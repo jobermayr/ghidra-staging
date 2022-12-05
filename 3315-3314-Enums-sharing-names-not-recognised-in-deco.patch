@@ -1,105 +1,83 @@
+From 05a04fef7723338d9b3934176b2163b94f5b018f Mon Sep 17 00:00:00 2001
+From: Wall-AF <Allan.F.Wall@users.noreply.github.com>
+Date: Sat, 7 Aug 2021 15:01:05 +0100
+Subject: [PATCH] 3315: #3314 - Enums sharing names not recognised in
+ decompiled output
+
+---
+ .../ghidra/program/database/data/EnumDB.java  |  4 ++--
+ .../program/model/data/EnumDataType.java      |  2 +-
+ .../model/pcode/PcodeDataTypeManager.java     | 19 +++++++++++++------
+ 3 files changed, 16 insertions(+), 9 deletions(-)
+
 diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/data/EnumDB.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/data/EnumDB.java
-index 85895556a0d..7da9b57b5bf 100644
+index 93d9a0d5a..e092bf9ea 100644
 --- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/data/EnumDB.java
 +++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/data/EnumDB.java
-@@ -154,6 +154,23 @@ public String getName(long value) {
- 		}
- 	}
- 
-+	@Override
-+	public String[] getNames(long value) {
-+		lock.acquire();
-+		try {
-+			checkIsValid();
-+			initializeIfNeeded();
-+			List<String> list = valueMap.get(value);
-+			if (list == null || list.isEmpty()) {
+@@ -170,9 +170,9 @@ class EnumDB extends DataTypeDB implements Enum {
+ 			initializeIfNeeded();
+ 			List<String> list = valueMap.get(value);
+ 			if (list == null || list.isEmpty()) {
+-				return new String[0];
 +				return null;
-+			}
+ 			}
+-			return list.toArray(new String[0]);
 +			return list.toArray(new String[list.size()]);
-+		}
-+		finally {
-+			lock.release();
-+		}
-+	}
-+
- 	@Override
- 	public boolean hasLanguageDependantLength() {
- 		return false;
-diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/data/Enum.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/data/Enum.java
-index 98f0b69b89b..d3a8fd2d867 100644
---- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/data/Enum.java
-+++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/data/Enum.java
-@@ -37,6 +37,13 @@ public interface Enum extends DataType {
- 	 */
- 	public String getName(long value);
- 
-+	/**
-+	 * Get all the names for the given value.
-+	 * @param value value of the enum entry.
-+	 * @return null if no names with the given value were found.
-+	 */
-+	public String[] getNames(long value);
-+
- 	/**
- 	 * Get the values of the enum entries.
- 	 * @return values sorted in ascending order
+ 		}
+ 		finally {
+ 			lock.release();
 diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/data/EnumDataType.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/data/EnumDataType.java
-index 02a6b081455..950bc1e20e7 100644
+index c2334e4d6..7c6041588 100644
 --- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/data/EnumDataType.java
 +++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/data/EnumDataType.java
-@@ -91,6 +91,15 @@ public String getName(long value) {
- 		return list.get(0);
+@@ -102,7 +102,7 @@ public class EnumDataType extends GenericDataType implements Enum {
+ 		if (list == null || list.isEmpty()) {
+ 			return null;
+ 		}
+-		return list.toArray(new String[0]);
++		return list.toArray(new String[list.size()]);
  	}
  
-+	@Override
-+	public String[] getNames(long value) {
-+		List<String> list = valueMap.get(value);
-+		if (list == null || list.isEmpty()) {
-+			return null;
-+		}
-+		return list.toArray(new String[list.size()]);
-+	}
-+
  	@Override
- 	public long[] getValues() {
- 		long[] values = valueMap.keySet().stream().mapToLong(Long::longValue).toArray();
 diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/PcodeDataTypeManager.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/PcodeDataTypeManager.java
-index 8544b69b287..fdf2429863f 100644
+index f512cbbc9..3c3fca915 100644
 --- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/PcodeDataTypeManager.java
 +++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/PcodeDataTypeManager.java
-@@ -470,10 +470,10 @@ else if (type instanceof Structure) {
- 		else if (type instanceof Enum) {
- 			appendNameIdAttributes(resBuf, origType);
- 			Enum enumDt = (Enum) type;
--			long[] keys = enumDt.getValues();
-+			long[] values = enumDt.getValues();
- 			String metatype = "uint";
--			for (long key : keys) {
--				if (key < 0) {
-+			for (long value : values) {
-+				if (value < 0) {
- 					metatype = "int";
- 					break;
- 				}
-@@ -482,10 +482,17 @@ else if (type instanceof Enum) {
- 			SpecXmlUtils.encodeSignedIntegerAttribute(resBuf, "size", enumDt.getLength());
- 			SpecXmlUtils.encodeBooleanAttribute(resBuf, "enum", true);
- 			resBuf.append(">\n");
--			for (long key : keys) {
-+			for (long value : values) {
-+				String name;
-+				String[] names = enumDt.getNames(value);
-+				if (names.length == 1) {
-+					name = names[0];
-+				} else {
-+					name = "(".concat(String.join(" | ", names)).concat(")");
-+				}
- 				resBuf.append("<val");
--				SpecXmlUtils.xmlEscapeAttribute(resBuf, "name", enumDt.getName(key));
--				SpecXmlUtils.encodeSignedIntegerAttribute(resBuf, "value", key);
-+				SpecXmlUtils.xmlEscapeAttribute(resBuf, "name", name);
-+				SpecXmlUtils.encodeSignedIntegerAttribute(resBuf, "value", value);
- 				resBuf.append("/>");
+@@ -519,10 +519,10 @@ public class PcodeDataTypeManager {
+ 	private void encodeEnum(Encoder encoder, Enum type, int size) throws IOException {
+ 		encoder.openElement(ELEM_TYPE);
+ 		encodeNameIdAttributes(encoder, type);
+-		long[] keys = type.getValues();
++		long[] values = type.getValues();
+ 		String metatype = "uint";
+-		for (long key : keys) {
+-			if (key < 0) {
++		for (long value : values) {
++			if (value < 0) {
+ 				metatype = "int";
+ 				break;
  			}
+@@ -530,10 +530,17 @@ public class PcodeDataTypeManager {
+ 		encoder.writeString(ATTRIB_METATYPE, metatype);
+ 		encoder.writeSignedInteger(ATTRIB_SIZE, type.getLength());
+ 		encoder.writeBool(ATTRIB_ENUM, true);
+-		for (long key : keys) {
++		for (long value : values) {
++			String name;
++			String[] names = type.getNames(value);
++			if (names.length == 1) {
++				name = names[0];
++			} else {
++				name = "(".concat(String.join(" | ", names)).concat(")");
++			}
+ 			encoder.openElement(ELEM_VAL);
+-			encoder.writeString(ATTRIB_NAME, type.getName(key));
+-			encoder.writeSignedInteger(ATTRIB_VALUE, key);
++			encoder.writeString(ATTRIB_NAME, name);
++			encoder.writeSignedInteger(ATTRIB_VALUE, value);
+ 			encoder.closeElement(ELEM_VAL);
  		}
+ 		encoder.closeElement(ELEM_TYPE);
+-- 
+2.38.1
+

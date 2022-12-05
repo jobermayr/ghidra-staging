@@ -1,8 +1,110 @@
+From 77911c26338724e95a7fe435f9bbe89e626cca8f Mon Sep 17 00:00:00 2001
+From: Sebastian Schmidt <yath@yath.de>
+Date: Fri, 3 Jan 2020 16:14:17 +0100
+Subject: [PATCH] 1407: Add Tensilica Xtensa processor support
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+This adds support for the Tensilica Xtensa ISA as used in e.g. the
+ESP8266 MCU. The Windowed Register ISA option, the MAC16 and the Loop
+options are not yet implemented.
+
+Squashed:
+Re-add javaProject dependency for dependency on :Base
+
+Fix s16_16.23_8.11 field signedness
+
+Simplify n_s4_4.7_nozero constructor
+
+Remove some XXXs
+
+@mumbel says looks good.
+
+Zero-extend UFLOAT operand first
+
+Otherwise, int2float would consider the MSB a sign.
+
+Truncate control flow after ILL
+
+GCC seems to insert a “DIV0” (in ASCII) after an ILL instruction, so
+truncate control flow by looping endlessly.
+
+Implement NSAU
+
+The libgcc1 __umodsi3 implementation for xtensa-lx106 uses this as Count
+Leading Zeros.
+
+Fix Shift Amount Register
+
+The least 5 significant bits is 0x1f, not 0xf. Also, don’t AND the SAR
+when shifting; it’s already <32.
+
+Remove now unused nsau pcodeop.
+
+Fix XSR constructor pattern
+
+Fix DWARF register mappings
+
+auto_count apparently counts the starting register as the 1st, so count
+one further to get to a15.
+
+Fix UTRUNC.S
+
+There is no unsigned trunc() pcodeop, so scale and truncate with double
+precision and check for over-/underflow separately. The over- and
+underflow values are taken from the documentation.
+
+Fix indentation
+
+Add lx106 pcodetest
+
+Add Xtensa ELF constants
+
+Put together by @mumbel, thanks!
+---
+ .../SleighDevTools/pcodetest/pcode_defs.py    |    9 +
+ Ghidra/Processors/Xtensa/Module.manifest      |    0
+ Ghidra/Processors/Xtensa/build.gradle         |   10 +
+ .../Processors/Xtensa/certification.manifest  |   17 +
+ .../Xtensa/data/languages/xtensa.cspec        |   80 +
+ .../Xtensa/data/languages/xtensa.dwarf        |    7 +
+ .../Xtensa/data/languages/xtensa.ldefs        |   17 +
+ .../Xtensa/data/languages/xtensa.opinion      |    6 +
+ .../Xtensa/data/languages/xtensa.pspec        |    5 +
+ .../Xtensa/data/languages/xtensa.sinc         |  275 ++++
+ .../Xtensa/data/languages/xtensa.slaspec      |    3 +
+ .../data/languages/xtensaInstructions.sinc    | 1304 +++++++++++++++++
+ .../Xtensa/data/languages/xtensaTodo.sinc     |   66 +
+ .../Processors/Xtensa/data/manuals/xtensa.idx |  242 +++
+ .../Xtensa_ElfRelocationConstants.java        |   58 +
+ .../Xtensa_ElfRelocationHandler.java          |  292 ++++
+ .../processors/Xtensa_O0_EmulatorTest.java    |   25 +
+ .../processors/Xtensa_O3_EmulatorTest.java    |   25 +
+ 18 files changed, 2441 insertions(+)
+ create mode 100644 Ghidra/Processors/Xtensa/Module.manifest
+ create mode 100644 Ghidra/Processors/Xtensa/build.gradle
+ create mode 100644 Ghidra/Processors/Xtensa/certification.manifest
+ create mode 100644 Ghidra/Processors/Xtensa/data/languages/xtensa.cspec
+ create mode 100644 Ghidra/Processors/Xtensa/data/languages/xtensa.dwarf
+ create mode 100644 Ghidra/Processors/Xtensa/data/languages/xtensa.ldefs
+ create mode 100644 Ghidra/Processors/Xtensa/data/languages/xtensa.opinion
+ create mode 100644 Ghidra/Processors/Xtensa/data/languages/xtensa.pspec
+ create mode 100644 Ghidra/Processors/Xtensa/data/languages/xtensa.sinc
+ create mode 100644 Ghidra/Processors/Xtensa/data/languages/xtensa.slaspec
+ create mode 100644 Ghidra/Processors/Xtensa/data/languages/xtensaInstructions.sinc
+ create mode 100644 Ghidra/Processors/Xtensa/data/languages/xtensaTodo.sinc
+ create mode 100644 Ghidra/Processors/Xtensa/data/manuals/xtensa.idx
+ create mode 100644 Ghidra/Processors/Xtensa/src/main/java/ghidra/app/util/bin/format/elf/relocation/Xtensa_ElfRelocationConstants.java
+ create mode 100644 Ghidra/Processors/Xtensa/src/main/java/ghidra/app/util/bin/format/elf/relocation/Xtensa_ElfRelocationHandler.java
+ create mode 100644 Ghidra/Processors/Xtensa/src/test.processors/java/ghidra/test/processors/Xtensa_O0_EmulatorTest.java
+ create mode 100644 Ghidra/Processors/Xtensa/src/test.processors/java/ghidra/test/processors/Xtensa_O3_EmulatorTest.java
+
 diff --git a/Ghidra/Extensions/SleighDevTools/pcodetest/pcode_defs.py b/Ghidra/Extensions/SleighDevTools/pcodetest/pcode_defs.py
-index 4a8e096ec62..b7129a1f63d 100644
+index ca300da20..be7f93809 100644
 --- a/Ghidra/Extensions/SleighDevTools/pcodetest/pcode_defs.py
 +++ b/Ghidra/Extensions/SleighDevTools/pcodetest/pcode_defs.py
-@@ -629,3 +629,12 @@
+@@ -663,3 +663,12 @@ PCodeTest({
      'has_double': 0,
      'has_longlong': 0,
  })
@@ -17,13 +119,13 @@ index 4a8e096ec62..b7129a1f63d 100644
 +})
 diff --git a/Ghidra/Processors/Xtensa/Module.manifest b/Ghidra/Processors/Xtensa/Module.manifest
 new file mode 100644
-index 00000000000..e69de29bb2d
+index 000000000..e69de29bb
 diff --git a/Ghidra/Processors/Xtensa/build.gradle b/Ghidra/Processors/Xtensa/build.gradle
 new file mode 100644
-index 00000000000..701baafa3bf
+index 000000000..9dadac96d
 --- /dev/null
 +++ b/Ghidra/Processors/Xtensa/build.gradle
-@@ -0,0 +1,11 @@
+@@ -0,0 +1,10 @@
 +apply from: "$rootProject.projectDir/gradle/distributableGhidraModule.gradle"
 +apply from: "$rootProject.projectDir/gradle/javaProject.gradle"
 +apply from: "$rootProject.projectDir/gradle/javaTestProject.gradle"
@@ -32,12 +134,34 @@ index 00000000000..701baafa3bf
 +eclipse.project.name = 'Processors Xtensa'
 +
 +dependencies {
-+	compile project(':Base')
++	api project(':Base')
 +}
-+
+diff --git a/Ghidra/Processors/Xtensa/certification.manifest b/Ghidra/Processors/Xtensa/certification.manifest
+new file mode 100644
+index 000000000..883e1ff18
+--- /dev/null
++++ b/Ghidra/Processors/Xtensa/certification.manifest
+@@ -0,0 +1,17 @@
++##VERSION: 2.0
++Module.manifest||GHIDRA||||END|
++build.gradle||GHIDRA||||END|
++data/languages/xtensa.cspec||GHIDRA||||END|
++data/languages/xtensa.dwarf||GHIDRA||||END|
++data/languages/xtensa.ldefs||GHIDRA||||END|
++data/languages/xtensa.opinion||GHIDRA||||END|
++data/languages/xtensa.pspec||GHIDRA||||END|
++data/languages/xtensa.sinc||GHIDRA||||END|
++data/languages/xtensa.slaspec||GHIDRA||||END|
++data/languages/xtensaInstructions.sinc||GHIDRA||||END|
++data/languages/xtensaTodo.sinc||GHIDRA||||END|
++data/manuals/xtensa.idx||GHIDRA||||END|
++src/main/java/ghidra/app/util/bin/format/elf/relocation/Xtensa_ElfRelocationHandler.java||GHIDRA||||END|
++src/main/java/ghidra/app/util/bin/format/elf/relocation/Xtensa_ElfRelocationConstants.java||GHIDRA||||END|
++src/test.processors/java/ghidra/test/processors/Xtensa_O0_EmulatorTest.java||GHIDRA||||END|
++src/test.processors/java/ghidra/test/processors/Xtensa_O3_EmulatorTest.java||GHIDRA||||END|
 diff --git a/Ghidra/Processors/Xtensa/data/languages/xtensa.cspec b/Ghidra/Processors/Xtensa/data/languages/xtensa.cspec
 new file mode 100644
-index 00000000000..f7049a22bab
+index 000000000..f7049a22b
 --- /dev/null
 +++ b/Ghidra/Processors/Xtensa/data/languages/xtensa.cspec
 @@ -0,0 +1,80 @@
@@ -123,7 +247,7 @@ index 00000000000..f7049a22bab
 +</compiler_spec>
 diff --git a/Ghidra/Processors/Xtensa/data/languages/xtensa.dwarf b/Ghidra/Processors/Xtensa/data/languages/xtensa.dwarf
 new file mode 100644
-index 00000000000..1790648cffc
+index 000000000..1790648cf
 --- /dev/null
 +++ b/Ghidra/Processors/Xtensa/data/languages/xtensa.dwarf
 @@ -0,0 +1,7 @@
@@ -136,7 +260,7 @@ index 00000000000..1790648cffc
 +</dwarf>
 diff --git a/Ghidra/Processors/Xtensa/data/languages/xtensa.ldefs b/Ghidra/Processors/Xtensa/data/languages/xtensa.ldefs
 new file mode 100644
-index 00000000000..80c6e257210
+index 000000000..80c6e2572
 --- /dev/null
 +++ b/Ghidra/Processors/Xtensa/data/languages/xtensa.ldefs
 @@ -0,0 +1,17 @@
@@ -159,7 +283,7 @@ index 00000000000..80c6e257210
 +</language_definitions>
 diff --git a/Ghidra/Processors/Xtensa/data/languages/xtensa.opinion b/Ghidra/Processors/Xtensa/data/languages/xtensa.opinion
 new file mode 100644
-index 00000000000..3f2eae23ff5
+index 000000000..3f2eae23f
 --- /dev/null
 +++ b/Ghidra/Processors/Xtensa/data/languages/xtensa.opinion
 @@ -0,0 +1,6 @@
@@ -171,7 +295,7 @@ index 00000000000..3f2eae23ff5
 +</opinions>
 diff --git a/Ghidra/Processors/Xtensa/data/languages/xtensa.pspec b/Ghidra/Processors/Xtensa/data/languages/xtensa.pspec
 new file mode 100644
-index 00000000000..114b5c47a81
+index 000000000..114b5c47a
 --- /dev/null
 +++ b/Ghidra/Processors/Xtensa/data/languages/xtensa.pspec
 @@ -0,0 +1,5 @@
@@ -182,7 +306,7 @@ index 00000000000..114b5c47a81
 +</processor_spec>
 diff --git a/Ghidra/Processors/Xtensa/data/languages/xtensa.sinc b/Ghidra/Processors/Xtensa/data/languages/xtensa.sinc
 new file mode 100644
-index 00000000000..b322f131b87
+index 000000000..b322f131b
 --- /dev/null
 +++ b/Ghidra/Processors/Xtensa/data/languages/xtensa.sinc
 @@ -0,0 +1,275 @@
@@ -463,7 +587,7 @@ index 00000000000..b322f131b87
 +define pcodeop xsr;
 diff --git a/Ghidra/Processors/Xtensa/data/languages/xtensa.slaspec b/Ghidra/Processors/Xtensa/data/languages/xtensa.slaspec
 new file mode 100644
-index 00000000000..16a64f3f6e0
+index 000000000..16a64f3f6
 --- /dev/null
 +++ b/Ghidra/Processors/Xtensa/data/languages/xtensa.slaspec
 @@ -0,0 +1,3 @@
@@ -472,7 +596,7 @@ index 00000000000..16a64f3f6e0
 +@include "xtensaTodo.sinc"
 diff --git a/Ghidra/Processors/Xtensa/data/languages/xtensaInstructions.sinc b/Ghidra/Processors/Xtensa/data/languages/xtensaInstructions.sinc
 new file mode 100644
-index 00000000000..e3e4766a667
+index 000000000..e3e4766a6
 --- /dev/null
 +++ b/Ghidra/Processors/Xtensa/data/languages/xtensaInstructions.sinc
 @@ -0,0 +1,1304 @@
@@ -1782,7 +1906,7 @@ index 00000000000..e3e4766a667
 +}
 diff --git a/Ghidra/Processors/Xtensa/data/languages/xtensaTodo.sinc b/Ghidra/Processors/Xtensa/data/languages/xtensaTodo.sinc
 new file mode 100644
-index 00000000000..b89eea56e8a
+index 000000000..b89eea56e
 --- /dev/null
 +++ b/Ghidra/Processors/Xtensa/data/languages/xtensaTodo.sinc
 @@ -0,0 +1,66 @@
@@ -1854,7 +1978,7 @@ index 00000000000..b89eea56e8a
 +:loopnez as, urel_16.23 is urel_16.23 & ar = 0b1001 & as & at = 0b0111 & op0 = 0b0110 unimpl
 diff --git a/Ghidra/Processors/Xtensa/data/manuals/xtensa.idx b/Ghidra/Processors/Xtensa/data/manuals/xtensa.idx
 new file mode 100644
-index 00000000000..e98296d0906
+index 000000000..e98296d09
 --- /dev/null
 +++ b/Ghidra/Processors/Xtensa/data/manuals/xtensa.idx
 @@ -0,0 +1,242 @@
@@ -2102,7 +2226,7 @@ index 00000000000..e98296d0906
 +xsr, 590
 diff --git a/Ghidra/Processors/Xtensa/src/main/java/ghidra/app/util/bin/format/elf/relocation/Xtensa_ElfRelocationConstants.java b/Ghidra/Processors/Xtensa/src/main/java/ghidra/app/util/bin/format/elf/relocation/Xtensa_ElfRelocationConstants.java
 new file mode 100644
-index 00000000000..f74eb6d7ff6
+index 000000000..f74eb6d7f
 --- /dev/null
 +++ b/Ghidra/Processors/Xtensa/src/main/java/ghidra/app/util/bin/format/elf/relocation/Xtensa_ElfRelocationConstants.java
 @@ -0,0 +1,58 @@
@@ -2166,7 +2290,7 @@ index 00000000000..f74eb6d7ff6
 +}
 diff --git a/Ghidra/Processors/Xtensa/src/main/java/ghidra/app/util/bin/format/elf/relocation/Xtensa_ElfRelocationHandler.java b/Ghidra/Processors/Xtensa/src/main/java/ghidra/app/util/bin/format/elf/relocation/Xtensa_ElfRelocationHandler.java
 new file mode 100644
-index 00000000000..58826903354
+index 000000000..588269033
 --- /dev/null
 +++ b/Ghidra/Processors/Xtensa/src/main/java/ghidra/app/util/bin/format/elf/relocation/Xtensa_ElfRelocationHandler.java
 @@ -0,0 +1,292 @@
@@ -2464,7 +2588,7 @@ index 00000000000..58826903354
 +}
 diff --git a/Ghidra/Processors/Xtensa/src/test.processors/java/ghidra/test/processors/Xtensa_O0_EmulatorTest.java b/Ghidra/Processors/Xtensa/src/test.processors/java/ghidra/test/processors/Xtensa_O0_EmulatorTest.java
 new file mode 100644
-index 00000000000..65f528001f1
+index 000000000..65f528001
 --- /dev/null
 +++ b/Ghidra/Processors/Xtensa/src/test.processors/java/ghidra/test/processors/Xtensa_O0_EmulatorTest.java
 @@ -0,0 +1,25 @@
@@ -2495,7 +2619,7 @@ index 00000000000..65f528001f1
 +}
 diff --git a/Ghidra/Processors/Xtensa/src/test.processors/java/ghidra/test/processors/Xtensa_O3_EmulatorTest.java b/Ghidra/Processors/Xtensa/src/test.processors/java/ghidra/test/processors/Xtensa_O3_EmulatorTest.java
 new file mode 100644
-index 00000000000..7e48b558164
+index 000000000..7e48b5581
 --- /dev/null
 +++ b/Ghidra/Processors/Xtensa/src/test.processors/java/ghidra/test/processors/Xtensa_O3_EmulatorTest.java
 @@ -0,0 +1,25 @@
@@ -2524,3 +2648,6 @@ index 00000000000..7e48b558164
 +		return ProcessorEmulatorTestAdapter.buildEmulatorTestSuite(Xtensa_O3_EmulatorTest.class);
 +	}
 +}
+-- 
+2.38.1
+

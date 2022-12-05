@@ -1,9 +1,23 @@
+From 410bf66f0e8aec4734f6b7b5498668d4645c453c Mon Sep 17 00:00:00 2001
+From: cmorin6 <cedric.morin6@gmail.com>
+Date: Tue, 20 Oct 2020 20:30:39 +0200
+Subject: [PATCH] 2392: Updated ruleBlockIfNoExit to better select branch if
+ both are noexit.
+
+---
+ .../Decompiler/src/decompile/cpp/block.cc     | 46 ++++++++++++++++
+ .../Decompiler/src/decompile/cpp/block.hh     |  7 +++
+ .../src/decompile/cpp/blockaction.cc          | 54 ++++++++++++++++---
+ .../src/decompile/cpp/blockaction.hh          |  1 +
+ .../Decompiler/src/decompile/cpp/op.hh        |  2 +
+ 5 files changed, 104 insertions(+), 6 deletions(-)
+
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/block.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/block.cc
-index 9b6d8d87e57..6ae384074b7 100644
+index 611009333..076dcdca1 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/block.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/block.cc
-@@ -1323,6 +1323,20 @@ void BlockGraph::restoreXmlBody(List::const_iterator &iter,List::const_iterator
-   }
+@@ -1296,6 +1296,20 @@ void BlockGraph::finalizePrinting(Funcdata &data) const
+     (*iter)->finalizePrinting(data);
  }
  
 +int4 BlockGraph::getInnerBlockDepth(void)
@@ -20,10 +34,10 @@ index 9b6d8d87e57..6ae384074b7 100644
 +  return maxDepth;
 +}
 +
- /// This is currently just a wrapper around the FlowBlock::restoreXml()
- /// that sets of the BlockMap resolver
- /// \param el is the root \<block> tag
-@@ -2505,6 +2519,12 @@ bool BlockBasic::isDoNothing(void) const
+ void BlockGraph::encodeBody(Encoder &encoder) const
+ 
+ {
+@@ -2523,6 +2537,12 @@ bool BlockBasic::isDoNothing(void) const
    return hasOnlyMarkers();
  }
  
@@ -36,7 +50,7 @@ index 9b6d8d87e57..6ae384074b7 100644
  /// In terms of machine instructions, a basic block always covers a range of addresses,
  /// from its first instruction to its last. This method establishes that range.
  /// \param beg is the address of the first instruction in the block
-@@ -2747,6 +2767,13 @@ FlowBlock *BlockList::getSplitPoint(void)
+@@ -2764,6 +2784,13 @@ FlowBlock *BlockList::getSplitPoint(void)
    return getBlock(getSize()-1)->getSplitPoint();
  }
  
@@ -50,8 +64,8 @@ index 9b6d8d87e57..6ae384074b7 100644
  void BlockList::printHeader(ostream &s) const
  
  {
-@@ -2831,6 +2858,13 @@ void BlockCondition::saveXmlHeader(ostream &s) const
-   a_v(s,"opcode",nm);
+@@ -2848,6 +2875,13 @@ void BlockCondition::encodeHeader(Encoder &encoder) const
+   encoder.writeString(ATTRIB_OPCODE, nm);
  }
  
 +int4 BlockCondition::getBlockDepth(void)
@@ -64,7 +78,7 @@ index 9b6d8d87e57..6ae384074b7 100644
  void BlockIf::markUnstructured(void)
  
  {
-@@ -3185,6 +3219,18 @@ FlowBlock *BlockSwitch::nextFlowAfter(const FlowBlock *bl) const
+@@ -3444,6 +3478,18 @@ FlowBlock *BlockSwitch::nextFlowAfter(const FlowBlock *bl) const
    return getParent()->nextFlowAfter(this);
  }
  
@@ -80,31 +94,31 @@ index 9b6d8d87e57..6ae384074b7 100644
 +  return maxDepth+2; // +1 for switch block and +1 for case/default block
 +}
 +
- BlockMap::BlockMap(const BlockMap &op2)
- 
- {
+ /// \param bt is the block_type
+ /// \return a new instance of the specialized FlowBlock
+ FlowBlock *BlockMap::resolveBlock(FlowBlock::block_type bt)
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/block.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/block.hh
-index 30f867a35ef..401c97dfedd 100644
+index 556789694..6079c40cf 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/block.hh
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/block.hh
-@@ -181,6 +181,7 @@ public:
-   /// \param enditer marks the end of the XML tags
-   /// \param resolver is used to recover FlowBlock objects based on XML references
-   virtual void restoreXmlBody(List::const_iterator &iter,List::const_iterator enditer,BlockMap &resolver) {}
+@@ -183,6 +183,7 @@ public:
+   virtual FlowBlock *nextFlowAfter(const FlowBlock *bl) const;
+   virtual void finalTransform(Funcdata &data) {}	///< Do any structure driven final transforms
+   virtual void finalizePrinting(Funcdata &data) const {}	///< Make any final configurations necessary to print the block
 +  virtual int4 getBlockDepth(void) {return 0;}		///< Return the depth in code block of \b this
-   void saveXmlEdges(ostream &s) const;			///< Save edge information to an XML stream
-   void restoreXmlEdges(List::const_iterator &iter,List::const_iterator enditer,BlockMap &resolver);
-   void saveXml(ostream &s) const;			///< Write out \b this to an XML stream
-@@ -299,6 +300,8 @@ public:
-   virtual void finalizePrinting(const Funcdata &data) const;
-   virtual void saveXmlBody(ostream &s) const;
-   virtual void restoreXmlBody(List::const_iterator &iter,List::const_iterator enditer,BlockMap &resolver);
+   virtual void encodeHeader(Encoder &encoder) const;	///< Encode basic information as attributes
+   virtual void decodeHeader(Decoder &decoder);		///< Decode basic information from element attributes
+   virtual void encodeBody(Encoder &encoder) const {}	///< Encode detail about components to a stream
+@@ -308,6 +309,8 @@ public:
+   virtual FlowBlock *nextFlowAfter(const FlowBlock *bl) const;
+   virtual void finalTransform(Funcdata &data);
+   virtual void finalizePrinting(Funcdata &data) const;
 +  virtual int4 getInnerBlockDepth();					///< Return max depth of child blocks
 +  virtual int4 getBlockDepth() {return getInnerBlockDepth()+1;}
-   void restoreXml(const Element *el,const AddrSpaceManager *m);	///< Restore \b this BlockGraph from an XML stream
-   void addEdge(FlowBlock *begin,FlowBlock *end);		///< Add a directed edge between component FlowBlocks
-   void addLoopEdge(FlowBlock *begin,int4 outindex);		///< Mark a given edge as a \e loop edge
-@@ -401,6 +404,7 @@ public:
+   virtual void encodeBody(Encoder &encoder) const;
+   virtual void decodeBody(Decoder &decoder);
+   void decode(Decoder &decoder);				///< Decode \b this BlockGraph from a stream
+@@ -412,6 +415,7 @@ public:
    list<PcodeOp *>::const_iterator beginOp(void) const { return op.begin(); }	///< Return an iterator to the beginning of the PcodeOps
    list<PcodeOp *>::const_iterator endOp(void) const { return op.end(); }	///< Return an iterator to the end of the PcodeOps
    bool emptyOp(void) const { return op.empty(); }		///< Return \b true if \b block contains no operations
@@ -112,7 +126,7 @@ index 30f867a35ef..401c97dfedd 100644
    static bool noInterveningStatement(PcodeOp *first,int4 path,PcodeOp *last);
  };
  
-@@ -501,6 +505,7 @@ public:
+@@ -512,6 +516,7 @@ public:
    virtual PcodeOp *lastOp(void) const;
    virtual bool negateCondition(bool toporbottom);
    virtual FlowBlock *getSplitPoint(void);
@@ -120,24 +134,24 @@ index 30f867a35ef..401c97dfedd 100644
  };
  
  /// \brief Two conditional blocks combined into one conditional using BOOL_AND or BOOL_OR
-@@ -530,6 +535,7 @@ public:
+@@ -541,6 +546,7 @@ public:
    virtual bool isComplex(void) const { return getBlock(0)->isComplex(); }
    virtual FlowBlock *nextFlowAfter(const FlowBlock *bl) const;
-   virtual void saveXmlHeader(ostream &s) const;
+   virtual void encodeHeader(Encoder &encoder) const;
 +  virtual int4 getBlockDepth(void);
  };
  
  /// \brief A basic "if" block
-@@ -675,6 +681,7 @@ public:
+@@ -703,6 +709,7 @@ public:
    virtual void emit(PrintLanguage *lng) const { lng->emitBlockSwitch(this); }
    virtual FlowBlock *nextFlowAfter(const FlowBlock *bl) const;
-   virtual void finalizePrinting(const Funcdata &data) const;
+   virtual void finalizePrinting(Funcdata &data) const;
 +  virtual int4 getBlockDepth(void);
  };
  
  /// \brief Helper class for resolving cross-references while deserializing BlockGraph objects
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/blockaction.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/blockaction.cc
-index 86489e4e945..9c3aaa0b43a 100644
+index 80265a458..b24102140 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/blockaction.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/blockaction.cc
 @@ -1463,6 +1463,7 @@ bool CollapseStructure::ruleBlockIfNoExit(FlowBlock *bl)
@@ -212,7 +226,7 @@ index 86489e4e945..9c3aaa0b43a 100644
  
  /// Try to find a while/do structure, starting with a given FlowBlock.
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/blockaction.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/blockaction.hh
-index abb04b91bb6..2e51503808e 100644
+index 09b1779dc..ebdf410e5 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/blockaction.hh
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/blockaction.hh
 @@ -217,6 +217,7 @@ class CollapseStructure {
@@ -224,10 +238,10 @@ index abb04b91bb6..2e51503808e 100644
    CollapseStructure(BlockGraph &g);		///< Construct given a control-flow graph
    int4 getChangeCount(void) const { return dataflow_changecount; }	///< Get number of data-flow changes
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/op.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/op.hh
-index ed915d66c83..3fcbe3dbb9d 100644
+index d93dcd3c1..29403a0e1 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/op.hh
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/op.hh
-@@ -176,6 +176,8 @@ public:
+@@ -182,6 +182,8 @@ public:
    bool isCallOrBranch(void) const { return ((flags&(PcodeOp::branch|PcodeOp::call))!=0); }
    /// \brief Return \b true if this op breaks fall-thru flow
    bool isFlowBreak(void) const { return ((flags&(PcodeOp::branch|PcodeOp::returns))!=0); }
@@ -236,3 +250,6 @@ index ed915d66c83..3fcbe3dbb9d 100644
    /// \brief Return \b true if this op flips the true/false meaning of its control-flow branching
    bool isBooleanFlip(void) const { return ((flags&PcodeOp::boolean_flip)!=0); }
    /// \brief Return \b true if the fall-thru branch is taken when the boolean input is true
+-- 
+2.38.1
+

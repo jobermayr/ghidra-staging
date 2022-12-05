@@ -1,53 +1,106 @@
+From 0c3730f7ae9a29c0c8e282c8b9fe9794bd372dc1 Mon Sep 17 00:00:00 2001
+From: Gregory Morse <gregory.morse@live.com>
+Date: Sat, 27 Jul 2019 18:03:21 +0200
+Subject: [PATCH] 0848: Reduce far pointers to near in segmented code
+
+Proposal to convert far pointers to near pointers which are bound as far pointers in type parameters to functions for example which is otherwise not detected or properly translated.
+
+The casting time is a too late and not ideal time for this code.  Possibly at function binding time would be better to detect it.  However it is tested and working and reasonably generic using the default segment e.g. global RAM for its basis, checking the segment op, checking matching sizes, and finally that a near pointer already is present which can cause discarding of the segment and this awkward CONCAT structure that gets emitted in code.
+
+CALLOTHER or even SEGMENTOP is better but needs to be processed earlier or CONCAT just becomes SEGMENT in the code.  Otherwise this direct simplification (which ruleaction segment reducer should deal with) also works.  First proposal only.
+
+Sequences like this are now fixed:
+PUSH SS
+PUSH AX
+
+Fixes other half of #817
+
+This fixes a great deal of cases and is one of the greatest output quality improvements in segmented code to date. This is the rigorous and serious attempt at a generalized fix which appears to now work correctly and is versatile.
+
+Update coreaction.cc
+Update coreaction.cc
+Update coreaction.cc
+Update coreaction.cc
+Update funcdata.hh
+Update funcdata_varnode.cc
+Update funcdata_varnode.cc
+Update funcdata.hh
+Update coreaction.cc
+Update funcdata_varnode.cc
+Update coreaction.cc
+Update funcdata.hh
+Update funcdata_varnode.cc
+Update coreaction.cc
+Update coreaction.cc
+Update coreaction.cc
+Update coreaction.cc
+Update funcdata.hh
+Update funcdata.cc
+Update coreaction.cc
+Update funcdata.hh
+Update funcdata.cc
+Update coreaction.cc
+Update funcdata.hh
+Update funcdata.cc
+Update coreaction.cc
+Update coreaction.cc
+Update coreaction.cc
+---
+ .../src/decompile/cpp/coreaction.cc           | 19 ++++++
+ .../Decompiler/src/decompile/cpp/funcdata.cc  | 66 +++++++++++++++++++
+ .../Decompiler/src/decompile/cpp/funcdata.hh  |  1 +
+ 3 files changed, 86 insertions(+)
+
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
-index b2ac97b7c29..26e73972156 100644
+index a4c6b71fc..e6b4e41da 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
-@@ -1223,6 +1223,7 @@ void ActionFuncLink::funcLinkInput(FuncCallSpecs *fc,Funcdata &data)
+@@ -1460,6 +1460,7 @@ void ActionFuncLink::funcLinkInput(FuncCallSpecs *fc,Funcdata &data)
        }
        else
  	data.opInsertInput(op,data.newVarnode(param->getSize(),param->getAddress()),op->numInput());
-+      data.segmentizeFarPtr(param->getType(), param->isTypeLocked(), op->getIn(op->numInput() - 1), false);
++	data.segmentizeFarPtr(param->getType(), param->isTypeLocked(), op->getIn(op->numInput() - 1), false);
      }
    }
    if (spacebase != (AddrSpace *)0) {	// If we need it, create the stackplaceholder
-@@ -1251,6 +1252,7 @@ void ActionFuncLink::funcLinkOutput(FuncCallSpecs *fc,Funcdata &data)
-       int4 sz = outparam->getSize();
+@@ -1504,6 +1505,7 @@ void ActionFuncLink::funcLinkOutput(FuncCallSpecs *fc,Funcdata &data)
+ 	data.opMarkCalculatedBool(callop);
        Address addr = outparam->getAddress();
-       data.newVarnodeOut(sz,addr,fc->getOp());
-+      data.segmentizeFarPtr(outparam->getType(), outparam->isTypeLocked(), fc->getOp()->getOut(), false);
+       data.newVarnodeOut(sz,addr,callop);
++      data.segmentizeFarPtr(outparam->getType(), outparam->isTypeLocked(), callop->getOut(), false);
        VarnodeData vdata;
        OpCode res = fc->assumedOutputExtension(addr,sz,vdata);
        if (res == CPUI_PIECE) {		// Pick an extension based on type
-@@ -4282,6 +4284,23 @@ int4 ActionInferTypes::apply(Funcdata &data)
+@@ -4827,6 +4829,23 @@ int4 ActionInferTypes::apply(Funcdata &data)
      }
      return 0;
    }
 +  if (localcount == 0) {
-+	  Datatype* ct;
-+	  Varnode* vn;
-+	  VarnodeLocSet::const_iterator iter;
++    Datatype* ct;
++    Varnode* vn;
++    VarnodeLocSet::const_iterator iter;
 +
-+	  for (iter = data.beginLoc(); iter != data.endLoc(); ++iter) {
-+		  vn = *iter;
-+		  if (vn->isAnnotation()) continue;
-+		  if ((!vn->isWritten()) && (vn->hasNoDescend())) continue;
-+		  ct = vn->getLocalType();
-+		  bool bBegin = false;
-+		  if (iter == data.beginLoc()) bBegin = true; else iter--;
-+		  data.segmentizeFarPtr(ct, vn->isTypeLock(), vn, true);
-+		  if (bBegin) iter = data.beginLoc(); else iter++;
-+	  }
-+  }	
-+	
++    for (iter = data.beginLoc(); iter != data.endLoc(); ++iter) {
++      vn = *iter;
++      if (vn->isAnnotation()) continue;
++      if ((!vn->isWritten()) && (vn->hasNoDescend())) continue;
++      bool needsBlock = false;
++      ct = vn->getLocalType(needsBlock);
++      bool bBegin = false;
++      if (iter == data.beginLoc()) bBegin = true; else iter--;
++      data.segmentizeFarPtr(ct, vn->isTypeLock(), vn, true);
++      if (bBegin) iter = data.beginLoc(); else iter++;
++    }
++  }
+   data.getScopeLocal()->applyTypeRecommendations();
    buildLocaltypes(data);	// Set up initial types (based on local info)
    for(iter=data.beginLoc();iter!=data.endLoc();++iter) {
-     vn = *iter;
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/funcdata.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/funcdata.cc
-index 13308f7604b..1bac2ec7caa 100644
+index 2412d35bb..a276495d6 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/funcdata.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/funcdata.cc
-@@ -343,6 +343,71 @@ void Funcdata::spacebaseConstant(PcodeOp *op,int4 slot,SymbolEntry *entry,const
-   opSetInput(op,outvn,slot);
+@@ -413,6 +413,72 @@ void Funcdata::spacebaseConstant(PcodeOp *op,int4 slot,SymbolEntry *entry,const
+     opSetInput(op,outvn,slot);
  }
  
 +void Funcdata::segmentizeFarPtr(Datatype* ct, bool locked, Varnode* vn, bool segmentize)
@@ -56,9 +109,10 @@ index 13308f7604b..1bac2ec7caa 100644
 +	if ((ct->getMetatype() == TYPE_PTR ||
 +		ct->getMetatype() == TYPE_CODE) && locked) {
 +		Architecture* glb = getArch();
-+		AddrSpace* rspc = glb->getDefaultSpace();
-+		bool arenearpointers = glb->hasNearPointers(rspc);
++		AddrSpace* rspc = glb->getDefaultDataSpace();
++		bool arenearpointers = rspc->hasNearPointers();
 +		if (arenearpointers && rspc->getAddrSize() == vn->getSize())
++		if (rspc != (AddrSpace *)0)
 +			segdef = glb->userops.getSegmentOp(rspc->getIndex());
 +	}
 +	//need to go through every single time this varnode is written to
@@ -119,14 +173,17 @@ index 13308f7604b..1bac2ec7caa 100644
  
  {
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/funcdata.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/funcdata.hh
-index 9ced5d3f611..374690b76db 100644
+index 892883c0d..d1a6d4f19 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/funcdata.hh
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/funcdata.hh
-@@ -196,6 +196,7 @@ public:
+@@ -221,6 +221,7 @@ public:
    Varnode *newSpacebasePtr(AddrSpace *id);	///< Construct a new \e spacebase register for a given address space
    Varnode *findSpacebaseInput(AddrSpace *id) const;
    void spacebaseConstant(PcodeOp *op,int4 slot,SymbolEntry *entry,const Address &rampoint,uintb origval,int4 origsize);
 +  void segmentizeFarPtr(Datatype* ct, bool locked, Varnode* vn, bool segmentize);
  
-   /// \brief Get the number of heritage passes performed for the given address space
-   ///
+   int4 getHeritagePass(void) const { return heritage.getPass(); }	///< Get overall count of heritage passes
+ 
+-- 
+2.38.1
+

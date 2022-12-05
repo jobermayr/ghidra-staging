@@ -1,16 +1,30 @@
+From 73077f7f7c39f713ffe1f55ff81567c18ad3aed1 Mon Sep 17 00:00:00 2001
+From: Lukas Kempf <git@lukas-kempf.de>
+Date: Tue, 19 May 2020 17:20:34 +0200
+Subject: [PATCH] 1892: 1876 Improved support for MZ executables
+
+1876 Improved support for MZ executables - Fixed incorrect header - Gracefully handle segment overflows - Added missing segment relocations - Create uninitiallized memory according to header
+---
+ .../app/util/bin/format/mz/DOSHeader.java     | 253 ++------------
+ .../app/util/bin/format/mz/OldDOSHeader.java  | 328 ++++++++++++++++++
+ .../bin/format/mz/OldStyleExecutable.java     |   8 +-
+ .../ghidra/app/util/opinion/MzLoader.java     |  68 ++--
+ 4 files changed, 405 insertions(+), 252 deletions(-)
+ create mode 100644 Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/mz/OldDOSHeader.java
+
 diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/mz/DOSHeader.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/mz/DOSHeader.java
-index 970c96df7d7..a1bac1ee73d 100644
+index f4cabc88e..dbdfe56e1 100644
 --- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/mz/DOSHeader.java
 +++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/mz/DOSHeader.java
-@@ -21,6 +21,7 @@
+@@ -21,6 +21,7 @@ import java.io.RandomAccessFile;
+ import ghidra.app.util.bin.BinaryReader;
  import ghidra.app.util.bin.StructConverter;
- import ghidra.app.util.bin.format.FactoryBundledWithBinaryReader;
  import ghidra.app.util.bin.format.Writeable;
 +import ghidra.app.util.bin.format.mz.OldDOSHeader;
  import ghidra.app.util.bin.format.ne.InvalidWindowsHeaderException;
  import ghidra.app.util.bin.format.ne.WindowsHeader;
  import ghidra.app.util.bin.format.pe.InvalidNTHeaderException;
-@@ -28,6 +29,7 @@
+@@ -28,6 +29,7 @@ import ghidra.app.util.bin.format.pe.NTHeader;
  import ghidra.app.util.bin.format.pe.PortableExecutable.SectionLayout;
  import ghidra.program.model.data.*;
  import ghidra.util.DataConverter;
@@ -18,7 +32,7 @@ index 970c96df7d7..a1bac1ee73d 100644
  import ghidra.util.exception.DuplicateNameException;
  
  
-@@ -61,26 +63,11 @@
+@@ -61,150 +63,28 @@ import ghidra.util.exception.DuplicateNameException;
   *
   * 
   */
@@ -46,31 +60,25 @@ index 970c96df7d7..a1bac1ee73d 100644
      private short [] e_res = new short[4];     // Reserved words
      private short e_oemid;                     // OEM identifier (for e_oeminfo)
      private short e_oeminfo;                   // OEM information; e_oemid specific
-@@ -89,8 +76,6 @@ public class DOSHeader implements StructConverter, Writeable {
+     private short [] e_res2 = new short[10];   // Reserved words
+     private int   e_lfanew;                    // File address of new exe header		
  
- 	private byte [] stubBytes;
- 
--    private FactoryBundledWithBinaryReader reader;
+-	private byte [] stubBytes;
 -
+-	private BinaryReader reader;
++    private byte [] stubBytes;
+ 
      /**
       * Constructs a new DOS header.
       * @param reader the binary reader
-@@ -102,122 +87,11 @@ public static DOSHeader createDOSHeader(
-         return dosHeader;
+      */
+-	public DOSHeader(BinaryReader reader) throws IOException {
+-        this.reader = reader;
++    public DOSHeader(BinaryReader reader) throws IOException {
++        super(reader);
+         parse();
      }
  
--    /**
-+	/**
-      * DO NOT USE THIS CONSTRUCTOR, USE create*(GenericFactory ...) FACTORY METHODS INSTEAD.
-      */
-     public DOSHeader() {}
- 
--    private void initDOSHeader(FactoryBundledWithBinaryReader reader) throws IOException {
--        this.reader = reader;
--
--        parse();
--    }
--
 -    /**
 -     * Returns the processor name.
 -     * @return the processor name
@@ -179,7 +187,7 @@ index 970c96df7d7..a1bac1ee73d 100644
      /**
       * Returns the reserved words.
       * @return the reserved words
-@@ -258,9 +132,10 @@ public int e_lfanew() {
+@@ -245,9 +125,10 @@ public class DOSHeader implements StructConverter, Writeable {
  	 * Returns true if a new EXE header exists.
  	 * @return true if a new EXE header exists
  	 */
@@ -187,11 +195,11 @@ index 970c96df7d7..a1bac1ee73d 100644
  	public boolean hasNewExeHeader() {
          if (e_lfanew >= 0 && e_lfanew <= 0x10000) {
 -        	if (e_lfarlc == 0x40) {
-+        	if (e_lfarlc() == 0x40) {
++		if (e_lfarlc() == 0x40) {
  				// There are some non-NE files out there than may have e_lfarlc == 0x40, so we need 
  				// to actually read the bytes at e_lfanew and check for the required NE signature.
  				try {
-@@ -279,6 +154,7 @@ public boolean hasNewExeHeader() {
+@@ -266,6 +147,7 @@ public class DOSHeader implements StructConverter, Writeable {
  	 * Returns true if a PE header exists.
  	 * @return true if a PE header exists
  	 */
@@ -199,7 +207,7 @@ index 970c96df7d7..a1bac1ee73d 100644
  	public boolean hasPeHeader() {
  		if (e_lfanew >= 0 && e_lfanew <= 0x1000000) {
  			try {
-@@ -295,24 +171,13 @@ public boolean hasPeHeader() {
+@@ -282,24 +164,13 @@ public class DOSHeader implements StructConverter, Writeable {
  		return false;
  	}
  
@@ -222,11 +230,11 @@ index 970c96df7d7..a1bac1ee73d 100644
 -			struct.add(WORD);
 -        }
 +		StructureDataType struct = (StructureDataType)super.toDataType();
-+		
++
  		struct.add(new ArrayDataType(WORD,4,2));
  		struct.add(WORD);
  		struct.add(WORD);
-@@ -322,20 +187,6 @@ public DataType toDataType() throws DuplicateNameException {
+@@ -309,57 +180,36 @@ public class DOSHeader implements StructConverter, Writeable {
  			struct.add(new ArrayDataType(BYTE, getProgramLen(), 1));
  		}
  
@@ -244,11 +252,19 @@ index 970c96df7d7..a1bac1ee73d 100644
 -        struct.getComponent(11).setFieldName("e_cs");
 -        struct.getComponent(12).setFieldName("e_lfarlc");
 -        struct.getComponent(13).setFieldName("e_ovno");
-         struct.getComponent(14).setFieldName("e_res[4]");
-         struct.getComponent(15).setFieldName("e_oemid");
-         struct.getComponent(16).setFieldName("e_oeminfo");
-@@ -345,20 +196,6 @@ public DataType toDataType() throws DuplicateNameException {
-         	struct.getComponent(19).setFieldName("e_program");
+-        struct.getComponent(14).setFieldName("e_res[4]");
+-        struct.getComponent(15).setFieldName("e_oemid");
+-        struct.getComponent(16).setFieldName("e_oeminfo");
+-        struct.getComponent(17).setFieldName("e_res2[10]");
+-        struct.getComponent(18).setFieldName("e_lfanew");
++		struct.getComponent(14).setFieldName("e_res[4]");
++		struct.getComponent(15).setFieldName("e_oemid");
++		struct.getComponent(16).setFieldName("e_oeminfo");
++		struct.getComponent(17).setFieldName("e_res2[10]");
++		struct.getComponent(18).setFieldName("e_lfanew");
+ 		if (getProgramLen() > 0) {
+-        	struct.getComponent(19).setFieldName("e_program");
++			struct.getComponent(19).setFieldName("e_program");
  		}
  
 -        struct.getComponent( 0).setComment("Magic number");
@@ -265,30 +281,39 @@ index 970c96df7d7..a1bac1ee73d 100644
 -        struct.getComponent(11).setComment("Initial (relative) CS value");
 -        struct.getComponent(12).setComment("File address of relocation table");
 -        struct.getComponent(13).setComment("Overlay number");
-         struct.getComponent(14).setComment("Reserved words");
-         struct.getComponent(15).setComment("OEM identifier (for e_oeminfo)");
-         struct.getComponent(16).setComment("OEM information; e_oemid specific");
-@@ -368,10 +205,17 @@ public DataType toDataType() throws DuplicateNameException {
-         	struct.getComponent(19).setComment("Actual DOS program");
+-        struct.getComponent(14).setComment("Reserved words");
+-        struct.getComponent(15).setComment("OEM identifier (for e_oeminfo)");
+-        struct.getComponent(16).setComment("OEM information; e_oemid specific");
+-        struct.getComponent(17).setComment("Reserved words");
+-        struct.getComponent(18).setComment("File address of new exe header");
++		struct.getComponent(14).setComment("Reserved words");
++		struct.getComponent(15).setComment("OEM identifier (for e_oeminfo)");
++		struct.getComponent(16).setComment("OEM information; e_oemid specific");
++		struct.getComponent(17).setComment("Reserved words");
++		struct.getComponent(18).setComment("File address of new exe header");
+ 		if (getProgramLen() > 0) {
+-        	struct.getComponent(19).setComment("Actual DOS program");
++			struct.getComponent(19).setComment("Actual DOS program");
  		}
  
 -		struct.setCategoryPath(new CategoryPath("/DOS"));
 -
          return struct;
      }
-+    
+ 
 +    /**
 +	 * Helper to override the value of name
 +	 * @return The name of the header
 +	 */
 +    @Override
 +    public String getName() {
-+    	return NAME;
++	return NAME;
 +    }
- 
++
      /**
       * Returns the length (in bytes) of the DOS
-@@ -386,35 +230,21 @@ public int getProgramLen() {
+      * program.
+@@ -373,35 +223,21 @@ public class DOSHeader implements StructConverter, Writeable {
          return stubBytes == null ? 0 : stubBytes.length;
      }
  
@@ -296,16 +321,15 @@ index 970c96df7d7..a1bac1ee73d 100644
 -        reader.setPointerIndex(0);
 -
 -        e_magic       = reader.readNextShort();
--
--		if (e_magic != IMAGE_DOS_SIGNATURE) {
 +    @Override
 +    protected void parse() throws IOException {
 +        super.parse();
-+        
+ 
+-		if (e_magic != IMAGE_DOS_SIGNATURE) {
 +        if (!isDosSignature()) {
  			return;
  		}
--
+ 
 -        e_cblp        = reader.readNextShort();
 -        e_cp          = reader.readNextShort();
 -        e_crlc        = reader.readNextShort();
@@ -319,7 +343,6 @@ index 970c96df7d7..a1bac1ee73d 100644
 -        e_cs          = reader.readNextShort();
 -        e_lfarlc      = reader.readNextShort();
 -        e_ovno        = reader.readNextShort();
-+        
          e_res         = reader.readNextShortArray(4);
          e_oemid       = reader.readNextShort();
          e_oeminfo     = reader.readNextShort();
@@ -331,7 +354,7 @@ index 970c96df7d7..a1bac1ee73d 100644
  			try {
  				stubBytes = e_lfanew > SIZEOF_DOS_HEADER ? 
  					reader.readByteArray(SIZEOF_DOS_HEADER, e_lfanew - SIZEOF_DOS_HEADER) : new byte[0];
-@@ -445,20 +275,7 @@ public void decrementStub(int start) {
+@@ -432,20 +268,7 @@ public class DOSHeader implements StructConverter, Writeable {
  	 */
  	@Override
  	public void write(RandomAccessFile raf, DataConverter dc) throws IOException {
@@ -355,17 +378,32 @@ index 970c96df7d7..a1bac1ee73d 100644
  		}
 diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/mz/OldDOSHeader.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/mz/OldDOSHeader.java
 new file mode 100644
-index 00000000000..34443c2fc1d
+index 000000000..e77b35b4b
 --- /dev/null
 +++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/mz/OldDOSHeader.java
-@@ -0,0 +1,322 @@
+@@ -0,0 +1,328 @@
++/* ###
++ * IP: GHIDRA
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
 +package ghidra.app.util.bin.format.mz;
 +
 +import java.io.IOException;
 +import java.io.RandomAccessFile;
 +
++import ghidra.app.util.bin.BinaryReader;
 +import ghidra.app.util.bin.StructConverter;
-+import ghidra.app.util.bin.format.FactoryBundledWithBinaryReader;
 +import ghidra.app.util.bin.format.Writeable;
 +import ghidra.program.model.data.ArrayDataType;
 +import ghidra.program.model.data.CategoryPath;
@@ -392,7 +430,7 @@ index 00000000000..34443c2fc1d
 + *     WORD   e_cs;                        // Initial (relative) CS value
 + *     WORD   e_lfarlc;                    // File address of relocation table
 + *     WORD   e_ovno;                      // Overlay number
-+ *     
++ *
 + * </pre>
 + */
 +
@@ -402,7 +440,7 @@ index 00000000000..34443c2fc1d
 +	public static final String NAME = "OLD_IMAGE_DOS_HEADER";
 +	public static final int IMAGE_DOS_SIGNATURE = 0x5A4D;
 +	public static final int SIZEOF_DOS_HEADER = 28;
-+	
++
 +	private short e_magic;
 +	private short e_cblp;
 +	private short e_cp;
@@ -417,23 +455,14 @@ index 00000000000..34443c2fc1d
 +	private short e_cs;
 +	private short e_lfarlc;
 +	private short e_ovno;
-+	protected FactoryBundledWithBinaryReader reader;
++	protected BinaryReader reader;
 +
 +	/**
 +	 * Constructs a new DOS header.
 +	 * @param reader the binary reader
 +	 */
-+	public static OldDOSHeader createOldDOSHeader(FactoryBundledWithBinaryReader reader) throws IOException {
-+	    OldDOSHeader OldDOSHeader = (OldDOSHeader) reader.getFactory().create(OldDOSHeader.class);
-+	    OldDOSHeader.initDOSHeader(reader);
-+	    return OldDOSHeader;
-+	}
-+
-+	public OldDOSHeader() { }
-+
-+	protected void initDOSHeader(FactoryBundledWithBinaryReader reader) throws IOException {
++	public OldDOSHeader(BinaryReader reader) throws IOException {
 +	    this.reader = reader;
-+	
 +	    parse();
 +	}
 +
@@ -482,7 +511,7 @@ index 00000000000..34443c2fc1d
 +	 * @return the size of header in paragraphs
 +	 */
 +	public short e_cparhdr() {
-+	    return e_cparhdr; 
++	    return e_cparhdr;
 +	}
 +
 +	/**
@@ -591,7 +620,7 @@ index 00000000000..34443c2fc1d
 +	    for (int i=1; i <= 13; i++) {
 +			struct.add(WORD);
 +	    }
-+	
++
 +	    struct.getComponent( 0).setFieldName("e_magic");
 +	    struct.getComponent( 1).setFieldName("e_cblp");
 +	    struct.getComponent( 2).setFieldName("e_cp");
@@ -606,7 +635,7 @@ index 00000000000..34443c2fc1d
 +	    struct.getComponent(11).setFieldName("e_cs");
 +	    struct.getComponent(12).setFieldName("e_lfarlc");
 +	    struct.getComponent(13).setFieldName("e_ovno");
-+	
++
 +	    struct.getComponent( 0).setComment("Magic number");
 +	    struct.getComponent( 1).setComment("Bytes of last page");
 +	    struct.getComponent( 2).setComment("Pages in file");
@@ -621,12 +650,12 @@ index 00000000000..34443c2fc1d
 +	    struct.getComponent(11).setComment("Initial (relative) CS value");
 +	    struct.getComponent(12).setComment("File address of relocation table");
 +	    struct.getComponent(13).setComment("Overlay number");
-+	
++
 +		struct.setCategoryPath(new CategoryPath("/DOS"));
-+	
++
 +	    return struct;
 +	}
-+	
++
 +	/**
 +	 * Helper to override the value of name
 +	 * @return The name of the header
@@ -637,13 +666,13 @@ index 00000000000..34443c2fc1d
 +
 +	protected void parse() throws IOException {
 +	    reader.setPointerIndex(0);
-+	
++
 +	    e_magic       = reader.readNextShort();
-+	
++
 +		if (!isDosSignature()) {
 +			return;
 +		}
-+	
++
 +	    e_cblp        = reader.readNextShort();
 +	    e_cp          = reader.readNextShort();
 +	    e_crlc        = reader.readNextShort();
@@ -681,30 +710,31 @@ index 00000000000..34443c2fc1d
 +	}
 +
 +}
-\ No newline at end of file
 diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/mz/OldStyleExecutable.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/mz/OldStyleExecutable.java
-index 7fa2e46308d..08c4918c95a 100644
+index c1ba05d63..6fa487865 100644
 --- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/mz/OldStyleExecutable.java
 +++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/mz/OldStyleExecutable.java
-@@ -29,7 +29,7 @@
+@@ -26,8 +26,8 @@ import ghidra.app.util.bin.ByteProvider;
+  * 
   */
  public class OldStyleExecutable {
-     private FactoryBundledWithBinaryReader reader;
+-	private BinaryReader reader;
 -    private DOSHeader dosHeader;
++    private BinaryReader reader;
 +    private OldDOSHeader dosHeader;
  
      /**
       * Constructs a new instance of an old-style executable
-@@ -38,7 +38,7 @@ public class OldStyleExecutable {
+@@ -36,7 +36,7 @@ public class OldStyleExecutable {
       */
-     public OldStyleExecutable(GenericFactory factory, ByteProvider bp) throws IOException {
-         reader = new FactoryBundledWithBinaryReader(factory, bp, true);
--        dosHeader = DOSHeader.createDOSHeader(reader);
-+        dosHeader = OldDOSHeader.createOldDOSHeader(reader);
+ 	public OldStyleExecutable(ByteProvider bp) throws IOException {
+ 		reader = new BinaryReader(bp, true);
+-		dosHeader = new DOSHeader(reader);
++		dosHeader = new OldDOSHeader(reader);
      }
  
      /**
-@@ -53,7 +53,7 @@ public FactoryBundledWithBinaryReader getBinaryReader() {
+@@ -51,7 +51,7 @@ public class OldStyleExecutable {
       * Returns the DOS Header from this old-style executable.
       * @return the DOS Header from this old-style executable
       */
@@ -714,37 +744,37 @@ index 7fa2e46308d..08c4918c95a 100644
      }
  }
 diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/opinion/MzLoader.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/opinion/MzLoader.java
-index c0bbad1a867..79bb7b44db3 100644
+index ea8150c0c..3b80631d3 100644
 --- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/opinion/MzLoader.java
 +++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/opinion/MzLoader.java
-@@ -25,7 +25,7 @@
+@@ -23,7 +23,7 @@ import ghidra.app.util.MemoryBlockUtils;
  import ghidra.app.util.Option;
+ import ghidra.app.util.bin.BinaryReader;
  import ghidra.app.util.bin.ByteProvider;
- import ghidra.app.util.bin.format.FactoryBundledWithBinaryReader;
 -import ghidra.app.util.bin.format.mz.DOSHeader;
 +import ghidra.app.util.bin.format.mz.OldDOSHeader;
  import ghidra.app.util.bin.format.mz.OldStyleExecutable;
  import ghidra.app.util.importer.MessageLog;
- import ghidra.app.util.importer.MessageLogContinuesFactory;
-@@ -70,7 +70,7 @@ public Collection<LoadSpec> findSupportedLoadSpecs(ByteProvider provider) throws
+ import ghidra.framework.store.LockException;
+@@ -67,7 +67,7 @@ public class MzLoader extends AbstractLibrarySupportLoader {
  			return loadSpecs;
  		}
- 		OldStyleExecutable ose = new OldStyleExecutable(RethrowContinuesFactory.INSTANCE, provider);
+ 		OldStyleExecutable ose = new OldStyleExecutable(provider);
 -		DOSHeader dos = ose.getDOSHeader();
 +		OldDOSHeader dos = ose.getOldDOSHeader();
  		if (dos.isDosSignature() && !dos.hasNewExeHeader() && !dos.hasPeHeader()) {
  			List<QueryResult> results =
  				QueryOpinionService.query(getName(), "" + dos.e_magic(), null);
-@@ -102,7 +102,7 @@ public void load(ByteProvider provider, LoadSpec loadSpec, List<Option> options,
+@@ -98,7 +98,7 @@ public class MzLoader extends AbstractLibrarySupportLoader {
+ 		Memory memory = prog.getMemory();
  
- 		ContinuesFactory factory = MessageLogContinuesFactory.create(log);
- 		OldStyleExecutable ose = new OldStyleExecutable(factory, provider);
+ 		OldStyleExecutable ose = new OldStyleExecutable(provider);
 -		DOSHeader dos = ose.getDOSHeader();
 +		OldDOSHeader dos = ose.getOldDOSHeader();
- 		FactoryBundledWithBinaryReader reader = ose.getBinaryReader();
+ 		BinaryReader reader = ose.getBinaryReader();
  
  		if (monitor.isCancelled()) {
-@@ -121,7 +121,7 @@ public void load(ByteProvider provider, LoadSpec loadSpec, List<Option> options,
+@@ -117,7 +117,7 @@ public class MzLoader extends AbstractLibrarySupportLoader {
  			return;
  		}
  		monitor.setMessage("Processing relocations...");
@@ -753,7 +783,7 @@ index c0bbad1a867..79bb7b44db3 100644
  
  		if (monitor.isCancelled()) {
  			return;
-@@ -141,7 +141,7 @@ public void load(ByteProvider provider, LoadSpec loadSpec, List<Option> options,
+@@ -137,7 +137,7 @@ public class MzLoader extends AbstractLibrarySupportLoader {
  	}
  
  	private void setRegisters(ProgramContext context, Symbol entry, MemoryBlock[] blocks,
@@ -762,7 +792,7 @@ index c0bbad1a867..79bb7b44db3 100644
  		if (entry == null) {
  			return;
  		}
-@@ -174,7 +174,7 @@ private void setRegisters(ProgramContext context, Symbol entry, MemoryBlock[] bl
+@@ -170,7 +170,7 @@ public class MzLoader extends AbstractLibrarySupportLoader {
  			context.setValue(sp, entry.getAddress(), entry.getAddress(),
  				BigInteger.valueOf(Conv.shortToLong(dos.e_sp())));
  			context.setValue(ss, entry.getAddress(), entry.getAddress(),
@@ -771,16 +801,15 @@ index c0bbad1a867..79bb7b44db3 100644
  
  			BigInteger csValue = BigInteger.valueOf(
  				Conv.intToLong(((SegmentedAddress) entry.getAddress()).getSegment()));
-@@ -255,7 +255,7 @@ private void adjustSegmentStarts(Program prog) {
+@@ -245,15 +245,16 @@ public class MzLoader extends AbstractLibrarySupportLoader {
  	}
  
  	private void processSegments(Program program, FileBytes fileBytes, SegmentedAddressSpace space,
--			FactoryBundledWithBinaryReader reader, DOSHeader dos, MessageLog log,
-+			FactoryBundledWithBinaryReader reader, OldDOSHeader dos, MessageLog log,
- 			TaskMonitor monitor) {
+-			BinaryReader reader, DOSHeader dos, MessageLog log, TaskMonitor monitor) {
++			BinaryReader reader, OldDOSHeader dos, MessageLog log, TaskMonitor monitor) {
  		try {
  			int relocationTableOffset = Conv.shortToInt(dos.e_lfarlc());
-@@ -263,8 +263,9 @@ private void processSegments(Program program, FileBytes fileBytes, SegmentedAddr
+ 			int csStart = INITIAL_SEGMENT_VAL;
  			int dataStart = dos.e_cparhdr() << 4;
  
  			HashMap<Address, Address> segMap = new HashMap<Address, Address>();
@@ -791,7 +820,7 @@ index c0bbad1a867..79bb7b44db3 100644
  			segMap.put(codeAddress, codeAddress);
  			codeAddress = space.getAddress(csStart, 0);
  			segMap.put(codeAddress, codeAddress);			// This is there data starts loading
-@@ -275,7 +276,7 @@ private void processSegments(Program program, FileBytes fileBytes, SegmentedAddr
+@@ -264,7 +265,7 @@ public class MzLoader extends AbstractLibrarySupportLoader {
  				int seg = Conv.shortToInt(reader.readNextShort());
  
  				// compute the new segment referenced at the location
@@ -800,7 +829,7 @@ index c0bbad1a867..79bb7b44db3 100644
  				segMap.put(segStartAddr, segStartAddr);
  
  				int location = (seg << 4) + off;
-@@ -342,6 +343,13 @@ private void processSegments(Program program, FileBytes fileBytes, SegmentedAddr
+@@ -331,6 +332,13 @@ public class MzLoader extends AbstractLibrarySupportLoader {
  					" extra bytes starting at file offset 0x" + Integer.toHexString(exeEndOffset));
  			}
  
@@ -808,22 +837,22 @@ index c0bbad1a867..79bb7b44db3 100644
 +			Memory mem = program.getMemory();
 +			Address end = mem.getMaxAddress().add(1);
 +			// TODO: Handle overflow, consider minalloc
-+			MemoryBlockUtils.createUninitializedBlock(program, false, "Alloc", end, 
++			MemoryBlockUtils.createUninitializedBlock(program, false, "Alloc", end,
 +					dos.e_maxalloc() * 16, "", "mz", true, true, false, log);
-+			
++
  //			// create the stack segment
  //			SegmentedAddress stackStart = space.getAddress((dos.e_ss() + csStart), 0);
  //			mbu.createUninitializedBlock(false, "Stack", stackStart, dos.e_sp(), "", "", true, true, false);
-@@ -355,7 +363,7 @@ private void processSegments(Program program, FileBytes fileBytes, SegmentedAddr
+@@ -344,7 +352,7 @@ public class MzLoader extends AbstractLibrarySupportLoader {
  		}
  	}
  
--	private void doRelocations(Program prog, FactoryBundledWithBinaryReader reader, DOSHeader dos) {
-+	private void doRelocations(Program prog, FactoryBundledWithBinaryReader reader, OldDOSHeader dos, MessageLog log) {
+-	private void doRelocations(Program prog, BinaryReader reader, DOSHeader dos) {
++	private void doRelocations(Program prog, BinaryReader reader, OldDOSHeader dos, MessageLog log) {
  		try {
  			Memory mem = prog.getMemory();
  			SegmentedAddressSpace space =
-@@ -371,36 +379,30 @@ private void doRelocations(Program prog, FactoryBundledWithBinaryReader reader,
+@@ -360,40 +368,34 @@ public class MzLoader extends AbstractLibrarySupportLoader {
  				int off = Conv.shortToInt(reader.readNextShort());
  				int seg = Conv.shortToInt(reader.readNextShort());
  
@@ -838,12 +867,19 @@ index c0bbad1a867..79bb7b44db3 100644
 -				int value = Conv.shortToInt(reader.readShort(locOffset));
 -				int fixupAddrSeg = (value + csStart) & Conv.SHORT_MASK;
 -				mem.setShort(fixupAddr, (short) fixupAddrSeg);
+-
+-				// Add to relocation table
+-				prog.getRelocationTable()
 +				try {
 +					// compute the new segment referenced at the location
-+					SegmentedAddress fixupAddr = space.getAddress((seg + csStart) & Conv.SHORT_MASK, off);
++					SegmentedAddress fixupAddr = space.getAddress(seg + csStart, off);
 +					int value = Conv.shortToInt(reader.readShort(locOffset));
 +					int fixupAddrSeg = (value + csStart) & Conv.SHORT_MASK;
 +					mem.setShort(fixupAddr, (short) fixupAddrSeg);
++
++					// Add to relocation table
++					prog.getRelocationTable()
+ 						.add(fixupAddr, 0, new long[] { off, seg }, null, null);
 +				}
 +				catch (AddressOutOfBoundsException|IOException|MemoryAccessException e) {
 +					log.error("MzLoader", "Failed to process relocation " + i + ": " + e.getMessage());
@@ -874,3 +910,6 @@ index c0bbad1a867..79bb7b44db3 100644
  
  		Address addr = space.getAddress(codeSegment, ipValue);
  
+-- 
+2.38.1
+

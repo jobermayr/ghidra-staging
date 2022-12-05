@@ -1,8 +1,333 @@
+From 0bd07e0bacf9a8dac57bfa8f4823e961a64797a0 Mon Sep 17 00:00:00 2001
+From: Nicolas Iooss <nicolas.iooss@ledger.fr>
+Date: Wed, 5 May 2021 17:17:48 +0200
+Subject: [PATCH] 3006: Add support for ARCompact instruction set
+
+ARCompact is the instruction set which was used in some versions of
+Intel's Management Engine, in some versions of Lenovo's Thinkpad
+Embedded Controller and some versions of Intel's Wireless-AC chips.
+
+Squashed:
+
+ARCompact: fix decompilation of Bcc.D, Jcc.D and JLcc.D
+
+Considering the following ARCompact instructions:
+
+    bne.d LABEL
+    mov r0, 0
+    ...
+
+(`bne.d` means "branch if Z != 0, with delay slot")
+
+Currently, this is decompiled as:
+
+        if (Z == 0) goto next;
+        r0 = 0;
+        goto LABEL;
+    next:
+        ...
+
+This is wrong. The instruction in the delay slot is always executed and
+the decompiled code should be:
+
+        r0 = 0;
+        if (Z == 0) goto next;
+        goto LABEL;
+    next:
+        ....
+
+Fix this by moving the statement `delayslot(1);` before the conditional
+jumps.
+
+ARCompact: fix implementation of instruction ABS
+
+In pcode, `abs` is the absolute function for floats. When operating on
+integers, conditional statements have to be used.
+
+ARCompact: fix shift left and shift right test when shifting more than 32 bits
+
+In ARCompact, shift instructions (`asl`, `asr` and `lsr`) only use the 5
+lowest bits of the shift operand. For example `asl r0, r0, 0x21`
+("arithmetic shift left 33 bits of register r0") computes `r0 << 1`, not
+`r0 << 33` (which would be 0).
+
+Use the bit extraction operation (`v0[0,5]`) to extract the 5 lowest
+bits of relevant operands.
+
+This issue was identified thanks to `i8_shiftLeft` and `u8_shiftLeft`
+tests in Ghidra's pcodetests. In these tests, 64-bit values are shifted
+using shift operands larger than 32, and invalid values were computed
+due to the incorrect pcode specification.
+
+ARCompact: remove stray space and fix misspelling
+
+ARCompact: implement min and max instructions
+
+Following a comment on GitHub
+(https://github.com/NationalSecurityAgency/ghidra/pull/3006#issuecomment-833600575),
+use an expression similar as the one in `PIC/data/languages/PIC24.sinc`
+to implement instructions `min` and `max`.
+
+While at it, fix the computations of the condition flags in `min.f` and
+`max.f`, which were wrong.
+
+ARCompact: implement norm instruction
+
+In ARCompact's port of gcc, division operations are implemented in
+assembler and use instruction `norm`:
+https://github.com/foss-for-synopsys-dwc-arc-processors/gcc/blob/arc-2021.03/libgcc/config/arc/lib1funcs.S#L434-L515
+
+In order to run `u4_divide`, `i4_divide`, `u8_divide`... tests from
+Ghidra's pcodetests, it is therefore necessary to implement this
+instruction.
+
+In ARCompact Instruction Set Architecture Programmer's Reference
+(http://me.bios.io/images/d/dd/ARCompactISA_ProgrammersReference.pdf),
+`norm` is documented as:
+
+    Gives the normalization integer for the signed value in the operand.
+    The normalization integer is the amount by which the operand should
+    be shifted left to normalize it as a 32-bit signed integer. This
+    function is sometimes referred to as "find first bit".
+
+This is not precise enough to implement this instruction. Thankfully a
+patch in QEMU's mailing list helped understand the semantics of this
+instruction: https://lists.gnu.org/archive/html/qemu-devel/2016-09/msg01918.html
+
+    target_ulong helper_norm(CPUARCState *env, uint32_t src1)
+    {
+        if (src1 == 0x00000000 || src1 == 0xffffffff) {
+            return 31;
+        } else {
+            if ((src1 & 0x80000000) == 0x80000000) {
+                src1 = ~src1;
+            }
+            return clz32(src1) - 1;
+        }
+    }
+
+Adapt this code in pcode. This enables running `..._divide` tests
+without any issue.
+
+ARCompact: define auxiliary registers as a RAM space
+
+Following a comment on GitHub
+(https://github.com/NationalSecurityAgency/ghidra/pull/3006#issuecomment-834474547),
+rework the implementation of instructions `lr` and `sr` (Load and Store
+Auxiliary Register) in order to avoid using pcodeops such as
+`get_AUXREG` and `set_AUXREG`.
+
+To do this, a new memory space is defined, named `auxregs`. Auxiliary
+registers are now defined as symbols in this space, which simplifies the
+implementation of `lr` and `sr`.
+
+Almost all auxiliary registers are defined as `volatile` in order to
+produce meaningful compiler output (cf.
+https://github.com/NationalSecurityAgency/ghidra/pull/3006#issuecomment-834200211
+for an example of issue that this solves). The only two registers which
+are not volatile are `LP_START` and `LP_END`, which are used in
+instructions `lp` and `lpcc` ("Loop Set Up"). This was done in order to
+make Ghidra's decompiler able to understand loops while storing code
+pointers in the memory associated with auxiliary register `LP_START`.
+
+Many symbols are added to give proper names to registers. This list
+comes from ARCompact Instruction Set Architecture Programmer's Reference
+(http://me.bios.io/images/d/dd/ARCompactISA_ProgrammersReference.pdf)
+and from Synopsys' fork of QEMU to support ARC processors emulation
+(https://github.com/foss-for-synopsys-dwc-arc-processors/qemu/blob/arc-master-2021.02.24/target/arc/regs-detail.def).
+
+ARCompact: wire-up pcodetests
+
+Define two new targets for ARCompact instruction set in
+`Ghidra/Extensions/SleighDevTools/pcodetest/pcode_defs.py` and add the
+associated tests in `Ghidra/Processors/ARCompact/src/test.processors`.
+
+Building ARCompact's pcodetests programs can be achieved by running the
+following commands:
+
+  # (Optional) Launch a container to run things in a clean environment
+  podman run -ti --rm -e DISPLAY="$DISPLAY" -v /tmp/.X11-unix:/tmp/.X11-unix \
+      -v "$(pwd):/ghidra" --workdir /ghidra \
+      -ti docker.io/library/gradle:5.6.4-jdk11 bash
+  ln -s ../proc/self/mounts /etc/mtab
+  apt update && apt install -y make file gcc g++ libgtk-3-0
+
+  # Download the last release for "Linux/uClibc ARC700, Little Endian"
+  # from https://github.com/foss-for-synopsys-dwc-arc-processors/toolchain/releases
+  wget https://github.com/foss-for-synopsys-dwc-arc-processors/toolchain/releases/download/arc-2021.03-rc2/arc_gnu_2021.03-rc2_prebuilt_uclibc_le_arc700_linux_install.tar.gz
+
+  # Extract it in the "toolchains" directory
+  mkdir -p /local/ToolChains/ARC
+  tar -C /local/ToolChains/ARC -xzf arc_gnu_2021.03-rc2_prebuilt_uclibc_le_arc700_linux_install.tar.gz
+  mv /local/ToolChains/ARC/arc_gnu_2021.03-rc2_prebuilt_uclibc_le_arc700_linux_install /local/ToolChains/ARC/arc700-elf
+
+  # Create symlinks to directly use the compiler
+  ln -s arc-linux-gcc /local/ToolChains/ARC/arc700-elf/bin/gcc
+  ln -s arc-linux-nm /local/ToolChains/ARC/arc700-elf/bin/nm
+  ln -s arc-linux-objdump /local/ToolChains/ARC/arc700-elf/bin/objdump
+  ln -s arc-linux-readelf /local/ToolChains/ARC/arc700-elf/bin/readelf
+
+  # Build test programs
+  pushd Ghidra/Extensions/SleighDevTools/pcodetest
+  ./build --pcodetest ARC700
+  popd
+
+  # Copy the test programs to the test directory
+  mkdir -p Ghidra/Processors/ARCompact/data/pcodetests/
+  cp ../ghidra.bin/Ghidra/Test/TestResources/data/pcodetests/ARC700_GCC_O0_pcodetest.out \
+      Ghidra/Processors/ARCompact/data/pcodetests/
+  cp ../ghidra.bin/Ghidra/Test/TestResources/data/pcodetests/ARC700_GCC_O3_pcodetest.out \
+      Ghidra/Processors/ARCompact/data/pcodetests/
+
+  # Build Eclipse development environment
+  gradle prepdev eclipse buildNatives_linux64
+
+Then, it is possible to use Eclipse to run the pcodetests. For example
+the following steps can be followed:
+
+* Download Eclipse IDE for Java Developers from
+  https://www.eclipse.org/downloads/packages/release/2021-03/r/eclipse-ide-java-developers
+* Extract it and run `eclipse` in it
+* Import Ghidra project in Eclipse by following the steps documented in
+  https://github.com/NationalSecurityAgency/ghidra/blob/Ghidra_9.2.4_build/DevGuide.md#import-eclipse-projects
+* Select the project named `Processors ARCompact`
+* Right click on it and select "Run As -> JUnit Test"
+
+ARCompact: add DWARF register mappings
+
+DWARF uses the same indexing as the processor for the core registers
+(which are indexed from 0 to 63):
+https://github.com/gcc-mirror/gcc/blob/releases/gcc-11.1.0/gcc/config/arc/arc.h#L333-L363
+and
+https://sourceware.org/git/?p=binutils-gdb.git;a=blob;f=gdb/arc-tdep.h;h=8bb005cc7d4d4342cab712f5d2768460c9940283;hb=5048549af94ccac1ac76de35120c2e85c44d3391#l29
+
+ARCompact: emulate instruction norm in Java
+
+Move the implementation of instruction `norm` in Java in order to keep
+the decompiled code simple.
+
+ARCompact: define the right alignment value for instructions
+
+ARCompact expects instructions to always be aligned on 16 bits (low bit
+of PC is always zero).
+
+ARCompact: name the volatile instructions {read,write}_volatile
+
+When analyzing firmware which uses memory-mapped I/O, Ghidra's
+decompiler showed `get_AUXREG_4`/`set_AUXREG_4` calls when accessing the
+virtual memory. This is unexpected, so rename the volatile accessor
+functions to the name which is used by most other processors,
+`read_volatile` and `write_volatile`.
+
+ARCompact: rename the processor directory to "ARC"
+
+As 32-bit ARC instruction set is being added in
+https://github.com/NationalSecurityAgency/ghidra/pull/3233, it makes
+sense to use a single directory to host all ARC-based processors.
+
+ARCompact: fix decoding of instructions stb and stw
+
+The size suffix was missing from the instruction mnemonic.
+
+ARCompact: add more auxiliary registers
+
+Add register definitions from:
+
+* Synopsys' fork of QEMU to support ARC processors emulation
+  https://github.com/foss-for-synopsys-dwc-arc-processors/qemu/blob/arc-master-2021.02.24/target/arc/regs-detail.def
+* Linux ARC header which defines many registers
+  https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/arch/arc/include/asm/arcregs.h?h=v5.13
+* Linux ARC header for cache registers
+  https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/arch/arc/include/asm/cache.h?h=v5.13
+* IDA Pro 7.6 ARC registers configuration (file cfg/arc.cfg)
+
+ARCompact: simplify ABS implementation
+
+Use a choosery pattern instead, as it is prefered:
+https://github.com/NationalSecurityAgency/ghidra/pull/3006#discussion_r677716504
+
+The chosen pattern comes from Tricore processor support.
+
+ARCompact: use a single branch for BRcc instructions
+
+ARCompact: remove "l_rb_high != 7 | l_rb_low_7 != 6" pattern
+
+Such a pattern can cause a combinatorial explosion and can be avoided by
+adding an explicit match for the "rb = limm" case.
+
+ARCompact: remove 2-phase decoding of instructions with major opcode 4 or 5
+
+This 2-phase decoding used patterns with !=, which should be avoided as
+they can cause a combinatorial explosion.
+
+ARCompact: simplify unconditional mnemonics
+
+A recent change introduced mnemonics like :add^".f", :and^".f"... which
+can be written more directly without concatenation.
+
+While at it, add a missing space in negsw instruction.
+
+ARCompact: decode pcl using inst_start in more instructions
+
+When analyzing gcc's built-in functions in libgcc_s.so.1 (from the
+toolchains available in
+https://github.com/foss-for-synopsys-dwc-arc-processors/toolchain/releases/tag/arc-2021.03-release
+), some instructions where not properly decoded in function __divdf3.
+
+For example:
+
+    ram:000131e8 b4 17 09 76  ld.as    r9,[pcl,0x2d0]
+                                          $U5880:4 = INT_ADD pcl, 0x2d0:4
+                                          r9 = LOAD ram($U5880:4)
+
+This code introduces register pcl in the decompiler, even though pcl is
+the program counter register and contains 0x000131e8 here.
+
+Replace pcl with "inst_start & ~3" in such instructions. The studied
+instruction becomes:
+
+    ram:000131e8 b4 17 09 76  ld.as    r9,[pcl=0x131e8,offset DAT_ram_000134b8]         = 7FF00000h
+                                          $U5a00:4 = INT_ADD 0x131e8:4, 0x2d0:4
+                                          r9 = LOAD ram($U5a00:4)
+
+ARCompact: implement ror.f and unify carry computation of asr and lsr
+
+ARCompact: add .f prefix for many instructions
+
+Some instructions update the processor flags when using the .f suffix.
+The instruction "ex" (exchange) does not, but uses the same bit to
+encode a .di suffix, like "ld".
+---
+ .../SleighDevTools/pcodetest/pcode_defs.py    |    8 +
+ Ghidra/Processors/ARC/Module.manifest         |    0
+ Ghidra/Processors/ARC/build.gradle            |   26 +
+ .../ARC/data/languages/ARCompact.cspec        |  157 ++
+ .../ARC/data/languages/ARCompact.dwarf        |   19 +
+ .../ARC/data/languages/ARCompact.ldefs        |   17 +
+ .../ARC/data/languages/ARCompact.opinion      |    5 +
+ .../ARC/data/languages/ARCompact.pspec        |  290 ++
+ .../ARC/data/languages/ARCompact.slaspec      | 2332 +++++++++++++++++
+ ...ompactEmulateInstructionStateModifier.java |   68 +
+ .../processors/ARC700_O0_EmulatorTest.java    |   40 +
+ .../processors/ARC700_O3_EmulatorTest.java    |   40 +
+ 12 files changed, 3002 insertions(+)
+ create mode 100644 Ghidra/Processors/ARC/Module.manifest
+ create mode 100644 Ghidra/Processors/ARC/build.gradle
+ create mode 100644 Ghidra/Processors/ARC/data/languages/ARCompact.cspec
+ create mode 100644 Ghidra/Processors/ARC/data/languages/ARCompact.dwarf
+ create mode 100644 Ghidra/Processors/ARC/data/languages/ARCompact.ldefs
+ create mode 100644 Ghidra/Processors/ARC/data/languages/ARCompact.opinion
+ create mode 100644 Ghidra/Processors/ARC/data/languages/ARCompact.pspec
+ create mode 100644 Ghidra/Processors/ARC/data/languages/ARCompact.slaspec
+ create mode 100644 Ghidra/Processors/ARC/src/main/java/ghidra/program/emulation/ARCompactEmulateInstructionStateModifier.java
+ create mode 100644 Ghidra/Processors/ARC/src/test.processors/java/ghidra/test/processors/ARC700_O0_EmulatorTest.java
+ create mode 100644 Ghidra/Processors/ARC/src/test.processors/java/ghidra/test/processors/ARC700_O3_EmulatorTest.java
+
 diff --git a/Ghidra/Extensions/SleighDevTools/pcodetest/pcode_defs.py b/Ghidra/Extensions/SleighDevTools/pcodetest/pcode_defs.py
-index c8cf6cc787b..d53106e1c7e 100644
+index c528599ed..29bf00101 100644
 --- a/Ghidra/Extensions/SleighDevTools/pcodetest/pcode_defs.py
 +++ b/Ghidra/Extensions/SleighDevTools/pcodetest/pcode_defs.py
-@@ -643,3 +643,11 @@
+@@ -745,3 +745,11 @@ PCodeTest({
      'has_double': 0,
      'has_longlong': 0,
  })
@@ -16,10 +341,10 @@ index c8cf6cc787b..d53106e1c7e 100644
 +})
 diff --git a/Ghidra/Processors/ARC/Module.manifest b/Ghidra/Processors/ARC/Module.manifest
 new file mode 100644
-index 00000000000..e69de29bb2d
+index 000000000..e69de29bb
 diff --git a/Ghidra/Processors/ARC/build.gradle b/Ghidra/Processors/ARC/build.gradle
 new file mode 100644
-index 00000000000..e254750198b
+index 000000000..2ef1c6c36
 --- /dev/null
 +++ b/Ghidra/Processors/ARC/build.gradle
 @@ -0,0 +1,26 @@
@@ -29,9 +354,9 @@ index 00000000000..e254750198b
 + * Licensed under the Apache License, Version 2.0 (the "License");
 + * you may not use this file except in compliance with the License.
 + * You may obtain a copy of the License at
-+ * 
++ *
 + *      http://www.apache.org/licenses/LICENSE-2.0
-+ * 
++ *
 + * Unless required by applicable law or agreed to in writing, software
 + * distributed under the License is distributed on an "AS IS" BASIS,
 + * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -47,11 +372,11 @@ index 00000000000..e254750198b
 +eclipse.project.name = 'Processors ARC'
 +
 +dependencies {
-+	compile project(':Base')
++	api project(':Base')
 +}
 diff --git a/Ghidra/Processors/ARC/data/languages/ARCompact.cspec b/Ghidra/Processors/ARC/data/languages/ARCompact.cspec
 new file mode 100644
-index 00000000000..25115fca59e
+index 000000000..25115fca5
 --- /dev/null
 +++ b/Ghidra/Processors/ARC/data/languages/ARCompact.cspec
 @@ -0,0 +1,157 @@
@@ -214,7 +539,7 @@ index 00000000000..25115fca59e
 +</compiler_spec>
 diff --git a/Ghidra/Processors/ARC/data/languages/ARCompact.dwarf b/Ghidra/Processors/ARC/data/languages/ARCompact.dwarf
 new file mode 100644
-index 00000000000..27e03bf759b
+index 000000000..27e03bf75
 --- /dev/null
 +++ b/Ghidra/Processors/ARC/data/languages/ARCompact.dwarf
 @@ -0,0 +1,19 @@
@@ -239,7 +564,7 @@ index 00000000000..27e03bf759b
 +</dwarf>
 diff --git a/Ghidra/Processors/ARC/data/languages/ARCompact.ldefs b/Ghidra/Processors/ARC/data/languages/ARCompact.ldefs
 new file mode 100644
-index 00000000000..b6173a8dd64
+index 000000000..b6173a8dd
 --- /dev/null
 +++ b/Ghidra/Processors/ARC/data/languages/ARCompact.ldefs
 @@ -0,0 +1,17 @@
@@ -262,7 +587,7 @@ index 00000000000..b6173a8dd64
 +</language_definitions>
 diff --git a/Ghidra/Processors/ARC/data/languages/ARCompact.opinion b/Ghidra/Processors/ARC/data/languages/ARCompact.opinion
 new file mode 100644
-index 00000000000..bc403fc12f0
+index 000000000..bc403fc12
 --- /dev/null
 +++ b/Ghidra/Processors/ARC/data/languages/ARCompact.opinion
 @@ -0,0 +1,5 @@
@@ -273,7 +598,7 @@ index 00000000000..bc403fc12f0
 +</opinions>
 diff --git a/Ghidra/Processors/ARC/data/languages/ARCompact.pspec b/Ghidra/Processors/ARC/data/languages/ARCompact.pspec
 new file mode 100644
-index 00000000000..181b5007c7d
+index 000000000..181b5007c
 --- /dev/null
 +++ b/Ghidra/Processors/ARC/data/languages/ARCompact.pspec
 @@ -0,0 +1,290 @@
@@ -569,7 +894,7 @@ index 00000000000..181b5007c7d
 +</processor_spec>
 diff --git a/Ghidra/Processors/ARC/data/languages/ARCompact.slaspec b/Ghidra/Processors/ARC/data/languages/ARCompact.slaspec
 new file mode 100644
-index 00000000000..6b813e2b466
+index 000000000..6b813e2b4
 --- /dev/null
 +++ b/Ghidra/Processors/ARC/data/languages/ARCompact.slaspec
 @@ -0,0 +1,2332 @@
@@ -2907,7 +3232,7 @@ index 00000000000..6b813e2b466
 +} # end of "with : phase=1"
 diff --git a/Ghidra/Processors/ARC/src/main/java/ghidra/program/emulation/ARCompactEmulateInstructionStateModifier.java b/Ghidra/Processors/ARC/src/main/java/ghidra/program/emulation/ARCompactEmulateInstructionStateModifier.java
 new file mode 100644
-index 00000000000..4d7d7aa3af0
+index 000000000..4d7d7aa3a
 --- /dev/null
 +++ b/Ghidra/Processors/ARC/src/main/java/ghidra/program/emulation/ARCompactEmulateInstructionStateModifier.java
 @@ -0,0 +1,68 @@
@@ -2981,7 +3306,7 @@ index 00000000000..4d7d7aa3af0
 +}
 diff --git a/Ghidra/Processors/ARC/src/test.processors/java/ghidra/test/processors/ARC700_O0_EmulatorTest.java b/Ghidra/Processors/ARC/src/test.processors/java/ghidra/test/processors/ARC700_O0_EmulatorTest.java
 new file mode 100644
-index 00000000000..f41ce9bfacd
+index 000000000..6705039be
 --- /dev/null
 +++ b/Ghidra/Processors/ARC/src/test.processors/java/ghidra/test/processors/ARC700_O0_EmulatorTest.java
 @@ -0,0 +1,40 @@
@@ -2991,9 +3316,9 @@ index 00000000000..f41ce9bfacd
 + * Licensed under the Apache License, Version 2.0 (the "License");
 + * you may not use this file except in compliance with the License.
 + * You may obtain a copy of the License at
-+ * 
++ *
 + *      http://www.apache.org/licenses/LICENSE-2.0
-+ * 
++ *
 + * Unless required by applicable law or agreed to in writing, software
 + * distributed under the License is distributed on an "AS IS" BASIS,
 + * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -3027,7 +3352,7 @@ index 00000000000..f41ce9bfacd
 +}
 diff --git a/Ghidra/Processors/ARC/src/test.processors/java/ghidra/test/processors/ARC700_O3_EmulatorTest.java b/Ghidra/Processors/ARC/src/test.processors/java/ghidra/test/processors/ARC700_O3_EmulatorTest.java
 new file mode 100644
-index 00000000000..28a178f3448
+index 000000000..4ecc688cd
 --- /dev/null
 +++ b/Ghidra/Processors/ARC/src/test.processors/java/ghidra/test/processors/ARC700_O3_EmulatorTest.java
 @@ -0,0 +1,40 @@
@@ -3037,9 +3362,9 @@ index 00000000000..28a178f3448
 + * Licensed under the Apache License, Version 2.0 (the "License");
 + * you may not use this file except in compliance with the License.
 + * You may obtain a copy of the License at
-+ * 
++ *
 + *      http://www.apache.org/licenses/LICENSE-2.0
-+ * 
++ *
 + * Unless required by applicable law or agreed to in writing, software
 + * distributed under the License is distributed on an "AS IS" BASIS,
 + * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -3071,3 +3396,6 @@ index 00000000000..28a178f3448
 +		return ProcessorEmulatorTestAdapter.buildEmulatorTestSuite(ARC700_O3_EmulatorTest.class);
 +	}
 +}
+-- 
+2.38.1
+

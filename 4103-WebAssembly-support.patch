@@ -1,9 +1,230 @@
+From 918a242861546cb25cf172af55660dc07e82be20 Mon Sep 17 00:00:00 2001
+From: Robert Xiao <brx@cs.ubc.ca>
+Date: Fri, 25 Mar 2022 11:13:53 -0700
+Subject: [PATCH] 4103: WebAssembly support.
+
+Merged from https://github.com/nneonneo/ghidra-wasm-plugin/.
+
+Closes #2937.
+
+WebAssembly: add a help page to explain the finer points of the extension.
+
+I was hoping to add this to a Processors help submenu, but it doesn't exist,
+so I put it in the Appendix instead for now.
+
+WebAssembly: make funcref/externref 32 bits in size.
+
+The use of 64 bits was mostly a debugging feature to ensure we didn't accidentally
+mix references with normal types. 64 bit addresses cause some problems, though,
+such as 64-bit immediates (e.g. from ref.func) not always being treated as addresses
+in the decompiler.
+
+WebAssembly: reduce dependency on Program class.
+
+Using Program throughout is rather lazy, and in many cases totally unnecessary.
+Using finer-grained interfaces and classes like AddressFactory allows usage of
+the code in non-Program contexts, such as emulation.
+
+WebAssembly: load .module directly to 0x8000000 in RAM
+
+This allows the whole module to be loaded in memory and eliminates the previous
+duplication of the .code bytes in the .module and the .function bytes in RAM.
+
+WebAssembly: extend regs to 16 bytes to prepare for vector insts
+
+Vector instructions will require 128-bit values, so prepare for that change by
+widening all registers to 128 bits.
+
+WebAssembly: Emulation support
+
+This patch implements a EmulateInstructionStateModifier for Wasm which provides
+support for emulating Wasm instructions.
+
+The memory contents must contain a full module for this to work, because
+instruction semantics still depend on module details (e.g. the type of certain
+operations depends on metadata like the types of imports or globals).
+
+WebAssembly: correctly handle u32 opcodes.
+
+0xFC (and 0xFD) have a u32 as the second operand, so we need to handle this
+correctly.
+
+WebAssembly: SIMD support.
+
+Disassembly and verification are implemented, but almost all of the SIMD opcodes
+are just stubbed out with pcodeops for now, so semantics aren't implemented. This
+is probably good enough for now.
+
+WebAssembly: create code length data to avoid undefined bytes
+---
+ Ghidra/Processors/WebAssembly/Module.manifest |    0
+ Ghidra/Processors/WebAssembly/build.gradle    |   28 +
+ .../WebAssembly/certification.manifest        |   22 +
+ .../WebAssembly/data/languages/BasicOps.sinc  |  514 +++++
+ .../WebAssembly/data/languages/Leb128.sinc    |   60 +
+ .../data/languages/Leb128_opc2.sinc           | 1152 ++++++++++
+ .../data/languages/Leb128_opc2_1b.sinc        |    5 +
+ .../data/languages/Leb128_opc2_2b.sinc        |    4 +
+ .../data/languages/Leb128_u32.sinc            |   30 +
+ .../WebAssembly/data/languages/VectorOps.sinc | 1493 +++++++++++++
+ .../languages/WebAssembly-pos-stack.cspec     |  831 +++++++
+ .../data/languages/WebAssembly.cspec          |   62 +
+ .../data/languages/WebAssembly.dwarf          |    6 +
+ .../data/languages/WebAssembly.ldefs          |   18 +
+ .../data/languages/WebAssembly.opinion        |    5 +
+ .../data/languages/WebAssembly.pspec          |   17 +
+ .../data/languages/WebAssembly.sinc           |  497 +++++
+ .../data/languages/WebAssembly.slaspec        | 1906 +++++++++++++++++
+ .../ghidra_scripts/analyze_dyncalls.py        |  117 +
+ .../ghidra_scripts/emulate_writev.py          |   57 +
+ .../src/main/help/help/TOC_Source.xml         |    7 +
+ .../src/main/help/help/shared/Frontpage.css   |   58 +
+ .../help/help/topics/WebAssembly/help.html    |  111 +
+ .../main/help/help/topics/WebAssembly/help.md |  104 +
+ .../WasmEmulateInstructionStateModifier.java  |  296 +++
+ .../emulation/WasmEmulationHelper.java        |  135 ++
+ .../src/main/java/wasm/WasmLoader.java        |  699 ++++++
+ .../wasm/analysis/ValidationException.java    |   32 +
+ .../main/java/wasm/analysis/WasmAnalysis.java |  154 ++
+ .../java/wasm/analysis/WasmDWARFAnalyzer.java |   36 +
+ .../java/wasm/analysis/WasmFuncSignature.java |   80 +
+ .../wasm/analysis/WasmFunctionAnalysis.java   | 1514 +++++++++++++
+ .../java/wasm/analysis/WasmPreAnalyzer.java   |  194 ++
+ .../wasm/analysis/WasmSignatureAnalyzer.java  |  118 +
+ .../analysis/WasmStackVariableAnalyzer.java   |  249 +++
+ .../java/wasm/format/StructureBuilder.java    |  135 ++
+ .../main/java/wasm/format/WasmConstants.java  |   21 +
+ .../src/main/java/wasm/format/WasmEnums.java  |  108 +
+ .../src/main/java/wasm/format/WasmHeader.java |   54 +
+ .../src/main/java/wasm/format/WasmModule.java |  273 +++
+ .../wasm/format/sections/WasmCodeSection.java |   57 +
+ .../format/sections/WasmCustomSection.java    |   64 +
+ .../wasm/format/sections/WasmDataSection.java |   58 +
+ .../format/sections/WasmElementSection.java   |   58 +
+ .../format/sections/WasmExportSection.java    |   77 +
+ .../format/sections/WasmFunctionSection.java  |   60 +
+ .../format/sections/WasmGlobalSection.java    |   58 +
+ .../format/sections/WasmImportSection.java    |   68 +
+ .../sections/WasmLinearMemorySection.java     |   58 +
+ .../wasm/format/sections/WasmNameSection.java |   97 +
+ .../wasm/format/sections/WasmSection.java     |  123 ++
+ .../format/sections/WasmStartSection.java     |   47 +
+ .../format/sections/WasmTableSection.java     |   58 +
+ .../wasm/format/sections/WasmTypeSection.java |   61 +
+ .../sections/WasmUnknownCustomSection.java    |   52 +
+ .../structures/ConstantExpression.java        |  218 ++
+ .../sections/structures/WasmCodeEntry.java    |   87 +
+ .../sections/structures/WasmDataSegment.java  |  103 +
+ .../structures/WasmElementSegment.java        |  214 ++
+ .../sections/structures/WasmExportEntry.java  |   60 +
+ .../sections/structures/WasmFuncType.java     |   81 +
+ .../sections/structures/WasmGlobalEntry.java  |   62 +
+ .../sections/structures/WasmGlobalType.java   |   52 +
+ .../sections/structures/WasmImportEntry.java  |  137 ++
+ .../sections/structures/WasmLocalEntry.java   |   52 +
+ .../format/sections/structures/WasmName.java  |   53 +
+ .../structures/WasmNameIndirectMap.java       |   71 +
+ .../structures/WasmNameLocalSubsection.java   |   46 +
+ .../sections/structures/WasmNameMap.java      |   73 +
+ .../structures/WasmNameMapSubsection.java     |   50 +
+ .../structures/WasmNameModuleSubsection.java  |   46 +
+ .../structures/WasmNameSubsection.java        |  123 ++
+ .../structures/WasmNameUnknownSubsection.java |   41 +
+ .../structures/WasmResizableLimits.java       |   62 +
+ .../sections/structures/WasmTableType.java    |   56 +
+ .../wasm/pcode/InjectPayloadWasmEntry.java    |   62 +
+ .../java/wasm/pcode/InjectPayloadWasmPop.java |   74 +
+ .../wasm/pcode/InjectPayloadWasmPush.java     |   73 +
+ .../wasm/pcode/PcodeInjectLibraryWasm.java    |   53 +
+ .../main/java/wasm/pcode/PcodeOpEmitter.java  |   70 +
+ 80 files changed, 14217 insertions(+)
+ create mode 100644 Ghidra/Processors/WebAssembly/Module.manifest
+ create mode 100644 Ghidra/Processors/WebAssembly/build.gradle
+ create mode 100644 Ghidra/Processors/WebAssembly/certification.manifest
+ create mode 100644 Ghidra/Processors/WebAssembly/data/languages/BasicOps.sinc
+ create mode 100644 Ghidra/Processors/WebAssembly/data/languages/Leb128.sinc
+ create mode 100644 Ghidra/Processors/WebAssembly/data/languages/Leb128_opc2.sinc
+ create mode 100644 Ghidra/Processors/WebAssembly/data/languages/Leb128_opc2_1b.sinc
+ create mode 100644 Ghidra/Processors/WebAssembly/data/languages/Leb128_opc2_2b.sinc
+ create mode 100644 Ghidra/Processors/WebAssembly/data/languages/Leb128_u32.sinc
+ create mode 100644 Ghidra/Processors/WebAssembly/data/languages/VectorOps.sinc
+ create mode 100644 Ghidra/Processors/WebAssembly/data/languages/WebAssembly-pos-stack.cspec
+ create mode 100644 Ghidra/Processors/WebAssembly/data/languages/WebAssembly.cspec
+ create mode 100644 Ghidra/Processors/WebAssembly/data/languages/WebAssembly.dwarf
+ create mode 100644 Ghidra/Processors/WebAssembly/data/languages/WebAssembly.ldefs
+ create mode 100644 Ghidra/Processors/WebAssembly/data/languages/WebAssembly.opinion
+ create mode 100644 Ghidra/Processors/WebAssembly/data/languages/WebAssembly.pspec
+ create mode 100644 Ghidra/Processors/WebAssembly/data/languages/WebAssembly.sinc
+ create mode 100644 Ghidra/Processors/WebAssembly/data/languages/WebAssembly.slaspec
+ create mode 100644 Ghidra/Processors/WebAssembly/ghidra_scripts/analyze_dyncalls.py
+ create mode 100644 Ghidra/Processors/WebAssembly/ghidra_scripts/emulate_writev.py
+ create mode 100644 Ghidra/Processors/WebAssembly/src/main/help/help/TOC_Source.xml
+ create mode 100644 Ghidra/Processors/WebAssembly/src/main/help/help/shared/Frontpage.css
+ create mode 100644 Ghidra/Processors/WebAssembly/src/main/help/help/topics/WebAssembly/help.html
+ create mode 100644 Ghidra/Processors/WebAssembly/src/main/help/help/topics/WebAssembly/help.md
+ create mode 100644 Ghidra/Processors/WebAssembly/src/main/java/ghidra/program/emulation/WasmEmulateInstructionStateModifier.java
+ create mode 100644 Ghidra/Processors/WebAssembly/src/main/java/ghidra/program/emulation/WasmEmulationHelper.java
+ create mode 100644 Ghidra/Processors/WebAssembly/src/main/java/wasm/WasmLoader.java
+ create mode 100644 Ghidra/Processors/WebAssembly/src/main/java/wasm/analysis/ValidationException.java
+ create mode 100644 Ghidra/Processors/WebAssembly/src/main/java/wasm/analysis/WasmAnalysis.java
+ create mode 100644 Ghidra/Processors/WebAssembly/src/main/java/wasm/analysis/WasmDWARFAnalyzer.java
+ create mode 100644 Ghidra/Processors/WebAssembly/src/main/java/wasm/analysis/WasmFuncSignature.java
+ create mode 100644 Ghidra/Processors/WebAssembly/src/main/java/wasm/analysis/WasmFunctionAnalysis.java
+ create mode 100644 Ghidra/Processors/WebAssembly/src/main/java/wasm/analysis/WasmPreAnalyzer.java
+ create mode 100644 Ghidra/Processors/WebAssembly/src/main/java/wasm/analysis/WasmSignatureAnalyzer.java
+ create mode 100644 Ghidra/Processors/WebAssembly/src/main/java/wasm/analysis/WasmStackVariableAnalyzer.java
+ create mode 100644 Ghidra/Processors/WebAssembly/src/main/java/wasm/format/StructureBuilder.java
+ create mode 100644 Ghidra/Processors/WebAssembly/src/main/java/wasm/format/WasmConstants.java
+ create mode 100644 Ghidra/Processors/WebAssembly/src/main/java/wasm/format/WasmEnums.java
+ create mode 100644 Ghidra/Processors/WebAssembly/src/main/java/wasm/format/WasmHeader.java
+ create mode 100644 Ghidra/Processors/WebAssembly/src/main/java/wasm/format/WasmModule.java
+ create mode 100644 Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/WasmCodeSection.java
+ create mode 100644 Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/WasmCustomSection.java
+ create mode 100644 Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/WasmDataSection.java
+ create mode 100644 Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/WasmElementSection.java
+ create mode 100644 Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/WasmExportSection.java
+ create mode 100644 Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/WasmFunctionSection.java
+ create mode 100644 Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/WasmGlobalSection.java
+ create mode 100644 Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/WasmImportSection.java
+ create mode 100644 Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/WasmLinearMemorySection.java
+ create mode 100644 Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/WasmNameSection.java
+ create mode 100644 Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/WasmSection.java
+ create mode 100644 Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/WasmStartSection.java
+ create mode 100644 Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/WasmTableSection.java
+ create mode 100644 Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/WasmTypeSection.java
+ create mode 100644 Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/WasmUnknownCustomSection.java
+ create mode 100644 Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/ConstantExpression.java
+ create mode 100644 Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmCodeEntry.java
+ create mode 100644 Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmDataSegment.java
+ create mode 100644 Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmElementSegment.java
+ create mode 100644 Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmExportEntry.java
+ create mode 100644 Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmFuncType.java
+ create mode 100644 Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmGlobalEntry.java
+ create mode 100644 Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmGlobalType.java
+ create mode 100644 Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmImportEntry.java
+ create mode 100644 Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmLocalEntry.java
+ create mode 100644 Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmName.java
+ create mode 100644 Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmNameIndirectMap.java
+ create mode 100644 Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmNameLocalSubsection.java
+ create mode 100644 Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmNameMap.java
+ create mode 100644 Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmNameMapSubsection.java
+ create mode 100644 Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmNameModuleSubsection.java
+ create mode 100644 Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmNameSubsection.java
+ create mode 100644 Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmNameUnknownSubsection.java
+ create mode 100644 Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmResizableLimits.java
+ create mode 100644 Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmTableType.java
+ create mode 100644 Ghidra/Processors/WebAssembly/src/main/java/wasm/pcode/InjectPayloadWasmEntry.java
+ create mode 100644 Ghidra/Processors/WebAssembly/src/main/java/wasm/pcode/InjectPayloadWasmPop.java
+ create mode 100644 Ghidra/Processors/WebAssembly/src/main/java/wasm/pcode/InjectPayloadWasmPush.java
+ create mode 100644 Ghidra/Processors/WebAssembly/src/main/java/wasm/pcode/PcodeInjectLibraryWasm.java
+ create mode 100644 Ghidra/Processors/WebAssembly/src/main/java/wasm/pcode/PcodeOpEmitter.java
+
 diff --git a/Ghidra/Processors/WebAssembly/Module.manifest b/Ghidra/Processors/WebAssembly/Module.manifest
 new file mode 100644
-index 00000000000..e69de29bb2d
+index 000000000..e69de29bb
 diff --git a/Ghidra/Processors/WebAssembly/build.gradle b/Ghidra/Processors/WebAssembly/build.gradle
 new file mode 100644
-index 00000000000..166811759dd
+index 000000000..77fff32f3
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/build.gradle
 @@ -0,0 +1,28 @@
@@ -13,9 +234,9 @@ index 00000000000..166811759dd
 + * Licensed under the Apache License, Version 2.0 (the "License");
 + * you may not use this file except in compliance with the License.
 + * You may obtain a copy of the License at
-+ * 
++ *
 + *      http://www.apache.org/licenses/LICENSE-2.0
-+ * 
++ *
 + * Unless required by applicable law or agreed to in writing, software
 + * distributed under the License is distributed on an "AS IS" BASIS,
 + * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -37,16 +258,12 @@ index 00000000000..166811759dd
 +}
 diff --git a/Ghidra/Processors/WebAssembly/certification.manifest b/Ghidra/Processors/WebAssembly/certification.manifest
 new file mode 100644
-index 00000000000..3ddae21c5ee
+index 000000000..e292745a0
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/certification.manifest
-@@ -0,0 +1,21 @@
+@@ -0,0 +1,22 @@
 +##VERSION: 2.0
 +Module.manifest||GHIDRA||||END|
-+src/main/help/help/TOC_Source.xml||GHIDRA||||END|
-+src/main/help/help/shared/Frontpage.css||GHIDRA||||END|
-+src/main/help/help/topics/WebAssembly/help.html||GHIDRA||||END|
-+src/main/help/help/topics/WebAssembly/help.md||GHIDRA||||END|
 +data/languages/BasicOps.sinc||GHIDRA||||END|
 +data/languages/Leb128.sinc||GHIDRA||||END|
 +data/languages/Leb128_opc2.sinc||GHIDRA||||END|
@@ -62,9 +279,14 @@ index 00000000000..3ddae21c5ee
 +data/languages/WebAssembly.pspec||GHIDRA||||END|
 +data/languages/WebAssembly.sinc||GHIDRA||||END|
 +data/languages/WebAssembly.slaspec||GHIDRA||||END|
++src/main/help/help/TOC_Source.xml||GHIDRA||||END|
++src/main/help/help/shared/Frontpage.css||GHIDRA||||END|
++src/main/help/help/topics/WebAssembly/help.html||GHIDRA||||END|
++src/main/help/help/topics/WebAssembly/help.md||GHIDRA||||END|
++src/main/java/wasm/analysis/WasmStackVariableAnalyzer.java||GHIDRA||||END|
 diff --git a/Ghidra/Processors/WebAssembly/data/languages/BasicOps.sinc b/Ghidra/Processors/WebAssembly/data/languages/BasicOps.sinc
 new file mode 100644
-index 00000000000..d045218e8d3
+index 000000000..d045218e8
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/data/languages/BasicOps.sinc
 @@ -0,0 +1,514 @@
@@ -584,7 +806,7 @@ index 00000000000..d045218e8d3
 +}
 diff --git a/Ghidra/Processors/WebAssembly/data/languages/Leb128.sinc b/Ghidra/Processors/WebAssembly/data/languages/Leb128.sinc
 new file mode 100644
-index 00000000000..9ee63b9d699
+index 000000000..9ee63b9d6
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/data/languages/Leb128.sinc
 @@ -0,0 +1,60 @@
@@ -650,7 +872,7 @@ index 00000000000..9ee63b9d699
 +{ export *[const]:8 val; }
 diff --git a/Ghidra/Processors/WebAssembly/data/languages/Leb128_opc2.sinc b/Ghidra/Processors/WebAssembly/data/languages/Leb128_opc2.sinc
 new file mode 100644
-index 00000000000..1b175ac0031
+index 000000000..1b175ac00
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/data/languages/Leb128_opc2.sinc
 @@ -0,0 +1,1152 @@
@@ -1808,7 +2030,7 @@ index 00000000000..1b175ac0031
 +@include "Leb128_opc2_2b.sinc"
 diff --git a/Ghidra/Processors/WebAssembly/data/languages/Leb128_opc2_1b.sinc b/Ghidra/Processors/WebAssembly/data/languages/Leb128_opc2_1b.sinc
 new file mode 100644
-index 00000000000..fc3f82c849b
+index 000000000..fc3f82c84
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/data/languages/Leb128_opc2_1b.sinc
 @@ -0,0 +1,5 @@
@@ -1819,7 +2041,7 @@ index 00000000000..fc3f82c849b
 +$(NAME): is topbit = 1 & v0 = $(N); topbit = 1 & v1 = 0; topbit = 1 & v2 = 0; topbit = 1 & v3 = 0; topbit = 0 & v4 = 0 {}
 diff --git a/Ghidra/Processors/WebAssembly/data/languages/Leb128_opc2_2b.sinc b/Ghidra/Processors/WebAssembly/data/languages/Leb128_opc2_2b.sinc
 new file mode 100644
-index 00000000000..6f878f2023a
+index 000000000..6f878f202
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/data/languages/Leb128_opc2_2b.sinc
 @@ -0,0 +1,4 @@
@@ -1829,7 +2051,7 @@ index 00000000000..6f878f2023a
 +$(NAME): is topbit = 1 & v0 = $(N0); topbit = 1 & v1 = $(N1); topbit = 1 & v2 = 0; topbit = 1 & v3 = 0; topbit = 0 & v4 = 0 {}
 diff --git a/Ghidra/Processors/WebAssembly/data/languages/Leb128_u32.sinc b/Ghidra/Processors/WebAssembly/data/languages/Leb128_u32.sinc
 new file mode 100644
-index 00000000000..cdef9711bd3
+index 000000000..cdef9711b
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/data/languages/Leb128_u32.sinc
 @@ -0,0 +1,30 @@
@@ -1865,7 +2087,7 @@ index 00000000000..cdef9711bd3
 +{ $(EXPORT_EXPR) }
 diff --git a/Ghidra/Processors/WebAssembly/data/languages/VectorOps.sinc b/Ghidra/Processors/WebAssembly/data/languages/VectorOps.sinc
 new file mode 100644
-index 00000000000..eb5b9084814
+index 000000000..eb5b90848
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/data/languages/VectorOps.sinc
 @@ -0,0 +1,1493 @@
@@ -3364,10 +3586,10 @@ index 00000000000..eb5b9084814
 +}
 diff --git a/Ghidra/Processors/WebAssembly/data/languages/WebAssembly-pos-stack.cspec b/Ghidra/Processors/WebAssembly/data/languages/WebAssembly-pos-stack.cspec
 new file mode 100644
-index 00000000000..4b44d43f59e
+index 000000000..94bb0d0ca
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/data/languages/WebAssembly-pos-stack.cspec
-@@ -0,0 +1,1596 @@
+@@ -0,0 +1,831 @@
 +<?xml version="1.0" encoding="UTF-8"?>
 +
 +<!-- See Relax specification: Ghidra/Framework/SoftwareModeling/data/languages/compiler_spec.rxg -->
@@ -3390,7 +3612,7 @@ index 00000000000..4b44d43f59e
 +  </global>
 +  <stackpointer register="SP" space="ram" growth="positive"/>
 +  <default_proto>
-+    <prototype name="__wasm" extrapop="0" stackshift="0">
++    <prototype name="__wasm" extrapop="0" stackshift="0" strategy="register">
 +      <input>
 +        <!-- With the positive stack direction, Ghidra will allocate
 +        starting at the highest addresses in any <addr> pentry, which is
@@ -4169,771 +4391,6 @@ index 00000000000..4b44d43f59e
 +        <pentry minsize="1" maxsize="16">
 +          <register name="o0o"/>
 +        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o1o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o2o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o3o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o4o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o5o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o6o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o7o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o8o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o9o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o10o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o11o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o12o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o13o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o14o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o15o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o16o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o17o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o18o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o19o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o20o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o21o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o22o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o23o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o24o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o25o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o26o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o27o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o28o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o29o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o30o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o31o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o32o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o33o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o34o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o35o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o36o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o37o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o38o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o39o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o40o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o41o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o42o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o43o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o44o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o45o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o46o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o47o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o48o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o49o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o50o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o51o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o52o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o53o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o54o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o55o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o56o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o57o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o58o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o59o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o60o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o61o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o62o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o63o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o64o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o65o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o66o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o67o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o68o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o69o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o70o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o71o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o72o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o73o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o74o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o75o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o76o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o77o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o78o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o79o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o80o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o81o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o82o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o83o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o84o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o85o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o86o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o87o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o88o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o89o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o90o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o91o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o92o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o93o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o94o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o95o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o96o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o97o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o98o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o99o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o100o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o101o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o102o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o103o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o104o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o105o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o106o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o107o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o108o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o109o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o110o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o111o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o112o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o113o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o114o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o115o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o116o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o117o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o118o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o119o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o120o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o121o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o122o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o123o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o124o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o125o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o126o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o127o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o128o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o129o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o130o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o131o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o132o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o133o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o134o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o135o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o136o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o137o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o138o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o139o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o140o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o141o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o142o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o143o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o144o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o145o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o146o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o147o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o148o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o149o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o150o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o151o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o152o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o153o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o154o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o155o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o156o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o157o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o158o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o159o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o160o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o161o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o162o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o163o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o164o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o165o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o166o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o167o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o168o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o169o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o170o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o171o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o172o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o173o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o174o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o175o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o176o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o177o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o178o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o179o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o180o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o181o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o182o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o183o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o184o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o185o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o186o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o187o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o188o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o189o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o190o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o191o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o192o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o193o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o194o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o195o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o196o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o197o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o198o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o199o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o200o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o201o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o202o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o203o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o204o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o205o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o206o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o207o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o208o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o209o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o210o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o211o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o212o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o213o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o214o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o215o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o216o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o217o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o218o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o219o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o220o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o221o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o222o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o223o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o224o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o225o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o226o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o227o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o228o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o229o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o230o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o231o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o232o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o233o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o234o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o235o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o236o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o237o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o238o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o239o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o240o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o241o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o242o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o243o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o244o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o245o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o246o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o247o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o248o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o249o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o250o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o251o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o252o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o253o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o254o"/>
-+        </pentry>
-+        <pentry minsize="1" maxsize="16">
-+          <register name="o255o"/>
-+        </pentry>
 +      </output>
 +      <unaffected>
 +        <varnode space="register" offset="0x10000000" size="0x10000000"/>
@@ -4966,7 +4423,7 @@ index 00000000000..4b44d43f59e
 +</compiler_spec>
 diff --git a/Ghidra/Processors/WebAssembly/data/languages/WebAssembly.cspec b/Ghidra/Processors/WebAssembly/data/languages/WebAssembly.cspec
 new file mode 100644
-index 00000000000..1d5b021b5bc
+index 000000000..1b3c1e8d5
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/data/languages/WebAssembly.cspec
 @@ -0,0 +1,62 @@
@@ -4992,7 +4449,7 @@ index 00000000000..1d5b021b5bc
 +  </global>
 +  <stackpointer register="SP" space="ram"/>
 +  <default_proto>
-+    <prototype name="__wasm" extrapop="0" stackshift="0">
++    <prototype name="__wasm" extrapop="0" stackshift="0" strategy="register">
 +      <input>
 +        <pentry minsize="1" maxsize="500" align="16">
 +          <addr offset="0x20000000" space="register"/>
@@ -5034,7 +4491,7 @@ index 00000000000..1d5b021b5bc
 +</compiler_spec>
 diff --git a/Ghidra/Processors/WebAssembly/data/languages/WebAssembly.dwarf b/Ghidra/Processors/WebAssembly/data/languages/WebAssembly.dwarf
 new file mode 100644
-index 00000000000..2df3b9b8bc2
+index 000000000..2df3b9b8b
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/data/languages/WebAssembly.dwarf
 @@ -0,0 +1,6 @@
@@ -5047,7 +4504,7 @@ index 00000000000..2df3b9b8bc2
 \ No newline at end of file
 diff --git a/Ghidra/Processors/WebAssembly/data/languages/WebAssembly.ldefs b/Ghidra/Processors/WebAssembly/data/languages/WebAssembly.ldefs
 new file mode 100644
-index 00000000000..643b47cf99e
+index 000000000..643b47cf9
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/data/languages/WebAssembly.ldefs
 @@ -0,0 +1,18 @@
@@ -5071,7 +4528,7 @@ index 00000000000..643b47cf99e
 +</language_definitions>
 diff --git a/Ghidra/Processors/WebAssembly/data/languages/WebAssembly.opinion b/Ghidra/Processors/WebAssembly/data/languages/WebAssembly.opinion
 new file mode 100644
-index 00000000000..43d630d161b
+index 000000000..43d630d16
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/data/languages/WebAssembly.opinion
 @@ -0,0 +1,5 @@
@@ -5083,7 +4540,7 @@ index 00000000000..43d630d161b
 \ No newline at end of file
 diff --git a/Ghidra/Processors/WebAssembly/data/languages/WebAssembly.pspec b/Ghidra/Processors/WebAssembly/data/languages/WebAssembly.pspec
 new file mode 100644
-index 00000000000..f4898dd965c
+index 000000000..f4898dd96
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/data/languages/WebAssembly.pspec
 @@ -0,0 +1,17 @@
@@ -5106,7 +4563,7 @@ index 00000000000..f4898dd965c
 +</processor_spec>
 diff --git a/Ghidra/Processors/WebAssembly/data/languages/WebAssembly.sinc b/Ghidra/Processors/WebAssembly/data/languages/WebAssembly.sinc
 new file mode 100644
-index 00000000000..9a9a043e6ac
+index 000000000..9a9a043e6
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/data/languages/WebAssembly.sinc
 @@ -0,0 +1,497 @@
@@ -5609,7 +5066,7 @@ index 00000000000..9a9a043e6ac
 +@include "VectorOps.sinc"
 diff --git a/Ghidra/Processors/WebAssembly/data/languages/WebAssembly.slaspec b/Ghidra/Processors/WebAssembly/data/languages/WebAssembly.slaspec
 new file mode 100644
-index 00000000000..8f7d2a61632
+index 000000000..8f7d2a616
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/data/languages/WebAssembly.slaspec
 @@ -0,0 +1,1906 @@
@@ -7521,7 +6978,7 @@ index 00000000000..8f7d2a61632
 +@include "WebAssembly.sinc"
 diff --git a/Ghidra/Processors/WebAssembly/ghidra_scripts/analyze_dyncalls.py b/Ghidra/Processors/WebAssembly/ghidra_scripts/analyze_dyncalls.py
 new file mode 100644
-index 00000000000..578c7d65ea0
+index 000000000..578c7d65e
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/ghidra_scripts/analyze_dyncalls.py
 @@ -0,0 +1,117 @@
@@ -7644,7 +7101,7 @@ index 00000000000..578c7d65ea0
 +    renameDyncalls(calltype)
 diff --git a/Ghidra/Processors/WebAssembly/ghidra_scripts/emulate_writev.py b/Ghidra/Processors/WebAssembly/ghidra_scripts/emulate_writev.py
 new file mode 100644
-index 00000000000..c40789c2ba2
+index 000000000..c40789c2b
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/ghidra_scripts/emulate_writev.py
 @@ -0,0 +1,57 @@
@@ -7707,7 +7164,7 @@ index 00000000000..c40789c2ba2
 +            wasmHelper.simulateReturn(emuHelper.emulator, -1)
 diff --git a/Ghidra/Processors/WebAssembly/src/main/help/help/TOC_Source.xml b/Ghidra/Processors/WebAssembly/src/main/help/help/TOC_Source.xml
 new file mode 100644
-index 00000000000..dbad6be64ab
+index 000000000..dbad6be64
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/src/main/help/help/TOC_Source.xml
 @@ -0,0 +1,7 @@
@@ -7720,7 +7177,7 @@ index 00000000000..dbad6be64ab
 +</tocroot>
 diff --git a/Ghidra/Processors/WebAssembly/src/main/help/help/shared/Frontpage.css b/Ghidra/Processors/WebAssembly/src/main/help/help/shared/Frontpage.css
 new file mode 100644
-index 00000000000..452bf6e6b5b
+index 000000000..452bf6e6b
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/src/main/help/help/shared/Frontpage.css
 @@ -0,0 +1,58 @@
@@ -7784,7 +7241,7 @@ index 00000000000..452bf6e6b5b
 +code { color: black; font-family: courier new; font-size: 14pt; }
 diff --git a/Ghidra/Processors/WebAssembly/src/main/help/help/topics/WebAssembly/help.html b/Ghidra/Processors/WebAssembly/src/main/help/help/topics/WebAssembly/help.html
 new file mode 100644
-index 00000000000..ec997c4e5ec
+index 000000000..ec997c4e5
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/src/main/help/help/topics/WebAssembly/help.html
 @@ -0,0 +1,111 @@
@@ -7902,7 +7359,7 @@ index 00000000000..ec997c4e5ec
 \ No newline at end of file
 diff --git a/Ghidra/Processors/WebAssembly/src/main/help/help/topics/WebAssembly/help.md b/Ghidra/Processors/WebAssembly/src/main/help/help/topics/WebAssembly/help.md
 new file mode 100644
-index 00000000000..49935bfb0ee
+index 000000000..49935bfb0
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/src/main/help/help/topics/WebAssembly/help.md
 @@ -0,0 +1,104 @@
@@ -8012,7 +7469,7 @@ index 00000000000..49935bfb0ee
 +- This module was directly based on https://github.com/garrettgu10/ghidra-wasm-plugin
 diff --git a/Ghidra/Processors/WebAssembly/src/main/java/ghidra/program/emulation/WasmEmulateInstructionStateModifier.java b/Ghidra/Processors/WebAssembly/src/main/java/ghidra/program/emulation/WasmEmulateInstructionStateModifier.java
 new file mode 100644
-index 00000000000..7084b122a5a
+index 000000000..7084b122a
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/src/main/java/ghidra/program/emulation/WasmEmulateInstructionStateModifier.java
 @@ -0,0 +1,296 @@
@@ -8314,7 +7771,7 @@ index 00000000000..7084b122a5a
 +}
 diff --git a/Ghidra/Processors/WebAssembly/src/main/java/ghidra/program/emulation/WasmEmulationHelper.java b/Ghidra/Processors/WebAssembly/src/main/java/ghidra/program/emulation/WasmEmulationHelper.java
 new file mode 100644
-index 00000000000..fdb959878c0
+index 000000000..fdb959878
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/src/main/java/ghidra/program/emulation/WasmEmulationHelper.java
 @@ -0,0 +1,135 @@
@@ -8455,10 +7912,10 @@ index 00000000000..fdb959878c0
 +}
 diff --git a/Ghidra/Processors/WebAssembly/src/main/java/wasm/WasmLoader.java b/Ghidra/Processors/WebAssembly/src/main/java/wasm/WasmLoader.java
 new file mode 100644
-index 00000000000..0b19b7e78fb
+index 000000000..1c409b3d5
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/src/main/java/wasm/WasmLoader.java
-@@ -0,0 +1,702 @@
+@@ -0,0 +1,699 @@
 +/* ###
 + * IP: GHIDRA
 + *
@@ -8496,7 +7953,6 @@ index 00000000000..0b19b7e78fb
 +import ghidra.program.model.address.AddressSpace;
 +import ghidra.program.model.data.ArrayDataType;
 +import ghidra.program.model.data.DataType;
-+import ghidra.program.model.data.DataTypeConflictException;
 +import ghidra.program.model.data.DataUtilities;
 +import ghidra.program.model.data.DataUtilities.ClearDataMode;
 +import ghidra.program.model.lang.LanguageCompilerSpecPair;
@@ -8725,8 +8181,6 @@ index 00000000000..0b19b7e78fb
 +			return d;
 +		} catch (CodeUnitInsertionException e) {
 +			Msg.warn(WasmLoader.class, "Data markup conflict at " + address, e);
-+		} catch (DataTypeConflictException e) {
-+			Msg.error(WasmLoader.class, "Data type markup conflict:" + e.getMessage(), e);
 +		}
 +		return null;
 +	}
@@ -8899,12 +8353,12 @@ index 00000000000..0b19b7e78fb
 +
 +	/**
 +	 * Copy element segment to table.
-+	 * 
++	 *
 +	 * This is public so that it can be called after loading, e.g. to load a passive
 +	 * element segment once the dynamic table index and offset are known.
 +	 *
 +	 * For example, this could be called from a script as follows:
-+	 * 
++	 *
 +	 * WasmLoader.loadElementsToTable(getCurrentProgram(),
 +	 * WasmAnalysis.getState(getCurrentProgram()).getModule(), elemidx, tableidx,
 +	 * offset, new ConsoleTaskMonitor())
@@ -8984,12 +8438,12 @@ index 00000000000..0b19b7e78fb
 +
 +	/**
 +	 * Copy data segment to memory.
-+	 * 
++	 *
 +	 * This is public so that it can be called after loading, e.g. to load a passive
 +	 * data segment once the dynamic memory index and offset are known.
 +	 *
 +	 * For example, this could be called from a script as follows:
-+	 * 
++	 *
 +	 * WasmLoader.loadDataToMemory(getCurrentProgram(),
 +	 * WasmAnalysis.getState(getCurrentProgram()).getModule(), dataidx, memidx,
 +	 * offset, new ConsoleTaskMonitor())
@@ -9163,7 +8617,7 @@ index 00000000000..0b19b7e78fb
 +}
 diff --git a/Ghidra/Processors/WebAssembly/src/main/java/wasm/analysis/ValidationException.java b/Ghidra/Processors/WebAssembly/src/main/java/wasm/analysis/ValidationException.java
 new file mode 100644
-index 00000000000..a5029b78b66
+index 000000000..a5029b78b
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/src/main/java/wasm/analysis/ValidationException.java
 @@ -0,0 +1,32 @@
@@ -9201,7 +8655,7 @@ index 00000000000..a5029b78b66
 +}
 diff --git a/Ghidra/Processors/WebAssembly/src/main/java/wasm/analysis/WasmAnalysis.java b/Ghidra/Processors/WebAssembly/src/main/java/wasm/analysis/WasmAnalysis.java
 new file mode 100644
-index 00000000000..d4fbbe7831e
+index 000000000..d4fbbe783
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/src/main/java/wasm/analysis/WasmAnalysis.java
 @@ -0,0 +1,154 @@
@@ -9361,19 +8815,19 @@ index 00000000000..d4fbbe7831e
 +}
 diff --git a/Ghidra/Processors/WebAssembly/src/main/java/wasm/analysis/WasmDWARFAnalyzer.java b/Ghidra/Processors/WebAssembly/src/main/java/wasm/analysis/WasmDWARFAnalyzer.java
 new file mode 100644
-index 00000000000..771295f7ba0
+index 000000000..8bd193540
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/src/main/java/wasm/analysis/WasmDWARFAnalyzer.java
-@@ -0,0 +1,35 @@
+@@ -0,0 +1,36 @@
 +/* ###
 + * IP: GHIDRA
 + *
 + * Licensed under the Apache License, Version 2.0 (the "License");
 + * you may not use this file except in compliance with the License.
 + * You may obtain a copy of the License at
-+ * 
++ *
 + *      http://www.apache.org/licenses/LICENSE-2.0
-+ * 
++ *
 + * Unless required by applicable law or agreed to in writing, software
 + * distributed under the License is distributed on an "AS IS" BASIS,
 + * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -9385,6 +8839,7 @@ index 00000000000..771295f7ba0
 +import ghidra.app.plugin.core.analysis.DWARFAnalyzer;
 +import ghidra.app.util.bin.format.dwarf4.next.sectionprovider.DWARFSectionProviderFactory;
 +import ghidra.program.model.listing.Program;
++import ghidra.util.task.TaskMonitor;
 +import wasm.WasmLoader;
 +
 +public class WasmDWARFAnalyzer extends DWARFAnalyzer {
@@ -9394,7 +8849,7 @@ index 00000000000..771295f7ba0
 +		String format = program.getExecutableFormat();
 +
 +		if (WasmLoader.WEBASSEMBLY.equals(format)
-+				&& DWARFSectionProviderFactory.createSectionProviderFor(program) != null) {
++				&& DWARFSectionProviderFactory.createSectionProviderFor(program, TaskMonitor.DUMMY) != null) {
 +			return true;
 +		}
 +		return false;
@@ -9402,7 +8857,7 @@ index 00000000000..771295f7ba0
 +}
 diff --git a/Ghidra/Processors/WebAssembly/src/main/java/wasm/analysis/WasmFuncSignature.java b/Ghidra/Processors/WebAssembly/src/main/java/wasm/analysis/WasmFuncSignature.java
 new file mode 100644
-index 00000000000..8cd5cc8b521
+index 000000000..8cd5cc8b5
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/src/main/java/wasm/analysis/WasmFuncSignature.java
 @@ -0,0 +1,80 @@
@@ -9488,7 +8943,7 @@ index 00000000000..8cd5cc8b521
 +}
 diff --git a/Ghidra/Processors/WebAssembly/src/main/java/wasm/analysis/WasmFunctionAnalysis.java b/Ghidra/Processors/WebAssembly/src/main/java/wasm/analysis/WasmFunctionAnalysis.java
 new file mode 100644
-index 00000000000..a38d2b310bf
+index 000000000..a38d2b310
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/src/main/java/wasm/analysis/WasmFunctionAnalysis.java
 @@ -0,0 +1,1514 @@
@@ -11008,7 +10463,7 @@ index 00000000000..a38d2b310bf
 +}
 diff --git a/Ghidra/Processors/WebAssembly/src/main/java/wasm/analysis/WasmPreAnalyzer.java b/Ghidra/Processors/WebAssembly/src/main/java/wasm/analysis/WasmPreAnalyzer.java
 new file mode 100644
-index 00000000000..10273385c85
+index 000000000..10273385c
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/src/main/java/wasm/analysis/WasmPreAnalyzer.java
 @@ -0,0 +1,194 @@
@@ -11208,7 +10663,7 @@ index 00000000000..10273385c85
 +}
 diff --git a/Ghidra/Processors/WebAssembly/src/main/java/wasm/analysis/WasmSignatureAnalyzer.java b/Ghidra/Processors/WebAssembly/src/main/java/wasm/analysis/WasmSignatureAnalyzer.java
 new file mode 100644
-index 00000000000..1f1fee999aa
+index 000000000..1f1fee999
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/src/main/java/wasm/analysis/WasmSignatureAnalyzer.java
 @@ -0,0 +1,118 @@
@@ -11330,9 +10785,264 @@ index 00000000000..1f1fee999aa
 +		return true;
 +	}
 +}
+diff --git a/Ghidra/Processors/WebAssembly/src/main/java/wasm/analysis/WasmStackVariableAnalyzer.java b/Ghidra/Processors/WebAssembly/src/main/java/wasm/analysis/WasmStackVariableAnalyzer.java
+new file mode 100644
+index 000000000..90519316d
+--- /dev/null
++++ b/Ghidra/Processors/WebAssembly/src/main/java/wasm/analysis/WasmStackVariableAnalyzer.java
+@@ -0,0 +1,249 @@
++package wasm.analysis;
++
++import java.util.ArrayList;
++import java.util.Collections;
++import java.util.List;
++
++import ghidra.app.cmd.function.CallDepthChangeInfo;
++import ghidra.app.services.AbstractAnalyzer;
++import ghidra.app.services.AnalysisPriority;
++import ghidra.app.services.AnalyzerType;
++import ghidra.app.util.importer.MessageLog;
++import ghidra.program.model.address.AddressSetView;
++import ghidra.program.model.data.ArrayDataType;
++import ghidra.program.model.data.ByteDataType;
++import ghidra.program.model.data.CharDataType;
++import ghidra.program.model.data.DataType;
++import ghidra.program.model.data.DefaultDataType;
++import ghidra.program.model.data.Float4DataType;
++import ghidra.program.model.data.Float8DataType;
++import ghidra.program.model.data.IntegerDataType;
++import ghidra.program.model.data.ShortDataType;
++import ghidra.program.model.data.SignedByteDataType;
++import ghidra.program.model.data.Undefined;
++import ghidra.program.model.data.Undefined1DataType;
++import ghidra.program.model.data.Undefined2DataType;
++import ghidra.program.model.data.Undefined4DataType;
++import ghidra.program.model.data.Undefined8DataType;
++import ghidra.program.model.data.UnsignedIntegerDataType;
++import ghidra.program.model.data.UnsignedShortDataType;
++import ghidra.program.model.lang.Processor;
++import ghidra.program.model.lang.Register;
++import ghidra.program.model.listing.Function;
++import ghidra.program.model.listing.Instruction;
++import ghidra.program.model.listing.InstructionIterator;
++import ghidra.program.model.listing.Program;
++import ghidra.program.model.listing.StackFrame;
++import ghidra.program.model.listing.Variable;
++import ghidra.program.model.scalar.Scalar;
++import ghidra.program.model.symbol.RefType;
++import ghidra.program.model.symbol.Reference;
++import ghidra.program.model.symbol.ReferenceManager;
++import ghidra.program.model.symbol.SourceType;
++import ghidra.program.model.symbol.StackReference;
++import ghidra.util.Msg;
++import ghidra.util.exception.CancelledException;
++import ghidra.util.exception.DuplicateNameException;
++import ghidra.util.exception.InvalidInputException;
++import ghidra.util.task.TaskMonitor;
++
++public class WasmStackVariableAnalyzer extends AbstractAnalyzer {
++	private static final String NAME = "Wasm Stack Analyzer";
++	private static final String DESCRIPTION = "Creates C stack variables for Wasm functions.";
++
++	public WasmStackVariableAnalyzer() {
++		super(NAME, DESCRIPTION, AnalyzerType.FUNCTION_ANALYZER);
++		setPriority(AnalysisPriority.DATA_TYPE_PROPOGATION.after().after().after());
++		setDefaultEnablement(true);
++	}
++
++	@Override
++	public boolean canAnalyze(Program program) {
++		return program.getLanguage().getProcessor().equals(Processor.findOrPossiblyCreateProcessor("WebAssembly"));
++	}
++
++	@Override
++	public boolean added(Program program, AddressSetView set, TaskMonitor monitor, MessageLog log) throws CancelledException {
++		monitor.initialize(program.getFunctionManager().getFunctionCount());
++
++		for (Function function : program.getListing().getFunctions(set, true)) {
++			monitor.checkCanceled();
++			monitor.setMessage("C Stack " + function.getName());
++			monitor.incrementProgress(1);
++
++			createStackPointerVariables(program, function, monitor);
++		}
++
++		return true;
++	}
++
++	private static DataType getMemoryDataType(String mnemonic) {
++		switch (mnemonic) {
++		case "i32.load":
++		case "i32.store":
++			return Undefined4DataType.dataType;
++		case "i64.load":
++		case "i64.store":
++			return Undefined8DataType.dataType;
++		case "f32.store":
++		case "f32.load":
++			return Float4DataType.dataType;
++		case "f64.store":
++		case "f64.load":
++			return Float8DataType.dataType;
++		case "i32.load8_s":
++		case "i64.load8_s":
++			return CharDataType.dataType;
++		case "i32.load8_u":
++		case "i64.load8_u":
++			return ByteDataType.dataType;
++		case "i32.store8":
++		case "i64.store8":
++			return Undefined1DataType.dataType;
++		case "i32.load16_s":
++		case "i64.load16_s":
++			return ShortDataType.dataType;
++		case "i32.load16_u":
++		case "i64.load16_u":
++			return UnsignedShortDataType.dataType;
++		case "i32.store16":
++		case "i64.store16":
++			return Undefined2DataType.dataType;
++		case "i64.load32_s":
++			return IntegerDataType.dataType;
++		case "i64.load32_u":
++			return UnsignedIntegerDataType.dataType;
++		case "i64.store32":
++			return Undefined4DataType.dataType;
++		case "v128.load":
++		case "v128.store":
++			return Undefined.getUndefinedDataType(16);
++		case "v128.load8_lane":
++		case "v128.load8_splat":
++		case "v128.store8_lane":
++			return Undefined1DataType.dataType;
++		case "v128.load16_lane":
++		case "v128.load16_splat":
++		case "v128.store16_lane":
++			return Undefined2DataType.dataType;
++		case "v128.load32_lane":
++		case "v128.load32_splat":
++		case "v128.load32_zero":
++		case "v128.store32_lane":
++			return Undefined4DataType.dataType;
++		case "v128.load64_lane":
++		case "v128.load64_splat":
++		case "v128.load64_zero":
++		case "v128.store64_lane":
++			return Undefined8DataType.dataType;
++		case "v128.load8x8_s":
++			return new ArrayDataType(SignedByteDataType.dataType, 8, 1);
++		case "v128.load8x8_u":
++			return new ArrayDataType(ByteDataType.dataType, 8, 1);
++		case "v128.load16x4_s":
++			return new ArrayDataType(ShortDataType.dataType, 4, 2);
++		case "v128.load16x4_u":
++			return new ArrayDataType(UnsignedShortDataType.dataType, 4, 2);
++		case "v128.load32x2_s":
++			return new ArrayDataType(IntegerDataType.dataType, 2, 4);
++		case "v128.load32x2_u":
++			return new ArrayDataType(UnsignedIntegerDataType.dataType, 2, 4);
++		}
++		return DefaultDataType.dataType;
++	}
++
++	private Variable createVar(Function func, int frameOffset, int offset, DataType dataType) throws InvalidInputException, DuplicateNameException {
++		StackFrame frame = func.getStackFrame();
++		int frameLoc = offset + frameOffset;
++		Variable var = frame.getVariableContaining(frameLoc);
++		if (var == null) {
++			var = frame.createVariable(null, frameLoc, dataType, SourceType.ANALYSIS);
++		} else if (var.getStackOffset() == frameLoc) {
++			DataType oldDt = var.getDataType();
++			if ((Undefined.isUndefined(oldDt) && !Undefined.isUndefined(dataType)) ||
++			(oldDt == DefaultDataType.DEFAULT && dataType != DefaultDataType.DEFAULT)) {
++				var.setDataType(dataType, SourceType.ANALYSIS);
++			}
++		}
++		return var;
++	}
++
++	private void defineFuncVariable(Program program, Function func, Instruction instr, int opIndex, int stackOffset, RefType refType) throws InvalidInputException, DuplicateNameException {
++		ReferenceManager refMgr = program.getReferenceManager();
++
++		Reference ref = instr.getPrimaryReference(opIndex);
++		DataType dataType = getMemoryDataType(instr.getMnemonicString());
++
++		if (ref != null && ref instanceof StackReference)
++			return;
++
++		refMgr.addStackReference(instr.getMinAddress(), opIndex, stackOffset, refType, SourceType.ANALYSIS);
++		createVar(func, 0, stackOffset, dataType);
++	}
++
++	// Get registers sorted by position within the register file
++	private List<Register> getRegisters(Object[] collection) {
++		List<Register> registers = new ArrayList<>();
++		for (Object obj : collection) {
++			if (obj instanceof Register) {
++				registers.add((Register) obj);
++			}
++		}
++		Collections.sort(registers);
++		return registers;
++	}
++
++	private void createStackPointerVariables(Program program, Function func, TaskMonitor monitor) throws CancelledException {
++		CallDepthChangeInfo info = new CallDepthChangeInfo(func, monitor);
++
++		InstructionIterator iter = program.getListing().getInstructions(func.getBody(), true);
++		while (iter.hasNext()) {
++			monitor.checkCanceled();
++			Instruction instr = iter.next();
++
++			try {
++				String mnemonic = instr.getMnemonicString();
++				if (mnemonic.contains(".load")) {
++					// Note: inputObjects is not sorted in any particular order (it may be derived
++					// from a HashSet)
++					Register base = getRegisters(instr.getInputObjects()).get(0);
++					// get offset from "align=A offset=O" operand
++					Scalar offset = (Scalar) instr.getOpObjects(0)[1];
++					int stackOffset = info.getRegDepth(instr.getMinAddress(), base);
++					if (stackOffset == Function.INVALID_STACK_DEPTH_CHANGE) {
++						continue;
++					}
++					defineFuncVariable(program, func, instr, 0, (int) (stackOffset + offset.getUnsignedValue()), RefType.READ);
++				} else if (mnemonic.contains(".store")) {
++					// Note: inputObjects is not sorted in any particular order (it may be derived
++					// from a HashSet)
++					Register base = getRegisters(instr.getInputObjects()).get(0);
++					// get offset from "align=A offset=O" operand
++					Scalar offset = (Scalar) instr.getOpObjects(0)[1];
++					int stackOffset = info.getRegDepth(instr.getMinAddress(), base);
++					if (stackOffset == Function.INVALID_STACK_DEPTH_CHANGE) {
++						continue;
++					}
++					defineFuncVariable(program, func, instr, 0, (int) (stackOffset + offset.getUnsignedValue()), RefType.WRITE);
++				} else if (mnemonic.equals("local.get") || mnemonic.equals("local.set")) {
++					// These instructions will only have one input
++					Register input = (Register) instr.getInputObjects()[0];
++					int stackOffset = info.getRegDepth(instr.getMinAddress(), input);
++					if (stackOffset == Function.INVALID_STACK_DEPTH_CHANGE) {
++						continue;
++					}
++					if (stackOffset == info.getDepth(instr.getMinAddress()) || stackOffset == 0) {
++						/*
++						 * Heuristically, avoid simple references to the frame or stack base, as they're
++						 * likely to be operands for a later operation
++						 */
++						continue;
++					}
++					defineFuncVariable(program, func, instr, 0, stackOffset, RefType.DATA);
++				}
++			} catch (Exception e) {
++				Msg.warn(this, "Failed to process instruction at " + instr.getMinAddress() + ": " + instr + ": " + e.getMessage());
++			}
++		}
++	}
++}
 diff --git a/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/StructureBuilder.java b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/StructureBuilder.java
 new file mode 100644
-index 00000000000..bf822bf460b
+index 000000000..bf822bf46
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/StructureBuilder.java
 @@ -0,0 +1,135 @@
@@ -11473,7 +11183,7 @@ index 00000000000..bf822bf460b
 +}
 diff --git a/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/WasmConstants.java b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/WasmConstants.java
 new file mode 100644
-index 00000000000..dd6393541ef
+index 000000000..dd6393541
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/WasmConstants.java
 @@ -0,0 +1,21 @@
@@ -11500,7 +11210,7 @@ index 00000000000..dd6393541ef
 +}
 diff --git a/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/WasmEnums.java b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/WasmEnums.java
 new file mode 100644
-index 00000000000..b0714fcae75
+index 000000000..b0714fcae
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/WasmEnums.java
 @@ -0,0 +1,108 @@
@@ -11614,7 +11324,7 @@ index 00000000000..b0714fcae75
 +}
 diff --git a/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/WasmHeader.java b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/WasmHeader.java
 new file mode 100644
-index 00000000000..f17d0b7d542
+index 000000000..f17d0b7d5
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/WasmHeader.java
 @@ -0,0 +1,54 @@
@@ -11674,7 +11384,7 @@ index 00000000000..f17d0b7d542
 +}
 diff --git a/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/WasmModule.java b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/WasmModule.java
 new file mode 100644
-index 00000000000..cb9f5cff4f9
+index 000000000..cb9f5cff4
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/WasmModule.java
 @@ -0,0 +1,273 @@
@@ -11953,7 +11663,7 @@ index 00000000000..cb9f5cff4f9
 +}
 diff --git a/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/WasmCodeSection.java b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/WasmCodeSection.java
 new file mode 100644
-index 00000000000..4940bfcac8d
+index 000000000..4940bfcac
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/WasmCodeSection.java
 @@ -0,0 +1,57 @@
@@ -12016,7 +11726,7 @@ index 00000000000..4940bfcac8d
 +}
 diff --git a/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/WasmCustomSection.java b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/WasmCustomSection.java
 new file mode 100644
-index 00000000000..57b674f5525
+index 000000000..57b674f55
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/WasmCustomSection.java
 @@ -0,0 +1,64 @@
@@ -12086,7 +11796,7 @@ index 00000000000..57b674f5525
 +}
 diff --git a/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/WasmDataSection.java b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/WasmDataSection.java
 new file mode 100644
-index 00000000000..18af527c270
+index 000000000..18af527c2
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/WasmDataSection.java
 @@ -0,0 +1,58 @@
@@ -12150,7 +11860,7 @@ index 00000000000..18af527c270
 +}
 diff --git a/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/WasmElementSection.java b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/WasmElementSection.java
 new file mode 100644
-index 00000000000..f23aa1a0f12
+index 000000000..f23aa1a0f
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/WasmElementSection.java
 @@ -0,0 +1,58 @@
@@ -12214,7 +11924,7 @@ index 00000000000..f23aa1a0f12
 +}
 diff --git a/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/WasmExportSection.java b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/WasmExportSection.java
 new file mode 100644
-index 00000000000..f0b1731cb0b
+index 000000000..f0b1731cb
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/WasmExportSection.java
 @@ -0,0 +1,77 @@
@@ -12297,7 +12007,7 @@ index 00000000000..f0b1731cb0b
 +}
 diff --git a/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/WasmFunctionSection.java b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/WasmFunctionSection.java
 new file mode 100644
-index 00000000000..30b12cffa6b
+index 000000000..30b12cffa
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/WasmFunctionSection.java
 @@ -0,0 +1,60 @@
@@ -12363,7 +12073,7 @@ index 00000000000..30b12cffa6b
 +}
 diff --git a/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/WasmGlobalSection.java b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/WasmGlobalSection.java
 new file mode 100644
-index 00000000000..c80715af817
+index 000000000..c80715af8
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/WasmGlobalSection.java
 @@ -0,0 +1,58 @@
@@ -12427,7 +12137,7 @@ index 00000000000..c80715af817
 +}
 diff --git a/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/WasmImportSection.java b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/WasmImportSection.java
 new file mode 100644
-index 00000000000..24a01428a85
+index 000000000..24a01428a
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/WasmImportSection.java
 @@ -0,0 +1,68 @@
@@ -12501,7 +12211,7 @@ index 00000000000..24a01428a85
 +}
 diff --git a/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/WasmLinearMemorySection.java b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/WasmLinearMemorySection.java
 new file mode 100644
-index 00000000000..1c052868462
+index 000000000..1c0528684
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/WasmLinearMemorySection.java
 @@ -0,0 +1,58 @@
@@ -12565,7 +12275,7 @@ index 00000000000..1c052868462
 +}
 diff --git a/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/WasmNameSection.java b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/WasmNameSection.java
 new file mode 100644
-index 00000000000..e7c83c19459
+index 000000000..e7c83c194
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/WasmNameSection.java
 @@ -0,0 +1,97 @@
@@ -12668,7 +12378,7 @@ index 00000000000..e7c83c19459
 +}
 diff --git a/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/WasmSection.java b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/WasmSection.java
 new file mode 100644
-index 00000000000..c8701a0a5ea
+index 000000000..c8701a0a5
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/WasmSection.java
 @@ -0,0 +1,123 @@
@@ -12797,7 +12507,7 @@ index 00000000000..c8701a0a5ea
 +}
 diff --git a/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/WasmStartSection.java b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/WasmStartSection.java
 new file mode 100644
-index 00000000000..76c620e2907
+index 000000000..76c620e29
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/WasmStartSection.java
 @@ -0,0 +1,47 @@
@@ -12850,7 +12560,7 @@ index 00000000000..76c620e2907
 +}
 diff --git a/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/WasmTableSection.java b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/WasmTableSection.java
 new file mode 100644
-index 00000000000..552a9ac44f0
+index 000000000..552a9ac44
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/WasmTableSection.java
 @@ -0,0 +1,58 @@
@@ -12914,7 +12624,7 @@ index 00000000000..552a9ac44f0
 +}
 diff --git a/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/WasmTypeSection.java b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/WasmTypeSection.java
 new file mode 100644
-index 00000000000..2ca53528b09
+index 000000000..2ca53528b
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/WasmTypeSection.java
 @@ -0,0 +1,61 @@
@@ -12981,7 +12691,7 @@ index 00000000000..2ca53528b09
 +}
 diff --git a/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/WasmUnknownCustomSection.java b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/WasmUnknownCustomSection.java
 new file mode 100644
-index 00000000000..9496a8b45f6
+index 000000000..9496a8b45
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/WasmUnknownCustomSection.java
 @@ -0,0 +1,52 @@
@@ -13039,7 +12749,7 @@ index 00000000000..9496a8b45f6
 +}
 diff --git a/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/ConstantExpression.java b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/ConstantExpression.java
 new file mode 100644
-index 00000000000..a36e53dac72
+index 000000000..a36e53dac
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/ConstantExpression.java
 @@ -0,0 +1,218 @@
@@ -13263,7 +12973,7 @@ index 00000000000..a36e53dac72
 +}
 diff --git a/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmCodeEntry.java b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmCodeEntry.java
 new file mode 100644
-index 00000000000..315033d4c1b
+index 000000000..315033d4c
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmCodeEntry.java
 @@ -0,0 +1,87 @@
@@ -13356,7 +13066,7 @@ index 00000000000..315033d4c1b
 +}
 diff --git a/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmDataSegment.java b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmDataSegment.java
 new file mode 100644
-index 00000000000..4e95a645320
+index 000000000..4e95a6453
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmDataSegment.java
 @@ -0,0 +1,103 @@
@@ -13465,7 +13175,7 @@ index 00000000000..4e95a645320
 +}
 diff --git a/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmElementSegment.java b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmElementSegment.java
 new file mode 100644
-index 00000000000..82870bd64fd
+index 000000000..82870bd64
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmElementSegment.java
 @@ -0,0 +1,214 @@
@@ -13685,7 +13395,7 @@ index 00000000000..82870bd64fd
 +}
 diff --git a/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmExportEntry.java b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmExportEntry.java
 new file mode 100644
-index 00000000000..0f48f3df31a
+index 000000000..0f48f3df3
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmExportEntry.java
 @@ -0,0 +1,60 @@
@@ -13751,7 +13461,7 @@ index 00000000000..0f48f3df31a
 +}
 diff --git a/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmFuncType.java b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmFuncType.java
 new file mode 100644
-index 00000000000..8fe1915472f
+index 000000000..8fe191547
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmFuncType.java
 @@ -0,0 +1,81 @@
@@ -13838,7 +13548,7 @@ index 00000000000..8fe1915472f
 +}
 diff --git a/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmGlobalEntry.java b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmGlobalEntry.java
 new file mode 100644
-index 00000000000..d6705d61ee1
+index 000000000..d6705d61e
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmGlobalEntry.java
 @@ -0,0 +1,62 @@
@@ -13906,7 +13616,7 @@ index 00000000000..d6705d61ee1
 +}
 diff --git a/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmGlobalType.java b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmGlobalType.java
 new file mode 100644
-index 00000000000..21235766e83
+index 000000000..21235766e
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmGlobalType.java
 @@ -0,0 +1,52 @@
@@ -13964,7 +13674,7 @@ index 00000000000..21235766e83
 +}
 diff --git a/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmImportEntry.java b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmImportEntry.java
 new file mode 100644
-index 00000000000..90b0b217372
+index 000000000..90b0b2173
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmImportEntry.java
 @@ -0,0 +1,137 @@
@@ -14107,7 +13817,7 @@ index 00000000000..90b0b217372
 +}
 diff --git a/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmLocalEntry.java b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmLocalEntry.java
 new file mode 100644
-index 00000000000..3ca7340faf5
+index 000000000..3ca7340fa
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmLocalEntry.java
 @@ -0,0 +1,52 @@
@@ -14165,7 +13875,7 @@ index 00000000000..3ca7340faf5
 +}
 diff --git a/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmName.java b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmName.java
 new file mode 100644
-index 00000000000..dcd0163cbab
+index 000000000..dcd0163cb
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmName.java
 @@ -0,0 +1,53 @@
@@ -14224,7 +13934,7 @@ index 00000000000..dcd0163cbab
 +}
 diff --git a/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmNameIndirectMap.java b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmNameIndirectMap.java
 new file mode 100644
-index 00000000000..8a5bb9cd646
+index 000000000..8a5bb9cd6
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmNameIndirectMap.java
 @@ -0,0 +1,71 @@
@@ -14301,7 +14011,7 @@ index 00000000000..8a5bb9cd646
 +}
 diff --git a/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmNameLocalSubsection.java b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmNameLocalSubsection.java
 new file mode 100644
-index 00000000000..5baeeb5e42a
+index 000000000..5baeeb5e4
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmNameLocalSubsection.java
 @@ -0,0 +1,46 @@
@@ -14353,7 +14063,7 @@ index 00000000000..5baeeb5e42a
 +}
 diff --git a/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmNameMap.java b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmNameMap.java
 new file mode 100644
-index 00000000000..422a57a43e7
+index 000000000..422a57a43
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmNameMap.java
 @@ -0,0 +1,73 @@
@@ -14432,7 +14142,7 @@ index 00000000000..422a57a43e7
 +}
 diff --git a/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmNameMapSubsection.java b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmNameMapSubsection.java
 new file mode 100644
-index 00000000000..36f3a5ad0fb
+index 000000000..36f3a5ad0
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmNameMapSubsection.java
 @@ -0,0 +1,50 @@
@@ -14488,7 +14198,7 @@ index 00000000000..36f3a5ad0fb
 +}
 diff --git a/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmNameModuleSubsection.java b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmNameModuleSubsection.java
 new file mode 100644
-index 00000000000..87973efdb9a
+index 000000000..87973efdb
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmNameModuleSubsection.java
 @@ -0,0 +1,46 @@
@@ -14540,7 +14250,7 @@ index 00000000000..87973efdb9a
 +}
 diff --git a/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmNameSubsection.java b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmNameSubsection.java
 new file mode 100644
-index 00000000000..fee86753f3c
+index 000000000..fee86753f
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmNameSubsection.java
 @@ -0,0 +1,123 @@
@@ -14669,7 +14379,7 @@ index 00000000000..fee86753f3c
 +}
 diff --git a/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmNameUnknownSubsection.java b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmNameUnknownSubsection.java
 new file mode 100644
-index 00000000000..1460e8443d2
+index 000000000..1460e8443
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmNameUnknownSubsection.java
 @@ -0,0 +1,41 @@
@@ -14716,7 +14426,7 @@ index 00000000000..1460e8443d2
 +}
 diff --git a/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmResizableLimits.java b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmResizableLimits.java
 new file mode 100644
-index 00000000000..e694f24c600
+index 000000000..e694f24c6
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmResizableLimits.java
 @@ -0,0 +1,62 @@
@@ -14784,7 +14494,7 @@ index 00000000000..e694f24c600
 +}
 diff --git a/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmTableType.java b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmTableType.java
 new file mode 100644
-index 00000000000..befb15080c2
+index 000000000..befb15080
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmTableType.java
 @@ -0,0 +1,56 @@
@@ -14846,7 +14556,7 @@ index 00000000000..befb15080c2
 +}
 diff --git a/Ghidra/Processors/WebAssembly/src/main/java/wasm/pcode/InjectPayloadWasmEntry.java b/Ghidra/Processors/WebAssembly/src/main/java/wasm/pcode/InjectPayloadWasmEntry.java
 new file mode 100644
-index 00000000000..158cb486ce3
+index 000000000..158cb486c
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/src/main/java/wasm/pcode/InjectPayloadWasmEntry.java
 @@ -0,0 +1,62 @@
@@ -14914,7 +14624,7 @@ index 00000000000..158cb486ce3
 +}
 diff --git a/Ghidra/Processors/WebAssembly/src/main/java/wasm/pcode/InjectPayloadWasmPop.java b/Ghidra/Processors/WebAssembly/src/main/java/wasm/pcode/InjectPayloadWasmPop.java
 new file mode 100644
-index 00000000000..fef1fd1c299
+index 000000000..fef1fd1c2
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/src/main/java/wasm/pcode/InjectPayloadWasmPop.java
 @@ -0,0 +1,74 @@
@@ -14994,7 +14704,7 @@ index 00000000000..fef1fd1c299
 +}
 diff --git a/Ghidra/Processors/WebAssembly/src/main/java/wasm/pcode/InjectPayloadWasmPush.java b/Ghidra/Processors/WebAssembly/src/main/java/wasm/pcode/InjectPayloadWasmPush.java
 new file mode 100644
-index 00000000000..463e670d4f1
+index 000000000..463e670d4
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/src/main/java/wasm/pcode/InjectPayloadWasmPush.java
 @@ -0,0 +1,73 @@
@@ -15073,7 +14783,7 @@ index 00000000000..463e670d4f1
 +}
 diff --git a/Ghidra/Processors/WebAssembly/src/main/java/wasm/pcode/PcodeInjectLibraryWasm.java b/Ghidra/Processors/WebAssembly/src/main/java/wasm/pcode/PcodeInjectLibraryWasm.java
 new file mode 100644
-index 00000000000..bad93c6ad9b
+index 000000000..bad93c6ad
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/src/main/java/wasm/pcode/PcodeInjectLibraryWasm.java
 @@ -0,0 +1,53 @@
@@ -15132,7 +14842,7 @@ index 00000000000..bad93c6ad9b
 +}
 diff --git a/Ghidra/Processors/WebAssembly/src/main/java/wasm/pcode/PcodeOpEmitter.java b/Ghidra/Processors/WebAssembly/src/main/java/wasm/pcode/PcodeOpEmitter.java
 new file mode 100644
-index 00000000000..4de4cbf0625
+index 000000000..4de4cbf06
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/src/main/java/wasm/pcode/PcodeOpEmitter.java
 @@ -0,0 +1,70 @@
@@ -15206,3 +14916,6 @@ index 00000000000..4de4cbf0625
 +		op.setOutput(new Varnode(toAddr, size));
 +	}
 +}
+-- 
+2.38.1
+

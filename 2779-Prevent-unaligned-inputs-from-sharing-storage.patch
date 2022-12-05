@@ -1,8 +1,20 @@
+From c69f19e92d4767592603a202c3d7ee9bb581d4d5 Mon Sep 17 00:00:00 2001
+From: astrelsky <ajs222@njit.edu>
+Date: Thu, 18 Feb 2021 17:06:57 -0500
+Subject: [PATCH] 2779: Prevent unaligned inputs from sharing storage
+
+---
+ .../Decompiler/src/decompile/cpp/fspec.cc     | 56 ++++++++++++++++---
+ .../Decompiler/src/decompile/cpp/fspec.hh     |  3 +-
+ .../Decompiler/src/decompile/cpp/translate.hh |  1 +
+ .../program/model/lang/ParamListStandard.java | 46 +++++++++++++--
+ 4 files changed, 92 insertions(+), 14 deletions(-)
+
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.cc
-index bb40b24eef8..bf098db9cb4 100644
+index 8e184ecce..55aaac4de 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.cc
-@@ -64,6 +64,21 @@ bool ParamEntry::contains(const ParamEntry &op2) const
+@@ -157,6 +157,21 @@ bool ParamEntry::subsumesDefinition(const ParamEntry &op2) const
  
  {
    if ((type!=TYPE_UNKNOWN)&&(op2.type != type)) return false;
@@ -24,7 +36,7 @@ index bb40b24eef8..bf098db9cb4 100644
    if (spaceid != op2.spaceid) return false;
    if (op2.addressbase < addressbase) return false;
    if ((op2.addressbase+op2.size-1) > (addressbase+size-1)) return false;
-@@ -510,9 +525,7 @@ int4 ParamListStandard::characterizeAsParam(const Address &loc,int4 size) const
+@@ -641,9 +656,7 @@ int4 ParamListStandard::characterizeAsParam(const Address &loc,int4 size) const
  Address ParamListStandard::assignAddress(const Datatype *tp,vector<int4> &status) const
  
  {
@@ -35,7 +47,7 @@ index bb40b24eef8..bf098db9cb4 100644
      int4 grp = curEntry.getGroup();
      if (status[grp]<0) continue;
      if ((curEntry.getType() != TYPE_UNKNOWN)&&
-@@ -521,16 +534,43 @@ Address ParamListStandard::assignAddress(const Datatype *tp,vector<int4> &status
+@@ -652,16 +665,43 @@ Address ParamListStandard::assignAddress(const Datatype *tp,vector<int4> &status
  
      Address res = curEntry.getAddrBySlot(status[grp],tp->getSize());
      if (res.isInvalid()) continue; // If -tp- doesn't fit an invalid address is returned
@@ -66,7 +78,7 @@ index bb40b24eef8..bf098db9cb4 100644
 +  const int4 maxgrp = grp + element.getGroupSize();
 +  for(int4 j=grp;j<maxgrp;++j) // For an exclusion entry
 +    status[j] = -1;		// some number of groups are taken up
-+  
++
 +  // any entries which this element contains must also be set as taken
 +  for (const ParamEntry &e : entry) {
 +    if (&e == &element) continue;
@@ -81,40 +93,32 @@ index bb40b24eef8..bf098db9cb4 100644
 +  }
 +}
 +
- void ParamListStandard::assignMap(const vector<Datatype *> &proto,bool isinput,TypeFactory &typefactory,
- 				  vector<ParameterPieces> &res) const
+ void ParamListStandard::assignMap(const vector<Datatype *> &proto,TypeFactory &typefactory,vector<ParameterPieces> &res) const
  
+ {
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.hh
-index 9a592cb4a2d..43390439b2f 100644
+index 08487fa4e..e3e346f7f 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.hh
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.hh
-@@ -69,7 +69,7 @@ private:
+@@ -109,7 +109,7 @@ private:
    int4 minsize;			///< Minimum bytes allowed for the logical value
    int4 alignment;		///< How much alignment (0 means only 1 logical value is allowed)
    int4 numslots;		///< (Maximum) number of slots that can store separate parameters
 -  JoinRecord *joinrec;		///< Non-null if this is logical variable from joined pieces
 +  JoinRecord *joinrec;		///< Non-null if this is a logical variable from joined pieces
-   void resolveJoin(void); 	///< If the ParamEntry is initialized with a \e join address, cache the join record
- 
-   /// \brief Is the logical value left-justified within its container
-@@ -98,6 +98,7 @@ public:
-   void extraChecks(list<ParamEntry> &entry);
-   bool isParamCheckHigh(void) const { return ((flags & extracheck_high)!=0); }	///< Return \b true if there is a high overlap
-   bool isParamCheckLow(void) const { return ((flags & extracheck_low)!=0); }	///< Return \b true if there is a low overlap
-+  const JoinRecord *getJoinRecord() const { return joinrec; } ///< Get the JoinRecord if present
- };
- 
- /// \brief Class for storing ParamEntry objects in an interval range (rangemap)
-@@ -514,6 +515,7 @@ protected:
-   void forceInactiveChain(ParamActive *active,int4 maxchain,int4 start,int4 stop) const;
-   void calcDelay(void);		///< Calculate the maximum heritage delay for any potential parameter in this list
-   void populateResolver(void);	///< Build the ParamEntry resolver maps
+   static const ParamEntry *findEntryByStorage(const list<ParamEntry> &entryList,const VarnodeData &vn);
+   void resolveJoin(list<ParamEntry> &curList); 	///< Make adjustments for a \e join ParamEntry
+   void resolveOverlap(list<ParamEntry> &curList);	///< Make adjustments for ParamEntry that overlaps others
+@@ -579,6 +579,7 @@ protected:
+ 		   int4 groupid,bool normalstack,bool autokill,bool splitFloat,bool grouped);
+   void parseGroup(Decoder &decoder,vector<EffectRecord> &effectlist,
+ 		  int4 groupid,bool normalstack,bool autokill,bool splitFloat);
 +  void consumeGroups(vector<int4> &status,const ParamEntry &element) const;
  public:
-   ParamListStandard(void) {}						///< Construct for use with restoreXml()
+   ParamListStandard(void) {}						///< Construct for use with decode()
    ParamListStandard(const ParamListStandard &op2);			///< Copy constructor
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/translate.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/translate.hh
-index 382964fb60d..d794c163fea 100644
+index 34a4709a8..e9dd11d64 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/translate.hh
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/translate.hh
 @@ -203,6 +203,7 @@ public:
@@ -125,55 +129,24 @@ index 382964fb60d..d794c163fea 100644
  };
  
  /// \brief Comparator for JoinRecord objects
-diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/ParamEntry.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/ParamEntry.java
-index 03a2a0a603c..618a881926a 100644
---- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/ParamEntry.java
-+++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/ParamEntry.java
-@@ -116,6 +116,27 @@ public boolean contains(ParamEntry op2) {
- 		if ((type != TYPE_UNKNOWN)&&(op2.type != type)) {
- 			return false;
- 		}
-+		if (joinrec != null) {
-+			if (op2.joinrec != null) {
-+				for (Varnode v2 : op2.joinrec) {
-+					boolean contains = false;
-+					for (int i = 0; i < joinrec.length && !contains; i++) {
-+						contains = joinrec[i].contains(v2.getAddress());
-+					}
-+					if (!contains) {
-+						return false;
-+					}
-+				}
-+				return true;
-+			}
-+			Address addr = op2.getSpace().getAddress(op2.getAddressBase());
-+			for (Varnode var : joinrec) {
-+				if (var.contains(addr)) {
-+					return true;
-+				}
-+			}
-+			return false;
-+		}
- 		if (spaceid != op2.spaceid) {
- 			return false;
- 		}
 diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/ParamListStandard.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/ParamListStandard.java
-index b9b3d09d7a6..194c44728e0 100644
+index ba474c1b2..20da95916 100644
 --- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/ParamListStandard.java
 +++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/ParamListStandard.java
-@@ -87,10 +87,7 @@ protected VariableStorage assignAddress(Program program, DataType tp, int[] stat
- 			if (res.space == null)
+@@ -106,11 +106,7 @@ public class ParamListStandard implements ParamList {
  				continue;	// -tp- does not fit in this entry
+ 			}
  			if (element.isExclusion()) {
 -				int maxgrp = grp + element.getGroupSize();
--				for (int j = grp; j < maxgrp; ++j)
+-				for (int j = grp; j < maxgrp; ++j) {
 -					// For an exclusion entry
 -					status[j] = -1;			// some number of groups are taken up
+-				}
 +				excludeGroups(status, element);
- 				if (element.isFloatExtended())		// If this is a small float datatype in a bigger container
+ 				if (element.isFloatExtended()) {
  					sz = element.getSize();			// Still use the entire container size, when assigning storage
- 			}
-@@ -278,4 +275,44 @@ public boolean possibleParamWithSlot(Address loc, int size, WithSlotRec res) {
+ 				}
+@@ -405,4 +401,44 @@ public class ParamListStandard implements ParamList {
  	public boolean isThisBeforeRetPointer() {
  		return thisbeforeret;
  	}
@@ -184,7 +157,7 @@ index b9b3d09d7a6..194c44728e0 100644
 +		for (int j = grp; j < maxgrp; ++j)
 +			// For an exclusion entry
 +			status[j] = -1;			// some number of groups are taken up
-+		
++
 +		// any entries which this element contains must also be set as taken
 +		for (ParamEntry e : entry) {
 +			if (e == element) {
@@ -206,7 +179,7 @@ index b9b3d09d7a6..194c44728e0 100644
 +			}
 +		}
 +	}
-+	
++
 +	private static boolean containsAny(ParamEntry p1, ParamEntry p2) {
 +		for (Varnode v1 : p1.getJoinRecord()) {
 +			for (Varnode v2 : p2.getJoinRecord()) {
@@ -218,3 +191,6 @@ index b9b3d09d7a6..194c44728e0 100644
 +		return false;
 +	}
  }
+-- 
+2.38.1
+

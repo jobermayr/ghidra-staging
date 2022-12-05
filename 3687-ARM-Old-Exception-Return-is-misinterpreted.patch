@@ -1,8 +1,25 @@
+From b262b8816b9ed57eb9b8d57632fc9e2dcde217ba Mon Sep 17 00:00:00 2001
+From: Andreas Werner <kernel@andy89.org>
+Date: Mon, 29 Nov 2021 11:10:44 +0100
+Subject: [PATCH] 3687: ARM: Old Exception Return is misinterpreted
+
+The old (ARMv4 - ARMv6) exception return is misinterpreted as Jump in Ghidra.
+According to ARM Instruction Set Specification `SUBS pc, <Rn>, #<const>` is always exception return.
+The appearance in normal User or System space code is very unlikely, because the behavior is UNPREDICTABLE.
+The side effect of all ALU Operation (AND, EOR, SUB, RSB, ADD, ADC, SBC, RSC, ORR, MOV, BIC, MVN)
+with destination register PC is updating the Status Register (CPSR) with the content of the Saved
+Status Register(SPSR). Therefor all ALU Operation with destination register PC shall be handled as
+return not as Jump. This behavior was remove in ARMv8 64 Bit Code(AArch64) and still present in
+ARMv8 32 Bit Code(AArch32) for compatible to older ARM Code.
+---
+ .../ARM/data/languages/ARMinstructions.sinc   | 108 ++++++++++--------
+ 1 file changed, 59 insertions(+), 49 deletions(-)
+
 diff --git a/Ghidra/Processors/ARM/data/languages/ARMinstructions.sinc b/Ghidra/Processors/ARM/data/languages/ARMinstructions.sinc
-index e46a5be7952..73ac7b3778a 100644
+index 661fc9c9c..f26b0a947 100644
 --- a/Ghidra/Processors/ARM/data/languages/ARMinstructions.sinc
 +++ b/Ghidra/Processors/ARM/data/languages/ARMinstructions.sinc
-@@ -1936,8 +1936,9 @@ macro sub_with_carry_flags(op1, op2){
+@@ -1951,8 +1951,9 @@ macro sub_with_carry_flags(op1, op2){
    dest:4 = rn + shift1 + zext(CY);
    resultflags(dest);
    build SBIT_CZNO;
@@ -12,8 +29,8 @@ index e46a5be7952..73ac7b3778a 100644
 +  return [pc];
  }
  
- :adc^COND^SBIT_CZNO pc,rn,shift2 	is $(AMODE) &  pc & COND & c2124=5 & SBIT_CZNO & rn & Rd=15 & c2627=0 & shift2
-@@ -1949,8 +1950,9 @@ macro sub_with_carry_flags(op1, op2){
+ :adc^COND^SBIT_CZNO pc,rn,shift2 	is $(AMODE) & pc & ARMcond=1 & COND & c2124=5 & SBIT_CZNO & rn & Rd=15 & c2627=0 & shift2
+@@ -1964,8 +1965,9 @@ macro sub_with_carry_flags(op1, op2){
    dest:4 = rn + shift2 + zext(CY);
    resultflags(dest);
    build SBIT_CZNO;
@@ -23,8 +40,8 @@ index e46a5be7952..73ac7b3778a 100644
 +  return [pc];
  }
  
- :adc^COND^SBIT_CZNO pc,rn,shift3 	is $(AMODE) &  pc & COND & c2124=5 & SBIT_CZNO & rn & Rd=15 & c2627=0 & shift3
-@@ -1962,8 +1964,9 @@ macro sub_with_carry_flags(op1, op2){
+ :adc^COND^SBIT_CZNO pc,rn,shift3 	is $(AMODE) & pc & ARMcond=1 & COND & c2124=5 & SBIT_CZNO & rn & Rd=15 & c2627=0 & shift3
+@@ -1977,8 +1979,9 @@ macro sub_with_carry_flags(op1, op2){
    dest:4 = rn + shift3 + zext(CY);
    resultflags(dest);
    build SBIT_CZNO;
@@ -35,7 +52,7 @@ index e46a5be7952..73ac7b3778a 100644
  }
  
  ArmPCRelImmed12: reloff		is U23=1 & immed & rotate
-@@ -2039,8 +2042,9 @@ ArmPCRelImmed12: reloff		is U23=0 & immed & rotate
+@@ -2054,8 +2057,9 @@ ArmPCRelImmed12: reloff		is U23=0 & immed & rotate
    dest:4 = rn + shift1;
    resultflags(dest);
    build SBIT_CZNO;
@@ -45,8 +62,8 @@ index e46a5be7952..73ac7b3778a 100644
 +  return [pc];
  }
  
- :add^COND^SBIT_CZNO pc,rn,shift2 	is $(AMODE) &  pc & COND & c2124=4 & SBIT_CZNO & rn & Rd=15 & c2627=0 & shift2
-@@ -2052,8 +2056,9 @@ ArmPCRelImmed12: reloff		is U23=0 & immed & rotate
+ :add^COND^SBIT_CZNO pc,rn,shift2 	is $(AMODE) & pc & ARMcond=1 & COND & c2124=4 & SBIT_CZNO & rn & Rd=15 & c2627=0 & shift2
+@@ -2067,8 +2071,9 @@ ArmPCRelImmed12: reloff		is U23=0 & immed & rotate
    dest:4 = rn + shift2;
    resultflags(dest);
    build SBIT_CZNO;
@@ -56,8 +73,8 @@ index e46a5be7952..73ac7b3778a 100644
 +  return [pc];
  }
  
- :add^COND^SBIT_CZNO pc,rn,shift3 	is $(AMODE) &  pc & COND & c2124=4 & SBIT_CZNO & rn & Rd=15 & c2627=0 & shift3
-@@ -2065,8 +2070,9 @@ ArmPCRelImmed12: reloff		is U23=0 & immed & rotate
+ :add^COND^SBIT_CZNO pc,rn,shift3 	is $(AMODE) & pc & ARMcond=1 & COND & c2124=4 & SBIT_CZNO & rn & Rd=15 & c2627=0 & shift3
+@@ -2080,8 +2085,9 @@ ArmPCRelImmed12: reloff		is U23=0 & immed & rotate
    dest:4 = rn + shift3;
    resultflags(dest);
    build SBIT_CZNO;
@@ -67,8 +84,8 @@ index e46a5be7952..73ac7b3778a 100644
 +  return [pc];
  }
  
- :and^COND^SBIT_CZNO Rd,rn,shift1	is $(AMODE) &  COND & c2124=0 & SBIT_CZNO & rn & Rd & c2627=0 & shift1
-@@ -2111,8 +2117,9 @@ ArmPCRelImmed12: reloff		is U23=0 & immed & rotate
+ :and^COND^SBIT_CZNO Rd,rn,shift1	is $(AMODE) & ARMcond=1 & COND & c2124=0 & SBIT_CZNO & rn & Rd & c2627=0 & shift1
+@@ -2126,8 +2132,9 @@ ArmPCRelImmed12: reloff		is U23=0 & immed & rotate
    logicflags();
    resultflags(dest);
    build SBIT_CZNO;
@@ -78,8 +95,8 @@ index e46a5be7952..73ac7b3778a 100644
 +  return [pc];
  }
  
- :and^COND^SBIT_CZNO pc,rn,shift2 	is $(AMODE) &  pc & COND & c2124=0 & SBIT_CZNO & rn & Rd=15 & c2627=0 & shift2
-@@ -2124,8 +2131,9 @@ ArmPCRelImmed12: reloff		is U23=0 & immed & rotate
+ :and^COND^SBIT_CZNO pc,rn,shift2 	is $(AMODE) & pc & ARMcond=1 & COND & c2124=0 & SBIT_CZNO & rn & Rd=15 & c2627=0 & shift2
+@@ -2139,8 +2146,9 @@ ArmPCRelImmed12: reloff		is U23=0 & immed & rotate
    logicflags();
    resultflags(dest);
    build SBIT_CZNO;
@@ -89,8 +106,8 @@ index e46a5be7952..73ac7b3778a 100644
 +  return [pc];
  }
  
- :and^COND^SBIT_CZNO pc,rn,shift3 	is $(AMODE) &  pc & COND & c2124=0 & SBIT_CZNO & rn & Rd=15 & c2627=0 & shift3
-@@ -2137,8 +2145,9 @@ ArmPCRelImmed12: reloff		is U23=0 & immed & rotate
+ :and^COND^SBIT_CZNO pc,rn,shift3 	is $(AMODE) & pc & ARMcond=1 & COND & c2124=0 & SBIT_CZNO & rn & Rd=15 & c2627=0 & shift3
+@@ -2152,8 +2160,9 @@ ArmPCRelImmed12: reloff		is U23=0 & immed & rotate
    logicflags();
    resultflags(dest);
    build SBIT_CZNO;
@@ -101,7 +118,7 @@ index e46a5be7952..73ac7b3778a 100644
  }
  
  # must match first! before conditional goto
-@@ -2220,8 +2229,9 @@ ArmPCRelImmed12: reloff		is U23=0 & immed & rotate
+@@ -2235,8 +2244,9 @@ ArmPCRelImmed12: reloff		is U23=0 & immed & rotate
    logicflags();
    resultflags(dest);
    build SBIT_CZNO;
@@ -111,8 +128,8 @@ index e46a5be7952..73ac7b3778a 100644
 +  return [pc];
  }
  
- :bic^COND^SBIT_CZNO pc,rn,shift2 	is $(AMODE) &  pc & COND & c2124=14 & SBIT_CZNO & rn & Rd=15 & c2627=0 & shift2
-@@ -2233,8 +2243,9 @@ ArmPCRelImmed12: reloff		is U23=0 & immed & rotate
+ :bic^COND^SBIT_CZNO pc,rn,shift2 	is $(AMODE) & pc & ARMcond=1 & COND & c2124=14 & SBIT_CZNO & rn & Rd=15 & c2627=0 & shift2
+@@ -2248,8 +2258,9 @@ ArmPCRelImmed12: reloff		is U23=0 & immed & rotate
    logicflags();
    resultflags(dest);
    build SBIT_CZNO;
@@ -122,8 +139,8 @@ index e46a5be7952..73ac7b3778a 100644
 +  return [pc];
  }
  
- :bic^COND^SBIT_CZNO pc,rn,shift3 	is $(AMODE) &  pc & COND & c2124=14 & SBIT_CZNO & rn & Rd=15 & c2627=0 & shift3
-@@ -2246,8 +2257,9 @@ ArmPCRelImmed12: reloff		is U23=0 & immed & rotate
+ :bic^COND^SBIT_CZNO pc,rn,shift3 	is $(AMODE) & pc & ARMcond=1 & COND & c2124=14 & SBIT_CZNO & rn & Rd=15 & c2627=0 & shift3
+@@ -2261,8 +2272,9 @@ ArmPCRelImmed12: reloff		is U23=0 & immed & rotate
    logicflags();
    resultflags(dest);
    build SBIT_CZNO;
@@ -134,7 +151,7 @@ index e46a5be7952..73ac7b3778a 100644
  }
  
  # bl used as a PIC instruction to get at current PC in lr
-@@ -2626,8 +2638,9 @@ ArmPCRelImmed12: reloff		is U23=0 & immed & rotate
+@@ -2650,8 +2662,9 @@ ArmPCRelImmed12: reloff		is U23=0 & immed & rotate
    logicflags();
    resultflags(dest);
    build SBIT_CZNO;
@@ -144,8 +161,8 @@ index e46a5be7952..73ac7b3778a 100644
 +  return [pc];
  }
  
- :eor^COND^SBIT_CZNO pc,rn,shift2 	is $(AMODE) &  pc & COND & c2124=1 & SBIT_CZNO & rn & Rd=15 & c2627=0 & shift2
-@@ -2639,8 +2652,9 @@ ArmPCRelImmed12: reloff		is U23=0 & immed & rotate
+ :eor^COND^SBIT_CZNO pc,rn,shift2 	is $(AMODE) & pc & ARMcond=1 & COND & c2124=1 & SBIT_CZNO & rn & Rd=15 & c2627=0 & shift2
+@@ -2663,8 +2676,9 @@ ArmPCRelImmed12: reloff		is U23=0 & immed & rotate
    logicflags();
    resultflags(dest);
    build SBIT_CZNO;
@@ -155,8 +172,8 @@ index e46a5be7952..73ac7b3778a 100644
 +  return [pc];
  }
  
- :eor^COND^SBIT_CZNO pc,rn,shift3 	is $(AMODE) &  pc & COND & c2124=1 & SBIT_CZNO & rn & Rd=15 & c2627=0 & shift3
-@@ -2652,8 +2666,9 @@ ArmPCRelImmed12: reloff		is U23=0 & immed & rotate
+ :eor^COND^SBIT_CZNO pc,rn,shift3 	is $(AMODE) & pc & ARMcond=1 & COND & c2124=1 & SBIT_CZNO & rn & Rd=15 & c2627=0 & shift3
+@@ -2676,8 +2690,9 @@ ArmPCRelImmed12: reloff		is U23=0 & immed & rotate
    logicflags();
    resultflags(dest);
    build SBIT_CZNO;
@@ -167,7 +184,7 @@ index e46a5be7952..73ac7b3778a 100644
  }
  
  @if defined(VERSION_7)
-@@ -3494,8 +3509,9 @@ ArmPCRelImmed12: reloff		is U23=0 & immed & rotate
+@@ -3518,8 +3533,9 @@ ArmPCRelImmed12: reloff		is U23=0 & immed & rotate
    resultflags(tmp);
    logicflags();
    build SBIT_CZNO;
@@ -177,8 +194,8 @@ index e46a5be7952..73ac7b3778a 100644
 +  return [pc];
  }
  
- :mov^COND^SBIT_CZNO pc,shift2 	is $(AMODE) &  pc & COND & c2124=13 & SBIT_CZNO & c1619=0 & Rd=15 & c2627=0 & shift2
-@@ -3507,8 +3523,9 @@ ArmPCRelImmed12: reloff		is U23=0 & immed & rotate
+ :mov^COND^SBIT_CZNO pc,shift2 	is $(AMODE) & pc & ARMcond=1 & COND & c2124=13 & SBIT_CZNO & c1619=0 & Rd=15 & c2627=0 & shift2
+@@ -3531,8 +3547,9 @@ ArmPCRelImmed12: reloff		is U23=0 & immed & rotate
    resultflags(tmp);
    logicflags();
    build SBIT_CZNO;
@@ -187,9 +204,9 @@ index e46a5be7952..73ac7b3778a 100644
 -  goto [pc];
 +  return [pc];
  }
- :mov^COND^SBIT_CZNO pc,shift2 	is $(AMODE) &  LRset=1 & pc & COND & c2124=13 & SBIT_CZNO & c1619=0 & Rd=15 & c2627=0 & shift2
+ :mov^COND^SBIT_CZNO pc,shift2 	is $(AMODE) &  LRset=1 & pc & COND & ARMcond=1 & c2124=13 & SBIT_CZNO & c1619=0 & Rd=15 & c2627=0 & shift2
  {
-@@ -3519,8 +3536,9 @@ ArmPCRelImmed12: reloff		is U23=0 & immed & rotate
+@@ -3543,8 +3560,9 @@ ArmPCRelImmed12: reloff		is U23=0 & immed & rotate
    resultflags(tmp);
    logicflags();
    build SBIT_CZNO;
@@ -199,8 +216,8 @@ index e46a5be7952..73ac7b3778a 100644
 +  return [pc];
  }
  
- :mov^COND^SBIT_CZNO pc,shift3 	is $(AMODE) &  pc & COND & c2124=13 & SBIT_CZNO & c1619=0 & Rd=15 & c2627=0 & shift3
-@@ -3532,8 +3550,9 @@ ArmPCRelImmed12: reloff		is U23=0 & immed & rotate
+ :mov^COND^SBIT_CZNO pc,shift3 	is $(AMODE) & pc & ARMcond=1 & COND & c2124=13 & SBIT_CZNO & c1619=0 & Rd=15 & c2627=0 & shift3
+@@ -3556,8 +3574,9 @@ ArmPCRelImmed12: reloff		is U23=0 & immed & rotate
    resultflags(tmp);
    logicflags();
    build SBIT_CZNO;
@@ -210,8 +227,8 @@ index e46a5be7952..73ac7b3778a 100644
 +  return [pc];
  }
  
- :mov lr,rm 		is $(AMODE) &  cond=15 & c2527=0 & S20=0 & c2124=13 & c1619=0 & rm & Rm2=15 & sftimm=0 & c0406=0 & Rd=14 & lr
-@@ -4285,7 +4304,7 @@ ArmPCRelImmed12: reloff		is U23=0 & immed & rotate
+ :mov lr,rm 		is $(AMODE) & ARMcond=0 & cond=15 & c2527=0 & S20=0 & c2124=13 & c1619=0 & rm & Rm2=15 & sftimm=0 & c0406=0 & Rd=14 & lr
+@@ -4309,7 +4328,7 @@ ArmPCRelImmed12: reloff		is U23=0 & immed & rotate
    resultflags(dest);
    build SBIT_CZNO;
    ALUWritePC(dest);
@@ -219,8 +236,8 @@ index e46a5be7952..73ac7b3778a 100644
 +  return [pc];
  }
  
- :orr^COND^SBIT_CZNO pc,rn,shift2 	is $(AMODE) &  pc & COND & c2124=12 & SBIT_CZNO & rn & Rd=15 & c2627=0 & shift2
-@@ -4297,8 +4316,9 @@ ArmPCRelImmed12: reloff		is U23=0 & immed & rotate
+ :orr^COND^SBIT_CZNO pc,rn,shift2 	is $(AMODE) & pc & ARMcond=1 & COND & c2124=12 & SBIT_CZNO & rn & Rd=15 & c2627=0 & shift2
+@@ -4321,8 +4340,9 @@ ArmPCRelImmed12: reloff		is U23=0 & immed & rotate
    logicflags();
    resultflags(dest);
    build SBIT_CZNO;
@@ -230,8 +247,8 @@ index e46a5be7952..73ac7b3778a 100644
 +  return [pc];
  }
  
- :orr^COND^SBIT_CZNO pc,rn,shift3 	is $(AMODE) &  pc & COND & c2124=12 & SBIT_CZNO & rn & Rd=15 & c2627=0 & shift3
-@@ -4310,8 +4330,9 @@ ArmPCRelImmed12: reloff		is U23=0 & immed & rotate
+ :orr^COND^SBIT_CZNO pc,rn,shift3 	is $(AMODE) & pc & ARMcond=1 & COND & c2124=12 & SBIT_CZNO & rn & Rd=15 & c2627=0 & shift3
+@@ -4334,8 +4354,9 @@ ArmPCRelImmed12: reloff		is U23=0 & immed & rotate
    logicflags();
    resultflags(dest);
    build SBIT_CZNO;
@@ -242,7 +259,7 @@ index e46a5be7952..73ac7b3778a 100644
  }
  
  @if defined(VERSION_6)
-@@ -4626,8 +4647,9 @@ macro BitReverse_arm(val) {
+@@ -4650,8 +4671,9 @@ macro BitReverse_arm(val) {
    dest:4 = shift1-rn;
    resultflags(dest);
    build SBIT_CZNO;
@@ -252,8 +269,8 @@ index e46a5be7952..73ac7b3778a 100644
 +  return [pc];
  }
  
- :rsb^COND^SBIT_CZNO pc,rn,shift2 	is $(AMODE) &  pc & COND & c2124=3 & SBIT_CZNO & rn & Rd=15 & c2627=0 & shift2
-@@ -4639,8 +4661,9 @@ macro BitReverse_arm(val) {
+ :rsb^COND^SBIT_CZNO pc,rn,shift2 	is $(AMODE) & pc & ARMcond=1 & COND & c2124=3 & SBIT_CZNO & rn & Rd=15 & c2627=0 & shift2
+@@ -4663,8 +4685,9 @@ macro BitReverse_arm(val) {
    dest:4 = shift2-rn;
    resultflags(dest);
    build SBIT_CZNO;
@@ -263,8 +280,8 @@ index e46a5be7952..73ac7b3778a 100644
 +  return [pc];
  }
  
- :rsb^COND^SBIT_CZNO pc,rn,shift3 	is $(AMODE) &  pc & COND & c2124=3 & SBIT_CZNO & rn & Rd=15 & c2627=0 & shift3
-@@ -4652,8 +4675,9 @@ macro BitReverse_arm(val) {
+ :rsb^COND^SBIT_CZNO pc,rn,shift3 	is $(AMODE) & pc & ARMcond=1 & COND & c2124=3 & SBIT_CZNO & rn & Rd=15 & c2627=0 & shift3
+@@ -4676,8 +4699,9 @@ macro BitReverse_arm(val) {
    dest:4 = shift3-rn;
    resultflags(dest);
    build SBIT_CZNO;
@@ -274,8 +291,8 @@ index e46a5be7952..73ac7b3778a 100644
 +  return [pc];
  }
  
- :rsc^COND^SBIT_CZNO Rd,rn,shift1	is $(AMODE) &  COND & c2124=7 & SBIT_CZNO & rn & Rd & c2627=0 & shift1
-@@ -4698,8 +4722,9 @@ macro BitReverse_arm(val) {
+ :rsc^COND^SBIT_CZNO Rd,rn,shift1	is $(AMODE) & ARMcond=1 & COND & c2124=7 & SBIT_CZNO & rn & Rd & c2627=0 & shift1
+@@ -4722,8 +4746,9 @@ macro BitReverse_arm(val) {
    local dest:4=shift1-(rn+zext(!CY));
    resultflags(dest);
    build SBIT_CZNO;
@@ -285,8 +302,8 @@ index e46a5be7952..73ac7b3778a 100644
 +  return [pc];
  }
  
- :rsc^COND^SBIT_CZNO pc,rn,shift2 	is $(AMODE) &  pc & COND & c2124=7 & SBIT_CZNO & rn & Rd=15 & c2627=0 & shift2
-@@ -4711,8 +4736,9 @@ macro BitReverse_arm(val) {
+ :rsc^COND^SBIT_CZNO pc,rn,shift2 	is $(AMODE) & pc & ARMcond=1 & COND & c2124=7 & SBIT_CZNO & rn & Rd=15 & c2627=0 & shift2
+@@ -4735,8 +4760,9 @@ macro BitReverse_arm(val) {
    local dest:4=shift2-(rn + zext(!CY));
    resultflags(dest);
    build SBIT_CZNO;
@@ -296,8 +313,8 @@ index e46a5be7952..73ac7b3778a 100644
 +  return [pc];
  }
  
- :rsc^COND^SBIT_CZNO pc,rn,shift3 	is $(AMODE) &  pc & COND & c2124=7 & SBIT_CZNO & rn & Rd=15 & c2627=0 & shift3
-@@ -4724,8 +4750,9 @@ macro BitReverse_arm(val) {
+ :rsc^COND^SBIT_CZNO pc,rn,shift3 	is $(AMODE) & pc & ARMcond=1 & COND & c2124=7 & SBIT_CZNO & rn & Rd=15 & c2627=0 & shift3
+@@ -4748,8 +4774,9 @@ macro BitReverse_arm(val) {
    local dest:4=shift3-(rn + zext(!CY));
    resultflags(dest);
    build SBIT_CZNO;
@@ -308,10 +325,10 @@ index e46a5be7952..73ac7b3778a 100644
  }
  
  @if defined(VERSION_6)
-@@ -5583,21 +5610,6 @@ armEndianNess: "BE" is c0031=0xf1010200 { export 1:1; }
+@@ -5607,21 +5634,6 @@ armEndianNess: "BE" is c0031=0xf1010200 { export 1:1; }
  }
  
- :sub^COND^SBIT_CZNO pc,rn,shift1 	is $(AMODE) &  pc & COND & c2124=2 & SBIT_CZNO & rn & Rd=15 & c2627=0 & shift1
+ :sub^COND^SBIT_CZNO pc,rn,shift1 	is $(AMODE) & pc & ARMcond=1 & COND & c2124=2 & SBIT_CZNO & rn & Rd=15 & c2627=0 & shift1
 -{
 -  build COND;
 -  build rn;
@@ -326,11 +343,11 @@ index e46a5be7952..73ac7b3778a 100644
 -  goto [pc];
 -}
 -
--:sub^COND^SBIT_CZNO pc,rn,shift1 	is $(AMODE) &  pc & COND & c2124=2 & SBIT_CZNO & rn & Rd=15 & Rn=14 & I25=1 & immed=0 & rotate=0 & c2627=0 & shift1
+-:sub^COND^SBIT_CZNO pc,rn,shift1 	is $(AMODE) & pc & ARMcond=1 & COND & c2124=2 & SBIT_CZNO & rn & Rd=15 & Rn=14 & I25=1 & immed=0 & rotate=0 & c2627=0 & shift1
  {
    build COND;
    build rn;
-@@ -5621,9 +5633,8 @@ armEndianNess: "BE" is c0031=0xf1010200 { export 1:1; }
+@@ -5645,9 +5657,8 @@ armEndianNess: "BE" is c0031=0xf1010200 { export 1:1; }
    resultflags(dest);
    build SBIT_CZNO;
    cpsr = spsr;
@@ -341,8 +358,8 @@ index e46a5be7952..73ac7b3778a 100644
 +  return [pc];
  }
  
- :sub^COND^SBIT_CZNO pc,rn,shift3 	is $(AMODE) &  pc & COND & c2124=2 & SBIT_CZNO & rn & Rd=15 & c2627=0 & shift3
-@@ -5636,9 +5647,8 @@ armEndianNess: "BE" is c0031=0xf1010200 { export 1:1; }
+ :sub^COND^SBIT_CZNO pc,rn,shift3 	is $(AMODE) & pc & ARMcond=1 & COND & c2124=2 & SBIT_CZNO & rn & Rd=15 & c2627=0 & shift3
+@@ -5660,9 +5671,8 @@ armEndianNess: "BE" is c0031=0xf1010200 { export 1:1; }
    resultflags(dest);
    build SBIT_CZNO;
    cpsr = spsr;
@@ -353,4 +370,7 @@ index e46a5be7952..73ac7b3778a 100644
 +  return [pc];
  }
  
- :swi^COND immed24 		is $(AMODE) &  COND & c2427=15 & immed24
+ :swi^COND immed24 		is $(AMODE) & ARMcond=1 & COND & c2427=15 & immed24
+-- 
+2.38.1
+

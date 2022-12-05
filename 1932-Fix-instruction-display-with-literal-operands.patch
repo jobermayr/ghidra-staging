@@ -1,8 +1,24 @@
+From 2e01d47792d6eba2361cebd991760377fc295cd1 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Jan=20Sch=C3=A4r?= <jscissr@gmail.com>
+Date: Wed, 3 Jun 2020 00:52:32 +0200
+Subject: [PATCH] 1932: Fix instruction display with literal operands
+
+For instructions which only have literal string operands
+(such as the Z80 IM 0/IM 1/IM2 instructions), previously
+the operand was missing in the assembly view and in the search result
+view, and could also not be found by search.
+ALso fixes #550.
+---
+ ...structionMnemonicOperandFieldSearcher.java |  8 ++--
+ .../util/viewer/field/OperandFieldHelper.java | 39 ++++++++++++-------
+ .../program/model/listing/CodeUnitFormat.java | 20 +++++-----
+ 3 files changed, 40 insertions(+), 27 deletions(-)
+
 diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/searchtext/databasesearcher/InstructionMnemonicOperandFieldSearcher.java b/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/searchtext/databasesearcher/InstructionMnemonicOperandFieldSearcher.java
-index bf6ad1f9fc3..1bb88c3f115 100644
+index 99a2ea80a..eeab3c8b0 100644
 --- a/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/searchtext/databasesearcher/InstructionMnemonicOperandFieldSearcher.java
 +++ b/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/searchtext/databasesearcher/InstructionMnemonicOperandFieldSearcher.java
-@@ -169,10 +169,12 @@ private String[] getOperandStrings(Instruction instruction) {
+@@ -169,10 +169,12 @@ public class InstructionMnemonicOperandFieldSearcher extends ProgramDatabaseFiel
  			}
  		}
  		// check for separator before first operand
@@ -19,10 +35,10 @@ index bf6ad1f9fc3..1bb88c3f115 100644
  		}
  		return opStrings;
 diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/viewer/field/OperandFieldHelper.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/viewer/field/OperandFieldHelper.java
-index 63851635bb5..cca6f6c4712 100644
+index 1c1c21595..9dc5bda77 100644
 --- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/viewer/field/OperandFieldHelper.java
 +++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/viewer/field/OperandFieldHelper.java
-@@ -391,19 +391,28 @@ private ColorStyleAttributes getAttributesForData(Data data, Object value) {
+@@ -420,19 +420,28 @@ abstract class OperandFieldHelper extends FieldFactory {
  
  	private ListingField getFieldForInstruction(Instruction inst, ProxyObj<?> proxy, int varWidth) {
  		int numOperands = inst.getNumOperands();
@@ -32,27 +48,26 @@ index 63851635bb5..cca6f6c4712 100644
  
 -		List<OperandFieldElement> elements = new ArrayList<>();
 -		int characterOffset = createSeparatorFieldElement(inst, 0, 0, 0, 0, elements);
--
--		for (int opIndex = 0; opIndex < numOperands; opIndex++) {
--			OperandRepresentationList operandRepresentationList =
--				codeUnitFormat.getOperandRepresentationList(inst, opIndex);
--			characterOffset = addElementsForOperand(inst, elements, opIndex,
--				operandRepresentationList, characterOffset);
--			characterOffset = 0;
 +		List<FieldElement> elements = new ArrayList<>();
 +		if (numOperands == 0) {
 +			String separator = inst.getSeparator(0);
 +			if (separator == null) {
 +				return null;
 +			}
-+	
+ 
+-		for (int opIndex = 0; opIndex < numOperands; opIndex++) {
+-			OperandRepresentationList operandRepresentationList =
+-				codeUnitFormat.getOperandRepresentationList(inst, opIndex);
+-			characterOffset = addElementsForOperand(inst, elements, opIndex,
+-				operandRepresentationList, characterOffset);
+-			characterOffset = 0;
 +			AttributedString as = new AttributedString(separator, separatorAttributes.colorAttribute,
 +				getMetrics(separatorAttributes.styleAttribute));
 +			FieldElement fieldElement = new TextFieldElement(as, 0, 0);
 +			elements.add(fieldElement);
 +		} else {
 +			int characterOffset = createSeparatorFieldElement(inst, 0, 0, 0, 0, elements);
-+	
++
 +			for (int opIndex = 0; opIndex < numOperands; opIndex++) {
 +				OperandRepresentationList operandRepresentationList =
 +					codeUnitFormat.getOperandRepresentationList(inst, opIndex);
@@ -63,7 +78,7 @@ index 63851635bb5..cca6f6c4712 100644
  		}
  
  		// There may be operands with no representation objects, so we don't want to create a composite field element.
-@@ -414,7 +423,7 @@ private ListingField getFieldForInstruction(Instruction inst, ProxyObj<?> proxy,
+@@ -443,7 +452,7 @@ abstract class OperandFieldHelper extends FieldFactory {
  			new CompositeFieldElement(elements), startX + varWidth, width, hlProvider);
  	}
  
@@ -72,16 +87,16 @@ index 63851635bb5..cca6f6c4712 100644
  			int opIndex, OperandRepresentationList opRepList, int characterOffset) {
  		int subOpIndex = 0;
  		if (opRepList == null || opRepList.hasError()) {
-@@ -437,7 +446,7 @@ badRefAttributes.colorAttribute, getMetrics(badRefAttributes.styleAttribute),
+@@ -466,7 +475,7 @@ abstract class OperandFieldHelper extends FieldFactory {
  			characterOffset, elements);
  	}
  
 -	private int addElements(Instruction inst, List<OperandFieldElement> elements, List<?> objList,
 +	private int addElements(Instruction inst, List<FieldElement> elements, List<?> objList,
  			int opIndex, int subOpIndex, boolean underline, int characterOffset) {
- 		for (int i = 0; i < objList.size(); i++) {
- 			characterOffset = addElement(inst, elements, objList.get(i), underline, opIndex,
-@@ -446,7 +455,7 @@ private int addElements(Instruction inst, List<OperandFieldElement> elements, Li
+ 		for (Object element : objList) {
+ 			characterOffset = addElement(inst, elements, element, underline, opIndex, subOpIndex,
+@@ -475,7 +484,7 @@ abstract class OperandFieldHelper extends FieldFactory {
  		return characterOffset;
  	}
  
@@ -90,7 +105,7 @@ index 63851635bb5..cca6f6c4712 100644
  			boolean underline, int opIndex, int subOpIndex, int characterOffset) {
  
  		if (opElem instanceof VariableOffset) {
-@@ -468,7 +477,7 @@ private int addElement(Instruction inst, List<OperandFieldElement> elements, Obj
+@@ -497,7 +506,7 @@ abstract class OperandFieldHelper extends FieldFactory {
  	}
  
  	private int createSeparatorFieldElement(Instruction instruction, int separatorIndex,
@@ -100,10 +115,10 @@ index 63851635bb5..cca6f6c4712 100644
  		if (separator == null) {
  			return characterOffset;
 diff --git a/Ghidra/Features/Base/src/main/java/ghidra/program/model/listing/CodeUnitFormat.java b/Ghidra/Features/Base/src/main/java/ghidra/program/model/listing/CodeUnitFormat.java
-index 2bf413cdddf..3d35e6de3d8 100644
+index bda6f72c1..80974e700 100644
 --- a/Ghidra/Features/Base/src/main/java/ghidra/program/model/listing/CodeUnitFormat.java
 +++ b/Ghidra/Features/Base/src/main/java/ghidra/program/model/listing/CodeUnitFormat.java
-@@ -116,17 +116,19 @@ public String getRepresentationString(CodeUnit cu, boolean includeEOLcomment) {
+@@ -115,17 +115,19 @@ public class CodeUnitFormat {
  		if (cu instanceof Instruction) {
  			Instruction instr = (Instruction) cu;
  			int n = instr.getNumOperands();
@@ -132,3 +147,6 @@ index 2bf413cdddf..3d35e6de3d8 100644
  			}
  		}
  		else { // data always has one operand
+-- 
+2.38.1
+

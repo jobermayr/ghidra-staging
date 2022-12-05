@@ -1,5 +1,22 @@
+From d55c195a49453e7a66fcb6e4ac5c55aeee646d95 Mon Sep 17 00:00:00 2001
+From: astrelsky <ajs222@njit.edu>
+Date: Thu, 18 Jun 2020 14:53:06 -0400
+Subject: [PATCH] 2004: Added Data Access Functionality GoToQuery
+
+Added functionality to GoToQuery to access data
+
+GoTo can now be performed through the data at the currentAddress
+and users can dereference valid pointer fields to jump to the
+referenced address.
+
+GoTo component expression tests
+---
+ .../ghidra/app/util/navigation/GoToQuery.java | 149 +++++++++++++++++-
+ .../GoToAddressLabelPluginTest.java           | 110 +++++++++++++
+ 2 files changed, 254 insertions(+), 5 deletions(-)
+
 diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/navigation/GoToQuery.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/navigation/GoToQuery.java
-index 21ea4d5ed67..8aac5847189 100644
+index 133aaad0a..4ba84b26b 100644
 --- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/navigation/GoToQuery.java
 +++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/navigation/GoToQuery.java
 @@ -4,9 +4,9 @@
@@ -14,16 +31,19 @@ index 21ea4d5ed67..8aac5847189 100644
   * Unless required by applicable law or agreed to in writing, software
   * distributed under the License is distributed on an "AS IS" BASIS,
   * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-@@ -17,6 +17,8 @@
+@@ -17,8 +17,9 @@ package ghidra.app.util.navigation;
  
  import java.awt.Component;
  import java.util.*;
+-import java.util.regex.Matcher;
+-import java.util.regex.Pattern;
++import util.CollectionUtils;
 +import java.util.regex.*;
 +import java.util.stream.IntStream;
  
  import javax.swing.SwingUtilities;
  
-@@ -35,6 +37,9 @@
+@@ -37,6 +38,9 @@ import ghidra.framework.options.Options;
  import ghidra.framework.plugintool.Plugin;
  import ghidra.framework.plugintool.PluginTool;
  import ghidra.program.model.address.*;
@@ -33,12 +53,12 @@ index 21ea4d5ed67..8aac5847189 100644
  import ghidra.program.model.listing.Program;
  import ghidra.program.model.mem.Memory;
  import ghidra.program.model.mem.MemoryBlock;
-@@ -42,12 +47,28 @@
+@@ -44,12 +48,27 @@ import ghidra.program.model.symbol.*;
  import ghidra.program.util.AddressEvaluator;
  import ghidra.program.util.ProgramLocation;
  import ghidra.util.Msg;
 +import ghidra.util.NumericUtilities;
- import ghidra.util.SystemUtilities;
+ import ghidra.util.Swing;
  import ghidra.util.table.AddressArrayTableModel;
  import ghidra.util.table.GhidraProgramTableModel;
  import ghidra.util.task.TaskMonitor;
@@ -58,21 +78,21 @@ index 21ea4d5ed67..8aac5847189 100644
 +	 */
 +	private static final Pattern COMPONENT_PATTERN =
 +		Pattern.compile("((?:->)|\\.)(\\w+)(?:\\[((?:0x)?\\p{XDigit}+)\\])?");
-+
- 	private QueryData queryData;
- 	private Address fromAddress;
- 	private GhidraProgramTableModel<?> model;
-@@ -103,6 +124,9 @@ public boolean processQuery() {
+ 
+ 	/**
+ 	 * Regex used for going to a file offset.  We expect something of the form <code>file(n)</code>,
+@@ -108,7 +127,9 @@ public class GoToQuery {
  		if (processAddressExpression()) {
  			return true;
  		}
+-
 +		if (processComponentExpression()) {
 +			return true;
 +		}
  		if (processWildCard()) {
  			return true;
  		}
-@@ -321,6 +345,124 @@ private boolean processAddressExpression() {
+@@ -337,6 +358,124 @@ public class GoToQuery {
  		return false;
  	}
  
@@ -197,12 +217,12 @@ index 21ea4d5ed67..8aac5847189 100644
  	private QueryData cleanupQuery(Program program, QueryData qData) {
  		String input = qData.getQueryString();
  		int colonPosition = input.indexOf("::");
-diff --git a/Ghidra/Features/Base/src/test.slow/java/ghidra/app/plugin/core/navigation/GoToPluginTest.java b/Ghidra/Features/Base/src/test.slow/java/ghidra/app/plugin/core/navigation/GoToPluginTest.java
-index 0eab8446e6a..819f5546c95 100644
---- a/Ghidra/Features/Base/src/test.slow/java/ghidra/app/plugin/core/navigation/GoToPluginTest.java
-+++ b/Ghidra/Features/Base/src/test.slow/java/ghidra/app/plugin/core/navigation/GoToPluginTest.java
-@@ -769,6 +769,99 @@ public void testNavigateToOtherProgramOption() throws Exception {
- 
+diff --git a/Ghidra/Features/Base/src/test.slow/java/ghidra/app/plugin/core/navigation/GoToAddressLabelPluginTest.java b/Ghidra/Features/Base/src/test.slow/java/ghidra/app/plugin/core/navigation/GoToAddressLabelPluginTest.java
+index cf5432725..8564bf83d 100644
+--- a/Ghidra/Features/Base/src/test.slow/java/ghidra/app/plugin/core/navigation/GoToAddressLabelPluginTest.java
++++ b/Ghidra/Features/Base/src/test.slow/java/ghidra/app/plugin/core/navigation/GoToAddressLabelPluginTest.java
+@@ -850,10 +850,99 @@ public class GoToAddressLabelPluginTest extends AbstractGhidraHeadedIntegrationT
+ 		assertFalse("Expected goto to succeed and dialog to be gone", dialog.isShowing());
  	}
  
 +	@Test
@@ -290,31 +310,20 @@ index 0eab8446e6a..819f5546c95 100644
 +		assertEquals("Failed to goto this[0]->first", addr(first), cbPlugin.getCurrentAddress());
 +	}
 +
+ //==================================================================================================
+ // Private Methods
+ //==================================================================================================
+ 
 +	private void waitForGoTo(Address target, String msg) throws Exception {
 +		assertEquals(msg, target, cbPlugin.getCurrentAddress());
 +	}
 +
-+//==================================================================================================
-+// Private Methods
-+//==================================================================================================
-+
  	private void setOptionToAllowNavigationToOtherOpenPrograms() throws Exception {
  		runSwing(() -> {
  			ToolOptions options = tool.getOptions("Navigation");
-@@ -776,10 +869,6 @@ private void setOptionToAllowNavigationToOtherOpenPrograms() throws Exception {
+@@ -971,6 +1060,27 @@ public class GoToAddressLabelPluginTest extends AbstractGhidraHeadedIntegrationT
+ 			f.addLocalVariable(var, SourceType.USER_DEFINED);
  		});
- 	}
- 
--//==================================================================================================
--// Private Methods
--//==================================================================================================
--
- 	private void assertItemsStartWtih(List<String> list, String prefix) {
- 		for (String s : list) {
- 			assertTrue(String.format("List item '%s' does not start with prefix '%s'", s, prefix),
-@@ -895,6 +984,27 @@ private Program buildProgram_X86(String name) throws Exception {
- 			p.endTransaction(txID, true);
- 		}
  
 +		// data for component expression testing
 +		Structure struct = new StructureDataType("vector", 0);
@@ -340,3 +349,6 @@ index 0eab8446e6a..819f5546c95 100644
  		return p;
  	}
  
+-- 
+2.38.1
+

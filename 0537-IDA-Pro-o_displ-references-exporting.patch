@@ -1,8 +1,20 @@
+From 8a558161ccca0a95aa1fdcad11d052bff5a87415 Mon Sep 17 00:00:00 2001
+From: Vladimir Kononovich <meffi@lab313.ru>
+Date: Mon, 29 Apr 2019 21:03:47 +0300
+Subject: [PATCH] 0537: IDA Pro o_displ references exporting
+
+Squashed:
+Fixed exporting IDA references with o_displ flag. Added masking for memory reference addresses.
+---
+ .../IDAPro/Python/6xx/plugins/xmlexp.py       | 44 ++++++++++++-------
+ .../IDAPro/Python/7xx/python/idaxml.py        | 43 +++++++++++-------
+ 2 files changed, 56 insertions(+), 31 deletions(-)
+
 diff --git a/GhidraBuild/IDAPro/Python/6xx/plugins/xmlexp.py b/GhidraBuild/IDAPro/Python/6xx/plugins/xmlexp.py
-index fbc4d07e627..566817e59d2 100644
+index 5f0a831bc..304ce739a 100644
 --- a/GhidraBuild/IDAPro/Python/6xx/plugins/xmlexp.py
 +++ b/GhidraBuild/IDAPro/Python/6xx/plugins/xmlexp.py
-@@ -108,6 +108,7 @@ def __init__(self, arg):
+@@ -124,6 +124,7 @@ class XmlExporter:
          self.state = idaapi.setStat(idaapi.st_Work)
          self.indent_level = 0
          self.seg_addr = False
@@ -10,7 +22,7 @@ index fbc4d07e627..566817e59d2 100644
          self.has_overlays = False
          self.hexrays = False
          self.options = None
-@@ -1280,7 +1281,9 @@ def export_memory_reference(self, addr, op):
+@@ -1296,7 +1297,9 @@ class XmlExporter:
                  target = ri.target
              elif idaapi.isCode(f) == True:
                  idaapi.decode_insn(addr)
@@ -21,7 +33,7 @@ index fbc4d07e627..566817e59d2 100644
              elif idaapi.isData(f) == True:
                  target = self.get_data_value(addr) - ri.tdelta + ri.base;
              else:
-@@ -1289,6 +1292,14 @@ def export_memory_reference(self, addr, op):
+@@ -1305,6 +1308,14 @@ class XmlExporter:
              return
          if idaapi.isEnabled(target) == False:
              return
@@ -36,7 +48,7 @@ index fbc4d07e627..566817e59d2 100644
          self.start_element(MEMORY_REFERENCE)
          self.write_address_attribute(ADDRESS, addr)
          self.write_numeric_attribute(OPERAND_INDEX, op, 10)
-@@ -1307,10 +1318,9 @@ def export_memory_references(self, addr):
+@@ -1323,10 +1334,9 @@ class XmlExporter:
          f = idaapi.getFlags(addr)
          for op in range(idaapi.UA_MAXOP):
              if idaapi.isOff(f, op) == True and (idaapi.isData(f) == True or
@@ -49,7 +61,7 @@ index fbc4d07e627..566817e59d2 100644
  
      def export_memory_section(self, seg, binfilename):
          """
-@@ -1396,28 +1406,28 @@ def export_program(self):
+@@ -1412,28 +1422,28 @@ class XmlExporter:
              byte_order ="little"
          self.write_attribute(ENDIAN, byte_order)
          self.seg_addr = False
@@ -86,7 +98,7 @@ index fbc4d07e627..566817e59d2 100644
              self.seg_addr = True
          # find any overlayed memory before processing addressable items
          self.find_overlay_memory()
-@@ -2130,20 +2140,22 @@ def get_type(self, flags):
+@@ -2146,20 +2156,22 @@ class XmlExporter:
          return "unknown"
  
  
@@ -114,10 +126,10 @@ index fbc4d07e627..566817e59d2 100644
          return False
          
 diff --git a/GhidraBuild/IDAPro/Python/7xx/python/idaxml.py b/GhidraBuild/IDAPro/Python/7xx/python/idaxml.py
-index 848702b3e1b..18b2a5f4e41 100644
+index 120413cbd..7d69a7249 100644
 --- a/GhidraBuild/IDAPro/Python/7xx/python/idaxml.py
 +++ b/GhidraBuild/IDAPro/Python/7xx/python/idaxml.py
-@@ -231,6 +231,7 @@ def __init__(self, arg):
+@@ -266,6 +266,7 @@ class XmlExporter(IdaXml):
          IdaXml.__init__(self, arg)
          self.indent_level = 0
          self.seg_addr = False
@@ -125,18 +137,17 @@ index 848702b3e1b..18b2a5f4e41 100644
          self.has_overlays = False
          self.hexrays = False
          
-@@ -1192,7 +1193,9 @@ def export_memory_reference(self, addr, op):
-             elif idc.is_code(f) == True:
+@@ -1233,6 +1234,9 @@ class XmlExporter(IdaXml):
                  insn = ida_ua.insn_t()
                  ida_ua.decode_insn(insn, addr)
--                target = insn.ops[op].value - ri.tdelta + ri.base
+                 target = (insn.ops[op].value - ri.tdelta + ri.base) & ((1 << 64) - 1)
 +                opnd = insn.ops[op]
 +                value = opnd.addr if opnd.type == idc.o_displ else opnd.value
 +                target = value - ri.tdelta + ri.base
              elif idc.is_data(f) == True:
-                 target = self.get_data_value(addr) - ri.tdelta + ri.base;
+                 target = (self.get_data_value(addr) - ri.tdelta + ri.base) & ((1 << 64) - 1)
              else:
-@@ -1201,6 +1204,14 @@ def export_memory_reference(self, addr, op):
+@@ -1241,6 +1245,14 @@ class XmlExporter(IdaXml):
              return
          if ida_bytes.is_mapped(target) == False:
              return
@@ -151,7 +162,7 @@ index 848702b3e1b..18b2a5f4e41 100644
          self.start_element(MEMORY_REFERENCE)
          self.write_address_attribute(ADDRESS, addr)
          self.write_numeric_attribute(OPERAND_INDEX, op, 10)
-@@ -1219,10 +1230,9 @@ def export_memory_references(self, addr):
+@@ -1259,10 +1271,9 @@ class XmlExporter(IdaXml):
          f = idc.get_full_flags(addr)
          for op in range(ida_ida.UA_MAXOP):
              if ida_bytes.is_off(f, op) == True and (idc.is_data(f) == True or
@@ -164,7 +175,7 @@ index 848702b3e1b..18b2a5f4e41 100644
  
      def export_memory_section(self, seg, binfilename):
          """
-@@ -1304,28 +1314,28 @@ def export_program(self):
+@@ -1344,28 +1355,28 @@ class XmlExporter(IdaXml):
              byte_order ="little"
          self.write_attribute(ENDIAN, byte_order)
          self.seg_addr = False
@@ -201,7 +212,7 @@ index 848702b3e1b..18b2a5f4e41 100644
              self.seg_addr = True
          # find any overlayed memory before processing addressable items
          self.find_overlay_memory()
-@@ -1973,21 +1983,23 @@ def get_type(self, flags):
+@@ -2015,21 +2026,23 @@ class XmlExporter(IdaXml):
          return "unknown"
  
  
@@ -229,3 +240,6 @@ index 848702b3e1b..18b2a5f4e41 100644
              return True
          return False
          
+-- 
+2.38.1
+

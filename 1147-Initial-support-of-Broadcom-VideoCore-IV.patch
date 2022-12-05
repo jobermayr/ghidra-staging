@@ -1,12 +1,59 @@
+From 478794d14fa0d360947ca4ad3709b965399485cc Mon Sep 17 00:00:00 2001
+From: Paolo Vagnero <pvagnero@protonmail.ch>
+Date: Sun, 13 Oct 2019 22:21:34 +0200
+Subject: [PATCH] 1147: Initial support of Broadcom VideoCore IV
+
+VideoCore IV: Simplify signext instruction
+
+The conditional jump is difficult to handle in the decompiler. A
+left shift followed by a (signed) right shift is easier.
+
+VideoCore IV: Avoid an unnecessary COPY in loop instructions
+
+When comparing to an immediate, a copy must be made. Currently, the
+value is copied twice: once in loophckcond to check the condition
+and once to display the value in the disassembly. However, the
+disassembly does not need the value itself; it can use a display
+stub and save one unnecessary P-Code.
+
+VideoCore IV: Add a __noclobber function prototype
+
+Some functions in the firmware seem to guarantee that no registers
+are clobbered except r0. The caller then uses original r1-r5 values
+after the function call.
+
+VideoCore IV: Fix rounding instructions
+
+FLOAT_FLOOR does not produce a twos complement integer output, so:
+
+  1. ffloor and fceil do not need an int2float()
+  2. floor needs a trunc()
+---
+ Ghidra/Processors/VideoCore/Module.manifest   |    0
+ Ghidra/Processors/VideoCore/build.gradle      |    7 +
+ .../VideoCore/certification.manifest          |    7 +
+ .../VideoCore/data/languages/vc4.cspec        |  133 ++
+ .../VideoCore/data/languages/vc4.ldefs        |   17 +
+ .../VideoCore/data/languages/vc4.pspec        |   44 +
+ .../VideoCore/data/languages/vc4.slaspec      | 1964 +++++++++++++++++
+ 7 files changed, 2172 insertions(+)
+ create mode 100644 Ghidra/Processors/VideoCore/Module.manifest
+ create mode 100644 Ghidra/Processors/VideoCore/build.gradle
+ create mode 100644 Ghidra/Processors/VideoCore/certification.manifest
+ create mode 100644 Ghidra/Processors/VideoCore/data/languages/vc4.cspec
+ create mode 100644 Ghidra/Processors/VideoCore/data/languages/vc4.ldefs
+ create mode 100644 Ghidra/Processors/VideoCore/data/languages/vc4.pspec
+ create mode 100644 Ghidra/Processors/VideoCore/data/languages/vc4.slaspec
+
 diff --git a/Ghidra/Processors/VideoCore/Module.manifest b/Ghidra/Processors/VideoCore/Module.manifest
 new file mode 100644
-index 00000000000..e69de29bb2d
+index 000000000..e69de29bb
 diff --git a/Ghidra/Processors/VideoCore/build.gradle b/Ghidra/Processors/VideoCore/build.gradle
 new file mode 100644
-index 00000000000..6fd5af14695
+index 000000000..f920c4724
 --- /dev/null
 +++ b/Ghidra/Processors/VideoCore/build.gradle
-@@ -0,0 +1,13 @@
+@@ -0,0 +1,7 @@
 +apply from: "$rootProject.projectDir/gradle/distributableGhidraModule.gradle"
 +apply from: "$rootProject.projectDir/gradle/javaProject.gradle"
 +apply from: "$rootProject.projectDir/gradle/jacocoProject.gradle"
@@ -14,15 +61,9 @@ index 00000000000..6fd5af14695
 +apply from: "$rootProject.projectDir/gradle/processorProject.gradle"
 +apply plugin: 'eclipse'
 +eclipse.project.name = 'Processors VideoCore IV'
-+
-+
-+dependencies {
-+	api project(':Base')
-+}
-+
 diff --git a/Ghidra/Processors/VideoCore/certification.manifest b/Ghidra/Processors/VideoCore/certification.manifest
 new file mode 100644
-index 00000000000..ab2be7eee61
+index 000000000..ab2be7eee
 --- /dev/null
 +++ b/Ghidra/Processors/VideoCore/certification.manifest
 @@ -0,0 +1,7 @@
@@ -35,7 +76,7 @@ index 00000000000..ab2be7eee61
 +data/languages/vc4.slaspec||GHIDRA||||END|
 diff --git a/Ghidra/Processors/VideoCore/data/languages/vc4.cspec b/Ghidra/Processors/VideoCore/data/languages/vc4.cspec
 new file mode 100644
-index 00000000000..d0e709bd9be
+index 000000000..d0e709bd9
 --- /dev/null
 +++ b/Ghidra/Processors/VideoCore/data/languages/vc4.cspec
 @@ -0,0 +1,133 @@
@@ -174,7 +215,7 @@ index 00000000000..d0e709bd9be
 +</compiler_spec>
 diff --git a/Ghidra/Processors/VideoCore/data/languages/vc4.ldefs b/Ghidra/Processors/VideoCore/data/languages/vc4.ldefs
 new file mode 100644
-index 00000000000..a754b876ddd
+index 000000000..a754b876d
 --- /dev/null
 +++ b/Ghidra/Processors/VideoCore/data/languages/vc4.ldefs
 @@ -0,0 +1,17 @@
@@ -197,7 +238,7 @@ index 00000000000..a754b876ddd
 +</language_definitions>
 diff --git a/Ghidra/Processors/VideoCore/data/languages/vc4.pspec b/Ghidra/Processors/VideoCore/data/languages/vc4.pspec
 new file mode 100644
-index 00000000000..065f5646f84
+index 000000000..065f5646f
 --- /dev/null
 +++ b/Ghidra/Processors/VideoCore/data/languages/vc4.pspec
 @@ -0,0 +1,44 @@
@@ -247,7 +288,7 @@ index 00000000000..065f5646f84
 +</processor_spec>
 diff --git a/Ghidra/Processors/VideoCore/data/languages/vc4.slaspec b/Ghidra/Processors/VideoCore/data/languages/vc4.slaspec
 new file mode 100644
-index 00000000000..41c37122d2e
+index 000000000..41c37122d
 --- /dev/null
 +++ b/Ghidra/Processors/VideoCore/data/languages/vc4.slaspec
 @@ -0,0 +1,1964 @@
@@ -2215,3 +2256,6 @@ index 00000000000..41c37122d2e
 +  :v^Vawidth^"op63" vargd, varga, vargb^vflags
 +	is (Vaop=63 & Vawidth) ... & vargd & varga & vargb & vflags unimpl
 +}
+-- 
+2.38.1
+

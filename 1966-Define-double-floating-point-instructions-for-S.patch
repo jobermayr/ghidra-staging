@@ -1,5 +1,18 @@
+From 93e447c4d425f3ed97691fabfea105fac7ab945a Mon Sep 17 00:00:00 2001
+From: Steven Goldade <smgoldade@gmail.com>
+Date: Tue, 9 Jun 2020 11:00:58 -0500
+Subject: [PATCH] 1966: Define double floating point instructions for SuperH
+
+Fix FSUB instructions
+Add floating point context registers
+Update FSCHG to use a simple global context change
+---
+ .../SuperH/data/languages/superh.pspec        |   6 +
+ .../SuperH/data/languages/superh.sinc         | 223 +++++++++++++-----
+ 2 files changed, 164 insertions(+), 65 deletions(-)
+
 diff --git a/Ghidra/Processors/SuperH/data/languages/superh.pspec b/Ghidra/Processors/SuperH/data/languages/superh.pspec
-index 114b5c47a81..4d5ab8e9aa9 100644
+index 114b5c47a..7b583e7b7 100644
 --- a/Ghidra/Processors/SuperH/data/languages/superh.pspec
 +++ b/Ghidra/Processors/SuperH/data/languages/superh.pspec
 @@ -2,4 +2,10 @@
@@ -7,14 +20,14 @@ index 114b5c47a81..4d5ab8e9aa9 100644
  <processor_spec>
    <programcounter register="pc"/>
 +  <context_data>
-+  	<context_set space="register">
-+  		<set name="fpscr_pr" val="0" description="Default floating-point precision"/>
-+  		<set name="fpscr_sz" val="0" description="Default floating-point size"/>
-+  	</context_set>
++	<context_set space="register">
++		<set name="fpscr_pr" val="0" description="Default floating-point precision"/>
++		<set name="fpscr_sz" val="0" description="Default floating-point size"/>
++	</context_set>
 +  </context_data>
  </processor_spec>
 diff --git a/Ghidra/Processors/SuperH/data/languages/superh.sinc b/Ghidra/Processors/SuperH/data/languages/superh.sinc
-index cbefdb24c88..ef0b624b98a 100644
+index ba58154a1..a16f45acd 100644
 --- a/Ghidra/Processors/SuperH/data/languages/superh.sinc
 +++ b/Ghidra/Processors/SuperH/data/languages/superh.sinc
 @@ -38,15 +38,16 @@ define register offset=0x200 size=8 [ dr0             dr2             dr4
@@ -72,7 +85,7 @@ index cbefdb24c88..ef0b624b98a 100644
  # MOVI20 #imm20, Rn           0000nnnniiii0000 iiiiiiiiiiiiiiii     imm → sign extension → Rn
  :movi20 simm20, l_rn_24_27
      is l_opcode_28_31=0b0000 & l_rn_24_27 & l_opcode_16_19=0b0000 & simm20
-@@ -2029,217 +2034,301 @@ define pcodeop Sleep_Standby;
+@@ -1996,217 +2001,301 @@ define pcodeop Sleep_Standby;
  #
  
  # FABS FRn                  1111nnnn01011101 |FRn| → FRn
@@ -398,8 +411,7 @@ index cbefdb24c88..ef0b624b98a 100644
 -:fsub ffrm_04_07, ffrn_08_11        is fop_12_15=0b1111 & ffrn_08_11 & ffrm_04_07 & fop_00_03=0b0001
 +:fsub ffrm_04_07, ffrn_08_11        is fop_12_15=0b1111 & ffrn_08_11 & ffrm_04_07 & fop_00_03=0b0001 & fpscr_pr=0b0
  {
--    ffrn_08_11 = ffrn_08_11 - ffrm_04_07;
-+    ffrn_08_11 = ffrn_08_11 f- ffrm_04_07;
+     ffrn_08_11 = ffrn_08_11 f- ffrm_04_07;
  }
  
 -# TODO: FSUB DRm, DRn               1111nnn0mmm00001 DRn - DRm → DRn
@@ -424,7 +436,7 @@ index cbefdb24c88..ef0b624b98a 100644
  
  @endif
  
-@@ -2253,7 +2342,7 @@ define pcodeop Sleep_Standby;
+@@ -2220,7 +2309,7 @@ define pcodeop Sleep_Standby;
  # LDS Rm,FPSCR          0100mmmm01101010    Rm → FPSCR
  :lds rm_08_11, fpscr    is fpscr & opcode_12_15=0b0100 & rm_08_11 & opcode_00_07=0b01101010
  {
@@ -433,7 +445,7 @@ index cbefdb24c88..ef0b624b98a 100644
  }
  
  # LDS Rm,FPUL           0100mmmm01011010    Rm → FPUL
-@@ -2265,7 +2354,7 @@ define pcodeop Sleep_Standby;
+@@ -2232,7 +2321,7 @@ define pcodeop Sleep_Standby;
  # LDS.L @Rm+, FPSCR     0100mmmm01100110    (Rm) → FPSCR, Rm+ = 4
  :lds.l @rm_08_11+, fpscr    is fpscr & opcode_12_15=0b0100 & rm_08_11 & opcode_00_07=0b01100110
  {
@@ -442,7 +454,7 @@ index cbefdb24c88..ef0b624b98a 100644
      rm_08_11 = rm_08_11 + 4;
  }
  
-@@ -2279,7 +2368,7 @@ define pcodeop Sleep_Standby;
+@@ -2246,7 +2335,7 @@ define pcodeop Sleep_Standby;
  # STS FPSCR, Rn         0000nnnn01101010    FPSCR → Rn
  :sts fpscr, rn_08_11    is fpscr & opcode_12_15=0b0000 & rn_08_11 & opcode_00_07=0b01101010
  {
@@ -451,7 +463,7 @@ index cbefdb24c88..ef0b624b98a 100644
  }
  
  # STS FPUL,Rn           0000nnnn01011010    FPUL → Rn
-@@ -2292,7 +2381,7 @@ define pcodeop Sleep_Standby;
+@@ -2259,7 +2348,7 @@ define pcodeop Sleep_Standby;
  :sts.l fpscr, @-rn_08_11    is fpscr & opcode_12_15=0b0100 & rn_08_11 & opcode_00_07=0b01100010
  {
      rn_08_11 = rn_08_11 - 4;
@@ -460,7 +472,7 @@ index cbefdb24c88..ef0b624b98a 100644
  }
  
  # STS.L FPUL,@-Rn       0100nnnn01010010    Rn- = 4, FPUL → (Rn)
-@@ -2302,7 +2391,11 @@ define pcodeop Sleep_Standby;
+@@ -2269,7 +2358,11 @@ define pcodeop Sleep_Standby;
      *:4 (rn_08_11) = fpul;
  }
  
@@ -473,3 +485,6 @@ index cbefdb24c88..ef0b624b98a 100644
  @endif
  
  
+-- 
+2.38.1
+

@@ -1,14 +1,34 @@
+From 7dcf7b3244d5de27844eda9bc773debcac245f08 Mon Sep 17 00:00:00 2001
+From: Gregory Morse <gregory.morse@live.com>
+Date: Sun, 28 Jul 2019 18:49:30 +0200
+Subject: [PATCH] 0853: Segmented pointer additions wrong offset inference
+
+A reference such as ```es:[bx+1D70h]``` should print out correctly as: bx_var + 0x1d70.  Currently it prints as an offset from coincidental data segment location found at 0x1D70 as &ram0x000006D0+bx_var.  For es:[bx+1d80] it would be &ram0x000006D0+(bx+var+0x10) and so forth.
+
+Looking at the next instruction to figure out where the output is bound does not seem like the ideal approach but its the easiest approach I could come up with as the SEGMENTOP would always come immediately after.  Obviously the DS segment is not used so just guessing here is totally ridiculous when the SEGMENTOP that happens in the next opcode binds to the ES segment.  Basically it ruins the clean output and wrongly queryies for nonsense addresses.
+
+Tested and working.
+
+Update coreaction.cc
+Cleaned up for correct tracking of the output to the SEGMENTOP
+---
+ Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc | 3 +++
+ 1 file changed, 3 insertions(+)
+
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
-index b2ac97b7c29..52cab68a2ec 100644
+index a434117bd..1006c7c4d 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
-@@ -862,6 +862,9 @@ SymbolEntry *ActionConstantPtr::isPointer(AddrSpace *spc,Varnode *vn,PcodeOp *op
+@@ -1071,6 +1071,9 @@ SymbolEntry *ActionConstantPtr::isPointer(AddrSpace *spc,Varnode *vn,PcodeOp *op
      case CPUI_INT_ADD:
        outvn = op->getOut();
-       if (outvn->getType()->getMetatype()==TYPE_PTR) {
+       if (outvn->getTypeDefFacing()->getMetatype()==TYPE_PTR) {
 +        PcodeOp* outop = outvn->loneDescend();
 +        if (outop != (PcodeOp*)0 && //if part of a segment op cannot process here!
 +          outop->code() == CPUI_SEGMENTOP) return (SymbolEntry*)0;
- 	int4 slot = op->getSlot(vn);
  	// Is there another pointer base in this expression
- 	if (op->getIn(1-slot)->getType()->getMetatype()==TYPE_PTR)
+ 	if (op->getIn(1-slot)->getTypeReadFacing(op)->getMetatype()==TYPE_PTR)
+ 	  return (SymbolEntry *)0; // If so, we are not a pointer
+-- 
+2.38.1
+

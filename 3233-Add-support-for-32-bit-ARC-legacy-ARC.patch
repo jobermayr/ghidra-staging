@@ -1,37 +1,58 @@
-diff --git a/Ghidra/Processors/ARC/Module.manifest b/Ghidra/Processors/ARC/Module.manifest
-new file mode 100644
-index 00000000000..e69de29bb2d
-diff --git a/Ghidra/Processors/ARC/build.gradle b/Ghidra/Processors/ARC/build.gradle
-new file mode 100644
-index 00000000000..b167f5f51fd
---- /dev/null
-+++ b/Ghidra/Processors/ARC/build.gradle
-@@ -0,0 +1,19 @@
-+/* ###
-+ * IP: GHIDRA
-+ *
-+ * Licensed under the Apache License, Version 2.0 (the "License");
-+ * you may not use this file except in compliance with the License.
-+ * You may obtain a copy of the License at
-+ *
-+ *      http://www.apache.org/licenses/LICENSE-2.0
-+ *
-+ * Unless required by applicable law or agreed to in writing, software
-+ * distributed under the License is distributed on an "AS IS" BASIS,
-+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-+ * See the License for the specific language governing permissions and
-+ * limitations under the License.
-+ */
-+apply from: "$rootProject.projectDir/gradle/distributableGhidraModule.gradle"
-+apply from: "$rootProject.projectDir/gradle/processorProject.gradle"
-+apply plugin: 'eclipse'
-+eclipse.project.name = 'Processors ARC'
+From e6a4859e2fae454fc265cf46e3cb76f720d29374 Mon Sep 17 00:00:00 2001
+From: cyrozap <cyrozap@gmail.com>
+Date: Sun, 30 May 2021 10:45:47 -0500
+Subject: [PATCH] 3233: Add support for 32-bit ARC (legacy ARC)
+
+Squashed:
+
+ARC32: Fix DWARF register mappings
+
+These are still guessed, so we'll need to update them with the real ones
+at some point.
+
+ARC32: Fix delay slots for conditional jumps
+
+ARC32: Properly implement lp instructions
+
+ARC32: Update compiler spec with information from GCC
+
+ARC32: Fix flag updates and simplify add/sub/adc/sbc definitions
+
+ARC32: Simplify conditionally setting the result flags
+
+ARC32: Simplify conditionally setting the result flags and ROR flags
+
+This removes the "goto <skip>" from the remaining instances where the
+result flags are set, as well as for the flags set after ROR operations.
+
+ARC32: Properly decode instructions with "op, #shimm, #shimm" encodings
+---
+ Ghidra/Processors/ARC/certification.manifest  |  19 +
+ .../Processors/ARC/data/languages/ARC.ldefs   |  27 +
+ .../Processors/ARC/data/languages/ARC.opinion |   5 +
+ .../Processors/ARC/data/languages/ARC32.cspec | 141 ++++
+ .../Processors/ARC/data/languages/ARC32.dwarf |  15 +
+ .../Processors/ARC/data/languages/ARC32.pspec |   4 +
+ .../Processors/ARC/data/languages/ARC32.sinc  | 650 ++++++++++++++++++
+ .../ARC/data/languages/ARC32_be.slaspec       |   3 +
+ .../ARC/data/languages/ARC32_le.slaspec       |   3 +
+ 9 files changed, 867 insertions(+)
+ create mode 100644 Ghidra/Processors/ARC/certification.manifest
+ create mode 100644 Ghidra/Processors/ARC/data/languages/ARC.ldefs
+ create mode 100644 Ghidra/Processors/ARC/data/languages/ARC.opinion
+ create mode 100644 Ghidra/Processors/ARC/data/languages/ARC32.cspec
+ create mode 100644 Ghidra/Processors/ARC/data/languages/ARC32.dwarf
+ create mode 100644 Ghidra/Processors/ARC/data/languages/ARC32.pspec
+ create mode 100644 Ghidra/Processors/ARC/data/languages/ARC32.sinc
+ create mode 100644 Ghidra/Processors/ARC/data/languages/ARC32_be.slaspec
+ create mode 100644 Ghidra/Processors/ARC/data/languages/ARC32_le.slaspec
+
 diff --git a/Ghidra/Processors/ARC/certification.manifest b/Ghidra/Processors/ARC/certification.manifest
 new file mode 100644
-index 00000000000..e3fd4a7dfac
+index 000000000..b1e5e1d0a
 --- /dev/null
 +++ b/Ghidra/Processors/ARC/certification.manifest
-@@ -0,0 +1,11 @@
+@@ -0,0 +1,19 @@
 +##VERSION: 2.0
 +Module.manifest||GHIDRA||||END|
 +data/build.xml||GHIDRA||||END|
@@ -43,9 +64,17 @@ index 00000000000..e3fd4a7dfac
 +data/languages/ARC32.sinc||GHIDRA||||END|
 +data/languages/ARC32_be.slaspec||GHIDRA||||END|
 +data/languages/ARC32_le.slaspec||GHIDRA||||END|
++data/languages/ARCompact.cspec||GHIDRA||||END|
++data/languages/ARCompact.dwarf||GHIDRA||||END|
++data/languages/ARCompact.ldefs||GHIDRA||||END|
++data/languages/ARCompact.opinion||GHIDRA||||END|
++data/languages/ARCompact.pspec||GHIDRA||||END|
++data/languages/ARCompact.sla||GHIDRA||||END|
++data/languages/ARCompact.slaspec||GHIDRA||||END|
++src/main/java/ghidra/program/emulation/ARCompactEmulateInstructionStateModifier.java||GHIDRA||||END|
 diff --git a/Ghidra/Processors/ARC/data/languages/ARC.ldefs b/Ghidra/Processors/ARC/data/languages/ARC.ldefs
 new file mode 100644
-index 00000000000..05eda2eeaa8
+index 000000000..05eda2eea
 --- /dev/null
 +++ b/Ghidra/Processors/ARC/data/languages/ARC.ldefs
 @@ -0,0 +1,27 @@
@@ -78,7 +107,7 @@ index 00000000000..05eda2eeaa8
 +</language_definitions>
 diff --git a/Ghidra/Processors/ARC/data/languages/ARC.opinion b/Ghidra/Processors/ARC/data/languages/ARC.opinion
 new file mode 100644
-index 00000000000..49ec715adaf
+index 000000000..49ec715ad
 --- /dev/null
 +++ b/Ghidra/Processors/ARC/data/languages/ARC.opinion
 @@ -0,0 +1,5 @@
@@ -89,7 +118,7 @@ index 00000000000..49ec715adaf
 +</opinions>
 diff --git a/Ghidra/Processors/ARC/data/languages/ARC32.cspec b/Ghidra/Processors/ARC/data/languages/ARC32.cspec
 new file mode 100644
-index 00000000000..7e8c787ebb3
+index 000000000..7e8c787eb
 --- /dev/null
 +++ b/Ghidra/Processors/ARC/data/languages/ARC32.cspec
 @@ -0,0 +1,141 @@
@@ -236,7 +265,7 @@ index 00000000000..7e8c787ebb3
 +</compiler_spec>
 diff --git a/Ghidra/Processors/ARC/data/languages/ARC32.dwarf b/Ghidra/Processors/ARC/data/languages/ARC32.dwarf
 new file mode 100644
-index 00000000000..0068f289d71
+index 000000000..0068f289d
 --- /dev/null
 +++ b/Ghidra/Processors/ARC/data/languages/ARC32.dwarf
 @@ -0,0 +1,15 @@
@@ -257,7 +286,7 @@ index 00000000000..0068f289d71
 +</dwarf>
 diff --git a/Ghidra/Processors/ARC/data/languages/ARC32.pspec b/Ghidra/Processors/ARC/data/languages/ARC32.pspec
 new file mode 100644
-index 00000000000..300f5e2e1b9
+index 000000000..300f5e2e1
 --- /dev/null
 +++ b/Ghidra/Processors/ARC/data/languages/ARC32.pspec
 @@ -0,0 +1,4 @@
@@ -267,7 +296,7 @@ index 00000000000..300f5e2e1b9
 +</processor_spec>
 diff --git a/Ghidra/Processors/ARC/data/languages/ARC32.sinc b/Ghidra/Processors/ARC/data/languages/ARC32.sinc
 new file mode 100644
-index 00000000000..d769bdfc958
+index 000000000..d769bdfc9
 --- /dev/null
 +++ b/Ghidra/Processors/ARC/data/languages/ARC32.sinc
 @@ -0,0 +1,650 @@
@@ -923,7 +952,7 @@ index 00000000000..d769bdfc958
 +}
 diff --git a/Ghidra/Processors/ARC/data/languages/ARC32_be.slaspec b/Ghidra/Processors/ARC/data/languages/ARC32_be.slaspec
 new file mode 100644
-index 00000000000..78075bee2ea
+index 000000000..78075bee2
 --- /dev/null
 +++ b/Ghidra/Processors/ARC/data/languages/ARC32_be.slaspec
 @@ -0,0 +1,3 @@
@@ -932,10 +961,13 @@ index 00000000000..78075bee2ea
 +@include "ARC32.sinc"
 diff --git a/Ghidra/Processors/ARC/data/languages/ARC32_le.slaspec b/Ghidra/Processors/ARC/data/languages/ARC32_le.slaspec
 new file mode 100644
-index 00000000000..b9a180dc682
+index 000000000..b9a180dc6
 --- /dev/null
 +++ b/Ghidra/Processors/ARC/data/languages/ARC32_le.slaspec
 @@ -0,0 +1,3 @@
 +define endian=little;
 +
 +@include "ARC32.sinc"
+-- 
+2.38.1
+

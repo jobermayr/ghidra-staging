@@ -1,9 +1,84 @@
+From c063388848a924c10eb66240d6dd4f07e8c4179f Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Timoth=C3=A9e=20COCAULT?= <timothee.cocault@gmail.com>
+Date: Thu, 16 Apr 2020 18:58:10 +0200
+Subject: [PATCH] 1778: Add support for the NDS32 Processor
+
+Add pbsad* instructions
+
+Add clip* instructions
+
+Ignore llw/scw atomicity
+
+Implement tlbop
+
+Fix dpref*
+
+Fix clip signed comparison
+
+Fix typo in XOR instruction
+
+Implement basic ELF relocation
+
+Add DWARF register mapping
+
+Add gp recovery from ELF symbol
+
+Add pcodeTest for little-endian variant
+
+Fix divr and divsr instructions
+
+Add baseline v3
+---
+ Ghidra/Processors/NDS32/Module.manifest       |    0
+ Ghidra/Processors/NDS32/build.gradle          |   15 +
+ .../Processors/NDS32/certification.manifest   |   17 +
+ .../Processors/NDS32/data/buildLanguage.xml   |   50 +
+ .../Processors/NDS32/data/languages/lsmw.sinc |  576 +++++++++
+ .../NDS32/data/languages/nds32.cspec          |  104 ++
+ .../NDS32/data/languages/nds32.dwarf          |   14 +
+ .../NDS32/data/languages/nds32.ldefs          |   30 +
+ .../NDS32/data/languages/nds32.opinion        |    5 +
+ .../NDS32/data/languages/nds32.pspec          |    5 +
+ .../NDS32/data/languages/nds32.sinc           | 1079 +++++++++++++++++
+ .../NDS32/data/languages/nds32be.slaspec      |    7 +
+ .../NDS32/data/languages/nds32le.slaspec      |    7 +
+ .../NDS32/data/patterns/nds32_patterns.xml    |   13 +
+ .../data/patterns/patternconstraints.xml      |    5 +
+ Ghidra/Processors/NDS32/data/sleighArgs.txt   |    6 +
+ .../plugin/core/analysis/NDS32Analyzer.java   |  187 +++
+ .../NDS32_ElfRelocationConstants.java         |   74 ++
+ .../NDS32_ElfRelocationHandler.java           |  111 ++
+ .../processors/NDS32_LE_O0_EmulatorTest.java  |   41 +
+ .../processors/NDS32_LE_O3_EmulatorTest.java  |   41 +
+ 21 files changed, 2387 insertions(+)
+ create mode 100644 Ghidra/Processors/NDS32/Module.manifest
+ create mode 100644 Ghidra/Processors/NDS32/build.gradle
+ create mode 100644 Ghidra/Processors/NDS32/certification.manifest
+ create mode 100644 Ghidra/Processors/NDS32/data/buildLanguage.xml
+ create mode 100644 Ghidra/Processors/NDS32/data/languages/lsmw.sinc
+ create mode 100644 Ghidra/Processors/NDS32/data/languages/nds32.cspec
+ create mode 100644 Ghidra/Processors/NDS32/data/languages/nds32.dwarf
+ create mode 100644 Ghidra/Processors/NDS32/data/languages/nds32.ldefs
+ create mode 100644 Ghidra/Processors/NDS32/data/languages/nds32.opinion
+ create mode 100644 Ghidra/Processors/NDS32/data/languages/nds32.pspec
+ create mode 100644 Ghidra/Processors/NDS32/data/languages/nds32.sinc
+ create mode 100644 Ghidra/Processors/NDS32/data/languages/nds32be.slaspec
+ create mode 100644 Ghidra/Processors/NDS32/data/languages/nds32le.slaspec
+ create mode 100644 Ghidra/Processors/NDS32/data/patterns/nds32_patterns.xml
+ create mode 100644 Ghidra/Processors/NDS32/data/patterns/patternconstraints.xml
+ create mode 100644 Ghidra/Processors/NDS32/data/sleighArgs.txt
+ create mode 100644 Ghidra/Processors/NDS32/src/main/java/ghidra/app/plugin/core/analysis/NDS32Analyzer.java
+ create mode 100644 Ghidra/Processors/NDS32/src/main/java/ghidra/app/util/bin/format/elf/relocation/NDS32_ElfRelocationConstants.java
+ create mode 100644 Ghidra/Processors/NDS32/src/main/java/ghidra/app/util/bin/format/elf/relocation/NDS32_ElfRelocationHandler.java
+ create mode 100644 Ghidra/Processors/NDS32/src/test.processors/java/ghidra/test/processors/NDS32_LE_O0_EmulatorTest.java
+ create mode 100644 Ghidra/Processors/NDS32/src/test.processors/java/ghidra/test/processors/NDS32_LE_O3_EmulatorTest.java
+
 diff --git a/Ghidra/Processors/NDS32/Module.manifest b/Ghidra/Processors/NDS32/Module.manifest
 new file mode 100644
-index 00000000000..e69de29bb2d
+index 000000000..e69de29bb
 diff --git a/Ghidra/Processors/NDS32/build.gradle b/Ghidra/Processors/NDS32/build.gradle
 new file mode 100644
-index 00000000000..6d9b72ae405
+index 000000000..4df69b463
 --- /dev/null
 +++ b/Ghidra/Processors/NDS32/build.gradle
 @@ -0,0 +1,15 @@
@@ -17,14 +92,37 @@ index 00000000000..6d9b72ae405
 +
 +
 +dependencies {
-+	compile project(':Base')
++	api project(':Base')
++	//compile project(':Base')
 +	// Temporary dependency so that pcodeTests can use the Decompiler switch recovery
-+	compile project(':Decompiler')
++	//compile project(':Decompiler')
 +}
-+
+diff --git a/Ghidra/Processors/NDS32/certification.manifest b/Ghidra/Processors/NDS32/certification.manifest
+new file mode 100644
+index 000000000..ceadc1d06
+--- /dev/null
++++ b/Ghidra/Processors/NDS32/certification.manifest
+@@ -0,0 +1,17 @@
++##VERSION: 2.0
++Module.manifest||GHIDRA||||END|
++build.gradle||GHIDRA||||END|
++data/buildLanguage.xml||GHIDRA||||END|
++data/languages/lsmw.sinc||GHIDRA||||END|
++data/languages/nds32.cspec||GHIDRA||||END|
++data/languages/nds32.dwarf||GHIDRA||||END|
++data/languages/nds32.ldefs||GHIDRA||||END|
++data/languages/nds32.opinion||GHIDRA||||END|
++data/languages/nds32.pspec||GHIDRA||||END|
++data/languages/nds32.sinc||GHIDRA||||END|
++data/languages/nds32be.slaspec||GHIDRA||||END|
++data/languages/nds32le.slaspec||GHIDRA||||END|
++data/patterns/nds32_patterns.xml||GHIDRA||||END|
++data/patterns/patternconstraints.xml||GHIDRA||||END|
++data/sleighArgs.txt||GHIDRA||||END|
++src/main/java/ghidra/app/plugin/core/analysis/NDS32Analyzer.java||GHIDRA||||END|
 diff --git a/Ghidra/Processors/NDS32/data/buildLanguage.xml b/Ghidra/Processors/NDS32/data/buildLanguage.xml
 new file mode 100644
-index 00000000000..1e2a6276bc6
+index 000000000..74a29faf7
 --- /dev/null
 +++ b/Ghidra/Processors/NDS32/data/buildLanguage.xml
 @@ -0,0 +1,50 @@
@@ -35,19 +133,19 @@ index 00000000000..1e2a6276bc6
 +  + Sleigh compiler options are read from the sleighArgs.txt file.
 +  + Eclipse: right-click on this file and choose menu item "Run As->Ant Build"
 +  -->
-+                                     
++
 +<project name="privateBuildDeveloper" default="sleighCompile">
-+	
++
 +	<property name="sleigh.compile.class" value="ghidra.pcodeCPort.slgh_compile.SleighCompile"/>
 +
 +	<!--Import optional ant properties.  GhidraDev Eclipse plugin produces this so this file can find the Ghidra installation-->
 +	<import file="../.antProperties.xml" optional="false" />
-+	
++
 +	<target name="sleighCompile">
-+	    
++
 +		<!-- If language module is detached from installation, get Ghidra installation directory path from imported properties -->
 +		<property name="framework.path" value="${ghidra.install.dir}/Ghidra/Framework"/>
-+		
++
 +		<path id="sleigh.class.path">
 +			<fileset dir="${framework.path}/SoftwareModeling/lib">
 +				<include name="*.jar"/>
@@ -59,11 +157,11 @@ index 00000000000..1e2a6276bc6
 +				<include name="*.jar"/>
 +			</fileset>
 +		</path>
-+		
++
 +		<available classname="${sleigh.compile.class}" classpathref="sleigh.class.path" property="sleigh.compile.exists"/>
-+			
++
 +		<fail unless="sleigh.compile.exists" />
-+		
++
 +		<java classname="${sleigh.compile.class}"
 +			classpathref="sleigh.class.path"
 +			fork="true"
@@ -74,13 +172,13 @@ index 00000000000..1e2a6276bc6
 +			<arg value="-a"/>
 +			<arg value="./languages"/>
 +		</java>
-+		
-+ 	</target>
++
++	</target>
 +
 +</project>
 diff --git a/Ghidra/Processors/NDS32/data/languages/lsmw.sinc b/Ghidra/Processors/NDS32/data/languages/lsmw.sinc
 new file mode 100644
-index 00000000000..2953e445d1d
+index 000000000..2953e445d
 --- /dev/null
 +++ b/Ghidra/Processors/NDS32/data/languages/lsmw.sinc
 @@ -0,0 +1,576 @@
@@ -662,10 +760,10 @@ index 00000000000..2953e445d1d
 +Smwa.regs: is LsmwBa=1 & LsmwId=1 & Smwad.a0 & Smwad.a1 & Smwad.a2 & Smwad.a3 & Smwad.a4 & Smwad.a5 & Smwad.s0 & Smwad.s1 & Smwad.s2 & Smwad.s3 & Smwad.s4 & Smwad.s5 & Smwad.s6 & Smwad.s7 & Smwad.s8 & Smwad.ta & Smwad.t0 & Smwad.t1 & Smwad.t2 & Smwad.t3 & Smwad.t4 & Smwad.t5 & Smwad.t6 & Smwad.t7 & Smwad.t8 & Smwad.t9 & Smwad.p0 & Smwad.p1 & Smwad.fp & Smwad.gp & Smwad.lp & Smwad.sp { }
 diff --git a/Ghidra/Processors/NDS32/data/languages/nds32.cspec b/Ghidra/Processors/NDS32/data/languages/nds32.cspec
 new file mode 100644
-index 00000000000..8dc06318b2b
+index 000000000..f6608d63c
 --- /dev/null
 +++ b/Ghidra/Processors/NDS32/data/languages/nds32.cspec
-@@ -0,0 +1,105 @@
+@@ -0,0 +1,104 @@
 +<?xml version="1.0" encoding="UTF-8"?>
 +
 +<compiler_spec>
@@ -770,10 +868,9 @@ index 00000000000..8dc06318b2b
 +        </prototype>
 +    </default_proto>
 +</compiler_spec>
-+
 diff --git a/Ghidra/Processors/NDS32/data/languages/nds32.dwarf b/Ghidra/Processors/NDS32/data/languages/nds32.dwarf
 new file mode 100644
-index 00000000000..b254e363fdd
+index 000000000..b254e363f
 --- /dev/null
 +++ b/Ghidra/Processors/NDS32/data/languages/nds32.dwarf
 @@ -0,0 +1,14 @@
@@ -793,10 +890,10 @@ index 00000000000..b254e363fdd
 +</dwarf>
 diff --git a/Ghidra/Processors/NDS32/data/languages/nds32.ldefs b/Ghidra/Processors/NDS32/data/languages/nds32.ldefs
 new file mode 100644
-index 00000000000..80619e45b1a
+index 000000000..0e89de40d
 --- /dev/null
 +++ b/Ghidra/Processors/NDS32/data/languages/nds32.ldefs
-@@ -0,0 +1,31 @@
+@@ -0,0 +1,30 @@
 +<?xml version="1.0" encoding="UTF-8"?>
 +
 +<language_definitions>
@@ -827,10 +924,9 @@ index 00000000000..80619e45b1a
 +    <external_name tool="DWARF.register.mapping.file" name="nds32.dwarf"/>
 +  </language>
 +</language_definitions>
-+
 diff --git a/Ghidra/Processors/NDS32/data/languages/nds32.opinion b/Ghidra/Processors/NDS32/data/languages/nds32.opinion
 new file mode 100644
-index 00000000000..bf744db1326
+index 000000000..bf744db13
 --- /dev/null
 +++ b/Ghidra/Processors/NDS32/data/languages/nds32.opinion
 @@ -0,0 +1,5 @@
@@ -841,22 +937,21 @@ index 00000000000..bf744db1326
 +</opinions>
 diff --git a/Ghidra/Processors/NDS32/data/languages/nds32.pspec b/Ghidra/Processors/NDS32/data/languages/nds32.pspec
 new file mode 100644
-index 00000000000..dbce6f2f990
+index 000000000..0210d9209
 --- /dev/null
 +++ b/Ghidra/Processors/NDS32/data/languages/nds32.pspec
-@@ -0,0 +1,6 @@
+@@ -0,0 +1,5 @@
 +<?xml version="1.0" encoding="UTF-8"?>
 +
 +<processor_spec>
 +    <programcounter register="pc"/>
 +</processor_spec>
-+
 diff --git a/Ghidra/Processors/NDS32/data/languages/nds32.sinc b/Ghidra/Processors/NDS32/data/languages/nds32.sinc
 new file mode 100644
-index 00000000000..06083dd57c6
+index 000000000..39aa3cd5e
 --- /dev/null
 +++ b/Ghidra/Processors/NDS32/data/languages/nds32.sinc
-@@ -0,0 +1,1081 @@
+@@ -0,0 +1,1079 @@
 +### General ###
 +
 +define endian=big;
@@ -942,13 +1037,13 @@ index 00000000000..06083dd57c6
 +
 +    StandbyZ    = (7, 9)
 +    StandbySub  = (5, 6)
-+    
++
 +    GpSub1      = (19, 19)
 +    GpSub2      = (18, 19)
 +    GpSub3      = (17, 19)
 +
 +    sh          = (5, 9)
-+    
++
 +    Bxxc		= (19, 19)
 +
 +    LsmwRa = (15, 19)
@@ -1224,7 +1319,7 @@ index 00000000000..06083dd57c6
 +### Branch with link Instruction ###
 +
 +:bgezal Rt, Rel16 is $(I32) & $(BR2) & Rt & Br2t=0b1100 & Rel16
-+{   
++{
 +    lp = inst_next;
 +    if(Rt s>= 0) goto <end>;
 +        call Rel16;
@@ -1232,7 +1327,7 @@ index 00000000000..06083dd57c6
 +}
 +
 +:bltzal Rt, Rel16 is $(I32) & $(BR2) & Rt & Br2t=0b1101 & Rel16
-+{   
++{
 +    lp = inst_next;
 +    if(Rt s< 0) goto <end>;
 +        call Rel16;
@@ -1936,11 +2031,9 @@ index 00000000000..06083dd57c6
 +
 +
 +@endif
-+
-+
 diff --git a/Ghidra/Processors/NDS32/data/languages/nds32be.slaspec b/Ghidra/Processors/NDS32/data/languages/nds32be.slaspec
 new file mode 100644
-index 00000000000..40714ad394d
+index 000000000..40714ad39
 --- /dev/null
 +++ b/Ghidra/Processors/NDS32/data/languages/nds32be.slaspec
 @@ -0,0 +1,7 @@
@@ -1953,7 +2046,7 @@ index 00000000000..40714ad394d
 +@include "nds32.sinc"
 diff --git a/Ghidra/Processors/NDS32/data/languages/nds32le.slaspec b/Ghidra/Processors/NDS32/data/languages/nds32le.slaspec
 new file mode 100644
-index 00000000000..ee6a1b9c48f
+index 000000000..ee6a1b9c4
 --- /dev/null
 +++ b/Ghidra/Processors/NDS32/data/languages/nds32le.slaspec
 @@ -0,0 +1,7 @@
@@ -1966,7 +2059,7 @@ index 00000000000..ee6a1b9c48f
 +@include "nds32.sinc"
 diff --git a/Ghidra/Processors/NDS32/data/patterns/nds32_patterns.xml b/Ghidra/Processors/NDS32/data/patterns/nds32_patterns.xml
 new file mode 100644
-index 00000000000..5cbde241f92
+index 000000000..5cbde241f
 --- /dev/null
 +++ b/Ghidra/Processors/NDS32/data/patterns/nds32_patterns.xml
 @@ -0,0 +1,13 @@
@@ -1985,7 +2078,7 @@ index 00000000000..5cbde241f92
 +</patternlist>
 diff --git a/Ghidra/Processors/NDS32/data/patterns/patternconstraints.xml b/Ghidra/Processors/NDS32/data/patterns/patternconstraints.xml
 new file mode 100644
-index 00000000000..735a59bec2c
+index 000000000..735a59bec
 --- /dev/null
 +++ b/Ghidra/Processors/NDS32/data/patterns/patternconstraints.xml
 @@ -0,0 +1,5 @@
@@ -1996,7 +2089,7 @@ index 00000000000..735a59bec2c
 +</patternconstraints>
 diff --git a/Ghidra/Processors/NDS32/data/sleighArgs.txt b/Ghidra/Processors/NDS32/data/sleighArgs.txt
 new file mode 100644
-index 00000000000..ce069263588
+index 000000000..ce0692635
 --- /dev/null
 +++ b/Ghidra/Processors/NDS32/data/sleighArgs.txt
 @@ -0,0 +1,6 @@
@@ -2009,7 +2102,7 @@ index 00000000000..ce069263588
 \ No newline at end of file
 diff --git a/Ghidra/Processors/NDS32/src/main/java/ghidra/app/plugin/core/analysis/NDS32Analyzer.java b/Ghidra/Processors/NDS32/src/main/java/ghidra/app/plugin/core/analysis/NDS32Analyzer.java
 new file mode 100644
-index 00000000000..b054561c04c
+index 000000000..c06cd94c0
 --- /dev/null
 +++ b/Ghidra/Processors/NDS32/src/main/java/ghidra/app/plugin/core/analysis/NDS32Analyzer.java
 @@ -0,0 +1,187 @@
@@ -2043,16 +2136,16 @@ index 00000000000..b054561c04c
 +
 +public class NDS32Analyzer extends ConstantPropagationAnalyzer {
 +	private final static String PROCESSOR_NAME = "NDS32";
-+	
++
 +	private static final String SWITCH_OPTION_NAME = "Switch Table Recovery";
 +	private static final String SWITCH_OPTION_DESCRIPTION = "Turn on to recover switch tables (not implemented yet !)";
 +	private static final boolean SWITCH_OPTION_DEFAULT_VALUE = false;
-+	
++
 +	private static final String RECOVER_GP_OPTION_NAME = "Recover global GP register writes";
 +	private static final String RECOVER_GP_OPTION_DESCRIPTION = "Reads the global GP value from the symbol _SDA_BASE_";
 +	private static final boolean RECOVER_GP_OPTION_DEFAULT_VALUE = true;
-+	
-+	
++
++
 +	private boolean recoverSwitchTables = SWITCH_OPTION_DEFAULT_VALUE;
 +	private boolean recoverGp = RECOVER_GP_OPTION_DEFAULT_VALUE;
 +
@@ -2074,7 +2167,7 @@ index 00000000000..b054561c04c
 +		}
 +
 +		gp = program.getRegister("gp");
-+		
++
 +		return true;
 +	}
 +
@@ -2090,7 +2183,7 @@ index 00000000000..b054561c04c
 +				RECOVER_GP_OPTION_DESCRIPTION);
 +		recoverGp = options.getBoolean(RECOVER_GP_OPTION_NAME, recoverGp);
 +	}
-+	
++
 +	@Override
 +	public boolean added(Program program, AddressSetView set, TaskMonitor monitor, MessageLog log)
 +			throws CancelledException {
@@ -2118,7 +2211,7 @@ index 00000000000..b054561c04c
 +		}
 +
 +		// TODO : if the symbol doesn't exist, check manually... somewhere else
-+		
++
 +		return;
 +	}
 +
@@ -2126,12 +2219,12 @@ index 00000000000..b054561c04c
 +	public AddressSetView flowConstants(final Program program, Address flowStart,
 +			AddressSetView flowSet, final SymbolicPropogator symEval, final TaskMonitor monitor)
 +			throws CancelledException {
-+		
++
 +		// get the function body
 +		final Function func = program.getFunctionManager().getFunctionContaining(flowStart);
 +
 +		final AddressSet coveredSet = new AddressSet();
-+		
++
 +		Address currentGPAssumptionValue = gpAssumptionValue;
 +
 +		// TODO : copypaste more code from MipsAddressAnalyzer to see if gp is written and act accordingly
@@ -2172,7 +2265,7 @@ index 00000000000..b054561c04c
 +				return false;
 +			}
 +		};
-+		
++
 +		AddressSet resultSet = symEval.flowConstants(flowStart, null, eval, true, monitor);
 +
 +		// Add in any addresses we should assume got covered
@@ -2181,7 +2274,7 @@ index 00000000000..b054561c04c
 +
 +		return resultSet;
 +	}
-+	
++
 +	/**
 +	 * @param program
 +	 * @param startInstr
@@ -2190,7 +2283,7 @@ index 00000000000..b054561c04c
 +	private void fixJumpTable(Program program, Instruction startInstr, TaskMonitor monitor) {
 +		/* TODO: implement switch recovery ?
 +		 * We are looking for tables like this :
-+		 * 
++		 *
 +		 * slti45  a0,0x4						<- table size
 +		 * beqzs8  LAB_005159ea					<- default jump
 +		 * sethi   ta, 0x515
@@ -2202,7 +2295,7 @@ index 00000000000..b054561c04c
 +}
 diff --git a/Ghidra/Processors/NDS32/src/main/java/ghidra/app/util/bin/format/elf/relocation/NDS32_ElfRelocationConstants.java b/Ghidra/Processors/NDS32/src/main/java/ghidra/app/util/bin/format/elf/relocation/NDS32_ElfRelocationConstants.java
 new file mode 100644
-index 00000000000..5f5bea65d45
+index 000000000..7aaf363cf
 --- /dev/null
 +++ b/Ghidra/Processors/NDS32/src/main/java/ghidra/app/util/bin/format/elf/relocation/NDS32_ElfRelocationConstants.java
 @@ -0,0 +1,74 @@
@@ -2212,9 +2305,9 @@ index 00000000000..5f5bea65d45
 + * Licensed under the Apache License, Version 2.0 (the "License");
 + * you may not use this file except in compliance with the License.
 + * You may obtain a copy of the License at
-+ * 
++ *
 + *      http://www.apache.org/licenses/LICENSE-2.0
-+ * 
++ *
 + * Unless required by applicable law or agreed to in writing, software
 + * distributed under the License is distributed on an "AS IS" BASIS,
 + * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -2224,65 +2317,65 @@ index 00000000000..5f5bea65d45
 +package ghidra.app.util.bin.format.elf.relocation;
 +
 +public class NDS32_ElfRelocationConstants {
-+	public static final int R_NDS32_NONE = 0;             
-+	public static final int R_NDS32_16_RELA = 19;         
-+	public static final int R_NDS32_32_RELA = 20;         
-+	public static final int R_NDS32_9_PCREL_RELA = 22;    
-+	public static final int R_NDS32_15_PCREL_RELA = 23;   
-+	public static final int R_NDS32_17_PCREL_RELA = 24;   
-+	public static final int R_NDS32_25_PCREL_RELA = 25;   
-+	public static final int R_NDS32_HI20_RELA = 26;       
-+	public static final int R_NDS32_LO12S3_RELA = 27;     
-+	public static final int R_NDS32_LO12S2_RELA = 28;     
-+	public static final int R_NDS32_LO12S1_RELA = 29;     
-+	public static final int R_NDS32_LO12S0_RELA = 30;     
-+	public static final int R_NDS32_SDA15S3_RELA = 31;    
-+	public static final int R_NDS32_SDA15S2_RELA = 32;    
-+	public static final int R_NDS32_SDA15S1_RELA = 33;    
-+	public static final int R_NDS32_SDA15S0_RELA = 34;    
-+	public static final int R_NDS32_GOT20 = 37;           
-+	public static final int R_NDS32_25_PLTREL = 38;       
-+	public static final int R_NDS32_COPY = 39;            
-+	public static final int R_NDS32_GLOB_DAT = 40;        
-+	public static final int R_NDS32_JMP_SLOT = 41;        
-+	public static final int R_NDS32_RELATIVE = 42;        
-+	public static final int R_NDS32_GOTOFF = 43;          
-+	public static final int R_NDS32_GOTPC20 = 44;         
-+	public static final int R_NDS32_GOT_HI20 = 45;        
-+	public static final int R_NDS32_GOT_LO12 = 46;        
-+	public static final int R_NDS32_GOTPC_HI20 = 47;      
-+	public static final int R_NDS32_GOTPC_LO12 = 48;      
-+	public static final int R_NDS32_GOTOFF_HI20 = 49;     
-+	public static final int R_NDS32_GOTOFF_LO12 = 50;     
-+	public static final int R_NDS32_INSN16 = 51;          
-+	public static final int R_NDS32_LABEL = 52;           
-+	public static final int R_NDS32_LONGCALL1 = 53;       
-+	public static final int R_NDS32_LONGCALL2 = 54;       
-+	public static final int R_NDS32_LONGCALL3 = 55;       
-+	public static final int R_NDS32_LONGJUMP1 = 56;       
-+	public static final int R_NDS32_LONGJUMP2 = 57;       
-+	public static final int R_NDS32_LONGJUMP3 = 58;       
-+	public static final int R_NDS32_LOADSTORE = 59;       
-+	public static final int R_NDS32_9_FIXED_RELA = 60;    
-+	public static final int R_NDS32_15_FIXED_RELA = 61;   
-+	public static final int R_NDS32_17_FIXED_RELA = 62;   
-+	public static final int R_NDS32_25_FIXED_RELA = 63;   
-+	public static final int R_NDS32_PLTREL_HI20 = 64;     
-+	public static final int R_NDS32_PLTREL_LO12 = 65;     
-+	public static final int R_NDS32_PLT_GOTREL_HI20 = 66; 
-+	public static final int R_NDS32_PLT_GOTREL_LO12 = 67; 
-+	public static final int R_NDS32_LO12S0_ORI_RELA = 72; 
-+	public static final int R_NDS32_DWARF2_OP1_RELA = 77; 
-+	public static final int R_NDS32_DWARF2_OP2_RELA = 78; 
-+	public static final int R_NDS32_DWARF2_LEB_RELA = 79; 
-+	public static final int R_NDS32_WORD_9_PCREL_RELA = 94; 
-+	public static final int R_NDS32_LONGCALL4 = 107;      
-+	public static final int R_NDS32_RELA_NOP_MIX = 192;   
-+	public static final int R_NDS32_RELA_NOP_MAX = 255;   
++	public static final int R_NDS32_NONE = 0;
++	public static final int R_NDS32_16_RELA = 19;
++	public static final int R_NDS32_32_RELA = 20;
++	public static final int R_NDS32_9_PCREL_RELA = 22;
++	public static final int R_NDS32_15_PCREL_RELA = 23;
++	public static final int R_NDS32_17_PCREL_RELA = 24;
++	public static final int R_NDS32_25_PCREL_RELA = 25;
++	public static final int R_NDS32_HI20_RELA = 26;
++	public static final int R_NDS32_LO12S3_RELA = 27;
++	public static final int R_NDS32_LO12S2_RELA = 28;
++	public static final int R_NDS32_LO12S1_RELA = 29;
++	public static final int R_NDS32_LO12S0_RELA = 30;
++	public static final int R_NDS32_SDA15S3_RELA = 31;
++	public static final int R_NDS32_SDA15S2_RELA = 32;
++	public static final int R_NDS32_SDA15S1_RELA = 33;
++	public static final int R_NDS32_SDA15S0_RELA = 34;
++	public static final int R_NDS32_GOT20 = 37;
++	public static final int R_NDS32_25_PLTREL = 38;
++	public static final int R_NDS32_COPY = 39;
++	public static final int R_NDS32_GLOB_DAT = 40;
++	public static final int R_NDS32_JMP_SLOT = 41;
++	public static final int R_NDS32_RELATIVE = 42;
++	public static final int R_NDS32_GOTOFF = 43;
++	public static final int R_NDS32_GOTPC20 = 44;
++	public static final int R_NDS32_GOT_HI20 = 45;
++	public static final int R_NDS32_GOT_LO12 = 46;
++	public static final int R_NDS32_GOTPC_HI20 = 47;
++	public static final int R_NDS32_GOTPC_LO12 = 48;
++	public static final int R_NDS32_GOTOFF_HI20 = 49;
++	public static final int R_NDS32_GOTOFF_LO12 = 50;
++	public static final int R_NDS32_INSN16 = 51;
++	public static final int R_NDS32_LABEL = 52;
++	public static final int R_NDS32_LONGCALL1 = 53;
++	public static final int R_NDS32_LONGCALL2 = 54;
++	public static final int R_NDS32_LONGCALL3 = 55;
++	public static final int R_NDS32_LONGJUMP1 = 56;
++	public static final int R_NDS32_LONGJUMP2 = 57;
++	public static final int R_NDS32_LONGJUMP3 = 58;
++	public static final int R_NDS32_LOADSTORE = 59;
++	public static final int R_NDS32_9_FIXED_RELA = 60;
++	public static final int R_NDS32_15_FIXED_RELA = 61;
++	public static final int R_NDS32_17_FIXED_RELA = 62;
++	public static final int R_NDS32_25_FIXED_RELA = 63;
++	public static final int R_NDS32_PLTREL_HI20 = 64;
++	public static final int R_NDS32_PLTREL_LO12 = 65;
++	public static final int R_NDS32_PLT_GOTREL_HI20 = 66;
++	public static final int R_NDS32_PLT_GOTREL_LO12 = 67;
++	public static final int R_NDS32_LO12S0_ORI_RELA = 72;
++	public static final int R_NDS32_DWARF2_OP1_RELA = 77;
++	public static final int R_NDS32_DWARF2_OP2_RELA = 78;
++	public static final int R_NDS32_DWARF2_LEB_RELA = 79;
++	public static final int R_NDS32_WORD_9_PCREL_RELA = 94;
++	public static final int R_NDS32_LONGCALL4 = 107;
++	public static final int R_NDS32_RELA_NOP_MIX = 192;
++	public static final int R_NDS32_RELA_NOP_MAX = 255;
 +}
 diff --git a/Ghidra/Processors/NDS32/src/main/java/ghidra/app/util/bin/format/elf/relocation/NDS32_ElfRelocationHandler.java b/Ghidra/Processors/NDS32/src/main/java/ghidra/app/util/bin/format/elf/relocation/NDS32_ElfRelocationHandler.java
 new file mode 100644
-index 00000000000..0d1f6604547
+index 000000000..9ead2c367
 --- /dev/null
 +++ b/Ghidra/Processors/NDS32/src/main/java/ghidra/app/util/bin/format/elf/relocation/NDS32_ElfRelocationHandler.java
 @@ -0,0 +1,111 @@
@@ -2292,9 +2385,9 @@ index 00000000000..0d1f6604547
 + * Licensed under the Apache License, Version 2.0 (the "License");
 + * you may not use this file except in compliance with the License.
 + * You may obtain a copy of the License at
-+ * 
++ *
 + *      http://www.apache.org/licenses/LICENSE-2.0
-+ * 
++ *
 + * Unless required by applicable law or agreed to in writing, software
 + * distributed under the License is distributed on an "AS IS" BASIS,
 + * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -2339,16 +2432,16 @@ index 00000000000..0d1f6604547
 +		if (elf.e_machine() != ElfConstants.EM_NDS32) {
 +			return;
 +		}
-+		
++
 +		if (!elf.is32Bit()) {
 +			return;
 +		}
-+		
++
 +		NDS32_ElfRelocationContext nds32RelocationContext =
 +				(NDS32_ElfRelocationContext) elfRelocationContext;
 +
 +		int type = relocation.getType();
-+		int symbolIndex = relocation.getSymbolIndex();		
++		int symbolIndex = relocation.getSymbolIndex();
 +		doRelocate(nds32RelocationContext, type, symbolIndex, relocation, relocationAddress);
 +	}
 +
@@ -2364,12 +2457,12 @@ index 00000000000..0d1f6604547
 +
 +		// Read instruction as big endian
 +		int oldValue = memory.getInt(relocationAddress, true);
-+		
++
 +		long addend = 0;
 +		if(relocation.hasAddend()) {
 +			addend = relocation.getAddend();
 +		}
-+		
++
 +		int value = 0;
 +		int newValue = 0;
 +
@@ -2388,7 +2481,7 @@ index 00000000000..0d1f6604547
 +			markAsUnhandled(program, relocationAddress, relocType, symbolIndex, symbolName, log);
 +		}
 +	}
-+	
++
 +	private static class NDS32_ElfRelocationContext extends ElfRelocationContext {
 +
 +		protected NDS32_ElfRelocationContext(ElfRelocationHandler handler, ElfLoadHelper loadHelper,
@@ -2399,7 +2492,7 @@ index 00000000000..0d1f6604547
 +}
 diff --git a/Ghidra/Processors/NDS32/src/test.processors/java/ghidra/test/processors/NDS32_LE_O0_EmulatorTest.java b/Ghidra/Processors/NDS32/src/test.processors/java/ghidra/test/processors/NDS32_LE_O0_EmulatorTest.java
 new file mode 100644
-index 00000000000..34e2b8ecdef
+index 000000000..3799bdeee
 --- /dev/null
 +++ b/Ghidra/Processors/NDS32/src/test.processors/java/ghidra/test/processors/NDS32_LE_O0_EmulatorTest.java
 @@ -0,0 +1,41 @@
@@ -2409,9 +2502,9 @@ index 00000000000..34e2b8ecdef
 + * Licensed under the Apache License, Version 2.0 (the "License");
 + * you may not use this file except in compliance with the License.
 + * You may obtain a copy of the License at
-+ * 
++ *
 + *      http://www.apache.org/licenses/LICENSE-2.0
-+ * 
++ *
 + * Unless required by applicable law or agreed to in writing, software
 + * distributed under the License is distributed on an "AS IS" BASIS,
 + * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -2446,7 +2539,7 @@ index 00000000000..34e2b8ecdef
 +}
 diff --git a/Ghidra/Processors/NDS32/src/test.processors/java/ghidra/test/processors/NDS32_LE_O3_EmulatorTest.java b/Ghidra/Processors/NDS32/src/test.processors/java/ghidra/test/processors/NDS32_LE_O3_EmulatorTest.java
 new file mode 100644
-index 00000000000..d90c855ed4e
+index 000000000..5343e5a27
 --- /dev/null
 +++ b/Ghidra/Processors/NDS32/src/test.processors/java/ghidra/test/processors/NDS32_LE_O3_EmulatorTest.java
 @@ -0,0 +1,41 @@
@@ -2456,9 +2549,9 @@ index 00000000000..d90c855ed4e
 + * Licensed under the Apache License, Version 2.0 (the "License");
 + * you may not use this file except in compliance with the License.
 + * You may obtain a copy of the License at
-+ * 
++ *
 + *      http://www.apache.org/licenses/LICENSE-2.0
-+ * 
++ *
 + * Unless required by applicable law or agreed to in writing, software
 + * distributed under the License is distributed on an "AS IS" BASIS,
 + * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -2491,3 +2584,6 @@ index 00000000000..d90c855ed4e
 +		return ProcessorEmulatorTestAdapter.buildEmulatorTestSuite(NDS32_LE_O3_EmulatorTest.class);
 +	}
 +}
+-- 
+2.38.1
+

@@ -1,0 +1,573 @@
+From f96b629ef323a14bc3ce2b8f32aa5beb565786cf Mon Sep 17 00:00:00 2001
+From: Joel Anderson <joelanderson333@gmail.com>
+Date: Sat, 2 Oct 2021 22:37:04 -0400
+Subject: [PATCH] 3472: align comments with code in decompiler
+
+Add a configuration option for the decompiler to align
+comments with code instead of using the fixed indentation setting.
+---
+ .../Decompiler/src/decompile/cpp/options.cc   |  11 ++
+ .../Decompiler/src/decompile/cpp/options.hh   |   6 +
+ .../src/decompile/cpp/printlanguage.cc        |  19 ++-
+ .../src/decompile/cpp/printlanguage.hh        |   2 +
+ .../DecompilePlugin/DecompilerOptions.html    |   9 +
+ .../app/decompiler/DecompileOptions.java      |  31 ++++
+ .../plugin/core/decompile/DecompilerTest.java |  77 ++++++++-
+ .../ghidra/program/model/pcode/ElementId.java | 159 +++++++++---------
+ 8 files changed, 231 insertions(+), 83 deletions(-)
+
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/options.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/options.cc
+index b85d0ea43..a1c273c95 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/options.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/options.cc
+@@ -109,6 +109,7 @@ OptionDatabase::OptionDatabase(Architecture *g)
+   registerOption(new OptionMaxLineWidth());
+   registerOption(new OptionIndentIncrement());
+   registerOption(new OptionCommentIndent());
++  registerOption(new OptionCommentIndentAlign());
+   registerOption(new OptionCommentStyle());
+   registerOption(new OptionCommentHeader());
+   registerOption(new OptionCommentInstruction());
+@@ -524,6 +525,16 @@ string OptionCommentIndent::apply(Architecture *glb,const string &p1,const strin
+   return "Comment indent set to "+p1;
+ }
+ 
++/// \class OptionCommentIndentAlign
++/// \brief Toggle whether to align the comment with the current code rather or use a fixed indentation.
++string OptionCommentIndentAlign::apply(Architecture *glb,const string &p1,const string &p2,const string &p3) const
++
++{
++  bool val = onOrOff(p1);
++  glb->print->setLineCommentIndentAlign(val);
++  return "Comment indent alignment turned "+p1;
++}
++
+ /// \class OptionCommentStyle
+ /// \brief Set the style of comment emitted by the decompiler
+ ///
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/options.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/options.hh
+index 75d79f4c8..ff351f8e3 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/options.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/options.hh
+@@ -212,6 +212,12 @@ public:
+   virtual string apply(Architecture *glb,const string &p1,const string &p2,const string &p3) const;
+ };
+ 
++class OptionCommentIndentAlign : public ArchOption {
++public:
++  OptionCommentIndentAlign(void) { name = "commentindentalign"; }	///< Constructor
++  virtual string apply(Architecture *glb,const string &p1,const string &p2,const string &p3) const;
++};
++
+ class OptionCommentStyle : public ArchOption {
+ public:
+   OptionCommentStyle(void) { name = "commentstyle"; }	///< Constructor
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/printlanguage.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/printlanguage.cc
+index 871f306cc..78035fb3c 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/printlanguage.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/printlanguage.cc
+@@ -86,6 +86,13 @@ void PrintLanguage::setLineCommentIndent(int4 val)
+   line_commentindent = val;
+ }
+ 
++/// \param val is whether to align comments with code or use a fixed indentation
++void PrintLanguage::setLineCommentIndentAlign(bool val)
++
++{
++  line_commentindentalign = val;
++}
++
+ /// By default, comments are indicated in the high-level language by preceding
+ /// them with a specific sequence of delimiter characters, and optionally
+ /// by ending the comment with another set of delimiter characters.
+@@ -590,6 +597,7 @@ void PrintLanguage::resetDefaultsInternal(void)
+   mods = 0;
+   head_comment_type = Comment::header | Comment::warningheader;
+   line_commentindent = 20;
++  line_commentindentalign = false;
+   namespc_strategy = MINIMAL_NAMESPACES;
+   instr_comment_type = Comment::user2 | Comment::warning;
+ }
+@@ -604,9 +612,14 @@ void PrintLanguage::emitLineComment(int4 indent,const Comment *comm)
+   const string &text( comm->getText() );
+   const AddrSpace *spc = comm->getAddr().getSpace();
+   uintb off = comm->getAddr().getOffset();
+-  if (indent <0)
+-    indent = line_commentindent; // User specified default indent
+-  emit->tagLine(indent);
++  if (line_commentindentalign) {
++    emit->tagLine();
++  }
++  else {
++    if (indent <0)
++      indent = line_commentindent; // User specified default indent
++    emit->tagLine(indent);
++  }
+   int4 id = emit->startComment();
+   // The comment delimeters should not be printed as
+   // comment tags, so that they won't get filled
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/printlanguage.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/printlanguage.hh
+index 69e21786d..a7983627d 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/printlanguage.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/printlanguage.hh
+@@ -250,6 +250,7 @@ private:
+   vector<NodePending> nodepend;		///< Data-flow nodes waiting to be pushed onto the RPN stack
+   int4 pending;				///< Number of data-flow nodes waiting to be pushed
+   int4 line_commentindent;		///< Number of characters a comment line should be indented
++  bool line_commentindentalign;		///< Whether to align comment lines with code or use a fixed indentation
+   string commentstart;			///< Delimiter characters for the start of a comment
+   string commentend;			///< Delimiter characters (if any) for the end of a comment
+ protected:
+@@ -430,6 +431,7 @@ public:
+   void setMaxLineSize(int4 mls) { emit->setMaxLineSize(mls); }		///< Set the maximum number of characters per line
+   void setIndentIncrement(int4 inc) { emit->setIndentIncrement(inc); }	///< Set the number of characters to indent per level of code nesting
+   void setLineCommentIndent(int4 val);					///< Set the number of characters to indent comment lines
++  void setLineCommentIndentAlign(bool val);				///< Set whether to align comment lines with code lines or not
+   void setCommentDelimeter(const string &start,const string &stop,
+ 			   bool usecommentfill);			///< Establish comment delimiters for the language
+   uint4 getInstructionComment(void) const { return instr_comment_type; }	///< Get the type of comments suitable within the body of a function
+diff --git a/Ghidra/Features/Decompiler/src/main/help/help/topics/DecompilePlugin/DecompilerOptions.html b/Ghidra/Features/Decompiler/src/main/help/help/topics/DecompilePlugin/DecompilerOptions.html
+index c8fb1f1e2..b25fda4a0 100644
+--- a/Ghidra/Features/Decompiler/src/main/help/help/topics/DecompilePlugin/DecompilerOptions.html
++++ b/Ghidra/Features/Decompiler/src/main/help/help/topics/DecompilePlugin/DecompilerOptions.html
+@@ -399,6 +399,15 @@
+ 	</p>
+       </dd>
+ <dt>
++<a name="DisplayCommentIndentAlign"></a><span class="term"><span class="bold"><strong>Align comments with code</strong></span></span>
++</dt>
++<dd>
++	<p>
++	  Aligns comment lines with the current indentation level of the decompiler output, instead of using a
++	  fixed amount of spaces. When checked, the comment line indent level option is ignored.
++	</p>
++      </dd>
++<dt>
+ <a name="DisplayCommentStyle"></a><span class="term"><span class="bold"><strong>Comment style</strong></span></span>
+ </dt>
+ <dd>
+diff --git a/Ghidra/Features/Decompiler/src/main/java/ghidra/app/decompiler/DecompileOptions.java b/Ghidra/Features/Decompiler/src/main/java/ghidra/app/decompiler/DecompileOptions.java
+index eb1bd97de..bae4ecf91 100644
+--- a/Ghidra/Features/Decompiler/src/main/java/ghidra/app/decompiler/DecompileOptions.java
++++ b/Ghidra/Features/Decompiler/src/main/java/ghidra/app/decompiler/DecompileOptions.java
+@@ -179,6 +179,13 @@ public class DecompileOptions {
+ 	private final static int COMMENTINDENT_OPTIONDEFAULT = 20;	// Must match PrintLanguage::resetDefaultsInternal
+ 	private int commentindent;
+ 
++	private final static String COMMENTINDENTALIGN_OPTIONSTRING = "Display.Comment lines aligned with code";
++	private final static String COMMENTINDENTALIGN_OPTIONDESCRIPTION =
++		"Align each comment with the indentation of the code immediately " +
++			"following it, instead of using the comment line indent level";
++	private final static boolean COMMENTINDENTALIGN_OPTIONDEFAULT = false;	// Must match PrintLanguage::resetDefaultsInternal
++	private boolean commentindentAlign;
++
+ 	private final static String COMMENTSTYLE_OPTIONSTRING = "Display.Comment style";
+ 	private final static String COMMENTSTYLE_OPTIONDESCRIPTION =
+ 		"Choice between either the C style comments /* */ or C++ style // ";
+@@ -419,6 +426,7 @@ public class DecompileOptions {
+ 		maxwidth = MAXWIDTH_OPTIONDEFAULT;
+ 		indentwidth = INDENTWIDTH_OPTIONDEFAULT;
+ 		commentindent = COMMENTINDENT_OPTIONDEFAULT;
++		commentindentAlign = COMMENTINDENTALIGN_OPTIONDEFAULT;
+ 		commentStyle = COMMENTSTYLE_OPTIONDEFAULT;
+ 		commentPREInclude = COMMENTPRE_OPTIONDEFAULT;
+ 		commentPLATEInclude = COMMENTPLATE_OPTIONDEFAULT;
+@@ -472,6 +480,7 @@ public class DecompileOptions {
+ 		maxwidth = opt.getInt(MAXWIDTH_OPTIONSTRING, MAXWIDTH_OPTIONDEFAULT);
+ 		indentwidth = opt.getInt(INDENTWIDTH_OPTIONSTRING, INDENTWIDTH_OPTIONDEFAULT);
+ 		commentindent = opt.getInt(COMMENTINDENT_OPTIONSTRING, COMMENTINDENT_OPTIONDEFAULT);
++		commentindentAlign = opt.getBoolean(COMMENTINDENTALIGN_OPTIONSTRING, COMMENTINDENTALIGN_OPTIONDEFAULT);
+ 		commentStyle = opt.getEnum(COMMENTSTYLE_OPTIONSTRING, COMMENTSTYLE_OPTIONDEFAULT);
+ 		commentEOLInclude = opt.getBoolean(COMMENTEOL_OPTIONSTRING, COMMENTEOL_OPTIONDEFAULT);
+ 		commentPREInclude = opt.getBoolean(COMMENTPRE_OPTIONSTRING, COMMENTPRE_OPTIONDEFAULT);
+@@ -589,6 +598,9 @@ public class DecompileOptions {
+ 		opt.registerOption(COMMENTINDENT_OPTIONSTRING, COMMENTINDENT_OPTIONDEFAULT,
+ 			new HelpLocation(HelpTopics.DECOMPILER, "DisplayCommentIndent"),
+ 			COMMENTINDENT_OPTIONDESCRIPTION);
++		opt.registerOption(COMMENTINDENTALIGN_OPTIONSTRING, COMMENTINDENTALIGN_OPTIONDEFAULT,
++			new HelpLocation(HelpTopics.DECOMPILER, "DisplayCommentIndentAlign"),
++			COMMENTINDENTALIGN_OPTIONDESCRIPTION);
+ 		opt.registerOption(COMMENTSTYLE_OPTIONSTRING, COMMENTSTYLE_OPTIONDEFAULT,
+ 			new HelpLocation(HelpTopics.DECOMPILER, "DisplayCommentStyle"),
+ 			COMMENTSTYLE_OPTIONDESCRIPTION);
+@@ -756,6 +768,9 @@ public class DecompileOptions {
+ 		if (commentindent != COMMENTINDENT_OPTIONDEFAULT) {
+ 			appendOption(encoder, ELEM_COMMENTINDENT, Integer.toString(commentindent), "", "");
+ 		}
++		if (commentindentAlign != COMMENTINDENTALIGN_OPTIONDEFAULT) {
++			appendOption(encoder, ELEM_COMMENTINDENTALIGN, commentindentAlign ? "on" : "off", "", "");
++		}
+ 		if (commentStyle != COMMENTSTYLE_OPTIONDEFAULT) {
+ 			String curstyle = CommentStyleEnum.CPPStyle.equals(commentStyle) ? "cplusplus" : "c";
+ 			appendOption(encoder, ELEM_COMMENTSTYLE, curstyle, "", "");
+@@ -1042,6 +1057,22 @@ public class DecompileOptions {
+ 		maxIntructionsPer = num;
+ 	}
+ 
++	public int getCommentIndent() {
++		return commentindent;
++	}
++
++	public void setCommentIndent(int indent) {
++		commentindent = indent;
++	}
++
++	public boolean isCommentIndentAlign() {
++		return commentindentAlign;
++	}
++
++	public void setCommentIndentAlign(boolean align) {
++		commentindentAlign = align;
++	}
++
+ 	public CommentStyleEnum getCommentStyle() {
+ 		return commentStyle;
+ 	}
+diff --git a/Ghidra/Features/Decompiler/src/test.slow/java/ghidra/app/plugin/core/decompile/DecompilerTest.java b/Ghidra/Features/Decompiler/src/test.slow/java/ghidra/app/plugin/core/decompile/DecompilerTest.java
+index 1044a1a4e..cb1668d84 100644
+--- a/Ghidra/Features/Decompiler/src/test.slow/java/ghidra/app/plugin/core/decompile/DecompilerTest.java
++++ b/Ghidra/Features/Decompiler/src/test.slow/java/ghidra/app/plugin/core/decompile/DecompilerTest.java
+@@ -15,10 +15,14 @@
+  */
+ package ghidra.app.plugin.core.decompile;
+ 
++import java.util.Optional;
++
+ import org.junit.*;
+ 
+ import ghidra.app.decompiler.*;
+ import ghidra.program.model.address.Address;
++import ghidra.program.model.address.AddressSpace;
++import ghidra.program.model.listing.CodeUnit;
+ import ghidra.program.model.listing.Function;
+ import ghidra.program.model.listing.Program;
+ import ghidra.test.AbstractGhidraHeadedIntegrationTest;
+@@ -28,13 +32,14 @@ import ghidra.util.task.TaskMonitor;
+ public class DecompilerTest extends AbstractGhidraHeadedIntegrationTest {
+ 	private Program prog;
+ 	private DecompInterface decompiler;
++	private long returnBytesOffset = 0x0;
+ 
+ 	@Before
+ 	public void setUp() throws Exception {
+ 
+ 		ToyProgramBuilder builder = new ToyProgramBuilder("notepad_decompiler", true);
+ 		builder.createMemory("test", "0x0", 2);
+-		builder.addBytesReturn(0x0);
++		builder.addBytesReturn(returnBytesOffset);
+ 		builder.createFunction("0x0");
+ 		prog = builder.getProgram();
+ 
+@@ -58,4 +63,74 @@ public class DecompilerTest extends AbstractGhidraHeadedIntegrationTest {
+ 		String decompilation = decompResults.getDecompiledFunction().getC();
+ 		Assert.assertNotNull(decompilation);
+ 	}
++
++	@Test
++	public void testAlignedCommentIndentation() throws Exception {
++		int indent = 20;
++		DecompileOptions options = new DecompileOptions();
++		options.setCommentIndent(indent);
++		options.setCommentIndentAlign(true);
++		options.setPRECommentIncluded(true);
++		decompiler.setOptions(options);
++
++		AddressSpace space = prog.getAddressFactory().getDefaultAddressSpace();
++
++		// add a comment to the program listing
++		Address returnBytesAddr = space.getAddress(returnBytesOffset);
++		int transaction = prog.startTransaction("add comment for indentation test");
++		String comment = "aligned-comment-indentation-test";
++		prog.getListing().getCodeUnitAt(returnBytesAddr).setComment(CodeUnit.PRE_COMMENT, comment);
++		prog.endTransaction(transaction, true);
++
++		Address addr = space.getAddress(0x0);
++		Function func = prog.getListing().getFunctionAt(addr);
++		DecompileResults decompResults = decompiler.decompileFunction(func,
++			DecompileOptions.SUGGESTED_DECOMPILE_TIMEOUT_SECS, TaskMonitor.DUMMY);
++		String decompilation = decompResults.getDecompiledFunction().getC();
++		Assert.assertNotNull(decompilation);
++
++		Optional<String> commentLineCheck = decompilation.lines().filter(line -> line.contains(comment)).findFirst();
++		Optional<String> returnLineCheck = decompilation.lines().filter(line -> line.endsWith("return;")).findFirst();
++		Assert.assertTrue(commentLineCheck.isPresent());
++		Assert.assertTrue(returnLineCheck.isPresent());
++
++		String commentLine = commentLineCheck.get();
++		String returnLine = returnLineCheck.get();
++
++		Assert.assertFalse(commentLine.startsWith(" ".repeat(indent)));
++
++		int commentIndentation = commentLine.indexOf(commentLine.stripLeading());
++		int returnIndentation = returnLine.indexOf(returnLine.stripLeading());
++		Assert.assertEquals(commentIndentation, returnIndentation);
++	}
++
++	@Test
++	public void testFixedCommentIndentation() throws Exception {
++		int indent = 20;
++		DecompileOptions options = new DecompileOptions();
++		options.setCommentIndent(indent);
++		options.setCommentIndentAlign(false);
++		options.setPRECommentIncluded(true);
++		decompiler.setOptions(options);
++
++		AddressSpace space = prog.getAddressFactory().getDefaultAddressSpace();
++
++		// add a comment to the program listing
++		Address returnBytesAddr = space.getAddress(returnBytesOffset);
++		int transaction = prog.startTransaction("add comment for indentation test");
++		String comment = "fixed-comment-indentation-test";
++		prog.getListing().getCodeUnitAt(returnBytesAddr).setComment(CodeUnit.PRE_COMMENT, comment);
++		prog.endTransaction(transaction, true);
++
++		Address addr = space.getAddress(0x0);
++		Function func = prog.getListing().getFunctionAt(addr);
++		DecompileResults decompResults = decompiler.decompileFunction(func,
++			DecompileOptions.SUGGESTED_DECOMPILE_TIMEOUT_SECS, TaskMonitor.DUMMY);
++		String decompilation = decompResults.getDecompiledFunction().getC();
++		Assert.assertNotNull(decompilation);
++
++		Optional<String> commentLine = decompilation.lines().filter(line -> line.contains(comment)).findFirst();
++		Assert.assertTrue(commentLine.isPresent());
++		Assert.assertTrue(commentLine.get().startsWith(" ".repeat(indent)));
++	}
+ }
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/ElementId.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/ElementId.java
+index 977e9c460..1e634d5dd 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/ElementId.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/ElementId.java
+@@ -275,150 +275,151 @@ public record ElementId(String name, int id) {
+ 	public static final ElementId ELEM_ANALYZEFORLOOPS = new ElementId("analyzeforloops", 176);
+ 	public static final ElementId ELEM_COMMENTHEADER = new ElementId("commentheader", 177);
+ 	public static final ElementId ELEM_COMMENTINDENT = new ElementId("commentindent", 178);
++	public static final ElementId ELEM_COMMENTINDENTALIGN = new ElementId("commendindentalign", 179);
+ 	public static final ElementId ELEM_COMMENTINSTRUCTION =
+-		new ElementId("commentinstruction", 179);
+-	public static final ElementId ELEM_COMMENTSTYLE = new ElementId("commentstyle", 180);
++		new ElementId("commentinstruction", 180);
++	public static final ElementId ELEM_COMMENTSTYLE = new ElementId("commentstyle", 181);
+ 	public static final ElementId ELEM_CONVENTIONPRINTING =
+-		new ElementId("conventionprinting", 181);
+-	public static final ElementId ELEM_CURRENTACTION = new ElementId("currentaction", 182);
+-	public static final ElementId ELEM_DEFAULTPROTOTYPE = new ElementId("defaultprototype", 183);
++		new ElementId("conventionprinting", 182);
++	public static final ElementId ELEM_CURRENTACTION = new ElementId("currentaction", 183);
++	public static final ElementId ELEM_DEFAULTPROTOTYPE = new ElementId("defaultprototype", 184);
+ 	public static final ElementId ELEM_ERRORREINTERPRETED =
+-		new ElementId("errorreinterpreted", 184);
++		new ElementId("errorreinterpreted", 185);
+ 	public static final ElementId ELEM_ERRORTOOMANYINSTRUCTIONS =
+-		new ElementId("errortoomanyinstructions", 185);
++		new ElementId("errortoomanyinstructions", 186);
+ 	public static final ElementId ELEM_ERRORUNIMPLEMENTED =
+-		new ElementId("errorunimplemented", 186);
+-	public static final ElementId ELEM_EXTRAPOP = new ElementId("extrapop", 187);
++		new ElementId("errorunimplemented", 187);
++	public static final ElementId ELEM_EXTRAPOP = new ElementId("extrapop", 188);
+ 	public static final ElementId ELEM_IGNOREUNIMPLEMENTED =
+-		new ElementId("ignoreunimplemented", 188);
+-	public static final ElementId ELEM_INDENTINCREMENT = new ElementId("indentincrement", 189);
+-	public static final ElementId ELEM_INFERCONSTPTR = new ElementId("inferconstptr", 190);
+-	public static final ElementId ELEM_INLINE = new ElementId("inline", 191);
+-	public static final ElementId ELEM_INPLACEOPS = new ElementId("inplaceops", 192);
+-	public static final ElementId ELEM_INTEGERFORMAT = new ElementId("integerformat", 193);
+-	public static final ElementId ELEM_JUMPLOAD = new ElementId("jumpload", 194);
+-	public static final ElementId ELEM_MAXINSTRUCTION = new ElementId("maxinstruction", 195);
+-	public static final ElementId ELEM_MAXLINEWIDTH = new ElementId("maxlinewidth", 196);
+-	public static final ElementId ELEM_NAMESPACESTRATEGY = new ElementId("namespacestrategy", 197);
+-	public static final ElementId ELEM_NOCASTPRINTING = new ElementId("nocastprinting", 198);
+-	public static final ElementId ELEM_NORETURN = new ElementId("noreturn", 199);
+-	public static final ElementId ELEM_NULLPRINTING = new ElementId("nullprinting", 200);
+-	public static final ElementId ELEM_OPTIONSLIST = new ElementId("optionslist", 201);
+-	public static final ElementId ELEM_PARAM1 = new ElementId("param1", 202);
+-	public static final ElementId ELEM_PARAM2 = new ElementId("param2", 203);
+-	public static final ElementId ELEM_PARAM3 = new ElementId("param3", 204);
+-	public static final ElementId ELEM_PROTOEVAL = new ElementId("protoeval", 205);
+-	public static final ElementId ELEM_INDENTATIONSTYLE = new ElementId("indentationstyle", 206);
+-	public static final ElementId ELEM_SETACTION = new ElementId("setaction", 207);
+-	public static final ElementId ELEM_SETLANGUAGE = new ElementId("setlanguage", 208);
+-	public static final ElementId ELEM_STRUCTALIGN = new ElementId("structalign", 209);
+-	public static final ElementId ELEM_TOGGLERULE = new ElementId("togglerule", 210);
+-	public static final ElementId ELEM_WARNING = new ElementId("warning", 211);
++		new ElementId("ignoreunimplemented", 189);
++	public static final ElementId ELEM_INDENTINCREMENT = new ElementId("indentincrement", 190);
++	public static final ElementId ELEM_INFERCONSTPTR = new ElementId("inferconstptr", 191);
++	public static final ElementId ELEM_INLINE = new ElementId("inline", 192);
++	public static final ElementId ELEM_INPLACEOPS = new ElementId("inplaceops", 193);
++	public static final ElementId ELEM_INTEGERFORMAT = new ElementId("integerformat", 194);
++	public static final ElementId ELEM_JUMPLOAD = new ElementId("jumpload", 195);
++	public static final ElementId ELEM_MAXINSTRUCTION = new ElementId("maxinstruction", 196);
++	public static final ElementId ELEM_MAXLINEWIDTH = new ElementId("maxlinewidth", 197);
++	public static final ElementId ELEM_NAMESPACESTRATEGY = new ElementId("namespacestrategy", 198);
++	public static final ElementId ELEM_NOCASTPRINTING = new ElementId("nocastprinting", 199);
++	public static final ElementId ELEM_NORETURN = new ElementId("noreturn", 200);
++	public static final ElementId ELEM_NULLPRINTING = new ElementId("nullprinting", 201);
++	public static final ElementId ELEM_OPTIONSLIST = new ElementId("optionslist", 202);
++	public static final ElementId ELEM_PARAM1 = new ElementId("param1", 203);
++	public static final ElementId ELEM_PARAM2 = new ElementId("param2", 204);
++	public static final ElementId ELEM_PARAM3 = new ElementId("param3", 205);
++	public static final ElementId ELEM_PROTOEVAL = new ElementId("protoeval", 206);
++	public static final ElementId ELEM_INDENTATIONSTYLE = new ElementId("indentationstyle", 207);
++	public static final ElementId ELEM_SETACTION = new ElementId("setaction", 208);
++	public static final ElementId ELEM_SETLANGUAGE = new ElementId("setlanguage", 209);
++	public static final ElementId ELEM_STRUCTALIGN = new ElementId("structalign", 210);
++	public static final ElementId ELEM_TOGGLERULE = new ElementId("togglerule", 211);
++	public static final ElementId ELEM_WARNING = new ElementId("warning", 212);
+ 
+ 	// jumptable
+-	public static final ElementId ELEM_BASICOVERRIDE = new ElementId("basicoverride", 212);
+-	public static final ElementId ELEM_DEST = new ElementId("dest", 213);
+-	public static final ElementId ELEM_JUMPTABLE = new ElementId("jumptable", 214);
+-	public static final ElementId ELEM_LOADTABLE = new ElementId("loadtable", 215);
+-	public static final ElementId ELEM_NORMADDR = new ElementId("normaddr", 216);
+-	public static final ElementId ELEM_NORMHASH = new ElementId("normhash", 217);
+-	public static final ElementId ELEM_STARTVAL = new ElementId("startval", 218);
++	public static final ElementId ELEM_BASICOVERRIDE = new ElementId("basicoverride", 213);
++	public static final ElementId ELEM_DEST = new ElementId("dest", 214);
++	public static final ElementId ELEM_JUMPTABLE = new ElementId("jumptable", 215);
++	public static final ElementId ELEM_LOADTABLE = new ElementId("loadtable", 216);
++	public static final ElementId ELEM_NORMADDR = new ElementId("normaddr", 217);
++	public static final ElementId ELEM_NORMHASH = new ElementId("normhash", 218);
++	public static final ElementId ELEM_STARTVAL = new ElementId("startval", 219);
+ 
+ 	// override
+-	public static final ElementId ELEM_DEADCODEDELAY = new ElementId("deadcodedelay", 219);
+-	public static final ElementId ELEM_FLOW = new ElementId("flow", 220);
+-	public static final ElementId ELEM_FORCEGOTO = new ElementId("forcegoto", 221);
+-	public static final ElementId ELEM_INDIRECTOVERRIDE = new ElementId("indirectoverride", 221);
+-	public static final ElementId ELEM_MULTISTAGEJUMP = new ElementId("multistagejump", 223);
+-	public static final ElementId ELEM_OVERRIDE = new ElementId("override", 224);
+-	public static final ElementId ELEM_PROTOOVERRIDE = new ElementId("protooverride", 225);
++	public static final ElementId ELEM_DEADCODEDELAY = new ElementId("deadcodedelay", 220);
++	public static final ElementId ELEM_FLOW = new ElementId("flow", 221);
++	public static final ElementId ELEM_FORCEGOTO = new ElementId("forcegoto", 222);
++	public static final ElementId ELEM_INDIRECTOVERRIDE = new ElementId("indirectoverride", 223);
++	public static final ElementId ELEM_MULTISTAGEJUMP = new ElementId("multistagejump", 224);
++	public static final ElementId ELEM_OVERRIDE = new ElementId("override", 225);
++	public static final ElementId ELEM_PROTOOVERRIDE = new ElementId("protooverride", 226);
+ 
+ 	// prefersplit
+-	public static final ElementId ELEM_PREFERSPLIT = new ElementId("prefersplit", 226);
++	public static final ElementId ELEM_PREFERSPLIT = new ElementId("prefersplit", 227);
+ 
+ 	// callgraph
+-	public static final ElementId ELEM_CALLGRAPH = new ElementId("callgraph", 227);
+-	public static final ElementId ELEM_NODE = new ElementId("node", 228);
++	public static final ElementId ELEM_CALLGRAPH = new ElementId("callgraph", 228);
++	public static final ElementId ELEM_NODE = new ElementId("node", 229);
+ 
+ 	// varmap
+-	public static final ElementId ELEM_LOCALDB = new ElementId("localdb", 229);
++	public static final ElementId ELEM_LOCALDB = new ElementId("localdb", 230);
+ 
+ 	// ghidra_process
+-	public static final ElementId ELEM_DOC = new ElementId("doc", 230);
++	public static final ElementId ELEM_DOC = new ElementId("doc", 231);
+ 
+ 	// loadimage_xml
+-//	public static final ElementId ELEM_BINARYIMAGE = new ElementId("binaryimage", 231);
+-//	public static final ElementId ELEM_BYTECHUNK = new ElementId("bytechunk", 232);
++//	public static final ElementId ELEM_BINARYIMAGE = new ElementId("binaryimage", 232);
++//	public static final ElementId ELEM_BYTECHUNK = new ElementId("bytechunk", 233);
+ 
+ 	// sleigh_arch
+-//	public static final ElementId ELEM_COMPILER = new ElementId("compiler", 233);
+-//	public static final ElementId ELEM_DESCRIPTION = new ElementId("description", 234);
+-//	public static final ElementId ELEM_LANGUAGE = new ElementId("language", 235);
++//	public static final ElementId ELEM_COMPILER = new ElementId("compiler", 234);
++//	public static final ElementId ELEM_DESCRIPTION = new ElementId("description", 235);
++//	public static final ElementId ELEM_LANGUAGE = new ElementId("language", 236);
+ //	public static final ElementId ELEM_LANGUAGE_DEFINITIONS =
+-//		new ElementId("language_definitions", 236);
++//		new ElementId("language_definitions", 237);
+ 
+ 	// xml_arch
+-//	public static final ElementId ELEM_XML_SAVEFILE = new ElementId("xml_savefile", 237);
++//	public static final ElementId ELEM_XML_SAVEFILE = new ElementId("xml_savefile", 238);
+ 
+ 	// raw_arch
+-//	public static final ElementId ELEM_RAW_SAVEFILE = new ElementId("raw_savefile", 238);
++//	public static final ElementId ELEM_RAW_SAVEFILE = new ElementId("raw_savefile", 239);
+ 
+ 	// ghidra_arch
+-	public static final int COMMAND_ISNAMEUSED = 239;
++	public static final int COMMAND_ISNAMEUSED = 240;
+ 	public static final ElementId ELEM_COMMAND_ISNAMEUSED =
+ 		new ElementId("command_isnameused", COMMAND_ISNAMEUSED);
+-	public static final int COMMAND_GETBYTES = 240;
++	public static final int COMMAND_GETBYTES = 241;
+ 	public static final ElementId ELEM_COMMAND_GETBYTES =
+ 		new ElementId("command_getbytes", COMMAND_GETBYTES);
+-	public static final int COMMAND_GETCALLFIXUP = 241;
++	public static final int COMMAND_GETCALLFIXUP = 242;
+ 	public static final ElementId ELEM_COMMAND_GETCALLFIXUP =
+ 		new ElementId("command_getcallfixup", COMMAND_GETCALLFIXUP);
+-	public static final int COMMAND_GETCALLMECH = 242;
++	public static final int COMMAND_GETCALLMECH = 243;
+ 	public static final ElementId ELEM_COMMAND_GETCALLMECH =
+ 		new ElementId("command_getcallmech", COMMAND_GETCALLMECH);
+-	public static final int COMMAND_GETCALLOTHERFIXUP = 243;
++	public static final int COMMAND_GETCALLOTHERFIXUP = 244;
+ 	public static final ElementId ELEM_COMMAND_GETCALLOTHERFIXUP =
+ 		new ElementId("command_getcallotherfixup", COMMAND_GETCALLOTHERFIXUP);
+-	public static final int COMMAND_GETCODELABEL = 244;
++	public static final int COMMAND_GETCODELABEL = 245;
+ 	public static final ElementId ELEM_COMMAND_GETCODELABEL =
+ 		new ElementId("command_getcodelabel", COMMAND_GETCODELABEL);
+-	public static final int COMMAND_GETCOMMENTS = 245;
++	public static final int COMMAND_GETCOMMENTS = 246;
+ 	public static final ElementId ELEM_COMMAND_GETCOMMENTS =
+ 		new ElementId("command_getcomments", COMMAND_GETCOMMENTS);
+-	public static final int COMMAND_GETCPOOLREF = 246;
++	public static final int COMMAND_GETCPOOLREF = 247;
+ 	public static final ElementId ELEM_COMMAND_GETCPOOLREF =
+ 		new ElementId("command_getcpoolref", COMMAND_GETCPOOLREF);
+-	public static final int COMMAND_GETDATATYPE = 247;
++	public static final int COMMAND_GETDATATYPE = 248;
+ 	public static final ElementId ELEM_COMMAND_GETDATATYPE =
+ 		new ElementId("command_getdatatype", COMMAND_GETDATATYPE);
+-	public static final int COMMAND_GETEXTERNALREF = 248;
++	public static final int COMMAND_GETEXTERNALREF = 249;
+ 	public static final ElementId ELEM_COMMAND_GETEXTERNALREF =
+ 		new ElementId("command_getexternalref", COMMAND_GETEXTERNALREF);
+-	public static final int COMMAND_GETMAPPEDSYMBOLS = 249;
++	public static final int COMMAND_GETMAPPEDSYMBOLS = 250;
+ 	public static final ElementId ELEM_COMMAND_GETMAPPEDSYMBOLS =
+ 		new ElementId("command_getmappedsymbols", COMMAND_GETMAPPEDSYMBOLS);
+-	public static final int COMMAND_GETNAMESPACEPATH = 250;
++	public static final int COMMAND_GETNAMESPACEPATH = 251;
+ 	public static final ElementId ELEM_COMMAND_GETNAMESPACEPATH =
+ 		new ElementId("command_getnamespacepath", COMMAND_GETNAMESPACEPATH);
+-	public static final int COMMAND_GETPCODE = 251;
++	public static final int COMMAND_GETPCODE = 252;
+ 	public static final ElementId ELEM_COMMAND_GETPCODE =
+ 		new ElementId("command_getpcode", COMMAND_GETPCODE);
+-	public static final int COMMAND_GETPCODEEXECUTABLE = 252;
++	public static final int COMMAND_GETPCODEEXECUTABLE = 253;
+ 	public static final ElementId ELEM_COMMAND_GETPCODEEXECUTABLE =
+ 		new ElementId("command_getpcodeexecutable", COMMAND_GETPCODEEXECUTABLE);
+-	public static final int COMMAND_GETREGISTER = 253;
++	public static final int COMMAND_GETREGISTER = 254;
+ 	public static final ElementId ELEM_COMMAND_GETREGISTER =
+ 		new ElementId("command_getregister", COMMAND_GETREGISTER);
+-	public static final int COMMAND_GETREGISTERNAME = 254;
++	public static final int COMMAND_GETREGISTERNAME = 255;
+ 	public static final ElementId ELEM_COMMAND_GETREGISTERNAME =
+ 		new ElementId("command_getregistername", COMMAND_GETREGISTERNAME);
+-	public static final int COMMAND_GETSTRINGDATA = 255;
++	public static final int COMMAND_GETSTRINGDATA = 256;
+ 	public static final ElementId ELEM_COMMAND_GETSTRINGDATA =
+ 		new ElementId("command_getstring", COMMAND_GETSTRINGDATA);
+-	public static final int COMMAND_GETTRACKEDREGISTERS = 256;
++	public static final int COMMAND_GETTRACKEDREGISTERS = 257;
+ 	public static final ElementId ELEM_COMMAND_GETTRACKEDREGISTERS =
+ 		new ElementId("command_gettrackedregisters", COMMAND_GETTRACKEDREGISTERS);
+-	public static final int COMMAND_GETUSEROPNAME = 257;
++	public static final int COMMAND_GETUSEROPNAME = 258;
+ 	public static final ElementId ELEM_COMMAND_GETUSEROPNAME =
+ 		new ElementId("command_getuseropname", COMMAND_GETUSEROPNAME);
+ 
+-- 
+2.38.1
+

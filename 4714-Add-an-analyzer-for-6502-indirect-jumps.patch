@@ -1,5 +1,19 @@
+From 2968826fea50d358af04b6ae139e4301a14611b5 Mon Sep 17 00:00:00 2001
+From: Alessandro Gatti <a.gatti@frob.it>
+Date: Fri, 4 Nov 2022 12:36:50 +0100
+Subject: [PATCH] 4714: Add an analyzer for 6502 indirect jumps.
+
+This adds an analyzer for non-CMOS 6502 variants that recalculates the
+target address of indirect jumps whose address crosses a page boundary,
+to compensate for a known hardware bug.
+---
+ Ghidra/Processors/6502/build.gradle           |   7 +-
+ ...S6502IndirectJumpPageCrossingAnalyzer.java | 132 ++++++++++++++++++
+ 2 files changed, 138 insertions(+), 1 deletion(-)
+ create mode 100644 Ghidra/Processors/6502/src/main/java/ghidra/app/plugin/core/analysis/MOS6502IndirectJumpPageCrossingAnalyzer.java
+
 diff --git a/Ghidra/Processors/6502/build.gradle b/Ghidra/Processors/6502/build.gradle
-index 1e81b0c56d3..053340c5d7f 100644
+index 1e81b0c56..053340c5d 100644
 --- a/Ghidra/Processors/6502/build.gradle
 +++ b/Ghidra/Processors/6502/build.gradle
 @@ -14,9 +14,14 @@
@@ -20,7 +34,7 @@ index 1e81b0c56d3..053340c5d7f 100644
 +}
 diff --git a/Ghidra/Processors/6502/src/main/java/ghidra/app/plugin/core/analysis/MOS6502IndirectJumpPageCrossingAnalyzer.java b/Ghidra/Processors/6502/src/main/java/ghidra/app/plugin/core/analysis/MOS6502IndirectJumpPageCrossingAnalyzer.java
 new file mode 100644
-index 00000000000..b913d9adf63
+index 000000000..63636a0b8
 --- /dev/null
 +++ b/Ghidra/Processors/6502/src/main/java/ghidra/app/plugin/core/analysis/MOS6502IndirectJumpPageCrossingAnalyzer.java
 @@ -0,0 +1,132 @@
@@ -115,33 +129,33 @@ index 00000000000..b913d9adf63
 +                    (instr.getOperandType(0) & OperandType.INDIRECT) != OperandType.INDIRECT) {
 +                continue;
 +            }
-+            
++
 +            Object[] operandObjects = instr.getOpObjects(0);
 +            if (operandObjects[0] instanceof Scalar) {
 +                Scalar scalarOperand = (Scalar) operandObjects[0];
 +                long indirectSource = scalarOperand.getUnsignedValue();
 +                if ((indirectSource & 0xFF) == 0xFF) {
 +                    try {
-+                    	Address originalIndirectSourceAddress = addressSpace.getAddress(indirectSource);
-+                    	long originalTarget = (long) memory.getByte(originalIndirectSourceAddress) +
-+                    			((long) memory.getByte(originalIndirectSourceAddress.add(1))) << 8;
-+                    	Address originalTargetAddress = addressSpace.getAddress(originalTarget);
-+                    	long effectiveTarget = (long) memory.getByte(originalIndirectSourceAddress) +
-+                    			((long) memory.getByte(addressSpace.getAddress(indirectSource & 0xFF00))) << 8;
-+                    	Address effectiveTargetAddress = addressSpace.getAddress(effectiveTarget);
++			Address originalIndirectSourceAddress = addressSpace.getAddress(indirectSource);
++			long originalTarget = (long) memory.getByte(originalIndirectSourceAddress) +
++					((long) memory.getByte(originalIndirectSourceAddress.add(1))) << 8;
++			Address originalTargetAddress = addressSpace.getAddress(originalTarget);
++			long effectiveTarget = (long) memory.getByte(originalIndirectSourceAddress) +
++					((long) memory.getByte(addressSpace.getAddress(indirectSource & 0xFF00))) << 8;
++			Address effectiveTargetAddress = addressSpace.getAddress(effectiveTarget);
 +
-+                    	// Remove previous references that did not consider the bug.
++			// Remove previous references that did not consider the bug.
 +                        Reference[] existingReferences = instr.getOperandReferences(0);
 +                        for (int referenceIndex = 0; referenceIndex < existingReferences.length; referenceIndex++) {
-+                        	if (existingReferences[referenceIndex].getFromAddress().compareTo(instr.getAddress()) == 0 &&
-+                        			existingReferences[referenceIndex].getToAddress().compareTo(originalTargetAddress) == 0) {
-+                        		instr.removeOperandReference(referenceIndex, originalTargetAddress);
-+                        	}
++				if (existingReferences[referenceIndex].getFromAddress().compareTo(instr.getAddress()) == 0 &&
++						existingReferences[referenceIndex].getToAddress().compareTo(originalTargetAddress) == 0) {
++					instr.removeOperandReference(referenceIndex, originalTargetAddress);
++				}
 +                        }
-+                        
++
 +                        Reference reference = referenceManager.addMemoryReference(instr.getAddress(),
-+                        		effectiveTargetAddress, RefType.JUMP_OVERRIDE_UNCONDITIONAL,
-+                        		SourceType.ANALYSIS, 0);
++					effectiveTargetAddress, RefType.JUMP_OVERRIDE_UNCONDITIONAL,
++					SourceType.ANALYSIS, 0);
 +                        instr.setPrimaryMemoryReference(reference);
 +                    } catch (MemoryAccessException e) {
 +                        // Unless the computed indirect target is pointing to an unmapped memory area, this
@@ -156,3 +170,6 @@ index 00000000000..b913d9adf63
 +        return true;
 +    }
 +}
+-- 
+2.38.1
+

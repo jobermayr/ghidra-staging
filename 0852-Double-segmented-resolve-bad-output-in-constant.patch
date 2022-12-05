@@ -1,8 +1,28 @@
+From 3557993101348688d0d26cbde6d4f62ba8039226 Mon Sep 17 00:00:00 2001
+From: Gregory Morse <gregory.morse@live.com>
+Date: Sun, 28 Jul 2019 17:35:17 +0200
+Subject: [PATCH] 0852: Double segmented resolve bad output in constants
+
+Instead of printing the global variable, relics like "ram0x000006d0" occur because the resolver is run twice, the first time on a near/far pointer, the second time on a RAM address which it treats like a segmented far pointer due to its size - and this is wrong behavior.  Yet the ptr check flag is set specifically to prevent this yet never inquired.
+
+Update type.cc
+Update printc.cc
+Update coreaction.cc
+Update ruleaction.cc
+---
+ Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc  | 6 +++---
+ .../Decompiler/src/decompile/cpp/funcdata_varnode.cc        | 2 +-
+ Ghidra/Features/Decompiler/src/decompile/cpp/printc.cc      | 2 +-
+ Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc  | 2 +-
+ Ghidra/Features/Decompiler/src/decompile/cpp/type.cc        | 3 ++-
+ Ghidra/Features/Decompiler/src/decompile/cpp/type.hh        | 2 +-
+ 6 files changed, 9 insertions(+), 8 deletions(-)
+
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
-index b2ac97b7c29..ffc80b4420e 100644
+index e6b4e41da..a434117bd 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
-@@ -4236,14 +4236,14 @@ void ActionInferTypes::propagateSpacebaseRef(Funcdata &data,Varnode *spcvn)
+@@ -4716,14 +4716,14 @@ void ActionInferTypes::propagateSpacebaseRef(Funcdata &data,Varnode *spcvn)
      switch(op->code()) {
      case CPUI_COPY:
        vn = op->getIn(0);
@@ -19,7 +39,7 @@ index b2ac97b7c29..ffc80b4420e 100644
  	propagateRef(data,op->getOut(),addr);
        }
        break;
-@@ -4251,7 +4251,7 @@ void ActionInferTypes::propagateSpacebaseRef(Funcdata &data,Varnode *spcvn)
+@@ -4731,7 +4731,7 @@ void ActionInferTypes::propagateSpacebaseRef(Funcdata &data,Varnode *spcvn)
        vn = op->getIn(1);
        if (vn->isConstant()) {
  	uintb off = vn->getOffset() * op->getIn(2)->getOffset();
@@ -28,25 +48,37 @@ index b2ac97b7c29..ffc80b4420e 100644
  	propagateRef(data,op->getOut(),addr);
        }
        break;
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/funcdata_varnode.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/funcdata_varnode.cc
+index 0c4275f15..fa6ba70ed 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/funcdata_varnode.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/funcdata_varnode.cc
+@@ -1096,7 +1096,7 @@ Symbol *Funcdata::linkSymbolReference(Varnode *vn)
+   if (sb->getMetatype() != TYPE_SPACEBASE)
+       return (Symbol *)0;
+   Scope *scope = sb->getMap();
+-  Address addr = sb->getAddress(vn->getOffset(),in0->getSize(),op->getAddr());
++  Address addr = sb->getAddress(vn->getOffset(),in0->getSize(),op->getAddr(),vn->isPtrCheck());
+   if (addr.isInvalid())
+     throw LowlevelError("Unable to generate proper address from spacebase");
+   SymbolEntry *entry = scope->queryContainer(addr,1,Address());
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/printc.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/printc.cc
-index 3d6e4a6d9fa..b2f0fdb7553 100644
+index 5c90024a2..6585db37a 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/printc.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/printc.cc
-@@ -772,7 +772,8 @@ void PrintC::opPtrsub(const PcodeOp *op)
-   else if (ct->getMetatype() == TYPE_SPACEBASE) {
-     TypeSpacebase *sb = (TypeSpacebase *)ct;
-     Scope *scope = sb->getMap();
--    Address addr = sb->getAddress(op->getIn(1)->getOffset(),in0->getSize(),op->getAddr());
-+    Address addr = sb->getAddress(op->getIn(1)->getOffset(),in0->getSize(),op->getAddr(),
-+      op->getIn(1)->isPtrCheck());
-     if (addr.isInvalid())
-       throw LowlevelError("Unable to generate proper address from spacebase");
-     SymbolEntry *entry = scope->queryContainer(addr,1,Address());
+@@ -976,7 +976,7 @@ void PrintC::opPtrsub(const PcodeOp *op)
+     }
+     if (symbol == (Symbol *)0) {
+       TypeSpacebase *sb = (TypeSpacebase *)ct;
+-      Address addr = sb->getAddress(in1const,in0->getSize(),op->getAddr());
++      Address addr = sb->getAddress(in1const,in0->getSize(),op->getAddr(),op->getIn(1)->isPtrCheck());
+       pushUnnamedLocation(addr,(Varnode *)0,op);
+     }
+     else {
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc
-index dc4123c3fbb..c8b60ab5a70 100644
+index 973a7a31d..bf61d2bb2 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc
-@@ -6109,7 +6109,7 @@ int4 RulePtrsubCharConstant::applyOp(PcodeOp *op,Funcdata &data)
+@@ -6814,7 +6814,7 @@ int4 RulePtrsubCharConstant::applyOp(PcodeOp *op,Funcdata &data)
    if (outtype->getMetatype() != TYPE_PTR) return 0;
    Datatype *basetype = outtype->getPtrTo();
    if (!basetype->isCharPrint()) return 0;
@@ -56,10 +88,10 @@ index dc4123c3fbb..c8b60ab5a70 100644
    if (!scope->isReadOnly(symaddr,1,op->getAddr()))
      return 0;
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/type.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/type.cc
-index d575d55153f..b0036492835 100644
+index 316074389..22ae5746e 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/type.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/type.cc
-@@ -1164,9 +1164,10 @@ int4 TypeSpacebase::compareDependency(const Datatype &op) const
+@@ -2556,10 +2556,11 @@ int4 TypeSpacebase::compareDependency(const Datatype &op) const
  /// \param sz is the size of offset (as a pointer)
  /// \param point is a "context" reference for the request
  /// \return the referred to Address
@@ -67,20 +99,24 @@ index d575d55153f..b0036492835 100644
 +Address TypeSpacebase::getAddress(uintb off,int4 sz,const Address &point,bool ptrCheck) const
  
  {
+   uintb fullEncoding;
 +  if (ptrCheck) return Address(spaceid,off);
-   return glb->resolveConstant(spaceid,off,sz,point);
- }
- 
+   // Currently a constant off of a global spacebase must be a full pointer encoding
+   if (localframe.isInvalid())
+     sz = -1;	// Set size to -1 to guarantee that full encoding recovery isn't launched
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/type.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/type.hh
-index 7033e230303..8a5c5035969 100644
+index 78b6fe4d2..63d378d25 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/type.hh
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/type.hh
-@@ -367,7 +367,7 @@ public:
+@@ -605,7 +605,7 @@ public:
    TypeSpacebase(AddrSpace *id,const Address &frame,Architecture *g)
      : Datatype(0,TYPE_SPACEBASE), localframe(frame) { spaceid = id; glb = g; }
    Scope *getMap(void) const;	///< Get the symbol table indexed by \b this
 -  Address getAddress(uintb off,int4 sz,const Address &point) const;	///< Construct an Address given an offset
 +  Address getAddress(uintb off,int4 sz,const Address &point,bool ptrCheck) const;	///< Construct an Address given an offset
    virtual Datatype *getSubType(uintb off,uintb *newoff) const;
-   virtual int4 compare(const Datatype &op,int4 level) const;
-   virtual int4 compareDependency(const Datatype &op) const; // For tree structure
+   virtual Datatype *nearestArrayedComponentForward(uintb off,uintb *newoff,int4 *elSize) const;
+   virtual Datatype *nearestArrayedComponentBackward(uintb off,uintb *newoff,int4 *elSize) const;
+-- 
+2.38.1
+
