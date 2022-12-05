@@ -1,0 +1,238 @@
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/block.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/block.cc
+index 9b6d8d87e57..6ae384074b7 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/block.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/block.cc
+@@ -1323,6 +1323,20 @@ void BlockGraph::restoreXmlBody(List::const_iterator &iter,List::const_iterator
+   }
+ }
+ 
++int4 BlockGraph::getInnerBlockDepth(void)
++
++{
++  int4 depth;
++  int4 maxDepth = 0;
++  for(int4 i=0;i<list.size();++i){
++    depth = list[i]->getBlockDepth();
++    if(depth>maxDepth){
++	maxDepth=depth;
++    }
++  }
++  return maxDepth;
++}
++
+ /// This is currently just a wrapper around the FlowBlock::restoreXml()
+ /// that sets of the BlockMap resolver
+ /// \param el is the root \<block> tag
+@@ -2505,6 +2519,12 @@ bool BlockBasic::isDoNothing(void) const
+   return hasOnlyMarkers();
+ }
+ 
++int4 BlockBasic::getOpSize(void)
++
++{
++  return op.size();
++}
++
+ /// In terms of machine instructions, a basic block always covers a range of addresses,
+ /// from its first instruction to its last. This method establishes that range.
+ /// \param beg is the address of the first instruction in the block
+@@ -2747,6 +2767,13 @@ FlowBlock *BlockList::getSplitPoint(void)
+   return getBlock(getSize()-1)->getSplitPoint();
+ }
+ 
++int4 BlockList::getBlockDepth(void)
++
++{
++  // list join block together but don't increase block depth
++  return getInnerBlockDepth();
++}
++
+ void BlockList::printHeader(ostream &s) const
+ 
+ {
+@@ -2831,6 +2858,13 @@ void BlockCondition::saveXmlHeader(ostream &s) const
+   a_v(s,"opcode",nm);
+ }
+ 
++int4 BlockCondition::getBlockDepth(void)
++
++{
++  // conditions join block together but don't increase block depth
++  return getInnerBlockDepth();
++}
++
+ void BlockIf::markUnstructured(void)
+ 
+ {
+@@ -3185,6 +3219,18 @@ FlowBlock *BlockSwitch::nextFlowAfter(const FlowBlock *bl) const
+   return getParent()->nextFlowAfter(this);
+ }
+ 
++int4 BlockSwitch::getBlockDepth(void){
++  int4 i;
++  int4 maxDepth=0;
++  for(i=0;i<caseblocks.size();++i){
++      int4 depth=caseblocks[i].block->getBlockDepth();
++      if(depth>maxDepth){
++	  maxDepth=depth;
++      }
++  }
++  return maxDepth+2; // +1 for switch block and +1 for case/default block
++}
++
+ BlockMap::BlockMap(const BlockMap &op2)
+ 
+ {
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/block.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/block.hh
+index 30f867a35ef..401c97dfedd 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/block.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/block.hh
+@@ -181,6 +181,7 @@ public:
+   /// \param enditer marks the end of the XML tags
+   /// \param resolver is used to recover FlowBlock objects based on XML references
+   virtual void restoreXmlBody(List::const_iterator &iter,List::const_iterator enditer,BlockMap &resolver) {}
++  virtual int4 getBlockDepth(void) {return 0;}		///< Return the depth in code block of \b this
+   void saveXmlEdges(ostream &s) const;			///< Save edge information to an XML stream
+   void restoreXmlEdges(List::const_iterator &iter,List::const_iterator enditer,BlockMap &resolver);
+   void saveXml(ostream &s) const;			///< Write out \b this to an XML stream
+@@ -299,6 +300,8 @@ public:
+   virtual void finalizePrinting(const Funcdata &data) const;
+   virtual void saveXmlBody(ostream &s) const;
+   virtual void restoreXmlBody(List::const_iterator &iter,List::const_iterator enditer,BlockMap &resolver);
++  virtual int4 getInnerBlockDepth();					///< Return max depth of child blocks
++  virtual int4 getBlockDepth() {return getInnerBlockDepth()+1;}
+   void restoreXml(const Element *el,const AddrSpaceManager *m);	///< Restore \b this BlockGraph from an XML stream
+   void addEdge(FlowBlock *begin,FlowBlock *end);		///< Add a directed edge between component FlowBlocks
+   void addLoopEdge(FlowBlock *begin,int4 outindex);		///< Mark a given edge as a \e loop edge
+@@ -401,6 +404,7 @@ public:
+   list<PcodeOp *>::const_iterator beginOp(void) const { return op.begin(); }	///< Return an iterator to the beginning of the PcodeOps
+   list<PcodeOp *>::const_iterator endOp(void) const { return op.end(); }	///< Return an iterator to the end of the PcodeOps
+   bool emptyOp(void) const { return op.empty(); }		///< Return \b true if \b block contains no operations
++  int4 getOpSize(void);					///< Number of PcodeOps contained in \b this block
+   static bool noInterveningStatement(PcodeOp *first,int4 path,PcodeOp *last);
+ };
+ 
+@@ -501,6 +505,7 @@ public:
+   virtual PcodeOp *lastOp(void) const;
+   virtual bool negateCondition(bool toporbottom);
+   virtual FlowBlock *getSplitPoint(void);
++  virtual int4 getBlockDepth(void);
+ };
+ 
+ /// \brief Two conditional blocks combined into one conditional using BOOL_AND or BOOL_OR
+@@ -530,6 +535,7 @@ public:
+   virtual bool isComplex(void) const { return getBlock(0)->isComplex(); }
+   virtual FlowBlock *nextFlowAfter(const FlowBlock *bl) const;
+   virtual void saveXmlHeader(ostream &s) const;
++  virtual int4 getBlockDepth(void);
+ };
+ 
+ /// \brief A basic "if" block
+@@ -675,6 +681,7 @@ public:
+   virtual void emit(PrintLanguage *lng) const { lng->emitBlockSwitch(this); }
+   virtual FlowBlock *nextFlowAfter(const FlowBlock *bl) const;
+   virtual void finalizePrinting(const Funcdata &data) const;
++  virtual int4 getBlockDepth(void);
+ };
+ 
+ /// \brief Helper class for resolving cross-references while deserializing BlockGraph objects
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/blockaction.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/blockaction.cc
+index 86489e4e945..9c3aaa0b43a 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/blockaction.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/blockaction.cc
+@@ -1463,6 +1463,7 @@ bool CollapseStructure::ruleBlockIfNoExit(FlowBlock *bl)
+ {
+   FlowBlock *clauseblock;
+   int4 i;
++  int4 bestIndex=-1;
+ 
+   if (bl->sizeOut() != 2) return false; // Must be binary condition
+   if (bl->isSwitchOut()) return false;
+@@ -1480,15 +1481,56 @@ bool CollapseStructure::ruleBlockIfNoExit(FlowBlock *bl)
+     //      bl->setGotoBranch(i);
+     //      return true;
+     //    }
++    if (bestIndex==-1){
++	bestIndex=i;
++    }else{ // both match
++	bestIndex = selectBestNoExit(bl->getOut(0),bl->getOut(1));
++    }
++  }
++  if(bestIndex==-1) return false; // no match
++  clauseblock = bl->getOut(bestIndex);
++  if (bestIndex==0) {			// clause must be true out of bl
++    if (bl->negateCondition(true))
++      dataflow_changecount += 1;
++  }
++  graph.newBlockIf(bl,clauseblock);
++  return true;
++}
+ 
+-    if (i==0) {			// clause must be true out of bl
+-      if (bl->negateCondition(true))
+-	dataflow_changecount += 1;
++/// Select the best of two NoExit branch to be collapsed by ruleBlockIfNoExit.
++/// \param clause0 is the first NoExit branch
++/// \param clause1 is the second NoExit branch
++/// \return the index of the selected branch (0 or 1)
++int4 CollapseStructure::selectBestNoExit(FlowBlock *clause0,FlowBlock *clause1)
++
++{
++  // select lowest block depth
++  int4 depth0 = clause0->getBlockDepth();
++  int4 depth1 = clause1->getBlockDepth();
++  if (depth0<depth1)return 0;
++  if (depth1<depth0)return 1;
++
++  // same depth, prefer non return
++  bool isRet0 = clause0->lastOp()!=(PcodeOp *)0 && clause0->lastOp()->isStandardReturn();
++  bool isRet1 = clause1->lastOp()!=(PcodeOp *)0 && clause1->lastOp()->isStandardReturn();
++  if(isRet0 && !isRet1) return 1;
++  if(isRet1 && !isRet0) return 0;
++
++  // prefer block containing only return op
++  if(isRet0){ // both are return
++    FlowBlock* fb;
++    if(clause0->getType()==FlowBlock::t_copy){
++      fb = ((BlockCopy*)clause0)->subBlock(0);
++      if(fb->getType()==FlowBlock::t_basic && ((BlockBasic*)fb)->getOpSize()==1) return 0;
++    }
++    if(clause1->getType()==FlowBlock::t_copy){
++      fb = ((BlockCopy*)clause1)->subBlock(0);
++      if(fb->getType()==FlowBlock::t_basic && ((BlockBasic*)fb)->getOpSize()==1) return 1;
+     }
+-    graph.newBlockIf(bl,clauseblock);
+-    return true;
+   }
+-  return false;
++
++  // fall back to previous behavior
++  return 0;
+ }
+ 
+ /// Try to find a while/do structure, starting with a given FlowBlock.
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/blockaction.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/blockaction.hh
+index abb04b91bb6..2e51503808e 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/blockaction.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/blockaction.hh
+@@ -217,6 +217,7 @@ class CollapseStructure {
+   bool ruleCaseFallthru(FlowBlock *bl);		///< Attempt to one switch case falling through to another
+   int4 collapseInternal(FlowBlock *targetbl);	///< The main collapsing loop
+   void collapseConditions(void);		///< Simplify conditionals
++  int4 selectBestNoExit(FlowBlock *clause0,FlowBlock *clause1);
+ public:
+   CollapseStructure(BlockGraph &g);		///< Construct given a control-flow graph
+   int4 getChangeCount(void) const { return dataflow_changecount; }	///< Get number of data-flow changes
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/op.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/op.hh
+index ed915d66c83..3fcbe3dbb9d 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/op.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/op.hh
+@@ -176,6 +176,8 @@ public:
+   bool isCallOrBranch(void) const { return ((flags&(PcodeOp::branch|PcodeOp::call))!=0); }
+   /// \brief Return \b true if this op breaks fall-thru flow
+   bool isFlowBreak(void) const { return ((flags&(PcodeOp::branch|PcodeOp::returns))!=0); }
++  /// \brief Return \b true if this op will be decompiled as "return"
++  bool isStandardReturn(void) const { return ((flags&PcodeOp::returns)!=0 && getHaltType()==0); }
+   /// \brief Return \b true if this op flips the true/false meaning of its control-flow branching
+   bool isBooleanFlip(void) const { return ((flags&PcodeOp::boolean_flip)!=0); }
+   /// \brief Return \b true if the fall-thru branch is taken when the boolean input is true

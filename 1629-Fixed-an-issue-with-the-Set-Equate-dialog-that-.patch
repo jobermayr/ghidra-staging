@@ -1,0 +1,145 @@
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/equate/CreateEquateCmd.java b/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/equate/CreateEquateCmd.java
+index 90299e47ef8..3dafb181b63 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/equate/CreateEquateCmd.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/equate/CreateEquateCmd.java
+@@ -72,7 +72,13 @@ public CreateEquateCmd(Scalar scalar, CodeUnitIterator iter, Enum enoom,
+ 			boolean overwriteExisting, ListingActionContext context) {
+ 		super("Create New Equate", true /* has progress */, true /* can cancel */,
+ 			false /* is modal */);
+-		this.targetScalarValue = scalar.getValue();
++		this.targetScalarValue = 0;
++		for (long value : new long[] { scalar.getUnsignedValue(), scalar.getSignedValue() }) {
++			if (enoom.getName(value) != null) {
++				this.targetScalarValue = value;
++				break;
++			}
++		}
+ 		this.iterator = iter;
+ 		this.overwriteExisting = overwriteExisting;
+ 		this.context = context;
+@@ -126,7 +132,7 @@ private void maybeCreateEquate(DomainObject domain, Instruction instruction) {
+ 				}
+ 
+ 				Scalar scalar = (Scalar) opObject;
+-				if (scalar.getValue() != targetScalarValue) {
++				if (scalar.getUnsignedValue() != targetScalarValue && scalar.getSignedValue() != targetScalarValue) {
+ 					continue;
+ 				}
+ 
+@@ -138,7 +144,6 @@ private void maybeCreateEquate(DomainObject domain, Instruction instruction) {
+ 	private void createEquate(DomainObject domain, CodeUnit codeUnit, int opIndex,
+ 			Scalar scalar) {
+ 
+-
+ 		EquateTable equateTable = codeUnit.getProgram().getEquateTable();
+ 		Address address = codeUnit.getAddress();
+ 		Equate curEquate = equateTable.getEquate(address, opIndex, targetScalarValue);
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/equate/EquatePlugin.java b/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/equate/EquatePlugin.java
+index 3787fa1ec13..19e9a18fb83 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/equate/EquatePlugin.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/equate/EquatePlugin.java
+@@ -336,7 +336,14 @@ private Equate getEquate(ListingActionContext context) {
+ 		if (s == null) {
+ 			return null;
+ 		}
+-		return equateTable.getEquate(context.getAddress(), getOperandIndex(context), s.getValue());
++		Equate equate = null;
++		for (long value : new long[] { s.getUnsignedValue(), s.getSignedValue() }) {
++			equate = equateTable.getEquate(context.getAddress(), getOperandIndex(context), value);
++			if (equate != null) {
++				break;
++			}
++		}
++		return equate;
+ 	}
+ 
+ 	private void renameEquate(ListingActionContext context, Equate oldEquate, String newEquateName,
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bean/SetEquateDialog.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bean/SetEquateDialog.java
+index f732c08a326..665d329e2dc 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bean/SetEquateDialog.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bean/SetEquateDialog.java
+@@ -210,10 +210,13 @@ private Set<EquateRowObject> createEntriesFromDataTypeManager() {
+ 			.stream()
+ 			.filter(dt -> dt instanceof Enum)
+ 			.map(Enum.class::cast)
+-			.filter(enoom -> enoom.getName(scalar.getValue()) != null)
+ 			.forEach(enoom -> {
+-				String name = enoom.getName(scalar.getValue());
+-				entries.add(new EquateRowObject(name, enoom));
++				for (long value : new long[] { scalar.getUnsignedValue(), scalar.getSignedValue() }) {
++					String name = enoom.getName(value);
++					if (name != null) {
++						entries.add(new EquateRowObject(name, enoom));
++					}
++				}
+ 			});
+ 		//@formatter:on
+ 
+@@ -550,19 +553,21 @@ public class EquateRowObject {
+ 		private Enum enoom;
+ 
+ 		EquateRowObject(String name, Enum enoom) {// Equate based off enum
+-			long value = scalar.getValue();
+ 			if (enoom == null) {
+ 				return;
+ 			}
+ 
+ 			this.enoom = enoom;
+-			this.entryName = enoom.getName(value);
++			this.entryName = name;
+ 			this.dataTypeUUID = enoom.getUniversalID();
+ 			this.path = getFullPath(enoom);
+-			String formattedEquateName = EquateManager.formatNameForEquate(dataTypeUUID, value);
+-			this.equate = equateTable.getEquate(formattedEquateName);
+-			if (equate != null) {
+-				this.refCount = equate.getReferenceCount();
++			this.refCount = 0;
++			for (long value : new long[] { scalar.getUnsignedValue(), scalar.getSignedValue() }) {
++				String formattedEquateName = EquateManager.formatNameForEquate(dataTypeUUID, value);
++				this.equate = equateTable.getEquate(formattedEquateName);
++				if (equate != null) {
++					this.refCount += equate.getReferenceCount();
++				}
+ 			}
+ 		}
+ 
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/program/model/listing/CodeUnitFormat.java b/Ghidra/Features/Base/src/main/java/ghidra/program/model/listing/CodeUnitFormat.java
+index 2bf413cdddf..47ccaa99b87 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/program/model/listing/CodeUnitFormat.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/program/model/listing/CodeUnitFormat.java
+@@ -993,7 +993,7 @@ private Equate findEquate(Scalar scalar, List<Equate> equates) {
+ 		while (equateItr.hasNext()) {
+ 			Equate equate = equateItr.next();
+ 			if (equate.getValue() == scalar.getSignedValue() ||
+-				equate.getValue() == scalar.getValue()) {
++				equate.getValue() == scalar.getUnsignedValue()) {
+ 				return equate;
+ 			}
+ 		}
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/symbol/EquateDB.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/symbol/EquateDB.java
+index 4b697254ed3..cc5285e7260 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/symbol/EquateDB.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/symbol/EquateDB.java
+@@ -125,7 +125,7 @@ private short findScalarOpIndex(Instruction instr) {
+ 		for (short i = 0; i < numOperands; i++) {
+ 			for (Object obj : instr.getOpObjects(i)) {
+ 				if (obj instanceof Scalar) {
+-					if (((Scalar) obj).getValue() != value) {
++					if (((Scalar) obj).getUnsignedValue() != value && ((Scalar) obj).getSignedValue() != value) {
+ 						continue;
+ 					}
+ 					if (opIndex >= 0) {
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/symbol/EquateManager.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/symbol/EquateManager.java
+index 8dd3c86f421..e46ae988e6d 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/symbol/EquateManager.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/symbol/EquateManager.java
+@@ -631,7 +631,8 @@ public static String formatNameForEquate(UniversalID dtID, long equateValue) {
+ 	 * @return The error formatted equate name
+ 	 */
+ 	public static String formatNameForEquateError(long equateValue) {
+-		return "0x" + Long.toString(equateValue, 16) + " " + EquateManager.ERROR_TAG;
++		return (equateValue < 0 ? "-" : "") + "0x" + Long.toHexString(Math.abs(equateValue)) +
++			" " + EquateManager.ERROR_TAG;
+ 	}
+ 
+ 	/**

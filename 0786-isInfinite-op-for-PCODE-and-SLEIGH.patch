@@ -1,0 +1,148 @@
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcode/floatformat/FloatFormat.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcode/floatformat/FloatFormat.java
+index 2b97ac6e6fc..371e10588ba 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcode/floatformat/FloatFormat.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcode/floatformat/FloatFormat.java
+@@ -544,6 +544,18 @@ public BigInteger opNan(BigInteger a) {
+ 		return res;
+ 	}
+ 
++	public long opInf(long a) {
++		double val = getHostFloat(a);
++		long res = Double.isInfinite(val) ? 1 : 0;
++		return res;
++	}
++
++	public BigInteger opInf(BigInteger a) {
++		BigDecimal val = getHostFloat(a);
++		BigInteger res = (val == BIG_POSITIVE_INFINITY || val == BIG_NEGATIVE_INFINITY) ? BigInteger.ONE : BigInteger.ZERO;
++		return res;
++	}
++
+ 	public long opAdd(long a, long b) { // a + b
+ 		double val1 = getHostFloat(a);
+ 		double val2 = getHostFloat(b);
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcode/opbehavior/OpBehaviorFactory.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcode/opbehavior/OpBehaviorFactory.java
+index 6a7cbeec322..40fc80346fd 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcode/opbehavior/OpBehaviorFactory.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcode/opbehavior/OpBehaviorFactory.java
+@@ -82,6 +82,7 @@ public class OpBehaviorFactory {
+ 		opBehaviorMap.put(PcodeOp.FLOAT_NOTEQUAL, new OpBehaviorFloatNotEqual());
+ 		opBehaviorMap.put(PcodeOp.FLOAT_LESS, new OpBehaviorFloatLess());
+ 		opBehaviorMap.put(PcodeOp.FLOAT_LESSEQUAL, new OpBehaviorFloatLessEqual());
++		opBehaviorMap.put(PcodeOp.FLOAT_INF, new OpBehaviorFloatInf());
+ 		opBehaviorMap.put(PcodeOp.FLOAT_NAN, new OpBehaviorFloatNan());
+ 
+ 		opBehaviorMap.put(PcodeOp.FLOAT_ADD, new OpBehaviorFloatAdd());
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/opcodes/OpCode.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/opcodes/OpCode.java
+index 075a6ac5c97..e6d22f2011e 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/opcodes/OpCode.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/opcodes/OpCode.java
+@@ -77,7 +77,7 @@ public enum OpCode {
+ 	CPUI_FLOAT_NOTEQUAL, // Return TRUE if operand1 != operand2
+ 	CPUI_FLOAT_LESS, // Return TRUE if op1 < op2
+ 	CPUI_FLOAT_LESSEQUAL, // Return TRUE if op1 <= op2
+-	CPUI_UNUSED1, // Slot 45 is unused
++	CPUI_FLOAT_INF, // Return TRUE if positive or negative infinity
+ 	CPUI_FLOAT_NAN, // Return TRUE if op1 is NaN
+ 
+ 	CPUI_FLOAT_ADD, // float addition
+@@ -197,7 +197,7 @@ public boolean getBooleanFlip()
+ 		"INT_XOR", "INT_AND", "INT_OR", "INT_LEFT", "INT_RIGHT", "INT_SRIGHT", "INT_MULT",
+ 		"INT_DIV", "INT_SDIV", "INT_REM", "INT_SREM", "BOOL_NEGATE", "BOOL_XOR", "BOOL_AND",
+ 		"BOOL_OR", "FLOAT_EQUAL", "FLOAT_NOTEQUAL", "FLOAT_LESS", "FLOAT_LESSEQUAL",
+-		"UNUSED1", "FLOAT_NAN", "FLOAT_ADD", "FLOAT_DIV", "FLOAT_MULT", "FLOAT_SUB",
++		"FLOAT_INF", "FLOAT_NAN", "FLOAT_ADD", "FLOAT_DIV", "FLOAT_MULT", "FLOAT_SUB",
+ 		"FLOAT_NEG", "FLOAT_ABS", "FLOAT_SQRT", "INT2FLOAT", "FLOAT2FLOAT", "TRUNC", "CEIL",
+ 		"FLOOR", "ROUND", "BUILD", "DELAY_SLOT", "PIECE", "SUBPIECE", "CAST", "LABEL",
+ 		"CROSSBUILD", "SEGMENTOP", "CPOOLREF", "NEW" };
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/slgh_compile/ConsistencyChecker.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/slgh_compile/ConsistencyChecker.java
+index cd6c8aa4abf..c60ee9682e0 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/slgh_compile/ConsistencyChecker.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/slgh_compile/ConsistencyChecker.java
+@@ -141,6 +141,7 @@ boolean sizeRestriction(OpTpl op, Constructor ct)
+ 					return false;
+ 				}
+ 				return true;
++			case CPUI_FLOAT_INF:
+ 			case CPUI_FLOAT_NAN:
+ 				vnout = recoverSize(op.getOut().getSize(), ct);
+ 				if (vnout == -1) {
+@@ -433,6 +434,8 @@ String getOpName(OpTpl op) {
+ 				return "Float less than(f<)";
+ 			case CPUI_FLOAT_LESSEQUAL:
+ 				return "Float less than or equal(f<=)";
++			case CPUI_FLOAT_INF:
++				return "+/- inifity";
+ 			case CPUI_FLOAT_NAN:
+ 				return "Not a number(nan)";
+ 			case CPUI_FLOAT_ADD:
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/slgh_compile/PcodeCompile.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/slgh_compile/PcodeCompile.java
+index 1975dd8c25a..8b000c1b1f2 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/slgh_compile/PcodeCompile.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/slgh_compile/PcodeCompile.java
+@@ -806,6 +806,7 @@ public void fillinZero(OpTpl op, VectorSTL<OpTpl> ops) { // Try to get rid of
+ 			case CPUI_FLOAT_NOTEQUAL:
+ 			case CPUI_FLOAT_LESS:
+ 			case CPUI_FLOAT_LESSEQUAL:
++			case CPUI_FLOAT_INF:
+ 			case CPUI_FLOAT_NAN:
+ 			case CPUI_BOOL_NEGATE:
+ 			case CPUI_BOOL_XOR:
+@@ -963,6 +964,9 @@ public Object findInternalFunction(Location location, String name, VectorSTL<Exp
+ 		if ("abs".equals(name) && hasOperands(1, operands, location, name)) {
+ 			return createOp(location, OpCode.CPUI_FLOAT_ABS, r);
+ 		}
++		if ("inf".equals(name) && hasOperands(1, operands, location, name)) {
++			return createOp(location, OpCode.CPUI_FLOAT_INF, r);
++		}
+ 		if ("nan".equals(name) && hasOperands(1, operands, location, name)) {
+ 			return createOp(location, OpCode.CPUI_FLOAT_NAN, r);
+ 		}
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/slgh_compile/SleighCompileLauncher.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/slgh_compile/SleighCompileLauncher.java
+index c678b37ef79..f559d127155 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/slgh_compile/SleighCompileLauncher.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/slgh_compile/SleighCompileLauncher.java
+@@ -409,7 +409,7 @@ private static int run_compilation(String filein, String fileout, SleighCompile
+ 			return 4;
+ 		}
+ 		catch (PreprocessorException e) {
+-			Msg.error(SleighCompile.class, "Errors during preprocessing, halting compilation");
++			Msg.error(SleighCompile.class, "Errors during preprocessing, halting compilation", e);
+ 			return 5;
+ 		}
+ //            catch (LowlevelError err) {
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/DynamicHash.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/DynamicHash.java
+index 8fb24b73e11..e2a8059a93e 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/DynamicHash.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/DynamicHash.java
+@@ -74,7 +74,7 @@ public class DynamicHash {
+ 		PcodeOp.FLOAT_EQUAL,	// NOTEQUAL hashes same as EQUAL
+ 		PcodeOp.FLOAT_LESS,
+ 		PcodeOp.FLOAT_LESS,		// LESSEQUAL hashes same as EQUAL
+-		0,						// Unused slot -- skip
++		PcodeOp.FLOAT_INF,
+ 		PcodeOp.FLOAT_NAN,
+ 
+ 		PcodeOp.FLOAT_ADD, PcodeOp.FLOAT_DIV, PcodeOp.FLOAT_MULT,
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/PcodeOp.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/PcodeOp.java
+index 2fd57525aac..bd845959fc8 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/PcodeOp.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/PcodeOp.java
+@@ -98,7 +98,7 @@ public class PcodeOp {
+ 	public static final int FLOAT_NOTEQUAL = 42;	// Return TRUE if operand1 != operand2    
+ 	public static final int FLOAT_LESS = 43;   	// Return TRUE if op1 < op2 
+ 	public static final int FLOAT_LESSEQUAL = 44;	// Return TRUE if op1 <= op2
+-	// Slot 45 is unused
++	public static final int FLOAT_INF = 45;	// Return TRUE if positive or negative infinity
+ 	public static final int FLOAT_NAN = 46;	// Return TRUE if neither op1 is NaN 
+ 
+ 	public static final int FLOAT_ADD = 47;            // float addition
+@@ -615,6 +615,8 @@ public final static String getMnemonic(int op) {
+ 				return "FLOAT_LESS";
+ 			case FLOAT_LESSEQUAL:
+ 				return "FLOAT_LESSEQUAL";
++			case FLOAT_INF:
++				return "FLOAT_INF";
+ 			case FLOAT_NAN:
+ 				return "FLOAT_NAN";
+ 			case FLOAT_ADD:

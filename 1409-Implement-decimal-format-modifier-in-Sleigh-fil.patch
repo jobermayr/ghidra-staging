@@ -1,0 +1,611 @@
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/context.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/context.hh
+index 3372e5ac55a..c89f08138a0 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/context.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/context.hh
+@@ -24,6 +24,7 @@ class Token {			// A multiple-byte sized chunk of pattern in a bitstream
+   int4 size;			// Number of bytes in token;
+   int4 index;			// Index of this token, for resolving offsets
+   bool bigendian;
++  uint4 base;			// The display base for the token, if used.
+ public:
+   Token(const string &nm,int4 sz,bool be,int4 ind) : name(nm) { size = sz; bigendian=be; index = ind; }
+   int4 getSize(void) const { return size; }
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/sleighbase.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/sleighbase.cc
+index c3e799be708..31bbf24ecb1 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/sleighbase.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/sleighbase.cc
+@@ -15,7 +15,7 @@
+  */
+ #include "sleighbase.hh"
+ 
+-const int4 SleighBase::SLA_FORMAT_VERSION = 2;
++const int4 SleighBase::SLA_FORMAT_VERSION = 3;
+ 
+ SleighBase::SleighBase(void)
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/slgh_compile.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/slgh_compile.cc
+index f6ae7d272c1..29483bd9d2b 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/slgh_compile.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/slgh_compile.cc
+@@ -104,7 +104,7 @@ FieldQuality::FieldQuality(string *nm,uintb *l,uintb *h)
+   high = *h;
+   signext = false;
+   flow = true;
+-  hex = true;
++  base = 16;
+   delete nm;
+   delete l;
+   delete h;
+@@ -1572,7 +1572,7 @@ int4 SleighCompile::calcContextVarLayout(int4 start,int4 sz,int4 numbits)
+       qual = contexttable[i].qual;
+       uint4 l = qual->low - min + low;
+       uint4 h = numbits-1-(max-qual->high);
+-      ContextField *field = new ContextField(qual->signext,l,h);
++      ContextField *field = new ContextField(qual->signext,l,h,qual->base);
+       addSymbol(new ContextSymbol(qual->name,field,sym,qual->low,qual->high,qual->flow));
+     }
+     
+@@ -2009,7 +2009,7 @@ TokenSymbol *SleighCompile::defineToken(string *name,uintb *sz)
+ void SleighCompile::addTokenField(TokenSymbol *sym,FieldQuality *qual)
+ 
+ {
+-  TokenField *field = new TokenField(sym->getToken(),qual->signext,qual->low,qual->high);
++  TokenField *field = new TokenField(sym->getToken(),qual->signext,qual->low,qual->high,qual->base);
+   addSymbol(new ValueSymbol(qual->name,field));
+   delete qual;
+ }
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/slgh_compile.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/slgh_compile.hh
+index 185efa346c8..f297dc725e4 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/slgh_compile.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/slgh_compile.hh
+@@ -61,7 +61,7 @@ struct FieldQuality {
+   uint4 low,high;
+   bool signext;
+   bool flow;
+-  bool hex;
++  uint4 base;
+   FieldQuality(string *nm,uintb *l,uintb *h);
+ };
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/slghparse.y b/Ghidra/Features/Decompiler/src/decompile/cpp/slghparse.y
+index 8626a9e540d..d24bdce6014 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/slghparse.y
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/slghparse.y
+@@ -98,7 +98,7 @@
+ %token BADINTEGER GOTO_KEY CALL_KEY RETURN_KEY IF_KEY
+ %token DEFINE_KEY ATTACH_KEY MACRO_KEY SPACE_KEY TYPE_KEY RAM_KEY DEFAULT_KEY
+ %token REGISTER_KEY ENDIAN_KEY WITH_KEY ALIGN_KEY OP_UNIMPL
+-%token TOKEN_KEY SIGNED_KEY NOFLOW_KEY HEX_KEY DEC_KEY BIG_KEY LITTLE_KEY
++%token TOKEN_KEY SIGNED_KEY NOFLOW_KEY HEX_KEY DEC_KEY OCT_KEY BIN_KEY BIG_KEY LITTLE_KEY
+ %token SIZE_KEY WORDSIZE_KEY OFFSET_KEY NAMES_KEY VALUES_KEY VARIABLES_KEY PCODEOP_KEY IS_KEY LOCAL_KEY
+ %token DELAYSLOT_KEY CROSSBUILD_KEY EXPORT_KEY BUILD_KEY CONTEXT_KEY ELLIPSIS_KEY GLOBALSET_KEY BITRANGE_KEY
+ 
+@@ -194,15 +194,19 @@ contextprop: DEFINE_KEY CONTEXT_KEY VARSYM { $$ = $3; }
+ fielddef: STRING '=' '(' INTEGER ',' INTEGER ')' { $$ = new FieldQuality($1,$4,$6); }
+   | anysymbol '=' '(' INTEGER ',' INTEGER ')' { delete $4; delete $6; string errmsg = $1->getName()+": redefined as field"; yyerror(errmsg.c_str()); YYERROR; }
+   | fielddef SIGNED_KEY			{ $$ = $1; $$->signext = true; }
+-  | fielddef HEX_KEY			{ $$ = $1; $$->hex = true; }
+-  | fielddef DEC_KEY			{ $$ = $1; $$->hex = false; }
++  | fielddef HEX_KEY			{ $$ = $1; $$->base = 16; }
++  | fielddef DEC_KEY			{ $$ = $1; $$->base = 10; }
++  | fielddef OCT_KEY			{ $$ = $1; $$->base = 8; }
++  | fielddef BIN_KEY			{ $$ = $1; $$->base = 2; }
+   ;
+ contextfielddef: STRING '=' '(' INTEGER ',' INTEGER ')' { $$ = new FieldQuality($1,$4,$6); }
+   | anysymbol '=' '(' INTEGER ',' INTEGER ')' { delete $4; delete $6; string errmsg = $1->getName()+": redefined as field"; yyerror(errmsg.c_str()); YYERROR; }
+   | contextfielddef SIGNED_KEY			{ $$ = $1; $$->signext = true; }
+   | contextfielddef NOFLOW_KEY			{ $$ = $1; $$->flow = false; }
+-  | contextfielddef HEX_KEY			{ $$ = $1; $$->hex = true; }
+-  | contextfielddef DEC_KEY			{ $$ = $1; $$->hex = false; }
++  | contextfielddef HEX_KEY			{ $$ = $1; $$->base = 16; }
++  | contextfielddef DEC_KEY			{ $$ = $1; $$->base = 10; }
++  | contextfielddef OCT_KEY			{ $$ = $1; $$->base = 8; }
++  | contextfielddef BIN_KEY			{ $$ = $1; $$->base = 2; }
+   ;
+ spacedef: spaceprop ';'			{ slgh->newSpace($1); }
+   ;
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/slghpatexpress.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/slghpatexpress.cc
+index 3b7534f091e..f5237e16fe4 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/slghpatexpress.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/slghpatexpress.cc
+@@ -556,7 +556,7 @@ static intb getContextBytes(ParserWalker &walker,int4 bytestart,int4 byteend)
+   return res;
+ }
+ 
+-TokenField::TokenField(Token *tk,bool s,int4 bstart,int4 bend)
++TokenField::TokenField(Token *tk,bool s,int4 bstart,int4 bend,uint4 tbase)
+ 
+ {
+   tok = tk;
+@@ -573,6 +573,7 @@ TokenField::TokenField(Token *tk,bool s,int4 bstart,int4 bend)
+     byteend = bitend/8;
+   }
+   shift = bitstart % 8;
++  base = tbase;
+ }
+ 
+ intb TokenField::getValue(ParserWalker &walker) const
+@@ -613,7 +614,8 @@ void TokenField::saveXml(ostream &s) const
+   s << " bitend=\"" << bitend << "\"";
+   s << " bytestart=\"" << bytestart << "\"";
+   s << " byteend=\"" << byteend << "\"";
+-  s << " shift=\"" << shift << "\"/>\n";
++  s << " shift=\"" << shift << "\"";
++  s << " base=\"" << base << "\"/>\n";
+ }
+ 
+ void TokenField::restoreXml(const Element *el,Translate *trans)
+@@ -647,9 +649,14 @@ void TokenField::restoreXml(const Element *el,Translate *trans)
+     s.unsetf(ios::dec | ios::hex | ios::oct);
+     s >> shift;
+   }
++  {
++    istringstream s(el->getAttributeValue("base"));
++    s.unsetf(ios::dec | ios::hex | ios::oct);
++    s >> base;
++  }
+ }
+ 
+-ContextField::ContextField(bool s,int4 sbit,int4 ebit)
++ContextField::ContextField(bool s,int4 sbit,int4 ebit,uint4 fbase)
+ 
+ {
+   signbit = s;
+@@ -658,6 +665,7 @@ ContextField::ContextField(bool s,int4 sbit,int4 ebit)
+   startbyte = startbit/8;
+   endbyte = endbit/8;
+   shift = 7 - (endbit%8);
++  base = fbase;
+ }
+ 
+ intb ContextField::getValue(ParserWalker &walker) const
+@@ -691,7 +699,8 @@ void ContextField::saveXml(ostream &s) const
+   s << " endbit=\"" << endbit << "\"";
+   s << " startbyte=\"" << startbyte << "\"";
+   s << " endbyte=\"" << endbyte << "\"";
+-  s << " shift=\"" << shift << "\"/>\n";
++  s << " shift=\"" << shift << "\"";
++  s << " base=\"" << base << "\"/>\n";
+ }
+ 
+ void ContextField::restoreXml(const Element *el,Translate *trans)
+@@ -723,6 +732,11 @@ void ContextField::restoreXml(const Element *el,Translate *trans)
+     s.unsetf(ios::dec | ios::hex | ios::oct);
+     s >> shift;
+   }
++  {
++    istringstream s(el->getAttributeValue("base"));
++    s.unsetf(ios::dec | ios::hex | ios::oct);
++    s >> base;
++  }
+ }
+ 
+ void ConstantValue::saveXml(ostream &s) const
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/slghpatexpress.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/slghpatexpress.hh
+index 5d8ee4f616f..99f39fb561d 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/slghpatexpress.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/slghpatexpress.hh
+@@ -93,9 +93,10 @@ class TokenField : public PatternValue {
+   int4 bitstart,bitend;		// Bits within the token, 0 bit is LEAST significant
+   int4 bytestart,byteend;	// Bytes to read to get value
+   int4 shift;			// Amount to shift to align value  (bitstart % 8)
++  uint4 base;			// The display base
+ public:
+   TokenField(void) {}		// For use with restoreXml
+-  TokenField(Token *tk,bool s,int4 bstart,int4 bend);
++  TokenField(Token *tk,bool s,int4 bstart,int4 bend,uint4 tbase);
+   virtual intb getValue(ParserWalker &walker) const;
+   virtual TokenPattern genMinPattern(const vector<TokenPattern> &ops) const { return TokenPattern(tok); }
+   virtual TokenPattern genPattern(intb val) const;
+@@ -110,12 +111,14 @@ class ContextField : public PatternValue {
+   int4 startbyte,endbyte;
+   int4 shift;
+   bool signbit;
++  uint4 base;
+ public:
+   ContextField(void) {}		// For use with restoreXml
+-  ContextField(bool s,int4 sbit,int4 ebit);
++  ContextField(bool s,int4 sbit,int4 ebit,uint4 fbase);
+   int4 getStartBit(void) const { return startbit; }
+   int4 getEndBit(void) const { return endbit; }
+   bool getSignBit(void) const { return signbit; }
++  uint4 getBase(void) const { return base; }
+   virtual intb getValue(ParserWalker &walker) const;
+   virtual TokenPattern genMinPattern(const vector<TokenPattern> &ops) const { return TokenPattern(); }
+   virtual TokenPattern genPattern(intb val) const;
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/slghscan.l b/Ghidra/Features/Decompiler/src/decompile/cpp/slghscan.l
+index 0675c298726..5860a8f0d2b 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/slghscan.l
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/slghscan.l
+@@ -529,6 +529,8 @@ with   { BEGIN(pattern); withsection = 1; slgh->calcContextLayout(); return WITH
+ <defblock>noflow    { return NOFLOW_KEY; }
+ <defblock>hex       { return HEX_KEY; }
+ <defblock>dec       { return DEC_KEY; }
++<defblock>oct       { return OCT_KEY; }
++<defblock>bin       { return BIN_KEY; }
+ <defblock>endian    { return ENDIAN_KEY; }
+ <defblock>alignment { return ALIGN_KEY; }
+ <defblock>big       { return BIG_KEY; }
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/antlr/ghidra/sleigh/grammar/BaseLexer.g b/Ghidra/Framework/SoftwareModeling/src/main/antlr/ghidra/sleigh/grammar/BaseLexer.g
+index f578ac40d88..6a3563ae40a 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/antlr/ghidra/sleigh/grammar/BaseLexer.g
++++ b/Ghidra/Framework/SoftwareModeling/src/main/antlr/ghidra/sleigh/grammar/BaseLexer.g
+@@ -14,6 +14,7 @@ tokens {
+ 	OP_ARGUMENTS;
+ 	OP_ASSIGN;
+ 	OP_BIG;
++	OP_BIN;
+ 	OP_BIN_CONSTANT;
+ 	OP_BITRANGE;
+ 	OP_BITRANGE2;
+@@ -83,13 +84,14 @@ tokens {
+ 	OP_NAMES;
+ 	OP_NEGATE;
+ 	OP_NIL;
+-    OP_NOFLOW;
+-    OP_NOP;
+-    OP_NOT;
++	OP_NOFLOW;
++	OP_NOP;
++	OP_NOT;
+ 	OP_NOTEQUAL;
+ 	OP_NOT_DEFAULT;
+ 	OP_NO_CONTEXT_BLOCK;
+ 	OP_NO_FIELD_MOD;
++	OP_OCT;
+ 	OP_OR;
+ 	OP_PARENTHESIZED;
+ 	OP_PCODE;
+@@ -104,8 +106,8 @@ tokens {
+ 	OP_SEQUENCE;
+ 	OP_SGREAT;
+ 	OP_SGREATEQUAL;
+-    OP_SIGNED;
+-    OP_SIZING_SIZE;
++	OP_SIGNED;
++	OP_SIZING_SIZE;
+ 	OP_SIZE;
+ 	OP_SLESS;
+ 	OP_SLESSEQUAL;
+@@ -156,6 +158,7 @@ RES_WITH		:	'with';
+ KEY_ALIGNMENT	:	'alignment';
+ KEY_ATTACH		:	'attach';
+ KEY_BIG			:	'big';
++KEY_BIN			:	'bin';
+ KEY_BITRANGE	:	'bitrange';
+ KEY_BUILD		:	'build';
+ KEY_CALL		:	'call';
+@@ -174,6 +177,7 @@ KEY_MACRO		:	'macro';
+ KEY_NAMES		:	'names';
+ KEY_NOFLOW		:	'noflow';
+ KEY_OFFSET		:	'offset';
++KEY_OCT			:	'oct';
+ KEY_PCODEOP		:	'pcodeop';
+ KEY_RETURN		:	'return';
+ KEY_SIGNED		:	'signed';
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/antlr/ghidra/sleigh/grammar/SleighCompiler.g b/Ghidra/Framework/SoftwareModeling/src/main/antlr/ghidra/sleigh/grammar/SleighCompiler.g
+index 8d05e777d04..d62a4d6ba9f 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/antlr/ghidra/sleigh/grammar/SleighCompiler.g
++++ b/Ghidra/Framework/SoftwareModeling/src/main/antlr/ghidra/sleigh/grammar/SleighCompiler.g
+@@ -230,8 +230,10 @@ fieldmods
+ fieldmod
+     :   OP_SIGNED { if ($fielddef::fieldQuality != null) $fielddef::fieldQuality.signext = true; }
+     |   OP_NOFLOW { if ($fielddef::fieldQuality != null) $fielddef::fieldQuality.flow = false; }
+-    |   OP_HEX { if ($fielddef::fieldQuality != null) $fielddef::fieldQuality.hex = true; }
+-    |   OP_DEC { if ($fielddef::fieldQuality != null) $fielddef::fieldQuality.hex = false; }
++    |   OP_HEX { if ($fielddef::fieldQuality != null) $fielddef::fieldQuality.base = 16; }
++    |   OP_DEC { if ($fielddef::fieldQuality != null) $fielddef::fieldQuality.base = 10; }
++    |   OP_OCT { if ($fielddef::fieldQuality != null) $fielddef::fieldQuality.base = 8; }
++    |   OP_BIN { if ($fielddef::fieldQuality != null) $fielddef::fieldQuality.base = 2; }
+     ;
+ 
+ specific_identifier[String purpose] returns [Tree value]
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/antlr/ghidra/sleigh/grammar/SleighEcho.g b/Ghidra/Framework/SoftwareModeling/src/main/antlr/ghidra/sleigh/grammar/SleighEcho.g
+index 2d3fc5bbae5..2006b856ed2 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/antlr/ghidra/sleigh/grammar/SleighEcho.g
++++ b/Ghidra/Framework/SoftwareModeling/src/main/antlr/ghidra/sleigh/grammar/SleighEcho.g
+@@ -81,6 +81,8 @@ fieldmod returns [String value]
+     |   OP_NOFLOW { $value = "noflow"; }
+     |   OP_HEX { $value = "hex"; }
+     |   OP_DEC { $value = "dec"; }
++    |   OP_OCT { $value = "oct"; }
++    |   OP_BIN { $value = "bin"; }
+     ;
+ 
+ contextdef
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/antlr/ghidra/sleigh/grammar/SleighParser.g b/Ghidra/Framework/SoftwareModeling/src/main/antlr/ghidra/sleigh/grammar/SleighParser.g
+index 74f75b56e04..c5bdbcbfd46 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/antlr/ghidra/sleigh/grammar/SleighParser.g
++++ b/Ghidra/Framework/SoftwareModeling/src/main/antlr/ghidra/sleigh/grammar/SleighParser.g
+@@ -93,6 +93,8 @@ fieldmod
+     :   lc=KEY_SIGNED -> OP_SIGNED[$lc]
+     |   lc=KEY_HEX -> OP_HEX[$lc]
+     |   lc=KEY_DEC -> OP_DEC[$lc]
++    |   lc=KEY_OCT -> OP_OCT[$lc]
++    |   lc=KEY_BIN -> OP_BIN[$lc]
+     ;
+ 
+ contextfielddefs[Token lc]
+@@ -113,6 +115,8 @@ contextfieldmod
+     |   lc=KEY_NOFLOW -> OP_NOFLOW[$lc]
+     |   lc=KEY_HEX -> OP_HEX[$lc]
+     |   lc=KEY_DEC -> OP_DEC[$lc]
++    |   lc=KEY_OCT -> OP_OCT[$lc]
++    |   lc=KEY_BIN -> OP_BIN[$lc]
+     ;
+ 
+ contextdef
+@@ -548,32 +552,34 @@ identifier
+ key_as_id
+ 	:	lc=KEY_ALIGNMENT	-> ^(OP_IDENTIFIER[$lc, "KEY_ALIGNMENT"] KEY_ALIGNMENT)
+ 	|	lc=KEY_ATTACH		-> ^(OP_IDENTIFIER[$lc, "KEY_ATTACH"] KEY_ATTACH)
+-	|	lc=KEY_BIG			-> ^(OP_IDENTIFIER[$lc, "KEY_BIG"] KEY_BIG)
++	|	lc=KEY_BIG		-> ^(OP_IDENTIFIER[$lc, "KEY_BIG"] KEY_BIG)
++	|	lc=KEY_BIN		-> ^(OP_IDENTIFIER[$lc, "KEY_BIN"] KEY_BIN)
+ 	|	lc=KEY_BITRANGE		-> ^(OP_IDENTIFIER[$lc, "KEY_BITRANGE"] KEY_BITRANGE)
+ 	|	lc=KEY_BUILD		-> ^(OP_IDENTIFIER[$lc, "KEY_BUILD"] KEY_BUILD)
+-	|	lc=KEY_CALL			-> ^(OP_IDENTIFIER[$lc, "KEY_CALL"] KEY_CALL)	// appeared in printpiece
++	|	lc=KEY_CALL		-> ^(OP_IDENTIFIER[$lc, "KEY_CALL"] KEY_CALL)	// appeared in printpiece
+ 	|	lc=KEY_CONTEXT		-> ^(OP_IDENTIFIER[$lc, "KEY_CONTEXT"] KEY_CONTEXT)
+ 	|	lc=KEY_CROSSBUILD	-> ^(OP_IDENTIFIER[$lc, "KEY_CROSSBUILD"] KEY_CROSSBUILD)
+-	|	lc=KEY_DEC			-> ^(OP_IDENTIFIER[$lc, "KEY_DEC"] KEY_DEC)	// appeared in printpiece
++	|	lc=KEY_DEC		-> ^(OP_IDENTIFIER[$lc, "KEY_DEC"] KEY_DEC)	// appeared in printpiece
+ 	|	lc=KEY_DEFAULT		-> ^(OP_IDENTIFIER[$lc, "KEY_DEFAULT"] KEY_DEFAULT)
+ 	|	lc=KEY_DEFINE		-> ^(OP_IDENTIFIER[$lc, "KEY_DEFINE"] KEY_DEFINE)
+ 	|	lc=KEY_ENDIAN		-> ^(OP_IDENTIFIER[$lc, "KEY_ENDIAN"] KEY_ENDIAN)
+ 	|	lc=KEY_EXPORT		-> ^(OP_IDENTIFIER[$lc, "KEY_EXPORT"] KEY_EXPORT)
+-	|	lc=KEY_GOTO			-> ^(OP_IDENTIFIER[$lc, "KEY_GOTO"] KEY_GOTO)
+-	|	lc=KEY_HEX			-> ^(OP_IDENTIFIER[$lc, "KEY_HEX"] KEY_HEX)
++	|	lc=KEY_GOTO		-> ^(OP_IDENTIFIER[$lc, "KEY_GOTO"] KEY_GOTO)
++	|	lc=KEY_HEX		-> ^(OP_IDENTIFIER[$lc, "KEY_HEX"] KEY_HEX)
+ 	|	lc=KEY_LITTLE		-> ^(OP_IDENTIFIER[$lc, "KEY_LITTLE"] KEY_LITTLE)
+ 	|	lc=KEY_LOCAL		-> ^(OP_IDENTIFIER[$lc, "KEY_LOCAL"] KEY_LOCAL)
+ 	|	lc=KEY_MACRO		-> ^(OP_IDENTIFIER[$lc, "KEY_MACRO"] KEY_MACRO)
+ 	|	lc=KEY_NAMES		-> ^(OP_IDENTIFIER[$lc, "KEY_NAMES"] KEY_NAMES)
+ 	|	lc=KEY_NOFLOW		-> ^(OP_IDENTIFIER[$lc, "KEY_NOFLOW"] KEY_NOFLOW)
++	|	lc=KEY_OCT		-> ^(OP_IDENTIFIER[$lc, "KEY_OCT"] KEY_OCT)
+ 	|	lc=KEY_OFFSET		-> ^(OP_IDENTIFIER[$lc, "KEY_OFFSET"] KEY_OFFSET)
+ 	|	lc=KEY_PCODEOP		-> ^(OP_IDENTIFIER[$lc, "KEY_PCODEOP"] KEY_PCODEOP)
+ 	|	lc=KEY_RETURN		-> ^(OP_IDENTIFIER[$lc, "KEY_RETURN"] KEY_RETURN)
+ 	|	lc=KEY_SIGNED		-> ^(OP_IDENTIFIER[$lc, "KEY_SIGNED"] KEY_SIGNED)
+-	|	lc=KEY_SIZE			-> ^(OP_IDENTIFIER[$lc, "KEY_SIZE"] KEY_SIZE)
++	|	lc=KEY_SIZE		-> ^(OP_IDENTIFIER[$lc, "KEY_SIZE"] KEY_SIZE)
+ 	|	lc=KEY_SPACE		-> ^(OP_IDENTIFIER[$lc, "KEY_SPACE"] KEY_SPACE)
+ 	|	lc=KEY_TOKEN		-> ^(OP_IDENTIFIER[$lc, "KEY_TOKEN"] KEY_TOKEN)
+-	|	lc=KEY_TYPE			-> ^(OP_IDENTIFIER[$lc, "KEY_TYPE"] KEY_TYPE)
++	|	lc=KEY_TYPE		-> ^(OP_IDENTIFIER[$lc, "KEY_TYPE"] KEY_TYPE)
+ 	|	lc=KEY_UNIMPL		-> ^(OP_IDENTIFIER[$lc, "KEY_UNIMPL"] KEY_UNIMPL)
+ 	|	lc=KEY_VALUES		-> ^(OP_IDENTIFIER[$lc, "KEY_VALUES"] KEY_VALUES)
+ 	|	lc=KEY_VARIABLES	-> ^(OP_IDENTIFIER[$lc, "KEY_VARIABLES"] KEY_VARIABLES)
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/processors/sleigh/SleighLanguage.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/processors/sleigh/SleighLanguage.java
+index fa58559993c..5d89df8885c 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/processors/sleigh/SleighLanguage.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/processors/sleigh/SleighLanguage.java
+@@ -52,7 +52,7 @@
+ 
+ public class SleighLanguage implements Language {
+ 
+-	public static final int SLA_FORMAT_VERSION = 2;	// What format of the .sla file this expects
++	public static final int SLA_FORMAT_VERSION = 3;	// What format of the .sla file this expects
+ 													// This value should always match SleighBase.SLA_FORMAT_VERSION
+ 	private Map<CompilerSpecID, SleighCompilerSpecDescription> compilerSpecDescriptions;
+ 	private HashMap<CompilerSpecID, BasicCompilerSpec> compilerSpecs;
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/processors/sleigh/expression/TokenField.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/processors/sleigh/expression/TokenField.java
+index ecd259e1314..894f4018196 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/processors/sleigh/expression/TokenField.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/processors/sleigh/expression/TokenField.java
+@@ -39,6 +39,7 @@ public class TokenField extends PatternValue {
+ 	private int bitstart, bitend;	// Bits within token, 0 bit is LEAST sig
+ 	private int bytestart, byteend;	// Bytes to read to get value
+ 	private int shift;				// Amount to shift to align value
++	private int base;               // The base to use to display the token value.
+ 
+ 	@Override
+ 	public int hashCode() {
+@@ -51,6 +52,8 @@ public int hashCode() {
+ 		result += Boolean.hashCode(signbit);
+ 		result *= 31;
+ 		result += Boolean.hashCode(bigendian);
++		result *= 31;
++		result += base;
+ 		return result;
+ 	}
+ 
+@@ -72,6 +75,9 @@ public boolean equals(Object obj) {
+ 		if (this.bigendian != that.bigendian) {
+ 			return false;
+ 		}
++		if (this.base != that.base) {
++			return false;
++		}
+ 		return true;
+ 	}
+ 
+@@ -124,6 +130,10 @@ public int getByteStart() {
+ 	public int getByteEnd() {
+ 		return byteend;
+ 	}
++	
++	public int getBase() {
++		return base;
++	}
+ 
+ 	/* (non-Javadoc)
+ 	 * @see ghidra.app.plugin.processors.sleigh.PatternExpression#restoreXml(org.jdom.Element)
+@@ -138,6 +148,7 @@ public void restoreXml(XmlPullParser parser, SleighLanguage lang) {
+ 		bytestart = SpecXmlUtils.decodeInt(el.getAttribute("bytestart"));
+ 		byteend = SpecXmlUtils.decodeInt(el.getAttribute("byteend"));
+ 		shift = SpecXmlUtils.decodeInt(el.getAttribute("shift"));
++		base = SpecXmlUtils.decodeInt(el.getAttribute("base"));
+ 		parser.end(el);
+ 	}
+ 
+@@ -242,6 +253,7 @@ public String toString() {
+ 		}
+ 		sb.append(", bytes " + bytestart + "-" + byteend);
+ 		sb.append(", shift=" + shift);
++		sb.append(", base=" + base);
+ 		sb.append("]");
+ 		return sb.toString();
+ 	}
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/processors/sleigh/symbol/OperandSymbol.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/processors/sleigh/symbol/OperandSymbol.java
+index f7074b3a270..2db9287d00f 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/processors/sleigh/symbol/OperandSymbol.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/processors/sleigh/symbol/OperandSymbol.java
+@@ -26,6 +26,7 @@
+ import ghidra.app.plugin.processors.sleigh.SleighLanguage;
+ import ghidra.app.plugin.processors.sleigh.expression.OperandValue;
+ import ghidra.app.plugin.processors.sleigh.expression.PatternExpression;
++import ghidra.app.plugin.processors.sleigh.expression.TokenField;
+ import ghidra.program.model.mem.MemoryAccessException;
+ import ghidra.util.xml.SpecXmlUtils;
+ import ghidra.xml.XmlElement;
+@@ -115,10 +116,14 @@ public String print(ParserWalker walker) throws MemoryAccessException {
+ 		}
+ 		else {		// Must be expression resulting in a constant
+ 			long val = defexp.getValue(walker);
+-			if (val >= 0)
+-				res = "0x" + Long.toHexString(val);
+-			else
+-				res = "-0x" + Long.toHexString(-val);
++			if (defexp instanceof TokenField && ((TokenField) defexp).getBase() == 10) {
++				res = String.valueOf(val);
++			} else {
++				if (val >= 0)
++					res = "0x" + Long.toHexString(val);
++				else
++					res = "-0x" + Long.toHexString(-val);
++			}
+ 		}
+ 		walker.popOperand();
+ 		return res;
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/sleighbase/SleighBase.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/sleighbase/SleighBase.java
+index 7a7cf2e32ae..35b2bc48551 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/sleighbase/SleighBase.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/sleighbase/SleighBase.java
+@@ -33,7 +33,7 @@ public abstract class SleighBase extends Translate implements NamedSymbolProvide
+ 	// NOTE: restoreXml method removed as it is only used by the decompiler's
+ 	// implementation
+ 
+-	public static final int SLA_FORMAT_VERSION = 2;	// What format of the .sla file this produces
++	public static final int SLA_FORMAT_VERSION = 3;	// What format of the .sla file this produces
+ 													// This value should always match SleighLanguage.SLA_FORMAT_VERSION
+ 	private VectorSTL<String> userop = new VectorSTL<>();
+ 	private address_set varnode_xref = new address_set(); // Cross-reference registers by address
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/slgh_compile/FieldQuality.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/slgh_compile/FieldQuality.java
+index 17a81ed187a..8ceafdfa1be 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/slgh_compile/FieldQuality.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/slgh_compile/FieldQuality.java
+@@ -24,7 +24,7 @@ public class FieldQuality {
+     public int low, high;
+     public boolean signext;
+     public boolean flow;
+-    public boolean hex;
++    public int base;
+ 
+     public FieldQuality(String nm, Location location, long l, long h) {
+         name = nm;
+@@ -33,10 +33,10 @@ public FieldQuality(String nm, Location location, long l, long h) {
+         high = (int) h;
+         signext = false;
+         flow = true;
+-        hex = true;
++        base = 16;
+     }
+     @Override
+     public String toString() {
+-        return "fq:{" + name + "," + low + "," + high + "," + signext + "," + hex + "}";
++        return "fq:{" + name + "," + low + "," + high + "," + signext + "," + base + "}";
+     }
+ }
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/slgh_compile/SleighCompile.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/slgh_compile/SleighCompile.java
+index e96ee6ba852..9b8e21d4310 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/slgh_compile/SleighCompile.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/slgh_compile/SleighCompile.java
+@@ -864,7 +864,7 @@ public TokenSymbol defineToken(Location location, String name, long sz) {
+ 	public void addTokenField(Location location, TokenSymbol sym, FieldQuality qual) {
+ 		entry("addTokenField", location, sym, qual);
+ 		TokenField field =
+-			new TokenField(location, sym.getToken(), qual.signext, qual.low, qual.high);
++			new TokenField(location, sym.getToken(), qual.signext, qual.low, qual.high, qual.base);
+ 		addSymbol(new ValueSymbol(location, qual.name, field));
+ 	}
+ 
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/slghpatexpress/TokenField.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/slghpatexpress/TokenField.java
+index fdb6875e062..2054a24f212 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/slghpatexpress/TokenField.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/slghpatexpress/TokenField.java
+@@ -36,6 +36,7 @@ public class TokenField extends PatternValue {
+ 	private int bitstart, bitend; // Bits within the token, 0 bit is LEAST signifigant
+ 	private int bytestart, byteend; // Bytes to read to get value
+ 	private int shift; // Amount to shift to align value (bitstart % 8)
++	private int base; // Display base
+ 
+ 	public TokenField(Location location) {
+ 		super(location);
+@@ -59,13 +60,14 @@ public long maxValue() {
+ 		return res;
+ 	}
+ 
+-	public TokenField(Location location, Token tk, boolean s, int bstart, int bend) {
++	public TokenField(Location location, Token tk, boolean s, int bstart, int bend, int tbase) {
+ 		super(location);
+ 		tok = tk;
+ 		bigendian = tok.isBigEndian();
+ 		signbit = s;
+ 		bitstart = bstart;
+ 		bitend = bend;
++		base = tbase;
+ 		if (tk.isBigEndian()) {
+ 			byteend = (tk.getSize() * 8 - bitstart - 1) / 8;
+ 			bytestart = (tk.getSize() * 8 - bitend - 1) / 8;
+@@ -124,6 +126,8 @@ public void saveXml(PrintStream s) {
+ 		s.append(" byteend=\"").print(byteend);
+ 		s.append("\"");
+ 		s.append(" shift=\"").print(shift);
++		s.append("\"");
++		s.append(" base=\"").print(base);
+ 		s.append("\"/>\n");
+ 	}
+ 
+@@ -137,6 +141,7 @@ public void restoreXml(Element el, Translate trans) {
+ 		bytestart = XmlUtils.decodeUnknownInt(el.getAttributeValue("bytestart"));
+ 		byteend = XmlUtils.decodeUnknownInt(el.getAttributeValue("byteend"));
+ 		shift = XmlUtils.decodeUnknownInt(el.getAttributeValue("shift"));
++		base = XmlUtils.decodeUnknownInt(el.getAttributeValue("base"));
+ 	}
+ 
+ }
+diff --git a/GhidraDocs/languages/html/sleigh_tokens.html b/GhidraDocs/languages/html/sleigh_tokens.html
+index 79521cfd7b4..77df1696914 100644
+--- a/GhidraDocs/languages/html/sleigh_tokens.html
++++ b/GhidraDocs/languages/html/sleigh_tokens.html
+@@ -65,6 +65,8 @@
+ signed
+ hex
+ dec
++bin
++oct
+ </pre></div>
+ <p>
+ These attributes are defined in the next section. There can be any
+@@ -90,11 +92,14 @@
+ obvious ways. The <span class="bold"><strong>signed</strong></span> attribute
+ determines whether the integer encoding should be treated as just an
+ unsigned encoding or if a twos-complement encoding should be used to
+-obtain a signed integer. The <span class="bold"><strong>hex</strong></span>
+-or <span class="bold"><strong>dec</strong></span> attributes describe whether
+-the integer should be displayed with a hexadecimal or decimal
+-representation. The default is hexadecimal. [Currently
+-the <span class="bold"><strong>dec</strong></span> attribute is not supported]
++obtain a signed integer. The <span class="bold"><strong>hex</strong></span>, 
++<span class="bold"><strong>dec</strong></span>,
++<span class="bold"><strong>oct</strong></span> or
++<span class="bold"><strong>bin</strong></span> attributes describe which numeric
++base should be used to display the integer (respectively hexadecimal, decimal,
++octal or binary). The default is hexadecimal. [Currently
++the <span class="bold"><strong>oct</strong></span> and
++<span class="bold"><strong>bin</strong></span> attributes are not supported]
+ </p>
+ </div>
+ <div class="sect2">

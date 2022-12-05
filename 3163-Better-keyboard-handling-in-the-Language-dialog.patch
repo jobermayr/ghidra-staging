@@ -1,0 +1,295 @@
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/processors/SetLanguageDialog.java b/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/processors/SetLanguageDialog.java
+index 93099d14d34..9166037c188 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/processors/SetLanguageDialog.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/processors/SetLanguageDialog.java
+@@ -19,6 +19,7 @@
+ 
+ import docking.DialogComponentProvider;
+ import ghidra.framework.plugintool.PluginTool;
++import ghidra.plugin.importer.LcsSelectionEvent;
+ import ghidra.plugin.importer.LcsSelectionListener;
+ import ghidra.plugin.importer.NewLanguagePanel;
+ import ghidra.program.model.lang.*;
+@@ -36,31 +37,36 @@ public class SetLanguageDialog extends DialogComponentProvider {
+ 	private LanguageID dialogLanguageDescID;
+ 	private CompilerSpecID dialogCompilerSpecDescID;
+ 
+-	LcsSelectionListener listener = e -> {
+-		LanguageID langID = null;
+-		CompilerSpecID compilerSpecID = null;
+-		if (e.selection != null) {
+-			langID = e.selection.languageID;
+-			compilerSpecID = e.selection.compilerSpecID;
+-		}
+-		if ((langID != null) && (langID.equals(currProgram.getLanguageID()))) {
+-			if ((compilerSpecID != null) &&
+-				(compilerSpecID.equals(currProgram.getCompilerSpec().getCompilerSpecID()))) {
+-				//selectLangPanel.setNotificationText("Please select a different Language or Compiler Spec.");
+-				setStatusText("Please select a different Language or Compiler Spec.");
+-				setOkEnabled(false);
++	LcsSelectionListener listener = new LcsSelectionListener() {
++		@Override
++		public void valueChanged(LcsSelectionEvent e) {
++			LanguageID langID = null;
++			CompilerSpecID compilerSpecID = null;
++			if (e.selection != null) {
++				langID = e.selection.languageID;
++				compilerSpecID = e.selection.compilerSpecID;
++			}
++			if ((langID != null) && (langID.equals(currProgram.getLanguageID()))) {
++				if ((compilerSpecID != null) &&
++						(compilerSpecID.equals(currProgram.getCompilerSpec().getCompilerSpecID()))) {
++					setStatusText("Please select a different Language or Compiler Spec.");
++					setOkEnabled(false);
++				} else {
++					setStatusText(null);
++					setOkEnabled(true);
++				}
++				return;
+ 			}
+-			else {
+-				//selectLangPanel.setNotificationText(null);
+-				setStatusText(null);
+-				setOkEnabled(true);
++			setStatusText(null);
++			setOkEnabled(langID != null);
++		}
++
++		@Override
++		public void valueChosen(LcsSelectionEvent e) {
++			if (isOKEnabled()) {
++				okCallback();
+ 			}
+-			return;
+ 		}
+-		//selectLangPanel.setNotificationText("Setting the language from '" + currProgram.getLanguageName() + "' to '" + langDesc.getName() + "'...");
+-		//selectLangPanel.setNotificationText(null);
+-		setStatusText(null);
+-		setOkEnabled(langID != null);
+ 	};
+ 
+ 	public SetLanguageDialog(PluginTool tool, Program program) {
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/plugin/importer/ImporterLanguageDialog.java b/Ghidra/Features/Base/src/main/java/ghidra/plugin/importer/ImporterLanguageDialog.java
+index 0dadbd87ec7..d5fe698cbad 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/plugin/importer/ImporterLanguageDialog.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/plugin/importer/ImporterLanguageDialog.java
+@@ -52,12 +52,9 @@ public void show(Component parent) {
+ 		}
+ 		else {
+ 			try {
+-				SwingUtilities.invokeAndWait(new Runnable() {
+-					@Override
+-					public void run() {
+-						build();
+-						tool.showDialog(ImporterLanguageDialog.this, parent);
+-					}
++				SwingUtilities.invokeAndWait(() -> {
++					build();
++					tool.showDialog(ImporterLanguageDialog.this, parent);
+ 				});
+ 			}
+ 			catch (Exception e) {
+@@ -77,6 +74,13 @@ private void build() {
+ 			public void valueChanged(LcsSelectionEvent e) {
+ 				validateFormInput();
+ 			}
++
++			@Override
++			public void valueChosen(LcsSelectionEvent e) {
++				if (isOKEnabled()) {
++					okCallback();
++				}
++			}
+ 		});
+ 
+ 		initialize();
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/plugin/importer/LcsSelectionListener.java b/Ghidra/Features/Base/src/main/java/ghidra/plugin/importer/LcsSelectionListener.java
+index 4d70214639f..31bf70aa408 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/plugin/importer/LcsSelectionListener.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/plugin/importer/LcsSelectionListener.java
+@@ -4,9 +4,9 @@
+  * Licensed under the Apache License, Version 2.0 (the "License");
+  * you may not use this file except in compliance with the License.
+  * You may obtain a copy of the License at
+- * 
++ *
+  *      http://www.apache.org/licenses/LICENSE-2.0
+- * 
++ *
+  * Unless required by applicable law or agreed to in writing, software
+  * distributed under the License is distributed on an "AS IS" BASIS,
+  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+@@ -15,6 +15,37 @@
+  */
+ package ghidra.plugin.importer;
+ 
++/**
++ * Language/Compiler selection table event listener interface.
++ */
+ public interface LcsSelectionListener {
+-    public void valueChanged(LcsSelectionEvent e);
++
++    /**
++     * Event types enumeration.
++     */
++    enum EventType {
++        /**
++         * The selected value has changed.
++         */
++        VALUE_CHANGED,
++
++        /**
++         * The currently selected value was chosen.
++         */
++        VALUE_CHOSEN
++    }
++
++    /**
++     * The selected value in the language/compiler selection table has changed.
++     *
++     * @param e the selection event.
++     */
++    void valueChanged(LcsSelectionEvent e);
++
++    /**
++     * The currently selected value in the language/compiler selection table was chosen for further operations.
++     *
++     * @param e the selection event.
++     */
++    void valueChosen(LcsSelectionEvent e);
+ }
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/plugin/importer/NewLanguagePanel.java b/Ghidra/Features/Base/src/main/java/ghidra/plugin/importer/NewLanguagePanel.java
+index 53580054926..5eeabc2eb59 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/plugin/importer/NewLanguagePanel.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/plugin/importer/NewLanguagePanel.java
+@@ -136,16 +136,73 @@ private void wireEverything() {
+ 			if (e.getValueIsAdjusting()) {
+ 				return;
+ 			}
+-			notifyListeners();
++			notifyListeners(LcsSelectionListener.EventType.VALUE_CHANGED);
+ 		});
+ 		table.addMouseListener(new MouseAdapter() {
+ 			@Override
+ 			public void mouseReleased(MouseEvent e) {
+ 				if (e.getClickCount() == 2) {
+-					// do the next action thingie
++					notifyListeners(LcsSelectionListener.EventType.VALUE_CHOSEN);
+ 				}
+ 			}
+ 		});
++		table.addKeyListener(new KeyListener() {
++			@Override
++			public void keyTyped(KeyEvent e) {
++			}
++
++			@Override
++			public void keyPressed(KeyEvent e) {
++				// Digits, letters, and dashes are appended to the filter text box.
++				if (Character.isLetterOrDigit(e.getKeyChar()) || e.getKeyChar() == '-') {
++					e.consume();
++					String filterText = tableFilterPanel.getFilterText();
++					tableFilterPanel.setFilterText(filterText + e.getKeyChar());
++					return;
++				}
++
++				switch (e.getKeyCode()) {
++					// Enter commits the selection if there is any.
++					case KeyEvent.VK_ENTER:
++						e.consume();
++
++						if (table.getSelectedRows().length > 0) {
++							notifyListeners(LcsSelectionListener.EventType.VALUE_CHOSEN);
++						}
++						break;
++
++					// Backspace removes the last character from the filter text box.
++					case KeyEvent.VK_BACK_SPACE:
++						e.consume();
++
++						String filterText = tableFilterPanel.getFilterText();
++						if (!filterText.isEmpty()) {
++							tableFilterPanel.setFilterText(filterText.substring(0, filterText.length() - 1));
++						}
++						break;
++
++					// Left and right cursor movement events are ignored, as columns don't need to be individually
++					// selected anyway.
++					//
++					// TODO: The proper fix for this is to add single-line selection to TableModel and GhidraTable,
++					//       let's do it later.
++					case KeyEvent.VK_LEFT:
++					case KeyEvent.VK_RIGHT:
++						e.consume();
++						break;
++
++					// TODO: Fix handling of TAB/focus change events.  Right now all focus change events are used to
++					//       change the currently selected cell, which in this specific dialog does not really matter.
++					//       All it has to do instead is to transfer focus to the next eligible UI element.
++					default:
++						break;
++				}
++			}
++
++			@Override
++			public void keyReleased(KeyEvent e) {
++			}
++		});
+ 	}
+ 
+ 	public void setFormatText(String text) {
+@@ -172,7 +229,7 @@ public void setShowAllLcsPairs(boolean show) {
+ 
+ 	private void setLanguages(List<LanguageCompilerSpecPair> lcsPairList) {
+ 		tableModel.setLanguages(lcsPairList);
+-		notifyListeners();
++		notifyListeners(LcsSelectionListener.EventType.VALUE_CHANGED);
+ 	}
+ 
+ 	private void switchToAllList() {
+@@ -206,7 +263,7 @@ else if (selectedLcsPair != null) {
+ 
+ 	private LanguageCompilerSpecPair recommendedLcsPair;
+ 
+-	private void notifyListeners() {
++	private void notifyListeners(LcsSelectionListener.EventType eventType) {
+ 		LanguageCompilerSpecPair selectedLcsPair = getSelectedLcsPair();
+ 		if (selectedLcsPair == null) {
+ 			descriptionLabel.setText(DEFAULT_DESCRIPTION_TEXT);
+@@ -221,11 +278,27 @@ private void notifyListeners() {
+ 			}
+ 			descriptionLabel.setFont(descriptionLabel.getFont().deriveFont(Font.PLAIN));
+ 		}
+-//		notifyListenersOfValidityChanged();
++
+ 		if (!listeners.isEmpty()) {
+ 			LcsSelectionEvent e = new LcsSelectionEvent(selectedLcsPair);
+-			for (LcsSelectionListener listener : listeners) {
+-				listener.valueChanged(e);
++
++			switch (eventType) {
++				case VALUE_CHANGED: {
++					for (LcsSelectionListener listener : listeners) {
++						listener.valueChanged(e);
++					}
++					break;
++				}
++
++				case VALUE_CHOSEN: {
++					for (LcsSelectionListener listener : listeners) {
++						listener.valueChosen(e);
++					}
++					break;
++				}
++
++				default:
++					break;
+ 			}
+ 		}
+ 	}
+@@ -326,5 +399,4 @@ public void dispose() {
+ 		table.dispose();
+ 		listeners.clear();
+ 	}
+-
+ }

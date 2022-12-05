@@ -1,0 +1,317 @@
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/options.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/options.cc
+index cd7aaa4c355..5a375c7c09c 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/options.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/options.cc
+@@ -109,6 +109,7 @@ OptionDatabase::OptionDatabase(Architecture *g)
+   registerOption(new OptionMaxLineWidth());
+   registerOption(new OptionIndentIncrement());
+   registerOption(new OptionCommentIndent());
++  registerOption(new OptionCommentIndentAlign());
+   registerOption(new OptionCommentStyle());
+   registerOption(new OptionCommentHeader());
+   registerOption(new OptionCommentInstruction());
+@@ -521,6 +522,16 @@ string OptionCommentIndent::apply(Architecture *glb,const string &p1,const strin
+   return "Comment indent set to "+p1;
+ }
+ 
++/// \class OptionCommentIndentAlign
++/// \brief Toggle whether to align the comment with the current code rather or use a fixed indentation.
++string OptionCommentIndentAlign::apply(Architecture *glb,const string &p1,const string &p2,const string &p3) const
++
++{
++  bool val = onOrOff(p1);
++  glb->print->setLineCommentIndentAlign(val);
++  return "Comment indent alignment turned "+p1;
++}
++
+ /// \class OptionCommentStyle
+ /// \brief Set the style of comment emitted by the decompiler
+ ///
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/options.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/options.hh
+index 474ee70715b..2ba09d575b0 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/options.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/options.hh
+@@ -212,6 +212,12 @@ public:
+   virtual string apply(Architecture *glb,const string &p1,const string &p2,const string &p3) const;
+ };
+ 
++class OptionCommentIndentAlign : public ArchOption {
++public:
++  OptionCommentIndentAlign(void) { name = "commentindentalign"; }	///< Constructor
++  virtual string apply(Architecture *glb,const string &p1,const string &p2,const string &p3) const;
++};
++
+ class OptionCommentStyle : public ArchOption {
+ public:
+   OptionCommentStyle(void) { name = "commentstyle"; }	///< Constructor
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/printlanguage.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/printlanguage.cc
+index f43d3e6f340..38e35900323 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/printlanguage.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/printlanguage.cc
+@@ -87,6 +87,13 @@ void PrintLanguage::setLineCommentIndent(int4 val)
+   line_commentindent = val;
+ }
+ 
++/// \param val is whether to align comments with code or use a fixed indentation
++void PrintLanguage::setLineCommentIndentAlign(bool val)
++
++{
++  line_commentindentalign = val;
++}
++
+ /// By default, comments are indicated in the high-level language by preceding
+ /// them with a specific sequence of delimiter characters, and optionally
+ /// by ending the comment with another set of delimiter characters.
+@@ -573,6 +580,7 @@ void PrintLanguage::resetDefaultsInternal(void)
+   mods = 0;
+   head_comment_type = Comment::header | Comment::warningheader;
+   line_commentindent = 20;
++  line_commentindentalign = false;
+   namespc_strategy = MINIMAL_NAMESPACES;
+   instr_comment_type = Comment::user2 | Comment::warning;
+ }
+@@ -587,9 +595,14 @@ void PrintLanguage::emitLineComment(int4 indent,const Comment *comm)
+   const string &text( comm->getText() );
+   const AddrSpace *spc = comm->getAddr().getSpace();
+   uintb off = comm->getAddr().getOffset();
+-  if (indent <0)
+-    indent = line_commentindent; // User specified default indent
+-  emit->tagLine(indent);
++  if (line_commentindentalign) {
++    emit->tagLine();
++  }
++  else {
++    if (indent <0)
++      indent = line_commentindent; // User specified default indent
++    emit->tagLine(indent);
++  }
+   int4 id = emit->startComment();
+   // The comment delimeters should not be printed as
+   // comment tags, so that they won't get filled
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/printlanguage.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/printlanguage.hh
+index ea7a1efa553..6db20e3b8ef 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/printlanguage.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/printlanguage.hh
+@@ -248,6 +248,7 @@ private:
+   vector<NodePending> nodepend;		///< Data-flow nodes waiting to be pushed onto the RPN stack
+   int4 pending;				///< Number of data-flow nodes waiting to be pushed
+   int4 line_commentindent;		///< Number of characters a comment line should be indented
++  bool line_commentindentalign;		///< Whether to align comment lines with code or use a fixed indentation
+   string commentstart;			///< Delimiter characters for the start of a comment
+   string commentend;			///< Delimiter characters (if any) for the end of a comment
+ protected:
+@@ -428,6 +429,7 @@ public:
+   void setMaxLineSize(int4 mls) { emit->setMaxLineSize(mls); }		///< Set the maximum number of characters per line
+   void setIndentIncrement(int4 inc) { emit->setIndentIncrement(inc); }	///< Set the number of characters to indent per level of code nesting
+   void setLineCommentIndent(int4 val);					///< Set the number of characters to indent comment lines
++  void setLineCommentIndentAlign(bool val);				///< Set whether to align comment lines with code lines or not
+   void setCommentDelimeter(const string &start,const string &stop,
+ 			   bool usecommentfill);			///< Establish comment delimiters for the language
+   uint4 getInstructionComment(void) const { return instr_comment_type; }	///< Get the type of comments suitable within the body of a function
+diff --git a/Ghidra/Features/Decompiler/src/main/help/help/topics/DecompilePlugin/DecompilerOptions.html b/Ghidra/Features/Decompiler/src/main/help/help/topics/DecompilePlugin/DecompilerOptions.html
+index 8f0a6ba0ffa..287bdbf1af2 100644
+--- a/Ghidra/Features/Decompiler/src/main/help/help/topics/DecompilePlugin/DecompilerOptions.html
++++ b/Ghidra/Features/Decompiler/src/main/help/help/topics/DecompilePlugin/DecompilerOptions.html
+@@ -397,6 +397,15 @@
+ 	</p>
+       </dd>
+ <dt>
++<a name="DisplayCommentIndentAlign"></a><span class="term"><span class="bold"><strong>Align comments with code</strong></span></span>
++</dt>
++<dd>
++	<p>
++	  Aligns comment lines with the current indentation level of the decompiler output, instead of using a
++	  fixed amount of spaces. When checked, the comment line indent level option is ignored.
++	</p>
++      </dd>
++<dt>
+ <a name="DisplayCommentStyle"></a><span class="term"><span class="bold"><strong>Comment style</strong></span></span>
+ </dt>
+ <dd>
+diff --git a/Ghidra/Features/Decompiler/src/main/java/ghidra/app/decompiler/DecompileOptions.java b/Ghidra/Features/Decompiler/src/main/java/ghidra/app/decompiler/DecompileOptions.java
+index 68544ae7d45..3166b36f7f3 100644
+--- a/Ghidra/Features/Decompiler/src/main/java/ghidra/app/decompiler/DecompileOptions.java
++++ b/Ghidra/Features/Decompiler/src/main/java/ghidra/app/decompiler/DecompileOptions.java
+@@ -177,6 +177,13 @@ public String toString() {
+ 	private final static int COMMENTINDENT_OPTIONDEFAULT = 20;	// Must match PrintLanguage::resetDefaultsInternal
+ 	private int commentindent;
+ 
++	private final static String COMMENTINDENTALIGN_OPTIONSTRING = "Display.Comment lines aligned with code";
++	private final static String COMMENTINDENTALIGN_OPTIONDESCRIPTION =
++		"Align each comment with the indentation of the code immediately " +
++			"following it, instead of using the comment line indent level";
++	private final static boolean COMMENTINDENTALIGN_OPTIONDEFAULT = false;	// Must match PrintLanguage::resetDefaultsInternal
++	private boolean commentindentAlign;
++
+ 	private final static String COMMENTSTYLE_OPTIONSTRING = "Display.Comment style";
+ 	private final static String COMMENTSTYLE_OPTIONDESCRIPTION =
+ 		"Choice between either the C style comments /* */ or C++ style // ";
+@@ -387,6 +394,7 @@ public DecompileOptions() {
+ 		maxwidth = MAXWIDTH_OPTIONDEFAULT;
+ 		indentwidth = INDENTWIDTH_OPTIONDEFAULT;
+ 		commentindent = COMMENTINDENT_OPTIONDEFAULT;
++		commentindentAlign = COMMENTINDENTALIGN_OPTIONDEFAULT;
+ 		commentStyle = COMMENTSTYLE_OPTIONDEFAULT;
+ 		commentPREInclude = COMMENTPRE_OPTIONDEFAULT;
+ 		commentPLATEInclude = COMMENTPLATE_OPTIONDEFAULT;
+@@ -450,6 +458,7 @@ public void grabFromToolAndProgram(Plugin ownerPlugin, ToolOptions opt, Program
+ 		maxwidth = opt.getInt(MAXWIDTH_OPTIONSTRING, MAXWIDTH_OPTIONDEFAULT);
+ 		indentwidth = opt.getInt(INDENTWIDTH_OPTIONSTRING, INDENTWIDTH_OPTIONDEFAULT);
+ 		commentindent = opt.getInt(COMMENTINDENT_OPTIONSTRING, COMMENTINDENT_OPTIONDEFAULT);
++		commentindentAlign = opt.getBoolean(COMMENTINDENTALIGN_OPTIONSTRING, COMMENTINDENTALIGN_OPTIONDEFAULT);
+ 		commentStyle = opt.getEnum(COMMENTSTYLE_OPTIONSTRING, COMMENTSTYLE_OPTIONDEFAULT);
+ 		commentEOLInclude = opt.getBoolean(COMMENTEOL_OPTIONSTRING, COMMENTEOL_OPTIONDEFAULT);
+ 		commentPREInclude = opt.getBoolean(COMMENTPRE_OPTIONSTRING, COMMENTPRE_OPTIONDEFAULT);
+@@ -584,6 +593,9 @@ public void registerOptions(Plugin ownerPlugin, ToolOptions opt, Program program
+ 		opt.registerOption(COMMENTINDENT_OPTIONSTRING, COMMENTINDENT_OPTIONDEFAULT,
+ 			new HelpLocation(HelpTopics.DECOMPILER, "DisplayCommentIndent"),
+ 			COMMENTINDENT_OPTIONDESCRIPTION);
++		opt.registerOption(COMMENTINDENTALIGN_OPTIONSTRING, COMMENTINDENTALIGN_OPTIONDEFAULT,
++			new HelpLocation(HelpTopics.DECOMPILER, "DisplayCommentIndentAlign"),
++			COMMENTINDENTALIGN_OPTIONDESCRIPTION);
+ 		opt.registerOption(COMMENTSTYLE_OPTIONSTRING, COMMENTSTYLE_OPTIONDEFAULT,
+ 			new HelpLocation(HelpTopics.DECOMPILER, "DisplayCommentStyle"),
+ 			COMMENTSTYLE_OPTIONDESCRIPTION);
+@@ -744,6 +756,9 @@ public void encode(Encoder encoder, DecompInterface iface) throws IOException {
+ 		if (commentindent != COMMENTINDENT_OPTIONDEFAULT) {
+ 			appendOption(encoder, ELEM_COMMENTINDENT, Integer.toString(commentindent), "", "");
+ 		}
++		if (commentindentAlign != COMMENTINDENTALIGN_OPTIONDEFAULT) {
++			appendOption(buf, "commentindentalign", commentindentAlign ? "on" : "off", "", "");
++		}
+ 		if (commentStyle != COMMENTSTYLE_OPTIONDEFAULT) {
+ 			String curstyle = CommentStyleEnum.CPPStyle.equals(commentStyle) ? "cplusplus" : "c";
+ 			appendOption(encoder, ELEM_COMMENTSTYLE, curstyle, "", "");
+@@ -974,6 +989,22 @@ public void setMaxInstructions(int num) {
+ 		maxIntructionsPer = num;
+ 	}
+ 
++	public int getCommentIndent() {
++		return commentindent;
++	}
++
++	public void setCommentIndent(int indent) {
++		commentindent = indent;
++	}
++
++	public boolean isCommentIndentAlign() {
++		return commentindentAlign;
++	}
++
++	public void setCommentIndentAlign(boolean align) {
++		commentindentAlign = align;
++	}
++
+ 	public CommentStyleEnum getCommentStyle() {
+ 		return commentStyle;
+ 	}
+diff --git a/Ghidra/Features/Decompiler/src/test.slow/java/ghidra/app/plugin/core/decompile/DecompilerTest.java b/Ghidra/Features/Decompiler/src/test.slow/java/ghidra/app/plugin/core/decompile/DecompilerTest.java
+index 1044a1a4e82..cb1668d84f3 100644
+--- a/Ghidra/Features/Decompiler/src/test.slow/java/ghidra/app/plugin/core/decompile/DecompilerTest.java
++++ b/Ghidra/Features/Decompiler/src/test.slow/java/ghidra/app/plugin/core/decompile/DecompilerTest.java
+@@ -15,10 +15,14 @@
+  */
+ package ghidra.app.plugin.core.decompile;
+ 
++import java.util.Optional;
++
+ import org.junit.*;
+ 
+ import ghidra.app.decompiler.*;
+ import ghidra.program.model.address.Address;
++import ghidra.program.model.address.AddressSpace;
++import ghidra.program.model.listing.CodeUnit;
+ import ghidra.program.model.listing.Function;
+ import ghidra.program.model.listing.Program;
+ import ghidra.test.AbstractGhidraHeadedIntegrationTest;
+@@ -28,13 +32,14 @@
+ public class DecompilerTest extends AbstractGhidraHeadedIntegrationTest {
+ 	private Program prog;
+ 	private DecompInterface decompiler;
++	private long returnBytesOffset = 0x0;
+ 
+ 	@Before
+ 	public void setUp() throws Exception {
+ 
+ 		ToyProgramBuilder builder = new ToyProgramBuilder("notepad_decompiler", true);
+ 		builder.createMemory("test", "0x0", 2);
+-		builder.addBytesReturn(0x0);
++		builder.addBytesReturn(returnBytesOffset);
+ 		builder.createFunction("0x0");
+ 		prog = builder.getProgram();
+ 
+@@ -58,4 +63,74 @@ public void testDecompileInterfaceReturnsAFunction() throws Exception {
+ 		String decompilation = decompResults.getDecompiledFunction().getC();
+ 		Assert.assertNotNull(decompilation);
+ 	}
++
++	@Test
++	public void testAlignedCommentIndentation() throws Exception {
++		int indent = 20;
++		DecompileOptions options = new DecompileOptions();
++		options.setCommentIndent(indent);
++		options.setCommentIndentAlign(true);
++		options.setPRECommentIncluded(true);
++		decompiler.setOptions(options);
++
++		AddressSpace space = prog.getAddressFactory().getDefaultAddressSpace();
++
++		// add a comment to the program listing
++		Address returnBytesAddr = space.getAddress(returnBytesOffset);
++		int transaction = prog.startTransaction("add comment for indentation test");
++		String comment = "aligned-comment-indentation-test";
++		prog.getListing().getCodeUnitAt(returnBytesAddr).setComment(CodeUnit.PRE_COMMENT, comment);
++		prog.endTransaction(transaction, true);
++
++		Address addr = space.getAddress(0x0);
++		Function func = prog.getListing().getFunctionAt(addr);
++		DecompileResults decompResults = decompiler.decompileFunction(func,
++			DecompileOptions.SUGGESTED_DECOMPILE_TIMEOUT_SECS, TaskMonitor.DUMMY);
++		String decompilation = decompResults.getDecompiledFunction().getC();
++		Assert.assertNotNull(decompilation);
++
++		Optional<String> commentLineCheck = decompilation.lines().filter(line -> line.contains(comment)).findFirst();
++		Optional<String> returnLineCheck = decompilation.lines().filter(line -> line.endsWith("return;")).findFirst();
++		Assert.assertTrue(commentLineCheck.isPresent());
++		Assert.assertTrue(returnLineCheck.isPresent());
++
++		String commentLine = commentLineCheck.get();
++		String returnLine = returnLineCheck.get();
++
++		Assert.assertFalse(commentLine.startsWith(" ".repeat(indent)));
++
++		int commentIndentation = commentLine.indexOf(commentLine.stripLeading());
++		int returnIndentation = returnLine.indexOf(returnLine.stripLeading());
++		Assert.assertEquals(commentIndentation, returnIndentation);
++	}
++
++	@Test
++	public void testFixedCommentIndentation() throws Exception {
++		int indent = 20;
++		DecompileOptions options = new DecompileOptions();
++		options.setCommentIndent(indent);
++		options.setCommentIndentAlign(false);
++		options.setPRECommentIncluded(true);
++		decompiler.setOptions(options);
++
++		AddressSpace space = prog.getAddressFactory().getDefaultAddressSpace();
++
++		// add a comment to the program listing
++		Address returnBytesAddr = space.getAddress(returnBytesOffset);
++		int transaction = prog.startTransaction("add comment for indentation test");
++		String comment = "fixed-comment-indentation-test";
++		prog.getListing().getCodeUnitAt(returnBytesAddr).setComment(CodeUnit.PRE_COMMENT, comment);
++		prog.endTransaction(transaction, true);
++
++		Address addr = space.getAddress(0x0);
++		Function func = prog.getListing().getFunctionAt(addr);
++		DecompileResults decompResults = decompiler.decompileFunction(func,
++			DecompileOptions.SUGGESTED_DECOMPILE_TIMEOUT_SECS, TaskMonitor.DUMMY);
++		String decompilation = decompResults.getDecompiledFunction().getC();
++		Assert.assertNotNull(decompilation);
++
++		Optional<String> commentLine = decompilation.lines().filter(line -> line.contains(comment)).findFirst();
++		Assert.assertTrue(commentLine.isPresent());
++		Assert.assertTrue(commentLine.get().startsWith(" ".repeat(indent)));
++	}
+ }

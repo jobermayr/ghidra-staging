@@ -1,0 +1,105 @@
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/data/EnumDB.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/data/EnumDB.java
+index 85895556a0d..7da9b57b5bf 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/data/EnumDB.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/data/EnumDB.java
+@@ -154,6 +154,23 @@ public String getName(long value) {
+ 		}
+ 	}
+ 
++	@Override
++	public String[] getNames(long value) {
++		lock.acquire();
++		try {
++			checkIsValid();
++			initializeIfNeeded();
++			List<String> list = valueMap.get(value);
++			if (list == null || list.isEmpty()) {
++				return null;
++			}
++			return list.toArray(new String[list.size()]);
++		}
++		finally {
++			lock.release();
++		}
++	}
++
+ 	@Override
+ 	public boolean hasLanguageDependantLength() {
+ 		return false;
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/data/Enum.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/data/Enum.java
+index 98f0b69b89b..d3a8fd2d867 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/data/Enum.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/data/Enum.java
+@@ -37,6 +37,13 @@ public interface Enum extends DataType {
+ 	 */
+ 	public String getName(long value);
+ 
++	/**
++	 * Get all the names for the given value.
++	 * @param value value of the enum entry.
++	 * @return null if no names with the given value were found.
++	 */
++	public String[] getNames(long value);
++
+ 	/**
+ 	 * Get the values of the enum entries.
+ 	 * @return values sorted in ascending order
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/data/EnumDataType.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/data/EnumDataType.java
+index 02a6b081455..950bc1e20e7 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/data/EnumDataType.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/data/EnumDataType.java
+@@ -91,6 +91,15 @@ public String getName(long value) {
+ 		return list.get(0);
+ 	}
+ 
++	@Override
++	public String[] getNames(long value) {
++		List<String> list = valueMap.get(value);
++		if (list == null || list.isEmpty()) {
++			return null;
++		}
++		return list.toArray(new String[list.size()]);
++	}
++
+ 	@Override
+ 	public long[] getValues() {
+ 		long[] values = valueMap.keySet().stream().mapToLong(Long::longValue).toArray();
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/PcodeDataTypeManager.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/PcodeDataTypeManager.java
+index 8544b69b287..fdf2429863f 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/PcodeDataTypeManager.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/PcodeDataTypeManager.java
+@@ -470,10 +470,10 @@ else if (type instanceof Structure) {
+ 		else if (type instanceof Enum) {
+ 			appendNameIdAttributes(resBuf, origType);
+ 			Enum enumDt = (Enum) type;
+-			long[] keys = enumDt.getValues();
++			long[] values = enumDt.getValues();
+ 			String metatype = "uint";
+-			for (long key : keys) {
+-				if (key < 0) {
++			for (long value : values) {
++				if (value < 0) {
+ 					metatype = "int";
+ 					break;
+ 				}
+@@ -482,10 +482,17 @@ else if (type instanceof Enum) {
+ 			SpecXmlUtils.encodeSignedIntegerAttribute(resBuf, "size", enumDt.getLength());
+ 			SpecXmlUtils.encodeBooleanAttribute(resBuf, "enum", true);
+ 			resBuf.append(">\n");
+-			for (long key : keys) {
++			for (long value : values) {
++				String name;
++				String[] names = enumDt.getNames(value);
++				if (names.length == 1) {
++					name = names[0];
++				} else {
++					name = "(".concat(String.join(" | ", names)).concat(")");
++				}
+ 				resBuf.append("<val");
+-				SpecXmlUtils.xmlEscapeAttribute(resBuf, "name", enumDt.getName(key));
+-				SpecXmlUtils.encodeSignedIntegerAttribute(resBuf, "value", key);
++				SpecXmlUtils.xmlEscapeAttribute(resBuf, "name", name);
++				SpecXmlUtils.encodeSignedIntegerAttribute(resBuf, "value", value);
+ 				resBuf.append("/>");
+ 			}
+ 		}

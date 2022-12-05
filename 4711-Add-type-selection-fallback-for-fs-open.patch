@@ -1,0 +1,156 @@
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/formats/gfilesystem/FileSystemService.java b/Ghidra/Features/Base/src/main/java/ghidra/formats/gfilesystem/FileSystemService.java
+index fa92a0d90ba..ffe90cbb668 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/formats/gfilesystem/FileSystemService.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/formats/gfilesystem/FileSystemService.java
+@@ -962,4 +962,17 @@ public synchronized CryptoSession newCryptoSession() {
+ 		return new CryptoProviderSessionChildImpl(currentCryptoSession);
+ 	}
+ 
++	/**
++	 * Adds the given {@link GFileSystem} instance to the managed filesystems list.
++	 *
++	 * @param fs {@link GFileSystem} to add to the managed filesystems list.
++	 */
++	public void addFileSystem(GFileSystem fs) {
++		synchronized (fsInstanceManager) {
++			if (!isFilesystemMountedAt(fs.getFSRL())) {
++				fsInstanceManager.add(fs);
++			}
++		}
++	}
++
+ }
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/formats/gfilesystem/factory/FileSystemFactoryMgr.java b/Ghidra/Features/Base/src/main/java/ghidra/formats/gfilesystem/factory/FileSystemFactoryMgr.java
+index ff2f2f145f0..9db4094aca9 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/formats/gfilesystem/factory/FileSystemFactoryMgr.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/formats/gfilesystem/factory/FileSystemFactoryMgr.java
+@@ -347,4 +347,12 @@ public GFileSystem probe(ByteProvider byteProvider, FileSystemService fsService,
+ 
+ 	}
+ 
++	/**
++	 * Returns the filesystem providers available to this factory.
++	 *
++	 * @return a copy of the available filesystem providers.
++	 */
++	public Map<String, FileSystemInfoRec> getFileSystemInfoRecs() {
++		return new HashMap<>(fsByType);
++	}
+ }
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/formats/gfilesystem/factory/GFileSystemProbeManual.java b/Ghidra/Features/Base/src/main/java/ghidra/formats/gfilesystem/factory/GFileSystemProbeManual.java
+new file mode 100644
+index 00000000000..664fe8a316c
+--- /dev/null
++++ b/Ghidra/Features/Base/src/main/java/ghidra/formats/gfilesystem/factory/GFileSystemProbeManual.java
+@@ -0,0 +1,24 @@
++/* ###
++ * IP: GHIDRA
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package ghidra.formats.gfilesystem.factory;
++
++/**
++ * A {@link GFileSystemProbe} interface for filesystems that can be directly
++ * chosen by the user as a fallback if automatic filesystem detection fails.
++ */
++public interface GFileSystemProbeManual extends GFileSystemProbe {
++	// Empty interface.
++}
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/plugins/fsbrowser/FileSystemBrowserPlugin.java b/Ghidra/Features/Base/src/main/java/ghidra/plugins/fsbrowser/FileSystemBrowserPlugin.java
+index feb8a01738f..5e8904669c0 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/plugins/fsbrowser/FileSystemBrowserPlugin.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/plugins/fsbrowser/FileSystemBrowserPlugin.java
+@@ -16,7 +16,7 @@
+ package ghidra.plugins.fsbrowser;
+ 
+ import java.util.*;
+-
++import java.util.stream.Collectors;
+ import java.awt.Component;
+ import java.awt.event.InputEvent;
+ import java.awt.event.KeyEvent;
+@@ -35,8 +35,14 @@
+ import ghidra.app.events.ProgramActivatedPluginEvent;
+ import ghidra.app.plugin.PluginCategoryNames;
+ import ghidra.app.services.*;
++import ghidra.app.util.bin.ByteProvider;
+ import ghidra.app.util.opinion.LoaderService;
+ import ghidra.formats.gfilesystem.*;
++import ghidra.formats.gfilesystem.factory.FileSystemFactoryMgr;
++import ghidra.formats.gfilesystem.factory.FileSystemInfoRec;
++import ghidra.formats.gfilesystem.factory.GFileSystemProbeByteProvider;
++import ghidra.formats.gfilesystem.factory.GFileSystemProbeBytesOnly;
++import ghidra.formats.gfilesystem.factory.GFileSystemProbeManual;
+ import ghidra.framework.main.FrontEndService;
+ import ghidra.framework.main.ApplicationLevelPlugin;
+ import ghidra.framework.model.Project;
+@@ -244,9 +250,12 @@ private void doOpenFilesystem(FSRL containerFSRL, Component parent, TaskMonitor
+ 			FileSystemRef ref = fsService().probeFileForFilesystem(containerFSRL, monitor,
+ 				FileSystemProbeConflictResolver.GUI_PICKER);
+ 			if (ref == null) {
+-				Msg.showWarn(this, parent, "Open Filesystem",
+-					"No filesystem provider for " + containerFSRL.getName());
+-				return;
++				ref = showFallbackFileSystemChooser(containerFSRL, parent, monitor);
++				if (ref == null) {
++					Msg.showWarn(this, parent, "Open Filesystem",
++							"No filesystem provider for " + containerFSRL.getName());
++					return;
++				}
+ 			}
+ 
+ 			createNewFileSystemBrowser(ref, true);
+@@ -257,6 +266,42 @@ private void doOpenFilesystem(FSRL containerFSRL, Component parent, TaskMonitor
+ 		}
+ 	}
+ 
++	private FileSystemRef showFallbackFileSystemChooser(FSRL containerFSRL, Component parent, TaskMonitor monitor) throws CancelledException, IOException {
++		FileSystemFactoryMgr fsFactoryMgr = FileSystemFactoryMgr.getInstance();
++
++		//@formatter:off
++		List<FileSystemInfoRec> fsList = fsFactoryMgr.getFileSystemInfoRecs().values()
++				.stream()
++				.filter(fs -> fs.getFactory() instanceof GFileSystemProbeManual)
++				.sorted((filesystem1, filesystem2) -> filesystem1.getDescription().compareToIgnoreCase(filesystem2.getDescription()))
++				.collect(Collectors.toList());
++		//@formatter:on
++
++		if (fsList.isEmpty()) {
++			return null;
++		}
++
++		FileSystemInfoRec chosenFilesystem = SelectFromListDialog.selectFromList(fsList, "Select filesystem",
++				"Select a filesystem from list", FileSystemInfoRec::getDescription);
++		if (chosenFilesystem == null) {
++			return null;
++		}
++
++		ByteProvider byteProvider = fsService().getByteProvider(containerFSRL, true, monitor);
++		GFileSystem fs = fsFactoryMgr.mountFileSystem(chosenFilesystem.getType(), byteProvider, fsService, monitor);
++		if (fs != null) {
++			FileSystemRef fsRef = fsService().getMountedFilesystem(containerFSRL.makeNested(chosenFilesystem.getType()));
++			if (fsRef != null) {
++				fs.close();
++				return fsRef;
++			}
++			fsService().addFileSystem(fs);
++			return fs.getRefManager().create();
++		}
++
++		return null;
++	}
++
+ 	/**
+ 	 * Prompts the user to pick a file system container file to open using a local
+ 	 * filesystem browser and then displays that filesystem in a new fsb browser.

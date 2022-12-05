@@ -1,0 +1,356 @@
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/cmd/formats/CoffBinaryAnalysisCommand.java b/Ghidra/Features/Base/src/main/java/ghidra/app/cmd/formats/CoffBinaryAnalysisCommand.java
+index 745fc5e04c6..15c5a639cf5 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/cmd/formats/CoffBinaryAnalysisCommand.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/cmd/formats/CoffBinaryAnalysisCommand.java
+@@ -145,7 +145,7 @@ private void processOptionalHeader(CoffFileHeader header) throws Exception {
+ 	private void processStrings(CoffFileHeader header) throws Exception {
+ 		monitor.setMessage("Processing strings...");
+ 		Address start = toAddr(header.getSymbolTablePointer() +
+-			(header.getSymbolTableEntries() * CoffConstants.SYMBOL_SIZEOF));
++			header.getSymbolTableLength());
+ 		Address address = start;
+ 		createData(address, new DWordDataType());
+ 		createLabel(address, "Number_of_strings", true);
+@@ -163,7 +163,7 @@ private void processStrings(CoffFileHeader header) throws Exception {
+ 	private void processSymbols(CoffFileHeader header) throws Exception {
+ 		monitor.setMessage("Processing symbols...");
+ 		Address start = toAddr(header.getSymbolTablePointer());
+-		long length = header.getSymbolTableEntries() * CoffConstants.SYMBOL_SIZEOF;
++		long length = header.getSymbolTableLength();
+ 		Address address = start;
+ 		List<CoffSymbol> symbols = header.getSymbols();
+ 		for (int i = 0; i < symbols.size(); ++i) {
+@@ -224,7 +224,7 @@ private void processSectionLineNumbers(CoffSectionHeader section) throws Excepti
+ 			return;
+ 		}
+ 		Address start = toAddr(section.getPointerToLineNumbers());
+-		long length = section.getLineNumberCount() * CoffLineNumber.SIZEOF;
++		long length = section.getLineNumberLength();
+ 		Address address = start;
+ 		List<CoffLineNumber> lineNumbers = section.getLineNumbers();
+ 		for (CoffLineNumber lineNumber : lineNumbers) {
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/coff/CoffConstants.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/coff/CoffConstants.java
+index 6b2de0598eb..b8ce54487d9 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/coff/CoffConstants.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/coff/CoffConstants.java
+@@ -38,4 +38,8 @@ public class CoffConstants {
+ 	 * Number of dimensions of a symbol's auxiliary array.
+ 	 */
+ 	public final static int AUXILIARY_ARRAY_DIMENSION   =  4;
++	/**
++	 * Length (in bytes0 of a Line Number
++	 */
++	public final static int LINENO_SIZEOF = 6;
+ }
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/coff/CoffFileHeader.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/coff/CoffFileHeader.java
+index 94abaa44cee..e8c0a5e6ad3 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/coff/CoffFileHeader.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/coff/CoffFileHeader.java
+@@ -104,6 +104,14 @@ public int getSymbolTablePointer() {
+ 	public int getSymbolTableEntries() {
+ 		return f_nsyms;
+ 	}
++	
++	/**
++	 * Returns the length of symbols in the symbol table.
++	 * @return the length of symbols in the symbol table
++	 */
++	public int getSymbolTableLength() {
++		return f_nsyms * CoffConstants.SYMBOL_SIZEOF;
++	}
+ 
+ 	/**
+ 	 * Returns the size in bytes of the optional header.
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/coff/CoffLineNumber.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/coff/CoffLineNumber.java
+index 9f5d36e3dee..b740bcab6b8 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/coff/CoffLineNumber.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/coff/CoffLineNumber.java
+@@ -23,10 +23,12 @@
+ import java.io.IOException;
+ 
+ public class CoffLineNumber implements StructConverter {
+-	public final static int SIZEOF = 4 + 2;
+ 
+-	private int   l_addr; // address of line number
+-	private short l_lnno; // line number
++	protected int   l_addr; // address of line number
++	protected short l_lnno; // line number
++	
++	protected CoffLineNumber() {		
++	}
+ 
+ 	CoffLineNumber(BinaryReader reader) throws IOException {
+ 		l_addr = reader.readNextInt();
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/coff/CoffSectionHeader.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/coff/CoffSectionHeader.java
+index 2362bb862f0..bad36a5f92e 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/coff/CoffSectionHeader.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/coff/CoffSectionHeader.java
+@@ -208,6 +208,14 @@ public int getRelocationCount() {
+ 	public int getLineNumberCount() {
+ 		return s_nlnno;
+ 	}
++	
++	/**
++	 * Returns the length of line number entries for this section.
++	 * @return the length of line number entries for this section
++	 */
++	public int getLineNumberLength() {
++		return s_nlnno * CoffConstants.LINENO_SIZEOF;
++	}
+ 
+ 	/**
+ 	 * Returns the flags for this section.
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/coff/CoffSymbol.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/coff/CoffSymbol.java
+index f0196a1eb35..5474d4234f5 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/coff/CoffSymbol.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/coff/CoffSymbol.java
+@@ -24,14 +24,17 @@
+ import java.util.List;
+ 
+ public class CoffSymbol implements StructConverter {
+-	private String e_name;
+-	private int e_value;
+-	private short e_scnum;
+-	private short e_type;
+-	private byte e_sclass;
+-	private byte e_numaux;
+-
+-	private List<CoffSymbolAux> _auxiliarySymbols = new ArrayList<CoffSymbolAux>();
++	protected String e_name;
++	protected int e_value;
++	protected short e_scnum;
++	protected int e_type;
++	protected byte e_sclass;
++	protected byte e_numaux;
++
++	protected List<CoffSymbolAux> _auxiliarySymbols = new ArrayList<CoffSymbolAux>();
++
++	protected CoffSymbol() {	
++	}
+ 
+ 	CoffSymbol(BinaryReader reader, CoffFileHeader header) throws IOException {
+ 
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/coff/CoffSymbolAuxArray.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/coff/CoffSymbolAuxArray.java
+index af123223181..36cc42071c2 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/coff/CoffSymbolAuxArray.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/coff/CoffSymbolAuxArray.java
+@@ -25,14 +25,17 @@
+ 
+ public class CoffSymbolAuxArray implements CoffSymbolAux {
+ 
+-	private int     tagIndex;
+-	private short   lineNumber;
+-	private short   arraySize;
+-	private short   firstDimension;
+-	private short   secondDimension;
+-	private short   thirdDimension;
+-	private short   fourthDimension;
+-	private byte [] unused;
++	protected int     tagIndex;
++	protected short   lineNumber;
++	protected short   arraySize;
++	protected short   firstDimension;
++	protected short   secondDimension;
++	protected short   thirdDimension;
++	protected short   fourthDimension;
++	protected byte [] unused;
++
++	protected CoffSymbolAuxArray() {		
++	}
+ 
+ 	CoffSymbolAuxArray(BinaryReader reader) throws IOException {
+ 		tagIndex        = reader.readNextInt();
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/coff/CoffSymbolAuxBeginningOfBlock.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/coff/CoffSymbolAuxBeginningOfBlock.java
+index 3858399d9f2..f2bf7ff2e57 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/coff/CoffSymbolAuxBeginningOfBlock.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/coff/CoffSymbolAuxBeginningOfBlock.java
+@@ -25,12 +25,15 @@
+ 
+ public class CoffSymbolAuxBeginningOfBlock implements CoffSymbolAux {
+ 
+-	private byte [] unused1;
+-	private short   sourceLineNumber;
+-	private byte [] unused2;
+-	private int     nextEntryIndex;
+-	private byte [] unused3;
++	protected byte [] unused1;
++	protected short   sourceLineNumber;
++	protected byte [] unused2;
++	protected int     nextEntryIndex;
++	protected byte [] unused3;
+ 
++	protected CoffSymbolAuxBeginningOfBlock() {
++	}
++	
+ 	CoffSymbolAuxBeginningOfBlock(BinaryReader reader) throws IOException {
+ 		unused1          = reader.readNextByteArray(4);
+ 		sourceLineNumber = reader.readNextShort();
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/coff/CoffSymbolAuxDefault.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/coff/CoffSymbolAuxDefault.java
+index f15761f2344..05e0b871500 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/coff/CoffSymbolAuxDefault.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/coff/CoffSymbolAuxDefault.java
+@@ -25,7 +25,10 @@
+ 
+ class CoffSymbolAuxDefault implements CoffSymbolAux {
+ 
+-	private byte [] bytes;
++	protected byte [] bytes;
++
++	protected CoffSymbolAuxDefault() {
++	}
+ 
+ 	CoffSymbolAuxDefault(BinaryReader reader) throws IOException {
+ 		bytes = reader.readNextByteArray(CoffConstants.SYMBOL_SIZEOF);
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/coff/CoffSymbolAuxEndOfBlock.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/coff/CoffSymbolAuxEndOfBlock.java
+index 9d334016519..67f018bc018 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/coff/CoffSymbolAuxEndOfBlock.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/coff/CoffSymbolAuxEndOfBlock.java
+@@ -25,9 +25,12 @@
+ 
+ public class CoffSymbolAuxEndOfBlock implements CoffSymbolAux {
+ 
+-	private byte [] unused1;
+-	private short   sourceLineNumber;
+-	private byte [] unused2;
++	protected byte [] unused1;
++	protected short   sourceLineNumber;
++	protected byte [] unused2;
++
++	protected CoffSymbolAuxEndOfBlock() {		
++	}
+ 
+ 	CoffSymbolAuxEndOfBlock(BinaryReader reader) throws IOException {
+ 		unused1          = reader.readNextByteArray(4);
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/coff/CoffSymbolAuxEndOfStruct.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/coff/CoffSymbolAuxEndOfStruct.java
+index db00e61ca5e..90918ac4fb4 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/coff/CoffSymbolAuxEndOfStruct.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/coff/CoffSymbolAuxEndOfStruct.java
+@@ -25,10 +25,13 @@
+ 
+ public class CoffSymbolAuxEndOfStruct implements CoffSymbolAux {
+ 
+-	private int     tagIndex;
+-	private byte [] unused1;
+-	private short   size; //of structure, union, or enumeration
+-	private byte [] unused2;
++	protected int     tagIndex;
++	protected byte [] unused1;
++	protected short   size; //of structure, union, or enumeration
++	protected byte [] unused2;
++
++	protected CoffSymbolAuxEndOfStruct() {		
++	}
+ 
+ 	CoffSymbolAuxEndOfStruct(BinaryReader reader) throws IOException {
+ 		tagIndex = reader.readNextInt();
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/coff/CoffSymbolAuxFilename.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/coff/CoffSymbolAuxFilename.java
+index f9979f11bdc..ac27dc62d8c 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/coff/CoffSymbolAuxFilename.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/coff/CoffSymbolAuxFilename.java
+@@ -25,9 +25,12 @@
+ 
+ public class CoffSymbolAuxFilename implements CoffSymbolAux {
+ 
+-	private byte [] filename;
+-	private byte [] unused;
++	protected byte [] filename;
++	protected byte [] unused;
+ 
++	protected CoffSymbolAuxFilename() {
++	}
++	
+ 	CoffSymbolAuxFilename(BinaryReader reader) throws IOException {
+ 		filename = reader.readNextByteArray(CoffConstants.FILE_NAME_LENGTH);
+ 		unused   = reader.readNextByteArray(4);
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/coff/CoffSymbolAuxFunction.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/coff/CoffSymbolAuxFunction.java
+index 31c3dda0982..1c296027f55 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/coff/CoffSymbolAuxFunction.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/coff/CoffSymbolAuxFunction.java
+@@ -25,11 +25,14 @@
+ 
+ public class CoffSymbolAuxFunction implements CoffSymbolAux {
+ 
+-	private int     tagIndex;
+-	private int     size;
+-	private int     filePointerToLineNumber;
+-	private int     nextEntryIndex;
+-	private byte [] unused;
++	protected int     tagIndex;
++	protected int     size;
++	protected int     filePointerToLineNumber;
++	protected int     nextEntryIndex;
++	protected byte [] unused;
++
++	protected CoffSymbolAuxFunction() {		
++	}
+ 
+ 	CoffSymbolAuxFunction(BinaryReader reader) throws IOException {
+ 		tagIndex                = reader.readNextInt();
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/coff/CoffSymbolAuxName.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/coff/CoffSymbolAuxName.java
+index 9dbe2b928b5..823f5e2583e 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/coff/CoffSymbolAuxName.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/coff/CoffSymbolAuxName.java
+@@ -25,10 +25,13 @@
+ 
+ public class CoffSymbolAuxName implements CoffSymbolAux {
+ 
+-	private int     tagIndex;
+-	private byte [] unused1;
+-	private short   size;
+-	private byte [] unused2;
++	protected int     tagIndex;
++	protected byte [] unused1;
++	protected short   size;
++	protected byte [] unused2;
++
++	protected CoffSymbolAuxName() {		
++	}
+ 
+ 	CoffSymbolAuxName(BinaryReader reader) throws IOException {
+ 		tagIndex   = reader.readNextInt();
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/coff/CoffSymbolAuxSection.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/coff/CoffSymbolAuxSection.java
+index 441b381a3e6..58fa3a60641 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/coff/CoffSymbolAuxSection.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/coff/CoffSymbolAuxSection.java
+@@ -25,10 +25,13 @@
+ 
+ public class CoffSymbolAuxSection implements CoffSymbolAux {
+ 
+-	private int      sectionLength;
+-	private short    relocationCount;
+-	private short    lineNumberCount;
+-	private byte []  unused;
++	protected int      sectionLength;
++	protected short    relocationCount;
++	protected short    lineNumberCount;
++	protected byte []  unused;
++
++	protected CoffSymbolAuxSection() {		
++	}
+ 
+ 	CoffSymbolAuxSection(BinaryReader reader) throws IOException {
+ 		sectionLength     = reader.readNextInt();
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/coff/CoffSymbolAuxTagName.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/coff/CoffSymbolAuxTagName.java
+index f9bac67a3e8..4c6dc00bb09 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/coff/CoffSymbolAuxTagName.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/coff/CoffSymbolAuxTagName.java
+@@ -25,11 +25,14 @@
+ 
+ public class CoffSymbolAuxTagName implements CoffSymbolAux {
+ 
+-	private byte []  unused1;
+-	private short    size;
+-	private byte []  unused2;
+-	private int      nextEntryIndex;
+-	private byte []  unused3;
++	protected byte []  unused1;
++	protected short    size;
++	protected byte []  unused2;
++	protected int      nextEntryIndex;
++	protected byte []  unused3;
++
++	protected CoffSymbolAuxTagName() {		
++	}
+ 
+ 	CoffSymbolAuxTagName(BinaryReader reader) throws IOException {
+ 		unused1         = reader.readNextByteArray(6);

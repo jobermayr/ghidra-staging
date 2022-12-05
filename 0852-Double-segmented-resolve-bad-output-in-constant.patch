@@ -1,0 +1,86 @@
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
+index b2ac97b7c29..ffc80b4420e 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
+@@ -4236,14 +4236,14 @@ void ActionInferTypes::propagateSpacebaseRef(Funcdata &data,Varnode *spcvn)
+     switch(op->code()) {
+     case CPUI_COPY:
+       vn = op->getIn(0);
+-      addr = sbtype->getAddress(0,vn->getSize(),op->getAddr());
++      addr = sbtype->getAddress(0,vn->getSize(),op->getAddr(),vn->isPtrCheck());
+       propagateRef(data,op->getOut(),addr);
+       break;
+     case CPUI_INT_ADD:
+     case CPUI_PTRSUB:
+       vn = op->getIn(1);
+       if (vn->isConstant()) {
+-	addr = sbtype->getAddress(vn->getOffset(),vn->getSize(),op->getAddr());
++	addr = sbtype->getAddress(vn->getOffset(),vn->getSize(),op->getAddr(),vn->isPtrCheck());
+ 	propagateRef(data,op->getOut(),addr);
+       }
+       break;
+@@ -4251,7 +4251,7 @@ void ActionInferTypes::propagateSpacebaseRef(Funcdata &data,Varnode *spcvn)
+       vn = op->getIn(1);
+       if (vn->isConstant()) {
+ 	uintb off = vn->getOffset() * op->getIn(2)->getOffset();
+-	addr = sbtype->getAddress(off,vn->getSize(),op->getAddr());
++	addr = sbtype->getAddress(off,vn->getSize(),op->getAddr(),vn->isPtrCheck());
+ 	propagateRef(data,op->getOut(),addr);
+       }
+       break;
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/printc.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/printc.cc
+index 3d6e4a6d9fa..b2f0fdb7553 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/printc.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/printc.cc
+@@ -772,7 +772,8 @@ void PrintC::opPtrsub(const PcodeOp *op)
+   else if (ct->getMetatype() == TYPE_SPACEBASE) {
+     TypeSpacebase *sb = (TypeSpacebase *)ct;
+     Scope *scope = sb->getMap();
+-    Address addr = sb->getAddress(op->getIn(1)->getOffset(),in0->getSize(),op->getAddr());
++    Address addr = sb->getAddress(op->getIn(1)->getOffset(),in0->getSize(),op->getAddr(),
++      op->getIn(1)->isPtrCheck());
+     if (addr.isInvalid())
+       throw LowlevelError("Unable to generate proper address from spacebase");
+     SymbolEntry *entry = scope->queryContainer(addr,1,Address());
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc
+index dc4123c3fbb..c8b60ab5a70 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc
+@@ -6109,7 +6109,7 @@ int4 RulePtrsubCharConstant::applyOp(PcodeOp *op,Funcdata &data)
+   if (outtype->getMetatype() != TYPE_PTR) return 0;
+   Datatype *basetype = outtype->getPtrTo();
+   if (!basetype->isCharPrint()) return 0;
+-  Address symaddr = sbtype->getAddress(vn1->getOffset(),vn1->getSize(),op->getAddr());
++  Address symaddr = sbtype->getAddress(vn1->getOffset(),vn1->getSize(),op->getAddr(),vn1->isPtrCheck());
+   Scope *scope = sbtype->getMap();
+   if (!scope->isReadOnly(symaddr,1,op->getAddr()))
+     return 0;
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/type.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/type.cc
+index d575d55153f..b0036492835 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/type.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/type.cc
+@@ -1164,9 +1164,10 @@ int4 TypeSpacebase::compareDependency(const Datatype &op) const
+ /// \param sz is the size of offset (as a pointer)
+ /// \param point is a "context" reference for the request
+ /// \return the referred to Address
+-Address TypeSpacebase::getAddress(uintb off,int4 sz,const Address &point) const
++Address TypeSpacebase::getAddress(uintb off,int4 sz,const Address &point,bool ptrCheck) const
+ 
+ {
++  if (ptrCheck) return Address(spaceid,off);
+   return glb->resolveConstant(spaceid,off,sz,point);
+ }
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/type.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/type.hh
+index 7033e230303..8a5c5035969 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/type.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/type.hh
+@@ -367,7 +367,7 @@ public:
+   TypeSpacebase(AddrSpace *id,const Address &frame,Architecture *g)
+     : Datatype(0,TYPE_SPACEBASE), localframe(frame) { spaceid = id; glb = g; }
+   Scope *getMap(void) const;	///< Get the symbol table indexed by \b this
+-  Address getAddress(uintb off,int4 sz,const Address &point) const;	///< Construct an Address given an offset
++  Address getAddress(uintb off,int4 sz,const Address &point,bool ptrCheck) const;	///< Construct an Address given an offset
+   virtual Datatype *getSubType(uintb off,uintb *newoff) const;
+   virtual int4 compare(const Datatype &op,int4 level) const;
+   virtual int4 compareDependency(const Datatype &op) const; // For tree structure

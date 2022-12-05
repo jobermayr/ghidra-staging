@@ -1,0 +1,134 @@
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/printc.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/printc.cc
+index 430c64e324e..64cf513a507 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/printc.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/printc.cc
+@@ -28,6 +28,10 @@ OpToken PrintC::bitwise_not = { "~", 1, 62, false, OpToken::unary_prefix, 0, 0,
+ OpToken PrintC::boolean_not = { "!", 1, 62, false, OpToken::unary_prefix, 0, 0, (OpToken *)0 };
+ OpToken PrintC::unary_minus = { "-", 1, 62, false, OpToken::unary_prefix, 0, 0, (OpToken *)0 };
+ OpToken PrintC::unary_plus = { "+", 1, 62, false, OpToken::unary_prefix, 0, 0, (OpToken *)0 };
++OpToken PrintC::pre_increment = { "++", 1, 66, false, OpToken::unary_prefix, 0, 0, (OpToken *)0 };
++OpToken PrintC::pre_decrement = { "--", 1, 66, false, OpToken::unary_prefix, 0, 0, (OpToken *)0 };
++OpToken PrintC::post_increment = { "++", 1, 66, false, OpToken::unary_postfix, 0, 0, (OpToken *)0 };
++OpToken PrintC::post_decrement = { "--", 1, 66, false, OpToken::unary_postfix, 0, 0, (OpToken *)0 };
+ OpToken PrintC::addressof = { "&", 1, 62, false, OpToken::unary_prefix, 0, 0, (OpToken *)0 };
+ OpToken PrintC::dereference = { "*", 1, 62, false, OpToken::unary_prefix, 0, 0, (OpToken *)0 };
+ OpToken PrintC::typecast = { "()", 2, 62, false, OpToken::presurround, 0, 0, (OpToken *)0 };
+@@ -2107,6 +2111,44 @@ void PrintC::docTypeDefinitions(const TypeFactory *typegrp)
+   }
+ }
+ 
++/// Check that the given p-code can be simplified to a C increment or decrement operator.
++/// \param op is the given PcodeOp
++bool PrintC::emitIncDecOp(const PcodeOp *op)
++
++{
++  const OpToken * token;
++  enum OpCode opcode = op->code();
++
++  if (opcode != CPUI_INT_ADD && opcode != CPUI_INT_SUB) return false;
++
++  // is operation modifying inplace?
++  const Varnode *vn = op->getIn(0);
++  if (op->getOut()->getHigh() != vn->getHigh()) return false;
++
++  // get add/sub value
++  const Varnode *value = op->getIn(1);
++
++  if (!value->isConstant()) return false;
++
++  int4 num = (int4)value->getAddr().getOffset();
++
++  // invert subtraction
++  if (opcode == CPUI_INT_SUB)
++    num = -num;
++
++  if (num == 1) {
++    token = &post_increment;
++  } else if (num == -1) {
++    token = &post_decrement;
++  } else {
++    return false;
++  }
++
++  pushOp(token,op);
++  pushVnExplicit(vn,op);
++  return true;
++}
++
+ /// Check that the given p-code op has an \e in-place token form and if the first input and the output
+ /// are references to  the same variable. If so, emit the expression using the \e in-place token.
+ /// \param op is the given PcodeOp
+@@ -2166,6 +2208,7 @@ void PrintC::emitExpression(const PcodeOp *op)
+ {
+   const Varnode *outvn = op->getOut();
+   if (outvn != (Varnode *)0) {
++    if (option_inplace_ops && emitIncDecOp(op)) return;
+     if (option_inplace_ops && emitInplaceOp(op)) return;
+     pushOp(&assignment,op);
+     pushVnLHS(outvn,op);
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/printc.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/printc.hh
+index 54162016f54..a0abe202ef2 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/printc.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/printc.hh
+@@ -72,6 +72,10 @@ protected:
+   static OpToken boolean_not;		///< The \e boolean \e not operator
+   static OpToken unary_minus;		///< The \e unary \e minus operator
+   static OpToken unary_plus;		///< The \e unary \e plus operator
++  static OpToken pre_increment;		///< The \e pre increment \e operator
++  static OpToken pre_decrement;		///< The \e pre decrement \e operator
++  static OpToken post_increment;	///< The \e post increment \e operator
++  static OpToken post_decrement;	///< The \e post decrement \e operator
+   static OpToken addressof;		///< The \e address \e of operator
+   static OpToken dereference;		///< The \e pointer \e dereference operator
+   static OpToken typecast;		///< The \e type \e cast operator
+@@ -149,6 +153,7 @@ protected:
+   void emitGlobalVarDeclsRecursive(Scope *scope);	///< Emit variable declarations for all global symbols under given scope
+   void emitLocalVarDecls(const Funcdata *fd);		///< Emit variable declarations for a function
+   void emitStatement(const PcodeOp *inst);		///< Emit a statement in the body of a function
++  bool emitIncDecOp(const PcodeOp *op);			///< Attempt to emit a increment or deincrement expression
+   bool emitInplaceOp(const PcodeOp *op);		///< Attempt to emit an expression rooted at an \e in-place operator
+   void emitGotoStatement(const FlowBlock *bl,const FlowBlock *exp_bl,uint4 type);
+   void emitSwitchCase(int4 casenum,const BlockSwitch *switchbl);	///< Emit labels for a \e case block
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/printlanguage.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/printlanguage.cc
+index bb73411e3b8..d705e887238 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/printlanguage.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/printlanguage.cc
+@@ -295,6 +295,12 @@ bool PrintLanguage::parentheses(const OpToken *op2)
+     //    if (associative && (this == &op2)) return false;
+     if ((op2->type==OpToken::unary_prefix)||(op2->type==OpToken::presurround)) return false;
+     return true;
++  case OpToken::unary_postfix:
++    if (topToken->precedence > op2->precedence) return true;
++    if (topToken->precedence < op2->precedence) return false;
++    //    if (associative && (this == &op2)) return false;
++    if (op2->type==OpToken::postsurround) return false;
++    return true;
+   case OpToken::postsurround:
+     if (stage==1) return false;	// Inside the surround
+     if (topToken->precedence > op2->precedence) return true;
+@@ -345,6 +351,11 @@ void PrintLanguage::emitOp(const ReversePolish &entry)
+     emit->tagOp(entry.tok->print,EmitXml::no_color,entry.op);
+     emit->spaces(entry.tok->spacing,entry.tok->bump);
+     break;
++  case OpToken::unary_postfix:
++    if (entry.visited!=1) return;
++    emit->tagOp(entry.tok->print,EmitXml::no_color,entry.op);
++    emit->spaces(entry.tok->spacing,entry.tok->bump);
++    break;
+   case OpToken::postsurround:
+     if (entry.visited==0) return;
+     if (entry.visited==1) {	// Front surround token 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/printlanguage.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/printlanguage.hh
+index e06c7c4abdb..12b22493a8d 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/printlanguage.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/printlanguage.hh
+@@ -87,7 +87,8 @@ public:
+     postsurround,		///< Function or array operator form
+     presurround,		///< Modifier form (like a cast operation)
+     space,			///< No explicitly printed token
+-    hiddenfunction		///< Operation that isn't explicitly printed
++    hiddenfunction,		///< Operation that isn't explicitly printed
++    unary_postfix		///< Unary operator form (printed after its input)
+   };
+   const char *print;		///< Printing characters for the token
+   int4 stage;			///< Additional elements consumed from the RPN stack when emitting this token

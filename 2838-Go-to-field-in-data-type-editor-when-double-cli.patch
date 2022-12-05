@@ -1,0 +1,341 @@
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/analysis/DefaultDataTypeManagerService.java b/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/analysis/DefaultDataTypeManagerService.java
+index 6a086b0e493..5715c80888a 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/analysis/DefaultDataTypeManagerService.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/analysis/DefaultDataTypeManagerService.java
+@@ -145,6 +145,11 @@ public void edit(DataType dt) {
+ 		throw new UnsupportedOperationException();
+ 	}
+ 
++	@Override
++	public void edit(DataType dt, int offset) {
++		throw new UnsupportedOperationException();
++	}
++
+ 	@Override
+ 	public DataTypeManager getBuiltInDataTypesManager() {
+ 		return builtInDataTypesManager;
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/compositeeditor/CompositeEditorPanel.java b/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/compositeeditor/CompositeEditorPanel.java
+index 7eeb27afccd..d98f37a8187 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/compositeeditor/CompositeEditorPanel.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/compositeeditor/CompositeEditorPanel.java
+@@ -1148,6 +1148,22 @@ public void selectionChanged() {
+ 		clsm.setLeadSelectionIndex(column);
+ 	}
+ 
++	/**
++	 * Select and scroll to the component at the given offset.
++	 * @param offset The offset of the component to scroll to.
++	 */
++	public void selectComponentWithOffset(int offset) {
++		int num = model.getNumComponents();
++		for (int i = 0; i < num; i++) {
++			DataTypeComponent dtc = model.getComponent(i);
++			if (dtc.getOffset() >= offset) {
++				model.setSelection(new int[]{i});
++				scrollToCell(i, 0);
++				return;
++			}
++		}
++	}
++
+ 	private class ComponentStringCellEditor extends ComponentCellEditor {
+ 		public ComponentStringCellEditor(JTextField textField) {
+ 			super(textField);
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/compositeeditor/StructureEditorProvider.java b/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/compositeeditor/StructureEditorProvider.java
+index a3eafc0c3fa..2e5d06b43b9 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/compositeeditor/StructureEditorProvider.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/compositeeditor/StructureEditorProvider.java
+@@ -87,4 +87,12 @@ public String getHelpName() {
+ 	public String getHelpTopic() {
+ 		return "DataTypeEditors";
+ 	}
++
++	/**
++	 * Scroll to the field at the given offset.
++	 * @param offset The offset of the field to scroll to.
++	 */
++	public void goToOffset(int offset) {
++		editorPanel.selectComponentWithOffset(offset);
++	}
+ }
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/datamgr/DataTypeManagerPlugin.java b/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/datamgr/DataTypeManagerPlugin.java
+index b3cf35615d6..992dc17b7bf 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/datamgr/DataTypeManagerPlugin.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/datamgr/DataTypeManagerPlugin.java
+@@ -468,6 +468,11 @@ public boolean isEditable(DataType dt) {
+ 
+ 	@Override
+ 	public void edit(DataType dt) {
++		edit(dt, -1);
++	}
++
++	@Override
++	public void edit(DataType dt, int offset) {
+ 		DataTypeManager dataTypeManager = dt.getDataTypeManager();
+ 		if (dataTypeManager == null) {
+ 			throw new IllegalArgumentException(
+@@ -479,7 +484,7 @@ public void edit(DataType dt) {
+ 			throw new IllegalArgumentException(
+ 				"DataType " + dt.getName() + " has no category path!");
+ 		}
+-		editorManager.edit(dt);
++		editorManager.edit(dt, offset);
+ 	}
+ 
+ 	@Override
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/datamgr/editor/DataTypeEditorManager.java b/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/datamgr/editor/DataTypeEditorManager.java
+index 2743e42c38f..c36a7574eb4 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/datamgr/editor/DataTypeEditorManager.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/datamgr/editor/DataTypeEditorManager.java
+@@ -101,8 +101,9 @@ public boolean isEditable(DataType dt) {
+ 	 * is already being edited then it is brought to the front. Otherwise, a new editor is created
+ 	 * and displayed.
+ 	 * @param dataType the data type to edit.
++	 * @param offset Scroll to the field with this offset, if it is non-negative.
+ 	 */
+-	public void edit(DataType dataType) {
++	public void edit(DataType dataType, int offset) {
+ 
+ 		DataTypeManager dataTypeManager = dataType.getDataTypeManager();
+ 		if (dataTypeManager == null) {
+@@ -115,27 +116,42 @@ public void edit(DataType dataType) {
+ 			ComponentProvider componentProvider = editor.getComponentProvider();
+ 			plugin.getTool().showComponentProvider(componentProvider, true);
+ 			componentProvider.toFront();
+-			return;
+-		}
+-
+-		if (dataType instanceof Enum) {
+-			editor = new EnumEditorProvider(plugin, (Enum) dataType);
+-		}
+-		else if (dataType instanceof Union) {
+-			editor = new UnionEditorProvider(plugin, (Union) dataType, showUnionNumbersInHex());
+-		}
+-		else if (dataType instanceof Structure) {
+-			editor = new StructureEditorProvider(plugin, (Structure) dataType,
+-				showStructureNumbersInHex());
+-		}
+-		else if (dataType instanceof FunctionDefinition) {
+-			editFunctionSignature((FunctionDefinition) dataType);
++		} else {
++			if (dataType instanceof Enum) {
++				editor = new EnumEditorProvider(plugin, (Enum) dataType);
++			}
++			else if (dataType instanceof Union) {
++				editor = new UnionEditorProvider(plugin, (Union) dataType, showUnionNumbersInHex());
++			}
++			else if (dataType instanceof Structure) {
++				editor = new StructureEditorProvider(plugin, (Structure) dataType,
++					showStructureNumbersInHex());
++			}
++			else if (dataType instanceof FunctionDefinition) {
++				editFunctionSignature((FunctionDefinition) dataType);
++			}
++			if (editor == null) {
++				return;
++			}
++			editor.addEditorListener(this);
++			editorList.add(editor);
+ 		}
+-		if (editor == null) {
+-			return;
++		if (offset >= 0) {
++			if (editor instanceof StructureEditorProvider)
++				((StructureEditorProvider) editor).goToOffset(offset);
++			else
++				throw new IllegalArgumentException("Cannot navigate to an offset with this data type.");
+ 		}
+-		editor.addEditorListener(this);
+-		editorList.add(editor);
++	}
++
++	/**
++	 * Displays a data type editor for editing the indicated data type. If the data type is
++	 * is already being edited then it is brought to the front. Otherwise, a new editor is created
++	 * and displayed.
++	 * @param dataType the data type to edit.
++	 */
++	public void edit(DataType dataType) {
++		edit(dataType, -1);
+ 	}
+ 
+ 	private void installEditorActions() {
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/services/DataTypeManagerService.java b/Ghidra/Features/Base/src/main/java/ghidra/app/services/DataTypeManagerService.java
+index fce2133d8bf..f31ad366770 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/services/DataTypeManagerService.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/services/DataTypeManagerService.java
+@@ -101,6 +101,16 @@ public interface DataTypeManagerService extends DataTypeQueryService {
+ 	 */
+ 	public void edit(DataType dt);
+ 
++	/**
++	 * Pop up an editor dialog for the given data type and offset.
++	 *
++	 * @param dt data type that either a Structure or a Union; built in types cannot be edited
++	 * @param offset offset of the field within dt to edit / focus
++	 * @throws IllegalArgumentException if the given has not been resolved by a DataTypeManager;
++	 *         in other words, if {@link DataType#getDataTypeManager()} returns null.
++	 */
++	public void edit(DataType dt, int offset);
++
+ 	/**
+ 	 * Closes the archive for the given {@link DataTypeManager}.  This will ignore request to 
+ 	 * close the open Program's manager and the built-in manager.  
+diff --git a/Ghidra/Features/Base/src/test/java/ghidra/app/services/TestDoubleDataTypeManagerService.java b/Ghidra/Features/Base/src/test/java/ghidra/app/services/TestDoubleDataTypeManagerService.java
+index a906497d48c..f30683dbde6 100644
+--- a/Ghidra/Features/Base/src/test/java/ghidra/app/services/TestDoubleDataTypeManagerService.java
++++ b/Ghidra/Features/Base/src/test/java/ghidra/app/services/TestDoubleDataTypeManagerService.java
+@@ -94,6 +94,11 @@ public void edit(DataType dt) {
+ 		throw new UnsupportedOperationException();
+ 	}
+ 
++	@Override
++	public void edit(DataType dt, int offset) {
++		throw new UnsupportedOperationException();
++	}
++
+ 	@Override
+ 	public void closeArchive(DataTypeManager dtm) {
+ 		throw new UnsupportedOperationException();
+diff --git a/Ghidra/Features/Decompiler/src/main/java/ghidra/app/decompiler/component/CDisplayPanel.java b/Ghidra/Features/Decompiler/src/main/java/ghidra/app/decompiler/component/CDisplayPanel.java
+index 940158a67a5..da01be065c0 100644
+--- a/Ghidra/Features/Decompiler/src/main/java/ghidra/app/decompiler/component/CDisplayPanel.java
++++ b/Ghidra/Features/Decompiler/src/main/java/ghidra/app/decompiler/component/CDisplayPanel.java
+@@ -24,6 +24,7 @@
+ import ghidra.app.plugin.core.decompile.DecompilerClipboardProvider;
+ import ghidra.app.util.viewer.listingpanel.ProgramLocationListener;
+ import ghidra.program.model.address.Address;
++import ghidra.program.model.data.DataType;
+ import ghidra.program.model.listing.Function;
+ import ghidra.program.model.listing.Program;
+ import ghidra.program.util.ProgramLocation;
+@@ -140,6 +141,11 @@ public void goToFunction(Function function, boolean newWindow) {
+ 		// stub
+ 	}
+ 
++	@Override
++	public void goToField(DataType dataType, int offset) {
++		// stub
++	}
++
+ 	@Override
+ 	public void locationChanged(ProgramLocation programLocation) {
+ 		if (locationListener == null) {
+diff --git a/Ghidra/Features/Decompiler/src/main/java/ghidra/app/decompiler/component/DecompilerCallbackHandler.java b/Ghidra/Features/Decompiler/src/main/java/ghidra/app/decompiler/component/DecompilerCallbackHandler.java
+index 0a739f83a90..5cbb5454731 100644
+--- a/Ghidra/Features/Decompiler/src/main/java/ghidra/app/decompiler/component/DecompilerCallbackHandler.java
++++ b/Ghidra/Features/Decompiler/src/main/java/ghidra/app/decompiler/component/DecompilerCallbackHandler.java
+@@ -16,6 +16,7 @@
+ package ghidra.app.decompiler.component;
+ 
+ import ghidra.program.model.address.Address;
++import ghidra.program.model.data.DataType;
+ import ghidra.program.model.listing.Function;
+ import ghidra.program.util.ProgramLocation;
+ import ghidra.program.util.ProgramSelection;
+@@ -47,4 +48,6 @@ public interface DecompilerCallbackHandler {
+ 	void goToFunction(Function function, boolean newWindow);
+ 
+ 	void doWheNotBusy(Callback c);
++
++	void goToField(DataType dataType, int offset);
+ }
+diff --git a/Ghidra/Features/Decompiler/src/main/java/ghidra/app/decompiler/component/DecompilerController.java b/Ghidra/Features/Decompiler/src/main/java/ghidra/app/decompiler/component/DecompilerController.java
+index ef2b18edb8f..0c5007b439e 100644
+--- a/Ghidra/Features/Decompiler/src/main/java/ghidra/app/decompiler/component/DecompilerController.java
++++ b/Ghidra/Features/Decompiler/src/main/java/ghidra/app/decompiler/component/DecompilerController.java
+@@ -25,6 +25,7 @@
+ import ghidra.app.decompiler.*;
+ import ghidra.app.plugin.core.decompile.DecompilerClipboardProvider;
+ import ghidra.program.model.address.Address;
++import ghidra.program.model.data.DataType;
+ import ghidra.program.model.listing.*;
+ import ghidra.program.model.pcode.HighFunction;
+ import ghidra.program.util.ProgramLocation;
+@@ -291,6 +292,10 @@ void goToScalar(long value, boolean newWindow) {
+ 		callbackHandler.goToScalar(value, newWindow);
+ 	}
+ 
++	public void goToField(DataType dataType, int offset) {
++		callbackHandler.goToField(dataType, offset);
++	}
++
+ 	public DecompileData getDecompileData() {
+ 		return currentDecompileData;
+ 	}
+diff --git a/Ghidra/Features/Decompiler/src/main/java/ghidra/app/decompiler/component/DecompilerPanel.java b/Ghidra/Features/Decompiler/src/main/java/ghidra/app/decompiler/component/DecompilerPanel.java
+index f817902c89a..43868f70f32 100644
+--- a/Ghidra/Features/Decompiler/src/main/java/ghidra/app/decompiler/component/DecompilerPanel.java
++++ b/Ghidra/Features/Decompiler/src/main/java/ghidra/app/decompiler/component/DecompilerPanel.java
+@@ -45,6 +45,7 @@
+ import ghidra.app.plugin.core.decompile.actions.FieldBasedSearchLocation;
+ import ghidra.app.plugin.core.decompile.actions.TokenHighlightColorProvider;
+ import ghidra.program.model.address.*;
++import ghidra.program.model.data.DataType;
+ import ghidra.program.model.listing.Function;
+ import ghidra.program.model.listing.Program;
+ import ghidra.program.model.pcode.*;
+@@ -599,6 +600,9 @@ else if (token instanceof ClangCommentToken) {
+ 		else if (token instanceof ClangSyntaxToken) {
+ 			tryGoToSyntaxToken((ClangSyntaxToken) token);
+ 		}
++		else if (token instanceof ClangFieldToken) {
++			tryGoToFieldToken((ClangFieldToken) token);
++		}
+ 	}
+ 
+ 	private void tryGoToComment(FieldLocation location, MouseEvent event, ClangTextField textField,
+@@ -731,6 +735,12 @@ else if (text.startsWith("(") && text.endsWith(")")) {
+ 		}
+ 	}
+ 
++	private void tryGoToFieldToken(ClangFieldToken token) {
++		DataType dataType = token.getDataType();
++		int offset = token.getOffset();
++		controller.goToField(dataType, offset);
++	}
++
+ 	Program getProgram() {
+ 		return decompileData.getProgram();
+ 	}
+diff --git a/Ghidra/Features/Decompiler/src/main/java/ghidra/app/plugin/core/decompile/DecompilerProvider.java b/Ghidra/Features/Decompiler/src/main/java/ghidra/app/plugin/core/decompile/DecompilerProvider.java
+index f062f0c5fcf..be5252f6b22 100644
+--- a/Ghidra/Features/Decompiler/src/main/java/ghidra/app/plugin/core/decompile/DecompilerProvider.java
++++ b/Ghidra/Features/Decompiler/src/main/java/ghidra/app/plugin/core/decompile/DecompilerProvider.java
+@@ -32,6 +32,7 @@
+ import ghidra.app.decompiler.*;
+ import ghidra.app.decompiler.component.*;
+ import ghidra.app.nav.*;
++import ghidra.app.plugin.core.datamgr.util.DataTypeUtils;
+ import ghidra.app.plugin.core.decompile.actions.*;
+ import ghidra.app.services.*;
+ import ghidra.app.util.HelpTopics;
+@@ -42,6 +43,8 @@
+ import ghidra.framework.plugintool.NavigatableComponentProviderAdapter;
+ import ghidra.framework.plugintool.util.ServiceListener;
+ import ghidra.program.model.address.*;
++import ghidra.program.model.data.DataType;
++import ghidra.program.model.data.DataTypeManager;
+ import ghidra.program.model.listing.Function;
+ import ghidra.program.model.listing.Program;
+ import ghidra.program.model.symbol.*;
+@@ -645,6 +648,19 @@ public void goToFunction(Function function, boolean newWindow) {
+ 		}
+ 	}
+ 
++	@Override
++	public void goToField(DataType dataType, int offset) {
++		DataType baseDataType = DataTypeUtils.getBaseDataType(dataType);
++		DataTypeManager dataTypeManager = program.getDataTypeManager();
++		DataTypeManager baseDtDTM = baseDataType.getDataTypeManager();
++		if (baseDtDTM != dataTypeManager) {
++			baseDataType = baseDataType.clone(dataTypeManager);
++		}
++		final DataTypeManagerService service =
++			tool.getService(DataTypeManagerService.class);
++		service.edit(baseDataType, offset);
++	}
++
+ 	@Override
+ 	public void doWheNotBusy(Callback c) {
+ 		followUpWork.offer(c);
