@@ -20,7 +20,7 @@ Add rule to simplify countLeadingZeros followed by right
  .../Decompiler/src/decompile/cpp/printc.hh    |    1 +
  .../src/decompile/cpp/printlanguage.hh        |    1 +
  .../src/decompile/cpp/ruleaction.cc           |   60 +
- .../src/decompile/cpp/ruleaction.hh           |   10 +
+ .../src/decompile/cpp/ruleaction.hh           |   11 +
  .../src/decompile/cpp/slgh_compile.cc         |    3 +
  .../Decompiler/src/decompile/cpp/slghparse.cc | 2061 +++++++++--------
  .../Decompiler/src/decompile/cpp/slghparse.hh |  135 +-
@@ -60,14 +60,14 @@ Add rule to simplify countLeadingZeros followed by right
  GhidraDocs/languages/html/reference.html      |    5 +
  GhidraDocs/languages/html/sleigh.html         |    5 +-
  GhidraDocs/languages/html/sleigh_ref.html     |    6 +
- 50 files changed, 1843 insertions(+), 1825 deletions(-)
+ 50 files changed, 1844 insertions(+), 1825 deletions(-)
  delete mode 100644 Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcode/emulate/callother/CountLeadingOnesOpBehavior.java
  delete mode 100644 Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcode/emulate/callother/CountLeadingZerosOpBehavior.java
  create mode 100644 Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcode/opbehavior/OpBehaviorCountLeadingZeros.java
  delete mode 100644 Ghidra/Processors/68000/src/main/java/ghidra/program/emulation/m68kEmulateInstructionStateModifier.java
 
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
-index 1006c7c4d..246e7b181 100644
+index 656483a75..6e20dbd23 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
 @@ -3598,6 +3598,7 @@ void ActionDeadCode::propagateConsumed(vector<Varnode *> &worklist)
@@ -78,10 +78,10 @@ index 1006c7c4d..246e7b181 100644
      a = 16 * op->getIn(0)->getSize() - 1;	// Mask for possible bits that could be set
      a &= outc;					// Of the bits that could be set, which are consumed
      b = (a == 0) ? 0 : ~((uintb)0);		// if any consumed, treat all input bits as consumed
-@@ -5126,6 +5127,7 @@ void ActionDatabase::universalAction(Architecture *conf)
- 	actprop->addRule( new RulePopcountBoolXor("analysis") );
+@@ -5127,6 +5128,7 @@ void ActionDatabase::universalAction(Architecture *conf)
  	actprop->addRule( new RuleOrMultiBool("analysis") );
  	actprop->addRule( new RuleXorSwap("analysis") );
+ 	actprop->addRule( new RuleLzcntZeroTest("analysis") );
 +	actprop->addRule( new RuleCountLeadingZerosShiftBool("analysis") );
  	actprop->addRule( new RuleSubvarAnd("subvar") );
  	actprop->addRule( new RuleSubvarSubpiece("subvar") );
@@ -210,12 +210,12 @@ index 6eb8a33e1..9e7db7665 100644
    static int4 mostNaturalBase(uintb val); 			///< Determine the most natural base for an integer
    static void formatBinary(ostream &s,uintb val);		///< Print a number in binary form
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc
-index bf61d2bb2..5aa910c7f 100644
+index ae9ee1798..af2c1240f 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc
-@@ -9945,3 +9945,63 @@ int4 RuleXorSwap::applyOp(PcodeOp *op,Funcdata &data)
-   }
-   return 0;
+@@ -10068,3 +10068,63 @@ int4 RuleLzcntZeroTest::applyOp(PcodeOp *op,Funcdata &data)
+     }
+     return 1;
  }
 +
 +/// \class RuleCountLeadingZerosShiftBool
@@ -278,13 +278,14 @@ index bf61d2bb2..5aa910c7f 100644
 +  return 0;
 +}
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.hh
-index 0412b8b72..d482f47fa 100644
+index c6d077792..dae1736dc 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.hh
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.hh
-@@ -1578,4 +1578,14 @@ public:
+@@ -1588,4 +1588,15 @@ public:
+   virtual void getOpList(vector<uint4> &oplist) const;
    virtual int4 applyOp(PcodeOp *op,Funcdata &data);
  };
- 
++
 +class RuleCountLeadingZerosShiftBool : public Rule {
 +public:
 +  RuleCountLeadingZerosShiftBool(const string &g) : Rule( g, 0, "countleadingzerosshiftbool") {}	///< Constructor
