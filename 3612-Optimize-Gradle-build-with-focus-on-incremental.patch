@@ -1,0 +1,378 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Pavlo Shevchenko <pshevchenko@gradle.com>
+Date: Mon, 8 Nov 2021 15:31:42 +0100
+Subject: [PATCH] 3612: Optimize Gradle build with focus on incremental build
+ support and output caching
+
+---
+ .../Framework-TraceModeling/build.gradle      | 12 +++++++
+ .../Extensions/bundle_examples/build.gradle   |  5 ---
+ Ghidra/Features/FunctionID/build.gradle       | 10 ++++++
+ .../Common/support/buildExtension.gradle      | 36 ++++++++++++++++---
+ gradle.properties                             |  1 +
+ gradle/distributableGhidraExtension.gradle    |  5 ---
+ gradle/distributableGhidraModule.gradle       |  4 +--
+ gradle/externalGhidraExtension.gradle         |  5 ---
+ gradle/helpProject.gradle                     | 36 ++++++++++++++++---
+ gradle/root/distribution.gradle               | 20 ++++++-----
+ gradle/support/extensionCommon.gradle         |  4 +--
+ gradle/support/ip.gradle                      | 12 ++++++-
+ settings.gradle                               |  1 +
+ 13 files changed, 114 insertions(+), 37 deletions(-)
+
+diff --git a/Ghidra/Debug/Framework-TraceModeling/build.gradle b/Ghidra/Debug/Framework-TraceModeling/build.gradle
+index 0b6f4871d..d75f7e751 100644
+--- a/Ghidra/Debug/Framework-TraceModeling/build.gradle
++++ b/Ghidra/Debug/Framework-TraceModeling/build.gradle
+@@ -21,6 +21,18 @@ apply from: "${rootProject.projectDir}/gradle/distributableGhidraModule.gradle"
+ apply plugin: 'eclipse'
+ eclipse.project.name = 'Debug Framework-TraceModeling'
+ 
++// The generation timestamp included in these help files
++// makes them different on every build which causes all consuming tasks to be re-executed every time
++// By excluding these files from crucial inputs using runtime classpath normalization,
++// we are able to re-use build artifacts of this project on incremental builds
++normalization {
++    runtimeClasspath {
++        ignore '**/help/*_HelpSet.hs'
++        ignore '**/help/*_map.xml'
++        ignore '**/help/*_TOC.xml'
++    }
++}
++
+ dependencies {
+ 	api project(':Generic')
+ 	api project(':SoftwareModeling')
+diff --git a/Ghidra/Extensions/bundle_examples/build.gradle b/Ghidra/Extensions/bundle_examples/build.gradle
+index 24194f0b3..1aaedb6d0 100644
+--- a/Ghidra/Extensions/bundle_examples/build.gradle
++++ b/Ghidra/Extensions/bundle_examples/build.gradle
+@@ -122,10 +122,5 @@ rootProject.createInstallationZip {
+ 			ZIP_DIR_PREFIX + "/Extensions/Ghidra"
+ 		}
+ 	}
+-	doLast {
+-		this.project.zipExtensions.outputs.each {
+-			delete it
+-		}
+-	}
+ }
+ 
+diff --git a/Ghidra/Features/FunctionID/build.gradle b/Ghidra/Features/FunctionID/build.gradle
+index 084669838..8fae47ac7 100644
+--- a/Ghidra/Features/FunctionID/build.gradle
++++ b/Ghidra/Features/FunctionID/build.gradle
+@@ -41,6 +41,16 @@ def fidDbFiles = fileTree(depsDir.exists() ? depsDir : binRepoDir) {
+ }
+ 
+ task unpackFidDatabases {
++    inputs.files(fidDbFiles.getFiles())
++			.withPropertyName("fidDbFiles")
++			.withPathSensitivity(PathSensitivity.RELATIVE)
++	// Adding task output to make use of Gradle's up-to-date check
++	// However, outputs in form of file trees are not supported by Gradle's build cache
++	// We would need to write these files to a separate folder if we'd like to enable caching
++    outputs.files fileTree("$buildDir/data").matching {
++        include "*.fidbf"
++    }
++
+ 	doLast {
+ 		fidDbFiles.each { file ->
+ 		
+diff --git a/Ghidra/RuntimeScripts/Common/support/buildExtension.gradle b/Ghidra/RuntimeScripts/Common/support/buildExtension.gradle
+index bc194f219..e91cbc7a3 100644
+--- a/Ghidra/RuntimeScripts/Common/support/buildExtension.gradle
++++ b/Ghidra/RuntimeScripts/Common/support/buildExtension.gradle
+@@ -183,16 +183,44 @@ task buildExtension (type: Zip) {
+ 	}
+ }
+ 
++// CommandLineArgumentProvider that supplies indexHelp task with relative help file paths
++// This allows build cache artifacts to be relocate-able across workspaces and machines.
++class HelpFilesPathProvider implements CommandLineArgumentProvider {
++    @InputDirectory
++    @PathSensitive(PathSensitivity.RELATIVE)
++    File helpFilePath
++
++    @Override
++    Iterable<String> asArguments() {
++        [helpFilePath.absolutePath]
++    }
++}
++
++// CommandLineArgumentProvider that supplies indexHelp task with the absolute path to the help output directory
++// This allows build cache artifacts to be relocate-able across workspaces and machines.
++class HelpOutputPathProvider implements CommandLineArgumentProvider {
++    @OutputDirectory
++    File helpOutputPath
++
++    @Override
++    Iterable<String> asArguments() {
++        ["-db ${helpOutputPath.absolutePath}".toString()]
++    }
++}
++
+ // task for calling the java help indexer
+-task indexHelp(type: JavaExec) {	
++task indexHelp(type: JavaExec) {
+ 	File helpRootDir = file('src/main/help')		// this the root dir for the help source
+ 	File outputFile = file("build/help/main/help/${project.name}_JavaHelpSearch")	
+ 	onlyIf {helpRootDir.exists()}
+ 
+ 	dependsOn configurations.helpPath
+ 
+-	inputs.dir helpRootDir
++	inputs.dir(helpRootDir)
++			.withPropertyName('helpRootDir')
++			.withPathSensitivity(PathSensitivity.RELATIVE)
+ 	outputs.dir outputFile
++    outputs.cacheIf { true }
+ 
+ 	classpath = sourceSets.main.runtimeClasspath		// this modules runtime classpath (contains jhall.jar)
+ 	
+@@ -200,7 +228,7 @@ task indexHelp(type: JavaExec) {
+ 
+ 	// tell the indexer where send its output
+ 	
+-	args '-db', outputFile.absolutePath
++    argumentProviders.add(new HelpOutputPathProvider(helpOutputPath: outputFile))
+ 
+ 
+ 	// The index has a config file parameter.  The only thing we use in the config file
+@@ -227,7 +255,7 @@ task indexHelp(type: JavaExec) {
+ 	doFirst {
+ 		// for each help file that was found, add it as an argument to the indexer
+ 		helpFiles.each { File file ->
+-			args "${file.absolutePath}"
++            argumentProviders.add(new HelpFilesPathProvider(helpFilePath: file))
+ 		}	
+ 	}
+ 	
+diff --git a/gradle.properties b/gradle.properties
+index bf8c2ba4e..7ccae8dfb 100644
+--- a/gradle.properties
++++ b/gradle.properties
+@@ -1,2 +1,3 @@
+ # Increase maximum Gradle heap size (default is 1G)
+ org.gradle.jvmargs=-Xmx2G
++org.gradle.caching=true
+diff --git a/gradle/distributableGhidraExtension.gradle b/gradle/distributableGhidraExtension.gradle
+index fb029f278..0ff9b15f2 100644
+--- a/gradle/distributableGhidraExtension.gradle
++++ b/gradle/distributableGhidraExtension.gradle
+@@ -32,10 +32,5 @@ rootProject.createInstallationZip {
+ 		into  {
+ 			ZIP_DIR_PREFIX + "/Extensions/Ghidra"
+ 		}
+-	} 
+-	doLast {
+-		this.project.zipExtensions.outputs.each {
+-			delete it
+-		}
+ 	}
+ }
+diff --git a/gradle/distributableGhidraModule.gradle b/gradle/distributableGhidraModule.gradle
+index b83bf5212..cf72058a1 100644
+--- a/gradle/distributableGhidraModule.gradle
++++ b/gradle/distributableGhidraModule.gradle
+@@ -43,8 +43,8 @@ rootProject.assembleDistribution {
+ 	from (BIN_REPO + '/' + getGhidraRelativePath(p) + "/data") {
+ 		into { zipPath + "/data" }
+ 	}
+-	
+-	from (p.projectDir.toString() + "/build/LICENSE.txt") {
++
++	from (ip) {
+ 		into { zipPath }
+ 	}
+ 
+diff --git a/gradle/externalGhidraExtension.gradle b/gradle/externalGhidraExtension.gradle
+index abda7a1d7..870589bcd 100644
+--- a/gradle/externalGhidraExtension.gradle
++++ b/gradle/externalGhidraExtension.gradle
+@@ -18,10 +18,5 @@ apply from: "$rootProject.projectDir/gradle/support/extensionCommon.gradle"
+ 
+ rootProject.createExternalExtensions {
+ 	from (this.project.zipExtensions)
+-	doLast {
+-		this.project.zipExtensions.outputs.each {
+-			delete it
+-		}
+-	}
+ }
+ 
+diff --git a/gradle/helpProject.gradle b/gradle/helpProject.gradle
+index c3b422173..b648d1081 100644
+--- a/gradle/helpProject.gradle
++++ b/gradle/helpProject.gradle
+@@ -63,9 +63,34 @@ dependencies {
+ 	helpIndexImplementation project(':Help')
+ }
+ 
++// CommandLineArgumentProvider that supplies indexHelp task with relative help file paths
++// This allows build cache artifacts to be relocate-able across workspaces and machines.
++class HelpFilesPathProvider implements CommandLineArgumentProvider {
++    @InputDirectory
++    @PathSensitive(PathSensitivity.RELATIVE)
++    File helpFilePath
++
++    @Override
++    Iterable<String> asArguments() {
++        [helpFilePath.absolutePath]
++    }
++}
++
++// CommandLineArgumentProvider that supplies indexHelp task with the absolute path to the help output directory
++// This allows build cache artifacts to be relocate-able across workspaces and machines.
++class HelpOutputPathProvider implements CommandLineArgumentProvider {
++    @OutputDirectory
++    File helpOutputPath
++
++    @Override
++    Iterable<String> asArguments() {
++        ["-db ${helpOutputPath.absolutePath}".toString()]
++    }
++}
++
+ // Task for calling the java help indexer, which creates a searchable index of the 
+ // help contents.
+-task indexHelp(type: JavaExec) {	
++task indexHelp(type: JavaExec) {
+ 
+ 	group "private"
+ 	description "indexes the helps files for this module.  [gradle/helpProject.gradle]"
+@@ -76,15 +101,18 @@ task indexHelp(type: JavaExec) {
+ 	dependsOn configurations.helpPath
+ 	dependsOn configurations.runtimeClasspath
+ 
+-	inputs.dir helpRootDir
++	inputs.dir(helpRootDir)
++			.withPropertyName('helpRootDir')
++			.withPathSensitivity(PathSensitivity.RELATIVE)
+ 	outputs.dir outputFile
++    outputs.cacheIf { true }
+ 	
+ 	classpath = sourceSets.helpIndex.runtimeClasspath
+ 	
+ 	mainClass = 'com.sun.java.help.search.Indexer'
+ 
+ 	// tell the indexer where send its output	
+-	args '-db', outputFile.absolutePath
++    argumentProviders.add(new HelpOutputPathProvider(helpOutputPath: outputFile))
+ 
+ 	// The index has a config file parameter.  The only thing we use in the config file
+ 	// is a root directory path that should be stripped off all the help references to
+@@ -114,7 +142,7 @@ task indexHelp(type: JavaExec) {
+ 		
+ 		// for each help file that was found, add it as an argument to the indexer
+ 		helpFiles.each { File file ->
+-			args "${file.absolutePath}"
++            argumentProviders.add(new HelpFilesPathProvider(helpFilePath: file))
+ 		}	
+ 	}
+ }
+diff --git a/gradle/root/distribution.gradle b/gradle/root/distribution.gradle
+index 7d0ab069c..3ec9a2770 100644
+--- a/gradle/root/distribution.gradle
++++ b/gradle/root/distribution.gradle
+@@ -478,6 +478,16 @@ def updateSlaFilesTimestamp(String distributionDirectoryPath, int timeOffsetMinu
+ 	println "updateSlaFilesTimestamp: Updated timestamps to $numFilesAdded .sla files."
+ }
+ 
++String ghidraExtensionsDirPath = DISTRIBUTION_DIR.getPath() + "/" + ZIP_DIR_PREFIX + "/Ghidra/Extensions"
++task createGhidraExtensionsDir {
++    outputs.dir ghidraExtensionsDirPath
++    doLast {
++        // We always want the extensions directory to exist in the zip, even if there's nothing
++        // installed there.
++        new File(ghidraExtensionsDirPath).mkdirs()
++    }
++}
++
+ /*********************************************************************************
+  * 
+  * Creates the local installation zip.
+@@ -491,6 +501,7 @@ task createInstallationZip(type: Zip) { t ->
+ 	dependsOn assembleDistribution
+ 	dependsOn assembleSource
+ 	dependsOn "assembleDistribution_$currentPlatform"
++    dependsOn createGhidraExtensionsDir
+ 	
+ 	if (project.hasProperty("allPlatforms")) {
+ 		project.PLATFORMS.each { platform ->
+@@ -514,11 +525,6 @@ task createInstallationZip(type: Zip) { t ->
+ 	}
+ 		
+ 	doFirst {
+-		// We always want the extensions directory to exist in the zip, even if there's nothing
+-		// installed there.
+-		new File( DISTRIBUTION_DIR.getPath() + "/" + ZIP_DIR_PREFIX + "/Ghidra/Extensions").mkdirs()
+-
+-
+ 		// The dependent tasks copy the sla and slaspec files into "extractTo/<release name>/ghidra/"
+ 		// and then later to "extractTo/<release name>/dist/", which this zip task compresses. The copy 
+ 		// tasks do not preserve the file modification times. If slaspec timestamp > sla timestamp, 
+@@ -527,10 +533,6 @@ task createInstallationZip(type: Zip) { t ->
+ 		// two minutes.
+ 		updateSlaFilesTimestamp(DISTRIBUTION_DIR.getPath(), 2)
+ 	}
+-	
+-	doLast {
+-		delete file(DISTRIBUTION_DIR.getPath() + "/" + ZIP_DIR_PREFIX)
+-	}
+ }
+ 
+ 
+diff --git a/gradle/support/extensionCommon.gradle b/gradle/support/extensionCommon.gradle
+index d1a11b101..dbc781ca0 100644
+--- a/gradle/support/extensionCommon.gradle
++++ b/gradle/support/extensionCommon.gradle
+@@ -110,8 +110,8 @@ task zipExtensions (type: Zip) {
+ 	from (p.projectDir.toString() + "/build/data") {
+ 		into { getBaseProjectName(p) + "/data" }
+ 	}
+-	
+-	from (p.projectDir.toString() + "/build/LICENSE.txt") {
++
++	from (ip) {
+ 		into { getBaseProjectName(p) }
+ 	}
+ 	
+diff --git a/gradle/support/ip.gradle b/gradle/support/ip.gradle
+index c0473383e..65fdeb6c2 100644
+--- a/gradle/support/ip.gradle
++++ b/gradle/support/ip.gradle
+@@ -31,7 +31,17 @@
+ /*********************************************************************************
+  * Defines the main ip task for each subproject
+  *********************************************************************************/
+-task ip { 
++task ip {
++
++    inputs.file(file("certification.manifest"))
++			.withPropertyName("ipCertificationFile")
++			.withPathSensitivity(PathSensitivity.RELATIVE)
++    inputs.file(file("Module.manifest"))
++			.withPropertyName("ipModuleManifest")
++			.withPathSensitivity(PathSensitivity.RELATIVE)
++    outputs.cacheIf { true}
++    outputs.file file("$buildDir/LICENSE.txt")
++
+ 	doLast {
+ 		
+ 		// scans all the files in the module, reads ip from header, verifies ip, and creates mapping
+diff --git a/settings.gradle b/settings.gradle
+index 13335a393..c7623d8e5 100644
+--- a/settings.gradle
++++ b/settings.gradle
+@@ -13,6 +13,7 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
++rootProject.name = "ghidra"
+ apply from: "gradle/support/settingsUtil.gradle"
+ 
+ /*******************************************************************************************
+-- 
+2.38.1
+
