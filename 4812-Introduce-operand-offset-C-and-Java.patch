@@ -1,0 +1,934 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Klaus=20K=C3=A4mpf?= <kkaempf@gmail.com>
+Date: Sun, 30 Oct 2022 20:01:10 +0100
+Subject: [PATCH] 4812: Introduce operand offset (C++ and Java)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Introduce operand_offset
+Signed-off-by: Klaus Kämpf <kkaempf@gmail.com>
+
+Add operand_offset to sleigh Java
+Signed-off-by: Klaus Kämpf <kkaempf@gmail.com>
+---
+ .../Decompiler/src/decompile/cpp/pcodeparse.y |   8 +-
+ .../Decompiler/src/decompile/cpp/semantics.cc |   8 ++
+ .../Decompiler/src/decompile/cpp/semantics.hh |   2 +-
+ .../src/decompile/cpp/slgh_compile.cc         |   2 +
+ .../Decompiler/src/decompile/cpp/slghparse.y  |   4 +
+ .../src/decompile/cpp/slghpatexpress.cc       |   2 +
+ .../src/decompile/cpp/slghpatexpress.hh       |  14 +++
+ .../Decompiler/src/decompile/cpp/slghscan.l   |   3 +
+ .../src/decompile/cpp/slghsymbol.cc           |  66 +++++++++++
+ .../src/decompile/cpp/slghsymbol.hh           |  19 ++-
+ .../ghidra/sleigh/grammar/SleighCompiler.g    |   6 +
+ .../sleigh/SleighAssemblerBuilder.java        |   3 +
+ .../expression/OffsetInstructionValue.java    |  83 +++++++++++++
+ .../sleigh/expression/PatternExpression.java  |   2 +
+ .../sleigh/symbol/OffsetSymbol.java           |  82 +++++++++++++
+ .../processors/sleigh/symbol/SymbolTable.java |   2 +
+ .../ghidra/pcodeCPort/semantics/ConstTpl.java |   9 +-
+ .../slgh_compile/SleighCompile.java           |   2 +
+ .../pcodeCPort/slgh_compile/Yylval.java       |   1 +
+ .../OffsetInstructionValue.java               |  68 +++++++++++
+ .../slghpatexpress/PatternExpression.java     |   3 +
+ .../pcodeCPort/slghsymbol/OffsetSymbol.java   | 111 ++++++++++++++++++
+ .../pcodeCPort/slghsymbol/SymbolTable.java    |   3 +
+ .../pcodeCPort/slghsymbol/symbol_type.java    |   1 +
+ .../program/model/lang/PcodeParser.java       |   1 +
+ 25 files changed, 501 insertions(+), 4 deletions(-)
+ create mode 100644 Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/processors/sleigh/expression/OffsetInstructionValue.java
+ create mode 100644 Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/processors/sleigh/symbol/OffsetSymbol.java
+ create mode 100644 Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/slghpatexpress/OffsetInstructionValue.java
+ create mode 100644 Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/slghsymbol/OffsetSymbol.java
+
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/pcodeparse.y b/Ghidra/Features/Decompiler/src/decompile/cpp/pcodeparse.y
+index 801c50742..1374a6e53 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/pcodeparse.y
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/pcodeparse.y
+@@ -37,6 +37,7 @@
+   UserOpSymbol *useropsym;
+   LabelSymbol *labelsym;
+   StartSymbol *startsym;
++  OffsetSymbol *offsetsym;
+   EndSymbol *endsym;
+   Next2Symbol *next2sym;
+   OperandSymbol *operandsym;
+@@ -76,6 +77,7 @@
+ %token <varsym> VARSYM
+ %token <operandsym> OPERANDSYM
+ %token <startsym> STARTSYM
++%token <offsetsym> OFFSETSYM
+ %token <endsym> ENDSYM
+ %token <next2sym> NEXT2SYM
+ %token <labelsym> LABELSYM
+@@ -223,6 +225,7 @@ label: '<' LABELSYM '>'         { $$ = $2; }
+ specificsymbol: VARSYM		{ $$ = $1; }
+   | OPERANDSYM			{ $$ = $1; }
+   | STARTSYM			{ $$ = $1; }
++  | OFFSETSYM			{ $$ = $1; }
+   | ENDSYM			{ $$ = $1; }
+   | NEXT2SYM			{ $$ = $1; }
+   ;
+@@ -636,7 +639,7 @@ void PcodeLexer::initialize(istream *t)
+   }
+ }
+ 
+-uint4 PcodeSnippet::allocateTemp(void)
++uintb PcodeSnippet::allocateTemp(void)
+ 
+ { // Allocate a variable in the unique space and return the offset
+   uint4 res = tempbase;
+@@ -744,6 +747,9 @@ int4 PcodeSnippet::lex(void)
+       case SleighSymbol::start_symbol:
+ 	yylval.startsym = (StartSymbol *)sym;
+ 	return STARTSYM;
++      case SleighSymbol::offset_symbol:
++	yylval.offsetsym = (OffsetSymbol *)sym;
++	return OFFSETSYM;
+       case SleighSymbol::end_symbol:
+ 	yylval.endsym = (EndSymbol *)sym;
+ 	return ENDSYM;
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/semantics.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/semantics.cc
+index 39d6936ae..e59523099 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/semantics.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/semantics.cc
+@@ -121,6 +121,8 @@ uintb ConstTpl::fix(const ParserWalker &walker) const
+   switch(type) {
+   case j_start:
+     return walker.getAddr().getOffset(); // Fill in starting address placeholder with real address
++  case j_offset:
++    return walker.getAddr().getOffset(); // Fill in starting address placeholder with real address
+   case j_next:
+     return walker.getNaddr().getOffset(); // Fill in next address placeholder with real address
+   case j_next2:
+@@ -350,6 +352,9 @@ void ConstTpl::saveXml(ostream &s) const
+   case j_start:
+     s << "start\"/>";
+     break;
++  case j_offset:
++    s << "operand_offset\"/>";
++    break;
+   case j_next:
+     s << "next\"/>";
+     break;
+@@ -408,6 +413,9 @@ void ConstTpl::restoreXml(const Element *el,const AddrSpaceManager *manage)
+   else if (typestring=="start") {
+     type = j_start;
+   }
++  else if (typestring=="operand_offset") {
++    type = j_offset;
++  }
+   else if (typestring=="next") {
+     type = j_next;
+   }
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/semantics.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/semantics.hh
+index 1fbd169c9..067aa31f4 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/semantics.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/semantics.hh
+@@ -32,7 +32,7 @@ class ConstTpl {
+ public:
+   enum const_type { real=0, handle=1, j_start=2, j_next=3, j_next2=4, j_curspace=5, 
+ 		    j_curspace_size=6, spaceid=7, j_relative=8,
+-		    j_flowref=9, j_flowref_size=10, j_flowdest=11, j_flowdest_size=12 };
++		    j_flowref=9, j_flowref_size=10, j_flowdest=11, j_flowdest_size=12, j_offset=13 };
+   enum v_field { v_space=0, v_offset=1, v_size=2, v_offset_plus=3 };
+ private:
+   const_type type;
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/slgh_compile.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/slgh_compile.cc
+index 6e11be6be..64c20ef44 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/slgh_compile.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/slgh_compile.cc
+@@ -1814,6 +1814,8 @@ void SleighCompile::predefinedSymbols(void)
+   symtab.addSymbol(spacesym);
+   StartSymbol *startsym = new StartSymbol("inst_start",getConstantSpace());
+   symtab.addSymbol(startsym);
++  OffsetSymbol *offsetsym = new OffsetSymbol("operand_offset",getConstantSpace());
++  symtab.addSymbol(offsetsym);
+   EndSymbol *endsym = new EndSymbol("inst_next",getConstantSpace());
+   symtab.addSymbol(endsym);
+   Next2Symbol *next2sym = new Next2Symbol("inst_next2",getConstantSpace());
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/slghparse.y b/Ghidra/Features/Decompiler/src/decompile/cpp/slghparse.y
+index 7ef0bbaee..4b4dafd59 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/slghparse.y
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/slghparse.y
+@@ -57,6 +57,7 @@
+   LabelSymbol *labelsym;
+   SubtableSymbol *subtablesym;
+   StartSymbol *startsym;
++  OffsetSymbol *offsetsym;
+   EndSymbol *endsym;
+   Next2Symbol *next2sym;
+   OperandSymbol *operandsym;
+@@ -121,6 +122,7 @@
+ %token <varlistsym> VARLISTSYM
+ %token <operandsym> OPERANDSYM
+ %token <startsym> STARTSYM
++%token <offsetsym> OFFSETSYM
+ %token <endsym> ENDSYM
+ %token <next2sym> NEXT2SYM
+ %token <macrosym> MACROSYM
+@@ -506,6 +508,7 @@ specificsymbol: VARSYM		{ $$ = $1; }
+   | SPECSYM                     { $$ = $1; }
+   | OPERANDSYM			{ $$ = $1; }
+   | STARTSYM			{ $$ = $1; }
++  | OFFSETSYM			{ $$ = $1; }
+   | ENDSYM			{ $$ = $1; }
+   | NEXT2SYM			{ $$ = $1; }
+   ;
+@@ -581,6 +584,7 @@ anysymbol: SPACESYM		{ $$ = $1; }
+   | VARLISTSYM			{ $$ = $1; }
+   | OPERANDSYM			{ $$ = $1; }
+   | STARTSYM			{ $$ = $1; }
++  | OFFSETSYM			{ $$ = $1; }
+   | ENDSYM			{ $$ = $1; }
+   | NEXT2SYM			{ $$ = $1; }
+   | BITSYM                      { $$ = $1; }
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/slghpatexpress.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/slghpatexpress.cc
+index f5237e16f..fbfa0688f 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/slghpatexpress.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/slghpatexpress.cc
+@@ -476,6 +476,8 @@ PatternExpression *PatternExpression::restoreExpression(const Element *el,Transl
+     res = new OperandValue();
+   else if (nm == "start_exp")
+     res = new StartInstructionValue();
++  else if (nm == "offset_exp")
++    res = new OperandOffsetValue();
+   else if (nm == "end_exp")
+     res = new EndInstructionValue();
+   else if (nm == "plus_exp")
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/slghpatexpress.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/slghpatexpress.hh
+index cc4ff2886..c90a02b1a 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/slghpatexpress.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/slghpatexpress.hh
+@@ -154,6 +154,20 @@ public:
+   virtual void saveXml(ostream &s) const { s << "<start_exp/>"; }
+   virtual void restoreXml(const Element *el,Translate *trans) {}
+ };
++
++class OperandOffsetValue : public PatternValue {
++public:
++  OperandOffsetValue(void) {}
++  virtual intb getValue(ParserWalker &walker) const {
++    return (intb)walker.getOffset(-1);
++  }
++  virtual TokenPattern genMinPattern(const vector<TokenPattern> &ops) const { return TokenPattern(); }
++  virtual TokenPattern genPattern(intb val) const { return TokenPattern(); }
++  virtual intb minValue(void) const { return (intb)0; }
++  virtual intb maxValue(void) const { return (intb)0; }
++  virtual void saveXml(ostream &s) const { s << "<offset_exp/>"; }
++  virtual void restoreXml(const Element *el,Translate *trans) {}
++};
+                                                                                         
+ class EndInstructionValue : public PatternValue {
+ public:
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/slghscan.l b/Ghidra/Features/Decompiler/src/decompile/cpp/slghscan.l
+index df7e6ed9e..7a8d469b3 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/slghscan.l
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/slghscan.l
+@@ -426,6 +426,9 @@ int4 find_symbol(void) {
+   case SleighSymbol::start_symbol:
+     yylval.startsym = (StartSymbol *)sym;
+     return STARTSYM;
++  case SleighSymbol::offset_symbol:
++    yylval.offsetsym = (OffsetSymbol *)sym;
++    return OFFSETSYM;
+   case SleighSymbol::end_symbol:
+     yylval.endsym = (EndSymbol *)sym;
+     return ENDSYM;
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/slghsymbol.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/slghsymbol.cc
+index 532564b61..0b6cf34bc 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/slghsymbol.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/slghsymbol.cc
+@@ -248,6 +248,8 @@ void SymbolTable::restoreSymbolHeader(const Element *el)
+     sym = new OperandSymbol();
+   else if (el->getName() == "start_sym_head")
+     sym = new StartSymbol();
++  else if (el->getName() == "offset_sym_head")
++    sym = new OffsetSymbol();
+   else if (el->getName() == "end_sym_head")
+     sym = new EndSymbol();
+   else if (el->getName() == "next2_sym_head")
+@@ -1190,6 +1192,70 @@ void StartSymbol::restoreXml(const Element *el,SleighBase *trans)
+   patexp->layClaim();
+ }
+ 
++OffsetSymbol::OffsetSymbol(const string &nm,AddrSpace *cspc) : SpecificSymbol(nm)
++
++{
++  const_space = cspc;
++  patexp = new OperandOffsetValue();
++  patexp->layClaim();
++}
++
++OffsetSymbol::~OffsetSymbol(void)
++
++{
++  if (patexp != (PatternExpression *)0)
++    PatternExpression::release(patexp);
++}
++
++VarnodeTpl *OffsetSymbol::getVarnode(void) const
++
++{ // Returns current operand offset as a constant
++  ConstTpl spc(const_space);
++  ConstTpl off(ConstTpl::j_offset);
++  ConstTpl sz_zero;
++  return new VarnodeTpl(spc,off,sz_zero);
++}
++
++void OffsetSymbol::getFixedHandle(FixedHandle &hand,ParserWalker &walker) const
++
++{
++  hand.space = walker.getCurSpace();
++  hand.offset_space = (AddrSpace *)0;
++  hand.offset_offset = walker.getAddr().getOffset(); // Get starting address of instruction
++  hand.size = hand.space->getAddrSize();
++}
++
++void OffsetSymbol::print(ostream &s,ParserWalker &walker) const
++
++{
++  intb val = (intb) walker.getAddr().getOffset();
++    s << "0x" << std::hex << val << std::dec;
++}
++
++void OffsetSymbol::saveXml(ostream &s) const
++
++{
++  s << "<offset_sym";
++  SleighSymbol::saveXmlHeader(s);
++  s << "/>\n";
++}
++
++void OffsetSymbol::saveXmlHeader(ostream &s) const
++
++{
++  s << "<offset_sym_head";
++  SleighSymbol::saveXmlHeader(s);
++  s << "/>\n";
++}
++
++void OffsetSymbol::restoreXml(const Element *el,SleighBase *trans)
++
++{
++  const_space = trans->getConstantSpace();
++  patexp = new OperandOffsetValue();
++  patexp->layClaim();
++}
++
+ EndSymbol::EndSymbol(const string &nm,AddrSpace *cspc) : SpecificSymbol(nm)
+ 
+ {
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/slghsymbol.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/slghsymbol.hh
+index 9fcbb4eed..240370bc6 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/slghsymbol.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/slghsymbol.hh
+@@ -25,7 +25,7 @@ class SleighSymbol {
+ public:
+   enum symbol_type { space_symbol, token_symbol, userop_symbol, value_symbol, valuemap_symbol,
+ 		     name_symbol, varnode_symbol, varnodelist_symbol, operand_symbol,
+-		     start_symbol, end_symbol, next2_symbol, subtable_symbol, macro_symbol, section_symbol,
++		     start_symbol, offset_symbol, end_symbol, next2_symbol, subtable_symbol, macro_symbol, section_symbol,
+                      bitrange_symbol, context_symbol, epsilon_symbol, label_symbol,
+ 		     dummy_symbol };
+ private:
+@@ -374,6 +374,23 @@ public:
+   virtual void restoreXml(const Element *el,SleighBase *trans);
+ };
+ 
++class OffsetSymbol : public SpecificSymbol {
++  AddrSpace *const_space;
++  PatternExpression *patexp;
++public:
++  OffsetSymbol(void) { patexp = (PatternExpression *)0; } // For use with restoreXml
++  OffsetSymbol(const string &nm,AddrSpace *cspc);
++  virtual ~OffsetSymbol(void);
++  virtual VarnodeTpl *getVarnode(void) const;
++  virtual PatternExpression *getPatternExpression(void) const { return patexp; }
++  virtual void getFixedHandle(FixedHandle &hand,ParserWalker &walker) const;
++  virtual void print(ostream &s,ParserWalker &walker) const;
++  virtual symbol_type getType(void) const { return offset_symbol; }
++  virtual void saveXml(ostream &s) const;
++  virtual void saveXmlHeader(ostream &s) const;
++  virtual void restoreXml(const Element *el,SleighBase *trans);
++};
++
+ class EndSymbol : public SpecificSymbol {
+   AddrSpace *const_space;
+   PatternExpression *patexp;
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/antlr/ghidra/sleigh/grammar/SleighCompiler.g b/Ghidra/Framework/SoftwareModeling/src/main/antlr/ghidra/sleigh/grammar/SleighCompiler.g
+index 6205ac3f8..9a451776f 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/antlr/ghidra/sleigh/grammar/SleighCompiler.g
++++ b/Ghidra/Framework/SoftwareModeling/src/main/antlr/ghidra/sleigh/grammar/SleighCompiler.g
+@@ -353,6 +353,7 @@ specific_symbol[String purpose] returns [SpecificSymbol symbol]
+ 			if (sym == null) {
+ 				unknownSymbolError($s.getText(), find($s), "start, end, next2, operand, epsilon, or varnode", purpose);
+ 			} else if(sym.getType() != symbol_type.start_symbol
++					&& sym.getType() != symbol_type.offset_symbol
+ 					&& sym.getType() != symbol_type.end_symbol
+ 					&& sym.getType() != symbol_type.next2_symbol
+ 					&& sym.getType() != symbol_type.operand_symbol
+@@ -861,6 +862,7 @@ pattern_symbol[String purpose] returns [PatternExpression expr]
+                 }
+                 $expr = os.getPatternExpression();
+ 			} else if(sym.getType() == symbol_type.start_symbol
++					|| sym.getType() == symbol_type.offset_symbol
+ 					|| sym.getType() == symbol_type.end_symbol
+ 					|| sym.getType() == symbol_type.next2_symbol
+ 					|| sym.getType() == symbol_type.epsilon_symbol
+@@ -894,6 +896,7 @@ pattern_symbol2[String purpose] returns [PatternExpression expr]
+ 			if (sym == null) {
+ 				unknownSymbolError($s.getText(), find($s), "start, end, next2, operand, epsilon, or varnode", purpose);
+ 			} else if(sym.getType() == symbol_type.start_symbol
++					|| sym.getType() == symbol_type.offset_symbol
+ 					|| sym.getType() == symbol_type.end_symbol
+ 					|| sym.getType() == symbol_type.next2_symbol
+ 					|| sym.getType() == symbol_type.operand_symbol
+@@ -965,6 +968,7 @@ cstatement[VectorSTL<ContextChange> r]
+ 							|| sym.getType() == symbol_type.name_symbol
+ 							|| sym.getType() == symbol_type.varnodelist_symbol
+ 							|| sym.getType() == symbol_type.start_symbol
++							|| sym.getType() == symbol_type.offset_symbol
+ 							|| sym.getType() == symbol_type.end_symbol
+ 							|| sym.getType() == symbol_type.next2_symbol
+ 							|| sym.getType() == symbol_type.operand_symbol
+@@ -1192,6 +1196,7 @@ assignment returns [VectorSTL<OpTpl> value]
+ 			if (sym == null) {
+ 				$value = pcode.newOutput(find(id), false, e, $id.getText());	
+ 			} else if(sym.getType() != symbol_type.start_symbol
++					&& sym.getType() != symbol_type.offset_symbol
+ 					&& sym.getType() != symbol_type.end_symbol
+ 					&& sym.getType() != symbol_type.next2_symbol
+ 					&& sym.getType() != symbol_type.operand_symbol
+@@ -1508,6 +1513,7 @@ expr_apply returns [Object value]
+ 						pcode.reportError(find($t), "macro invocation not allowed as expression");
+ 					}
+ 				} else if(sym.getType() == symbol_type.start_symbol
++					|| sym.getType() == symbol_type.offset_symbol
+ 					|| sym.getType() == symbol_type.end_symbol
+ 					|| sym.getType() == symbol_type.next2_symbol
+ 					|| sym.getType() == symbol_type.operand_symbol
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/assembler/sleigh/SleighAssemblerBuilder.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/assembler/sleigh/SleighAssemblerBuilder.java
+index 1a6f544b1..282731ef3 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/assembler/sleigh/SleighAssemblerBuilder.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/assembler/sleigh/SleighAssemblerBuilder.java
+@@ -570,6 +570,9 @@ public class SleighAssemblerBuilder implements AssemblerBuilder {
+ 				else if (sym instanceof StartSymbol) {
+ 					// Ignore. We handle inst_start in semantic processing
+ 				}
++				else if (sym instanceof OffsetSymbol) {
++					// Ignore. We handle inst_start in semantic processing
++				}
+ 				else if (sym instanceof EndSymbol) {
+ 					// Ignore. We handle inst_next in semantic processing
+ 				}
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/processors/sleigh/expression/OffsetInstructionValue.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/processors/sleigh/expression/OffsetInstructionValue.java
+new file mode 100644
+index 000000000..a600413fd
+--- /dev/null
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/processors/sleigh/expression/OffsetInstructionValue.java
+@@ -0,0 +1,83 @@
++/* ###
++ * IP: GHIDRA
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++/*
++ * Created on Feb 8, 2005
++ *
++ */
++package ghidra.app.plugin.processors.sleigh.expression;
++
++import ghidra.app.plugin.processors.sleigh.ParserWalker;
++import ghidra.app.plugin.processors.sleigh.SleighLanguage;
++import ghidra.program.model.address.Address;
++import ghidra.program.model.mem.MemoryAccessException;
++import ghidra.xml.XmlPullParser;
++
++/**
++ *
++ *
++ * The offset value of the current instructions address
++ */
++public class OffsetInstructionValue extends PatternValue {
++	private static final int HASH = "[operand_offset]".hashCode();
++
++	@Override
++	public int hashCode() {
++		return HASH;
++	}
++
++	@Override
++	public boolean equals(Object obj) {
++		return obj instanceof OffsetInstructionValue;
++	}
++
++	/* (non-Javadoc)
++	 * @see ghidra.app.plugin.processors.sleigh.expression.PatternValue#minValue()
++	 */
++	@Override
++	public long minValue() {
++		return 0;
++	}
++
++	/* (non-Javadoc)
++	 * @see ghidra.app.plugin.processors.sleigh.expression.PatternValue#maxValue()
++	 */
++	@Override
++	public long maxValue() {
++		return 0;
++	}
++
++	/* (non-Javadoc)
++	 * @see ghidra.app.plugin.processors.sleigh.expression.PatternExpression#getValue(ghidra.app.plugin.processors.sleigh.ParserWalker)
++	 */
++	@Override
++	public long getValue(ParserWalker walker) throws MemoryAccessException {
++		return walker.getOffset(-1);
++	}
++
++	/* (non-Javadoc)
++	 * @see ghidra.app.plugin.processors.sleigh.PatternExpression#restoreXml(org.jdom.Element)
++	 */
++	@Override
++	public void restoreXml(XmlPullParser parser, SleighLanguage lang) {
++		parser.discardSubTree("offset_exp");
++		// Nothing to do
++	}
++
++	@Override
++	public String toString() {
++		return "[operand_offset]";
++	}
++}
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/processors/sleigh/expression/PatternExpression.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/processors/sleigh/expression/PatternExpression.java
+index 69b6f9c3c..920ea9238 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/processors/sleigh/expression/PatternExpression.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/processors/sleigh/expression/PatternExpression.java
+@@ -49,6 +49,8 @@ public abstract class PatternExpression {
+ 			res = new OperandValue();
+ 		else if (nm.equals("start_exp"))
+ 			res = new StartInstructionValue();
++		else if (nm.equals("offset_exp"))
++			res = new OffsetInstructionValue();
+ 		else if (nm.equals("end_exp"))
+ 			res = new EndInstructionValue();
+ 		else if (nm.equals("next2_exp"))
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/processors/sleigh/symbol/OffsetSymbol.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/processors/sleigh/symbol/OffsetSymbol.java
+new file mode 100644
+index 000000000..eb90e24b2
+--- /dev/null
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/processors/sleigh/symbol/OffsetSymbol.java
+@@ -0,0 +1,82 @@
++/* ###
++ * IP: GHIDRA
++ * REVIEWED: YES
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++/*
++ * Created on Feb 8, 2005
++ *
++ */
++package ghidra.app.plugin.processors.sleigh.symbol;
++
++import ghidra.app.plugin.processors.sleigh.*;
++import ghidra.app.plugin.processors.sleigh.expression.*;
++import ghidra.program.model.mem.*;
++import ghidra.xml.*;
++
++import java.util.*;
++
++/**
++ *
++ *
++ * TripleSymbol with semantic value equal to offset of instruction's
++ * current address
++ */
++public class OffsetSymbol extends SpecificSymbol {
++
++	private PatternExpression patexp;
++
++	/* (non-Javadoc)
++	 * @see ghidra.app.plugin.processors.sleigh.symbol.TripleSymbol#getPatternExpression()
++	 */
++	@Override
++    public PatternExpression getPatternExpression() {
++		return patexp;
++	}
++
++	/* (non-Javadoc)
++	 * @see ghidra.app.plugin.processors.sleigh.symbol.TripleSymbol#getFixedHandle(ghidra.app.plugin.processors.sleigh.FixedHandle, ghidra.app.plugin.processors.sleigh.ParserWalker)
++	 */
++	@Override
++    public void getFixedHandle(FixedHandle hand, ParserWalker walker) {
++		hand.space = walker.getCurSpace();
++		hand.offset_space = null;
++		hand.offset_offset = walker.getAddr().getOffset();
++		hand.size = hand.space.getPointerSize();
++	}
++
++	/* (non-Javadoc)
++	 * @see ghidra.app.plugin.processors.sleigh.symbol.TripleSymbol#print(ghidra.app.plugin.processors.sleigh.ParserWalker)
++	 */
++	@Override
++    public String print(ParserWalker walker) throws MemoryAccessException {
++		long val = walker.getAddr().getOffset();
++		return "0x" + Long.toHexString(val);
++	}
++
++	@Override
++    public void printList(ParserWalker walker, ArrayList<Object> list) {
++		list.add(walker.getParentHandle());
++	}
++	/* (non-Javadoc)
++	 * @see ghidra.app.plugin.processors.sleigh.symbol.Symbol#restoreXml(org.jdom.Element, ghidra.app.plugin.processors.sleigh.SleighLanguage)
++	 */
++	@Override
++    public void restoreXml(XmlPullParser parser, SleighLanguage sleigh) {
++	    XmlElement element = parser.start("offset_sym");
++		patexp = new OffsetInstructionValue();
++		parser.end(element);
++	}
++
++}
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/processors/sleigh/symbol/SymbolTable.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/processors/sleigh/symbol/SymbolTable.java
+index dd9cec532..0cc6a2a81 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/processors/sleigh/symbol/SymbolTable.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/processors/sleigh/symbol/SymbolTable.java
+@@ -150,6 +150,8 @@ public class SymbolTable {
+ 			sym = new OperandSymbol();
+ 		else if (el.getName().equals("start_sym_head"))
+ 			sym = new StartSymbol();
++		else if (el.getName().equals("offset_sym_head"))
++			sym = new OffsetSymbol();
+ 		else if (el.getName().equals("end_sym_head"))
+ 			sym = new EndSymbol();
+ 		else if (el.getName().equals("next2_sym_head"))
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/semantics/ConstTpl.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/semantics/ConstTpl.java
+index 341877dae..5c14e3bbc 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/semantics/ConstTpl.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/semantics/ConstTpl.java
+@@ -46,7 +46,8 @@ public class ConstTpl {
+ 		j_flowref,
+ 		j_flowref_size,
+ 		j_flowdest,
+-		j_flowdest_size
++		j_flowdest_size,
++		j_offset
+ 	}
+ 
+ 	public enum v_field {
+@@ -297,6 +298,9 @@ public class ConstTpl {
+ 			case j_start:
+ 				s.append("start\"/>");
+ 				break;
++			case j_offset:
++				s.append("offset\"/>");
++				break;
+ 			case j_next:
+ 				s.append("next\"/>");
+ 				break;
+@@ -351,6 +355,9 @@ public class ConstTpl {
+ 		else if (typestring.equals("start")) {
+ 			type = const_type.j_start;
+ 		}
++		else if (typestring.equals("offset")) {
++			type = const_type.j_offset;
++		}
+ 		else if (typestring.equals("next")) {
+ 			type = const_type.j_next;
+ 		}
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/slgh_compile/SleighCompile.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/slgh_compile/SleighCompile.java
+index b377a6c1d..420e6b5d1 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/slgh_compile/SleighCompile.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/slgh_compile/SleighCompile.java
+@@ -287,6 +287,8 @@ public class SleighCompile extends SleighBase {
+ 		symtab.addSymbol(spacesym);
+ 		StartSymbol startsym = new StartSymbol(location, "inst_start", getConstantSpace());
+ 		symtab.addSymbol(startsym);
++		OffsetSymbol offsetsym = new OffsetSymbol(location, "operand_offset", getConstantSpace());
++		symtab.addSymbol(offsetsym);
+ 		EndSymbol endsym = new EndSymbol(location, "inst_next", getConstantSpace());
+ 		symtab.addSymbol(endsym);
+ 		Next2Symbol next2sym = new Next2Symbol(location, "inst_next2", getConstantSpace());
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/slgh_compile/Yylval.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/slgh_compile/Yylval.java
+index f165ca6b8..dc5740001 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/slgh_compile/Yylval.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/slgh_compile/Yylval.java
+@@ -30,6 +30,7 @@ class Yylval {
+     VarnodeListSymbol varlistsym;
+     OperandSymbol operandsym;
+     StartSymbol startsym;
++    OffsetSymbol offsetsym;
+     EndSymbol endsym;
+ 	Next2Symbol next2sym;
+     SubtableSymbol subtablesym;
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/slghpatexpress/OffsetInstructionValue.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/slghpatexpress/OffsetInstructionValue.java
+new file mode 100644
+index 000000000..3b5007e6f
+--- /dev/null
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/slghpatexpress/OffsetInstructionValue.java
+@@ -0,0 +1,68 @@
++/* ###
++ * IP: GHIDRA
++ * REVIEWED: YES
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package ghidra.pcodeCPort.slghpatexpress;
++
++import generic.stl.VectorSTL;
++import ghidra.pcodeCPort.context.ParserWalker;
++import ghidra.pcodeCPort.translate.Translate;
++import ghidra.sleigh.grammar.Location;
++
++import java.io.PrintStream;
++
++import org.jdom.Element;
++
++public class OffsetInstructionValue extends PatternValue {
++
++	public OffsetInstructionValue(Location location) {
++		super(location);
++	}
++
++	@Override
++	public long getValue(ParserWalker pos) {
++		return pos.getOffset(-1);
++	}
++
++	@Override
++	public TokenPattern genMinPattern(VectorSTL<TokenPattern> ops) {
++		return new TokenPattern(location);
++	}
++
++	@Override
++	public TokenPattern genPattern(long val) {
++		return new TokenPattern(location);
++	}
++
++	@Override
++	public long minValue() {
++		return 0;
++	}
++
++	@Override
++	public long maxValue() {
++		return 0;
++	}
++
++	@Override
++	public void saveXml(PrintStream s) {
++		s.append("<offset_exp/>");
++	}
++
++	@Override
++	public void restoreXml(Element el, Translate trans) {
++	}
++
++}
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/slghpatexpress/PatternExpression.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/slghpatexpress/PatternExpression.java
+index 2842fa83a..315450dd8 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/slghpatexpress/PatternExpression.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/slghpatexpress/PatternExpression.java
+@@ -84,6 +84,9 @@ public abstract class PatternExpression {
+ 		else if (nm.equals("start_exp")) {
+ 			res = new StartInstructionValue(null);
+ 		}
++		else if (nm.equals("offset_exp")) {
++			res = new OffsetInstructionValue(null);
++		}
+ 		else if (nm.equals("end_exp")) {
+ 			res = new EndInstructionValue(null);
+ 		}
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/slghsymbol/OffsetSymbol.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/slghsymbol/OffsetSymbol.java
+new file mode 100644
+index 000000000..c9e7cbe18
+--- /dev/null
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/slghsymbol/OffsetSymbol.java
+@@ -0,0 +1,111 @@
++/* ###
++ * IP: GHIDRA
++ * REVIEWED: YES
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package ghidra.pcodeCPort.slghsymbol;
++
++import ghidra.pcodeCPort.context.FixedHandle;
++import ghidra.pcodeCPort.context.ParserWalker;
++import ghidra.pcodeCPort.semantics.ConstTpl;
++import ghidra.pcodeCPort.semantics.VarnodeTpl;
++import ghidra.pcodeCPort.sleighbase.SleighBase;
++import ghidra.pcodeCPort.slghpatexpress.PatternExpression;
++import ghidra.pcodeCPort.slghpatexpress.OffsetInstructionValue;
++import ghidra.pcodeCPort.space.AddrSpace;
++import ghidra.sleigh.grammar.Location;
++
++import java.io.PrintStream;
++
++import org.jdom.Element;
++
++public class OffsetSymbol extends SpecificSymbol {
++	private AddrSpace const_space;
++	private PatternExpression patexp;
++
++	OffsetSymbol(Location location) {
++		super(location);
++		patexp = null;
++	} // For use with restoreXml
++
++	@Override
++	public PatternExpression getPatternExpression() {
++		return patexp;
++	}
++
++	@Override
++	public symbol_type getType() {
++		return symbol_type.offset_symbol;
++	}
++
++	public OffsetSymbol(Location location, String nm, AddrSpace cspc) {
++		super(location, nm);
++		const_space = cspc;
++		patexp = new OffsetInstructionValue(location);
++		patexp.layClaim();
++	}
++
++	@Override
++	public void dispose() {
++		if (patexp != null) {
++			PatternExpression.release(patexp);
++		}
++	}
++
++// Returns current instruction offset as a constant
++	@Override
++	public VarnodeTpl getVarnode() {
++		ConstTpl spc = new ConstTpl(const_space);
++		ConstTpl off = new ConstTpl(ConstTpl.const_type.j_offset);
++		ConstTpl sz_zero = new ConstTpl();
++		return new VarnodeTpl(location, spc, off, sz_zero);
++	}
++
++	@Override
++	public void getFixedHandle(FixedHandle hand, ParserWalker pos) {
++		hand.space = pos.getCurSpace();
++		hand.offset_space = null;
++		hand.offset_offset = pos.getAddr().getOffset(); // Get starting address of instruction
++		hand.size = hand.space.getAddrSize();
++	}
++
++	@Override
++	public void print(PrintStream s, ParserWalker pos) {
++		long val = pos.getAddr().getOffset();
++		s.append("0x");
++		s.print(Long.toHexString(val));
++	}
++
++	@Override
++	public void saveXml(PrintStream s) {
++		s.append("<start_sym");
++		saveSleighSymbolXmlHeader(s);
++		s.println("/>");
++	}
++
++	@Override
++	public void saveXmlHeader(PrintStream s) {
++		s.append("<start_sym_head");
++		saveSleighSymbolXmlHeader(s);
++		s.append("/>\n");
++	}
++
++	@Override
++	public void restoreXml(Element el, SleighBase trans) {
++		const_space = trans.getConstantSpace();
++		patexp = new OffsetInstructionValue(null);
++		patexp.layClaim();
++	}
++
++}
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/slghsymbol/SymbolTable.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/slghsymbol/SymbolTable.java
+index 76f476a8d..2ce004ddf 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/slghsymbol/SymbolTable.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/slghsymbol/SymbolTable.java
+@@ -297,6 +297,9 @@ public class SymbolTable {
+ 		else if (el.getName().equals("start_sym_head")) {
+ 			sym = new StartSymbol(location);
+ 		}
++		else if (el.getName().equals("offset_sym_head")) {
++			sym = new OffsetSymbol(location);
++		}
+ 		else if (el.getName().equals("end_sym_head")) {
+ 			sym = new EndSymbol(location);
+ 		}
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/slghsymbol/symbol_type.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/slghsymbol/symbol_type.java
+index 272b5fe64..cc3b29f27 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/slghsymbol/symbol_type.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/slghsymbol/symbol_type.java
+@@ -26,6 +26,7 @@ public enum symbol_type {
+ 	varnodelist_symbol,
+ 	operand_symbol,
+ 	start_symbol,  // inst_start, inst_ref, inst_def
++        offset_symbol,
+ 	end_symbol,    // inst_next
+ 	next2_symbol,    // inst_next2
+ 	subtable_symbol,
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/PcodeParser.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/PcodeParser.java
+index 8e64c318a..b1fce2988 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/PcodeParser.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/PcodeParser.java
+@@ -84,6 +84,7 @@ public class PcodeParser extends PcodeCompile {
+ 
+ 		Location internalLoc = Location.INTERNALLY_DEFINED;
+ 		symbolMap.put("inst_start", new StartSymbol(internalLoc, "inst_start", getConstantSpace()));
++		symbolMap.put("operand_offset", new OffsetSymbol(internalLoc, "operand_offset", getConstantSpace()));
+ 		symbolMap.put("inst_next", new EndSymbol(internalLoc, "inst_next", getConstantSpace()));
+ 		symbolMap.put("inst_next2", new Next2Symbol(internalLoc, "inst_next2", getConstantSpace()));
+ 		symbolMap.put("inst_ref", new FlowRefSymbol(internalLoc, "inst_ref", getConstantSpace()));
+-- 
+2.38.1
+
