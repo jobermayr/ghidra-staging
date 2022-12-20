@@ -1,8 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Eric Kilmer <eric.d.kilmer@gmail.com>
 Date: Sat, 10 Sep 2022 18:18:51 -0400
-Subject: [PATCH] 4336: POC to fix `LOCK` instruction prefix for x86
- disassembly
+Subject: [PATCH] 4336: Fix LOCK, XACQUIRE, XRELEASE instruction prefix for x86
 
 x86: Reduce duplication in slaspecs
 
@@ -15,11 +14,11 @@ x86: Correctly handle `LOCK`, `XRELEASE`, `XACQUIRE` prefixes
 ---
  Ghidra/Processors/x86/certification.manifest  |   1 +
  Ghidra/Processors/x86/data/languages/ia.sinc  | 428 +++++++++---------
- .../x86/data/languages/lockable.sinc          | 312 +++++++++++++
+ .../x86/data/languages/lockable.sinc          | 313 +++++++++++++
  .../x86/data/languages/x86-64.slaspec         |  20 +-
  .../Processors/x86/data/languages/x86.ldefs   |  10 +-
  .../Processors/x86/data/languages/x86.slaspec |   4 +-
- 6 files changed, 531 insertions(+), 244 deletions(-)
+ 6 files changed, 532 insertions(+), 244 deletions(-)
  create mode 100644 Ghidra/Processors/x86/data/languages/lockable.sinc
 
 diff --git a/Ghidra/Processors/x86/certification.manifest b/Ghidra/Processors/x86/certification.manifest
@@ -35,7 +34,7 @@ index e7281d85a..8108792e6 100644
  data/languages/macros.sinc||GHIDRA||||END|
  data/languages/mpx.sinc||GHIDRA||||END|
 diff --git a/Ghidra/Processors/x86/data/languages/ia.sinc b/Ghidra/Processors/x86/data/languages/ia.sinc
-index 171ea6b54..2a8525309 100644
+index 171ea6b54..0891bbb7c 100644
 --- a/Ghidra/Processors/x86/data/languages/ia.sinc
 +++ b/Ghidra/Processors/x86/data/languages/ia.sinc
 @@ -245,7 +245,7 @@ define register offset=0x1400 size=4   [
@@ -361,8 +360,8 @@ index 171ea6b54..2a8525309 100644
 -:CMPXCHG rm32,Reg32    is vexMode=0 & opsize=1 & byte=0xf; byte=0xb1; rm32 & Reg32 ... & check_EAX_dest ... & check_rm32_dest ... 
 -{ 
 -	#this instruction writes to either EAX or rm32
-+:CMPXCHG Rmr8,Reg8  is vexMode=0 & byte=0xf; byte=0xa6; Rmr8 & Reg8                   { _cmpxchg(Rmr8, Reg8); } #deprecated after 486
-+:CMPXCHG Rmr16,Reg16  is vexMode=0 & byte=0xf; byte=0xa7; Rmr16 & Reg16               { _cmpxchg(Rmr16, Reg16); } #deprecated after 486
++:CMPXCHG Rmr8,Reg8  is vexMode=0 & byte=0xf; byte=0xa6; mod=3 & Rmr8 & Reg8           { _cmpxchg(Rmr8, Reg8); } #deprecated after 486
++:CMPXCHG Rmr16,Reg16  is vexMode=0 & byte=0xf; byte=0xa7; mod=3 & Rmr16 & Reg16           { _cmpxchg(Rmr16, Reg16); } #deprecated after 486
 +:CMPXCHG Rmr8,Reg8  is vexMode=0 & byte=0xf; byte=0xb0; mod=3 & Rmr8 & Reg8           { subflags(AL,Rmr8); local tmp=AL-Rmr8; resultflags(tmp);
 +                                          local diff = Rmr8^Reg8; Rmr8 = Rmr8 ^ (ZF*diff);
 +                                          diff = AL ^ Rmr8; AL = AL ^ ((ZF==0)*diff); }
@@ -799,10 +798,10 @@ index 171ea6b54..2a8525309 100644
 +} # end with : lockprefx=0
 diff --git a/Ghidra/Processors/x86/data/languages/lockable.sinc b/Ghidra/Processors/x86/data/languages/lockable.sinc
 new file mode 100644
-index 000000000..ff2fd48f6
+index 000000000..d62535415
 --- /dev/null
 +++ b/Ghidra/Processors/x86/data/languages/lockable.sinc
-@@ -0,0 +1,312 @@
+@@ -0,0 +1,313 @@
 +# The LOCK prefix is only valid for certain instructions, otherwise, from the
 +# Intel instruction manual:
 +#     An undefined opcode exception will also be generated if the LOCK prefix
@@ -932,7 +931,8 @@ index 000000000..ff2fd48f6
 +:BTS^lockx^unlock m64,imm8     is $(LONGMODE_ON) & vexMode=0 & lockx & unlock & opsize=2 & byte=0xf; byte=0xba; m64 & reg_opcode=5 ...; imm8   { build lockx; local bit=imm8&0x3f; local val=(m64>>bit)&1; m64=m64 | (1<<bit); CF=(val!=0); build unlock; }
 +@endif
 +
-+:CMPXCHG^lockx^unlock m8,Reg8  is vexMode=0 & lockx & unlock & byte=0xf; byte=0xa6; m8 & Reg8 ...           { build lockx; build unlock; }
++:CMPXCHG^lockx^unlock m8,Reg8  is vexMode=0 & lockx & unlock & byte=0xf; byte=0xa6; m8 & Reg8 ...           { build lockx; _cmpxchg(m8, Reg8); build unlock; }
++:CMPXCHG^lockx^unlock m16,Reg16  is vexMode=0 & lockx & unlock & byte=0xf; byte=0xa7; m16 & Reg16 ...           { build lockx; _cmpxchg(m16, Reg16); build unlock; }
 +:CMPXCHG^lockx^unlock m8,Reg8  is vexMode=0 & lockx & unlock & byte=0xf; byte=0xb0; m8 & Reg8 ...           { build lockx; subflags(AL,m8); local tmp=AL-m8; resultflags(tmp);
 +                                          local diff = m8^Reg8; m8 = m8 ^ (ZF*diff);
 +                                          diff = AL ^ m8; AL = AL ^ ((ZF==0)*diff);
