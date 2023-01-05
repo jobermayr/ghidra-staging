@@ -4,18 +4,96 @@ Date: Wed, 28 Dec 2022 13:03:13 +0100
 Subject: [PATCH] 4857: OMF format: Added handling of ALIAS record type (Closes
  #4856)
 
+OMF format: Added handling of CEXTDEF, COMDAT, LINKSYM, ALIAS, NBKPAT, LLNAMES, VERNUM, VENDEXT record types (Closes #4856)
 ---
- .../util/bin/format/omf/OmfAliasRecord.java   | 41 +++++++++++++++++++
- .../app/util/bin/format/omf/OmfRecord.java    |  4 ++
- 2 files changed, 45 insertions(+)
- create mode 100644 Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfAliasRecord.java
+ .../util/bin/format/omf/OmfFileHeader.java    | 14 +++++-
+ .../app/util/bin/format/omf/OmfRecord.java    | 18 ++++++++
+ .../bin/format/omf/OmfUnsupportedRecord.java  | 46 +++++++++++++++++++
+ .../ghidra/app/util/opinion/OmfLoader.java    |  2 +-
+ 4 files changed, 78 insertions(+), 2 deletions(-)
+ create mode 100644 Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfUnsupportedRecord.java
 
-diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfAliasRecord.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfAliasRecord.java
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfFileHeader.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfFileHeader.java
+index fa2de8a9d..2c0976199 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfFileHeader.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfFileHeader.java
+@@ -21,6 +21,7 @@ import java.io.IOException;
+ 
+ import ghidra.app.util.bin.BinaryReader;
+ import ghidra.app.util.bin.ByteProvider;
++import ghidra.app.util.importer.MessageLog;
+ import ghidra.util.task.TaskMonitor;
+ 
+ public class OmfFileHeader extends OmfRecord {
+@@ -299,7 +300,7 @@ public class OmfFileHeader extends OmfRecord {
+ 	 * @throws IOException for problems reading data
+ 	 * @throws OmfException for malformed records
+ 	 */
+-	public static OmfFileHeader parse(BinaryReader reader,TaskMonitor monitor) throws IOException, OmfException {
++	public static OmfFileHeader parse(BinaryReader reader,TaskMonitor monitor, MessageLog log) throws IOException, OmfException {
+ 		OmfRecord record = OmfRecord.readRecord(reader);
+ 		if ((record.getRecordType() & (byte)0xfc)!=OmfRecord.THEADR) {
+ 			throw new OmfException("Object file does not start with proper header");
+@@ -371,6 +372,17 @@ public class OmfFileHeader extends OmfRecord {
+ 				segheader2.addIteratedData(iterheader);
+ 				lastDataBlock = iterheader;
+ 				break;
++			case CEXTDEF:
++			case COMDAT:
++			case LINKSYM:
++			case ALIAS:
++			case NBKPAT:
++			case LLNAMES:
++			case VERNUM:
++			case VENDEXT:
++				OmfUnsupportedRecord unsupported = (OmfUnsupportedRecord)record;
++				log.appendMsg(unsupported.getMessage());
++				break;
+ 			default:
+ 				// Should never reach here
+ 			}
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfRecord.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfRecord.java
+index 853c2ace9..1fc3bbc8f 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfRecord.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfRecord.java
+@@ -38,6 +38,14 @@ public abstract class OmfRecord {
+ 	public final static byte LEXTDEF = (byte)0xB4;
+ 	public final static byte LPUBDEF = (byte)0xB6;
+ 	public final static byte LCOMDEF = (byte)0xB8;
++	public final static byte CEXTDEF = (byte)0xBC;
++	public final static byte COMDAT = (byte)0xC2;
++	public final static byte LINKSYM = (byte)0xC4;
++	public final static byte ALIAS = (byte)0xC6;
++	public final static byte NBKPAT = (byte)0xC8;
++	public final static byte LLNAMES = (byte)0xCA;
++	public final static byte VERNUM = (byte)0xCC;
++	public final static byte VENDEXT = (byte)0xCE;
+ 	protected byte recordType;
+ 	protected int recordLength;
+ 	protected byte checkSum;
+@@ -153,6 +161,16 @@ public abstract class OmfRecord {
+ 		case LCOMDEF:
+ 			res = new OmfComdefRecord(reader,true);
+ 			break;
++		case CEXTDEF:
++		case COMDAT:
++		case LINKSYM:
++		case ALIAS:
++		case NBKPAT:
++		case LLNAMES:
++		case VERNUM:
++		case VENDEXT:
++			res = new OmfUnsupportedRecord(reader);
++			break;
+ 		default:
+ 			throw new OmfException("Unrecognized record type");
+ 		}
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfUnsupportedRecord.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfUnsupportedRecord.java
 new file mode 100644
-index 000000000..9180dce0f
+index 000000000..85ffd95dc
 --- /dev/null
-+++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfAliasRecord.java
-@@ -0,0 +1,41 @@
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfUnsupportedRecord.java
+@@ -0,0 +1,46 @@
 +/* ###
 + * IP: GHIDRA
 + * REVIEWED: NO
@@ -37,49 +115,45 @@ index 000000000..9180dce0f
 +import java.io.IOException;
 +import ghidra.app.util.bin.BinaryReader;
 +
-+public class OmfAliasRecord extends OmfRecord {
++public class OmfUnsupportedRecord extends OmfRecord {
++	private long offset;
 +
 +	/***
-+	 * Read an OMF ALIAS record.
-+	 * Aliases is a list of from/to string pairs, used by the linker.
++	 * Skip an unsupported OMF record.
 +	 *
-+	 * @param reader The byte stream with the alias record
++	 * @param reader The byte stream with the unsupported record to skip
 +	 * @throws IOException
 +	 */
-+	public OmfAliasRecord(BinaryReader reader) throws IOException {
++	public OmfUnsupportedRecord(BinaryReader reader) throws IOException {
 +		readRecordHeader(reader);
-+		long max = reader.getPointerIndex() + getRecordLength() - 1;
-+		while(reader.getPointerIndex() < max) {
-+			OmfRecord.readString(reader); /* From */
-+			OmfRecord.readString(reader); /* To */
-+		}
-+		readCheckSumByte(reader);
++		offset = reader.getPointerIndex();
++
++		reader.setPointerIndex(reader.getPointerIndex() + getRecordLength());
++	}
++
++	/***
++	 * Get a message suitable for logging about this record
++	 * @return String Message text about record
++	 */
++	public String getMessage() {
++		return "Unsupported OMF record of type " + (getRecordType() & 0xff) + " of length " + getRecordLength() + " at " + offset;
 +	}
 +
 +}
 \ No newline at end of file
-diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfRecord.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfRecord.java
-index 853c2ace9..1a278acf0 100644
---- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfRecord.java
-+++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfRecord.java
-@@ -38,6 +38,7 @@ public abstract class OmfRecord {
- 	public final static byte LEXTDEF = (byte)0xB4;
- 	public final static byte LPUBDEF = (byte)0xB6;
- 	public final static byte LCOMDEF = (byte)0xB8;
-+	public final static byte ALIAS = (byte)0xC6;
- 	protected byte recordType;
- 	protected int recordLength;
- 	protected byte checkSum;
-@@ -153,6 +154,9 @@ public abstract class OmfRecord {
- 		case LCOMDEF:
- 			res = new OmfComdefRecord(reader,true);
- 			break;
-+		case ALIAS:
-+			res = new OmfAliasRecord(reader);
-+			break;
- 		default:
- 			throw new OmfException("Unrecognized record type");
- 		}
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/opinion/OmfLoader.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/opinion/OmfLoader.java
+index 4a1ced92b..32341f1c8 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/opinion/OmfLoader.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/opinion/OmfLoader.java
+@@ -115,7 +115,7 @@ public class OmfLoader extends AbstractProgramWrapperLoader {
+ 		OmfFileHeader header = null;
+ 		BinaryReader reader = OmfFileHeader.createReader(provider);
+ 		try {
+-			header = OmfFileHeader.parse(reader, monitor);
++			header = OmfFileHeader.parse(reader, monitor, log);
+ 			header.resolveNames();
+ 			header.sortSegmentDataBlocks();
+ 			OmfFileHeader.doLinking(IMAGE_BASE, header.getSegments(), header.getGroups());
 -- 
 2.39.0
 
