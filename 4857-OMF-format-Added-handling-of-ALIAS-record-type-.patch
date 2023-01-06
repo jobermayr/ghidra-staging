@@ -4,17 +4,106 @@ Date: Wed, 28 Dec 2022 13:03:13 +0100
 Subject: [PATCH] 4857: OMF format: Added handling of ALIAS record type (Closes
  #4856)
 
-OMF format: Added handling of CEXTDEF, COMDAT, LINKSYM, ALIAS, NBKPAT, LLNAMES, VERNUM, VENDEXT record types (Closes #4856)
+OMF format: Added handling of many record types (Closes #4856)
+OMF format: Refactor OMF handling to each record type
 ---
- .../util/bin/format/omf/OmfFileHeader.java    | 14 +++++-
- .../app/util/bin/format/omf/OmfRecord.java    | 18 ++++++++
- .../bin/format/omf/OmfUnsupportedRecord.java  | 46 +++++++++++++++++++
- .../ghidra/app/util/opinion/OmfLoader.java    |  2 +-
- 4 files changed, 78 insertions(+), 2 deletions(-)
+ .../util/bin/format/omf/OmfComdefRecord.java  |  14 +-
+ .../util/bin/format/omf/OmfCommentRecord.java |  11 ++
+ .../bin/format/omf/OmfEnumeratedData.java     |   4 +
+ .../bin/format/omf/OmfExternalSymbol.java     |   4 +
+ .../util/bin/format/omf/OmfFileHeader.java    | 168 +++++++-----------
+ .../util/bin/format/omf/OmfFixupRecord.java   |   5 +
+ .../util/bin/format/omf/OmfGroupRecord.java   |   7 +
+ .../util/bin/format/omf/OmfIteratedData.java  |   9 +
+ .../util/bin/format/omf/OmfLibraryRecord.java |   9 +-
+ .../bin/format/omf/OmfLineNumberRecord.java   |   4 +
+ .../app/util/bin/format/omf/OmfModuleEnd.java |   3 +
+ .../util/bin/format/omf/OmfNamesRecord.java   |   7 +-
+ .../app/util/bin/format/omf/OmfRecord.java    |  62 ++++++-
+ .../util/bin/format/omf/OmfSegmentHeader.java |  12 ++
+ .../util/bin/format/omf/OmfSymbolRecord.java  |   4 +
+ .../bin/format/omf/OmfUnsupportedRecord.java  |  53 ++++++
+ .../ghidra/app/util/opinion/OmfLoader.java    |   2 +-
+ 17 files changed, 262 insertions(+), 116 deletions(-)
  create mode 100644 Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfUnsupportedRecord.java
 
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfComdefRecord.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfComdefRecord.java
+index e65ca6edb..b2d34666b 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfComdefRecord.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfComdefRecord.java
+@@ -69,5 +69,17 @@ public class OmfComdefRecord extends OmfExternalSymbol {
+ 			throw new OmfException("Illegal communal length encoding");
+ 		return val;
+ 	}
+-		
++
++	public void handle(OmfFileHeader header) {
++		OmfSymbol[] coms = getSymbols();
++		for (OmfSymbol sym : coms) {
++			int dt = sym.getDataType();
++			if (dt >0 && dt < 0x60) {		// A special borland segment symbol
++				int count = (header.getExtraSegments() ==null) ? 1 : header.getExtraSegments().size()+1;
++				header.createOrFindBorlandSegment(count,dt);
++				sym.setSegmentRef(count);
++			}
++		}
++		super.handle(header);
++	}
+ }
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfCommentRecord.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfCommentRecord.java
+index 4a3b21807..036051791 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfCommentRecord.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfCommentRecord.java
+@@ -45,6 +45,17 @@ public class OmfCommentRecord extends OmfRecord {
+ 		}
+ 		readCheckSumByte(reader);
+ 	}
++
++	public void handle(OmfFileHeader header) {
++		switch(commentClass) {
++		case COMMENT_CLASS_TRANSLATOR:
++			header.setTranslator(value);
++			break;
++		case COMMENT_CLASS_LIBMOD:
++			header.setLibModuleName(value);
++			break;
++		}
++	}
+ 	
+ 	public byte getCommentClass() {
+ 		return commentClass;
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfEnumeratedData.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfEnumeratedData.java
+index da885b648..4f59349bb 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfEnumeratedData.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfEnumeratedData.java
+@@ -35,6 +35,10 @@ public class OmfEnumeratedData extends OmfRecord implements OmfData {
+ 		reader.setPointerIndex(streamOffset + streamLength); 	// Skip over the data when reading header
+ 		readCheckSumByte(reader);
+ 	}
++
++	public void handle(OmfFileHeader header) throws OmfException {
++		header.addEnumeratedBlock(this);
++	}
+ 	
+ 	public int getSegmentIndex() {
+ 		return segmentIndex;
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfExternalSymbol.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfExternalSymbol.java
+index 65cfb8c26..3164e7d58 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfExternalSymbol.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfExternalSymbol.java
+@@ -46,6 +46,10 @@ public class OmfExternalSymbol extends OmfRecord {
+ 		symbollist.toArray(symbol);
+ 	}
+ 
++	public void handle(OmfFileHeader header) {
++		header.getExternalSymbols().add(this);
++	}
++
+ 	public OmfSymbol[] getSymbols() {
+ 		return symbol;
+ 	}
 diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfFileHeader.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfFileHeader.java
-index fa2de8a9d..2c0976199 100644
+index fa2de8a9d..473efc151 100644
 --- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfFileHeader.java
 +++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfFileHeader.java
 @@ -21,6 +21,7 @@ import java.io.IOException;
@@ -25,60 +114,474 @@ index fa2de8a9d..2c0976199 100644
  import ghidra.util.task.TaskMonitor;
  
  public class OmfFileHeader extends OmfRecord {
-@@ -299,7 +300,7 @@ public class OmfFileHeader extends OmfRecord {
+@@ -36,6 +37,8 @@ public class OmfFileHeader extends OmfRecord {
+ 	private ArrayList<OmfSymbolRecord> symbols = new ArrayList<OmfSymbolRecord>();
+ 	private ArrayList<OmfFixupRecord> fixup = new ArrayList<OmfFixupRecord>();
+ 	private ArrayList<OmfSegmentHeader> extraSeg = null;		// Holds implied segments that don't have official header record
++	private MessageLog log;
++	private Object lastDataBlock = null;
+ //	private OmfModuleEnd endModule = null;
+ 
+ 	public OmfFileHeader(BinaryReader reader) throws IOException {
+@@ -125,6 +128,20 @@ public class OmfFileHeader extends OmfRecord {
+ 	public ArrayList<OmfFixupRecord> getFixups() {
+ 		return fixup;
+ 	}
++
++	/**
++	 * @return the list of mapping names
++	 */
++	public ArrayList<String> getNameList() {
++		return nameList;
++	}
++
++	/**
++	 * @return the last data block seen in input
++	 */
++	public Object getLastBlock() {
++		return lastDataBlock;
++	}
+ 	
+ 	/**
+ 	 * Sort the explicit data-blocks for each segment into address order.
+@@ -145,7 +162,7 @@ public class OmfFileHeader extends OmfRecord {
+ 	 * @param datablock is the LEDATA record
+ 	 * @throws OmfException for a malformed segment index
+ 	 */
+-	private void addEnumeratedBlock(OmfEnumeratedData datablock) throws OmfException {
++	public void addEnumeratedBlock(OmfEnumeratedData datablock) throws OmfException {
+ 		int index = datablock.getSegmentIndex();
+ 		int subindex = -1;
+ 		OmfSegmentHeader segment;
+@@ -166,6 +183,7 @@ public class OmfFileHeader extends OmfRecord {
+ 		else {
+ 			segment.addEnumeratedData(datablock);
+ 		}
++		lastDataBlock = datablock;
+ 	}
+ 	
+ 	/**
+@@ -219,7 +237,7 @@ public class OmfFileHeader extends OmfRecord {
+ 	 * @param datatype is the type of (new) segment
+ 	 * @return the corresponding OmfSegmentHeader
+ 	 */
+-	private OmfSegmentHeader createOrFindBorlandSegment(int index,int datatype) {
++	public OmfSegmentHeader createOrFindBorlandSegment(int index,int datatype) {
+ 		if (extraSeg == null) {
+ 			extraSeg = new ArrayList<OmfSegmentHeader>();
+ 		}
+@@ -233,18 +251,29 @@ public class OmfFileHeader extends OmfRecord {
+ 		}
+ 		return segment;
+ 	}
++
++	public void setTranslator(String name) {
++		translator = name;
++	}
++
++	public void setLibModuleName(String name) {
++		libModuleName = name;
++	}
++
++	public void setLog(MessageLog l) {
++		log = l;
++	}
+ 	
+-	private void evaluateComdef(OmfComdefRecord comdef) {
+-		OmfSymbol[] coms = comdef.getSymbols();
+-		for (OmfSymbol sym : coms) {
+-			int dt = sym.getDataType();
+-			if (dt >0 && dt < 0x60) {		// A special borland segment symbol
+-				int count = (extraSeg==null) ? 1 : extraSeg.size()+1;
+-				createOrFindBorlandSegment(count,dt);
+-				sym.setSegmentRef(count);
+-				
+-			}
++	public void setLastBlock(Object last) {
++		lastDataBlock = last;
++	}
++
++	private static OmfFileHeader readHeader(BinaryReader reader) throws IOException, OmfException {
++		OmfRecord record = OmfRecord.readRecord(reader);
++		if (!(record instanceof OmfFileHeader)) {
++			throw new OmfException("Object file does not start with proper header");
+ 		}
++		return (OmfFileHeader)record;
+ 	}
+ 
+ 	/**
+@@ -257,35 +286,17 @@ public class OmfFileHeader extends OmfRecord {
+ 	 * @throws OmfException for malformed records
+ 	 */
+ 	public static OmfFileHeader scan(BinaryReader reader,TaskMonitor monitor,boolean initialCommentsOnly) throws IOException, OmfException {
+-		OmfRecord record = OmfRecord.readRecord(reader);
+-		if ((record.getRecordType() & (byte)0xfc)!=OmfRecord.THEADR) {
+-			throw new OmfException("Object file does not start with proper header");
+-		}
+-		OmfFileHeader header = (OmfFileHeader)record;
+-		byte type = record.getRecordType();
+-		type &= 0xfe;
+-		while(type != MODEND) {
++		OmfFileHeader header = readHeader(reader);
++		OmfRecord record = header;
++		while(!(record instanceof OmfModuleEnd)) {
+ 			if (monitor.isCancelled()) {
+ 				break;					// Return what we have
+ 			}
+ 			record = OmfRecord.readRecord(reader);
+-			type = record.getRecordType();
+-			type &= 0xfe;	// Mask off the least significant bit
+-			if (initialCommentsOnly && (type != COMENT)) {
+-				break;
+-			}
+-			switch(type) {
+-			case COMENT:
+-				byte commentClass = ((OmfCommentRecord)record).getCommentClass();
+-				if (commentClass == OmfCommentRecord.COMMENT_CLASS_TRANSLATOR) {
+-					header.translator = ((OmfCommentRecord)record).getValue();
+-				}
+-				else if (commentClass == OmfCommentRecord.COMMENT_CLASS_LIBMOD) {
+-					header.libModuleName = ((OmfCommentRecord)record).getValue();
+-				}
++			if(record instanceof OmfCommentRecord coment) {
++				record.handle(header);
++			} else if(initialCommentsOnly) {
+ 				break;
+-			default:
+-				break;		// Skip most records
+ 			}
+ 		}
+ 		return header;
+@@ -299,85 +310,28 @@ public class OmfFileHeader extends OmfRecord {
  	 * @throws IOException for problems reading data
  	 * @throws OmfException for malformed records
  	 */
 -	public static OmfFileHeader parse(BinaryReader reader,TaskMonitor monitor) throws IOException, OmfException {
+-		OmfRecord record = OmfRecord.readRecord(reader);
+-		if ((record.getRecordType() & (byte)0xfc)!=OmfRecord.THEADR) {
+-			throw new OmfException("Object file does not start with proper header");
+-		}
+-		OmfFileHeader header = (OmfFileHeader)record;
+-		Object lastDataBlock = null;
 +	public static OmfFileHeader parse(BinaryReader reader,TaskMonitor monitor, MessageLog log) throws IOException, OmfException {
- 		OmfRecord record = OmfRecord.readRecord(reader);
- 		if ((record.getRecordType() & (byte)0xfc)!=OmfRecord.THEADR) {
- 			throw new OmfException("Object file does not start with proper header");
-@@ -371,6 +372,17 @@ public class OmfFileHeader extends OmfRecord {
- 				segheader2.addIteratedData(iterheader);
- 				lastDataBlock = iterheader;
- 				break;
-+			case CEXTDEF:
-+			case COMDAT:
-+			case LINKSYM:
-+			case ALIAS:
-+			case NBKPAT:
-+			case LLNAMES:
-+			case VERNUM:
-+			case VENDEXT:
-+				OmfUnsupportedRecord unsupported = (OmfUnsupportedRecord)record;
-+				log.appendMsg(unsupported.getMessage());
-+				break;
- 			default:
- 				// Should never reach here
++		OmfFileHeader header = readHeader(reader);
++		OmfRecord record = header;
++		header.setLog(log);
++		header.setLastBlock(null);
+ 		
+-		while((record.getRecordType() & (byte)0xfe) != OmfRecord.MODEND) {
++		while(!(record instanceof OmfModuleEnd)) {
+ 			if (monitor.isCancelled()) {
+ 				break;					// Return what we have
  			}
+ 			record = OmfRecord.readRecord(reader);
+-			byte type = record.getRecordType();
+-			type &= 0xfe;	// Mask off the least significant bit
+-			switch(type) {
+-			case COMENT:
+-				byte commentClass = ((OmfCommentRecord)record).getCommentClass();
+-				if (commentClass == OmfCommentRecord.COMMENT_CLASS_TRANSLATOR) {
+-					header.translator = ((OmfCommentRecord)record).getValue();
+-				}
+-				else if (commentClass == OmfCommentRecord.COMMENT_CLASS_LIBMOD) {
+-					header.libModuleName = ((OmfCommentRecord)record).getValue();
+-				}
+-				break;
+-			case MODEND:
+-//				header.endModule = (OmfModuleEnd)record;
+-					// We are not currently examining the end module record
+-				break;
+-			case COMDEF:
+-			case LCOMDEF:
+-				header.evaluateComdef((OmfComdefRecord)record);
+-				header.externsymbols.add((OmfExternalSymbol)record);
+-				break;
+-			case LEXTDEF:
+-			case EXTDEF:
+-				header.externsymbols.add((OmfExternalSymbol)record);
+-				break;
+-			case PUBDEF:
+-			case LPUBDEF:
+-				header.symbols.add((OmfSymbolRecord)record);
+-				break;
+-			case LINNUM:
+-				break;		// Not saving this information currently
+-			case LNAMES:
+-				((OmfNamesRecord)record).appendNames(header.nameList);		// Keep names, otherwise don't save record
+-				break;
+-			case SEGDEF:
+-				header.segments.add((OmfSegmentHeader)record);
+-				break;
+-			case GRPDEF:
+-				header.groups.add((OmfGroupRecord)record);
+-				break;
+-			case FIXUPP:
+-				OmfFixupRecord fixuprec = (OmfFixupRecord)record;
+-				fixuprec.setDataBlock(lastDataBlock);
+-				header.fixup.add(fixuprec);
+-				break;
+-			case LEDATA:
+-				OmfEnumeratedData enumheader = (OmfEnumeratedData)record;
+-				header.addEnumeratedBlock(enumheader);
+-				lastDataBlock = enumheader;
+-				break;
+-			case LIDATA:
+-				OmfIteratedData iterheader = (OmfIteratedData)record;
+-				if (iterheader.getSegmentIndex() <= 0 || iterheader.getSegmentIndex() > header.segments.size()) {
+-					throw new OmfException("Bad segment index on LIDATA");
+-				}
+-				OmfSegmentHeader segheader2 = header.segments.get(iterheader.getSegmentIndex()-1);
+-				segheader2.addIteratedData(iterheader);
+-				lastDataBlock = iterheader;
+-				break;
+-			default:
+-				// Should never reach here
+-			}
++			record.handle(header);
+ 		}
+ 		return header;
+ 	}
+-	
++
++	/**
++	 * Handling is done in parse or scan
++	 */
++	public void handle(OmfFileHeader header) {
++	}
++
+ 	/**
+ 	 * Assign a load image address to each segment. Follow OMF rules for grouping and ordering
+ 	 * the segments in memory.
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfFixupRecord.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfFixupRecord.java
+index 91e3481d7..76af74382 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfFixupRecord.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfFixupRecord.java
+@@ -60,6 +60,11 @@ public class OmfFixupRecord extends OmfRecord {
+ 			lastLEData = null;
+ 		}
+ 	}
++
++	public void handle(OmfFileHeader header) {
++		setDataBlock(header.getLastBlock());
++		header.getFixups().add(this);
++	}
+ 	
+ 	public Subrecord[] getSubrecords() {
+ 		return subrecs;
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfGroupRecord.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfGroupRecord.java
+index 5d2957158..4ef1aecf0 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfGroupRecord.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfGroupRecord.java
+@@ -43,6 +43,13 @@ public class OmfGroupRecord extends OmfRecord {
+ 		group = new GroupSubrecord[ grouplist.size() ];
+ 		grouplist.toArray(group);
+ 	}
++
++	/**
++	 * Add this record to the list of groups
++	 */
++	public void handle(OmfFileHeader header) {
++		header.getGroups().add(this);
++	}
+ 	
+ 	public String getName() {
+ 		return groupName;
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfIteratedData.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfIteratedData.java
+index 9a26034fb..bf0d27507 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfIteratedData.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfIteratedData.java
+@@ -42,6 +42,15 @@ public class OmfIteratedData extends OmfRecord implements OmfData {
+ 		datablock = new DataBlock[blocklist.size()];
+ 		blocklist.toArray(datablock);
+ 	}
++
++	public void handle(OmfFileHeader header) throws OmfException {
++		if (getSegmentIndex() <= 0 || getSegmentIndex() > header.getSegments().size()) {
++			throw new OmfException("Bad segment index on LIDATA");
++		}
++		OmfSegmentHeader segheader2 = header.getSegments().get(getSegmentIndex()-1);
++		segheader2.addIteratedData(this);
++		header.setLastBlock(this);
++	}
+ 	
+ 	public int getSegmentIndex() {
+ 		return segmentIndex;
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfLibraryRecord.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfLibraryRecord.java
+index c4293e154..1ddc2be4d 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfLibraryRecord.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfLibraryRecord.java
+@@ -53,6 +53,9 @@ public class OmfLibraryRecord extends OmfRecord {
+ 		return members;
+ 	}
+ 	
++	public void handle(OmfFileHeader header) {
++	}
++
+ 	public static boolean checkMagicNumer(BinaryReader reader) throws IOException {
+ 		byte type = reader.readNextByte();
+ 		if (type != (byte)0xF0)
+@@ -71,20 +74,20 @@ public class OmfLibraryRecord extends OmfRecord {
+ 		if (count > 15) return false;
+ 		reader.align(pageSize);
+ 		type = reader.readNextByte();
+-		if ((type & 0xfc) != 0x80) return false;
++		if ((type & 0xfc) != THEADR) return false;
+ 		return true;
+ 	}
+ 	
+ 	public static OmfLibraryRecord parse(BinaryReader reader,TaskMonitor monitor) throws IOException {
+ 		OmfLibraryRecord res = null;
+ 		byte type = reader.peekNextByte();
+-		if (type != (byte)0xF0)
++		if (type != START)
+ 			throw new IOException("Not an OMF Library record");
+ 		res = new OmfLibraryRecord(reader);
+ 		res.members = new ArrayList<MemberHeader>();		
+ 		reader.align(res.pageSize);		// Skip padding to get to next page boundary
+ 		type = reader.peekNextByte();
+-		while(type != (byte)0xF1) {		// Until we see the official "end of library" record
++		while(type != END) {		// Until we see the official "end of library" record
+ 			MemberHeader curheader = new MemberHeader();
+ 			curheader.payloadOffset = reader.getPointerIndex();
+ 			OmfFileHeader fileheader;
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfLineNumberRecord.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfLineNumberRecord.java
+index 61feaf379..4fa0418d0 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfLineNumberRecord.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfLineNumberRecord.java
+@@ -41,6 +41,10 @@ public class OmfLineNumberRecord extends OmfRecord {
+ 		linelist.toArray(linenumber);
+ 	}
+ 	
++	public void handle(OmfFileHeader header) {
++		/* Data ignored for now */
++	}
++
+ 	public static class LineSubrecord {
+ 		private int lineNumber;
+ 		private int lineNumberOffset;
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfModuleEnd.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfModuleEnd.java
+index 7267f67b1..6a74d62f9 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfModuleEnd.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfModuleEnd.java
+@@ -31,6 +31,9 @@ public class OmfModuleEnd extends OmfRecord {
+ 			startAddress = OmfFixupRecord.FixupTarget.readFixupTarget(reader,hasBigFields());
+ 		readCheckSumByte(reader);
+ 	}
++
++	public void handle(OmfFileHeader header) {
++	}
+ 	
+ 	public boolean isMainProgramModule() {
+ 		return ((moduleType & 0x80)!=0);
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfNamesRecord.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfNamesRecord.java
+index 7246540ff..754d22842 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfNamesRecord.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfNamesRecord.java
+@@ -34,8 +34,9 @@ public class OmfNamesRecord extends OmfRecord {
+ 		}
+ 		readCheckSumByte(reader);
+ 	}
+-	
+-	public void appendNames(ArrayList<String> namelist) {
+-		namelist.addAll(name);
++
++	public void handle(OmfFileHeader header) {
++		header.getNameList().addAll(name); // Keep names, otherwise don't save record
+ 	}
++
+ }
 diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfRecord.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfRecord.java
-index 853c2ace9..1fc3bbc8f 100644
+index 853c2ace9..cd6978e15 100644
 --- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfRecord.java
 +++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfRecord.java
-@@ -38,6 +38,14 @@ public abstract class OmfRecord {
+@@ -21,12 +21,25 @@ import java.io.IOException;
+ import ghidra.app.util.bin.BinaryReader;
+ 
+ public abstract class OmfRecord {
++	public final static byte RHEADR = (byte)0x6E; // Obselete
++	public final static byte REGINT = (byte)0x70; // Obselete
++	public final static byte REDATA = (byte)0x72; // Obselete
++	public final static byte RIDATA = (byte)0x74; // Obselete
++	public final static byte OVLDEF = (byte)0x76; // Obselete
++	public final static byte ENDREC = (byte)0x78; // Obselete
++	public final static byte BLKDEF = (byte)0x7A; // Obselete
++	public final static byte BLKEND = (byte)0x7C; // Obselete
++	public final static byte DEBSYM = (byte)0x7E; // Obselete
+ 	public final static byte THEADR = (byte)0x80;
+ 	public final static byte LHEADR = (byte)0x82;
++	public final static byte PEDATA = (byte)0x84; // Obselete
++	public final static byte PIDATA = (byte)0x86; // Obselete
+ 	public final static byte COMENT = (byte)0x88;
+ 	public final static byte MODEND = (byte)0x8A;
+ 	public final static byte EXTDEF = (byte)0x8C;
++	public final static byte TYPDEF = (byte)0x8E; // Obselete
+ 	public final static byte PUBDEF = (byte)0x90;
++	public final static byte LOCSYM = (byte)0x92; // Obselete
+ 	public final static byte LINNUM = (byte)0x94;
+ 	public final static byte LNAMES = (byte)0x96;
+ 	public final static byte SEGDEF = (byte)0x98;
+@@ -34,10 +47,26 @@ public abstract class OmfRecord {
+ 	public final static byte FIXUPP = (byte)0x9C;
+ 	public final static byte LEDATA = (byte)0xA0;
+ 	public final static byte LIDATA = (byte)0xA2;
++	public final static byte LIBHED = (byte)0xA4; // Obselete
++	public final static byte LIBNAM = (byte)0xA6; // Obselete
++	public final static byte LIBLOC = (byte)0xA8; // Obselete
++	public final static byte LIBDIC = (byte)0xAA; // Obselete
+ 	public final static byte COMDEF = (byte)0xB0;
++	public final static byte BAKPAT = (byte)0xB2;
  	public final static byte LEXTDEF = (byte)0xB4;
  	public final static byte LPUBDEF = (byte)0xB6;
  	public final static byte LCOMDEF = (byte)0xB8;
 +	public final static byte CEXTDEF = (byte)0xBC;
 +	public final static byte COMDAT = (byte)0xC2;
-+	public final static byte LINKSYM = (byte)0xC4;
++	public final static byte LINSYM = (byte)0xC4;
 +	public final static byte ALIAS = (byte)0xC6;
 +	public final static byte NBKPAT = (byte)0xC8;
 +	public final static byte LLNAMES = (byte)0xCA;
 +	public final static byte VERNUM = (byte)0xCC;
 +	public final static byte VENDEXT = (byte)0xCE;
++	public final static byte START = (byte)0xF0;
++	public final static byte END = (byte)0xF1;
++
  	protected byte recordType;
  	protected int recordLength;
  	protected byte checkSum;
-@@ -153,6 +161,16 @@ public abstract class OmfRecord {
+@@ -102,7 +131,7 @@ public abstract class OmfRecord {
+ 	public static OmfRecord readRecord(BinaryReader reader) throws IOException, OmfException {
+ 		OmfRecord res = null;
+ 		byte type = reader.peekNextByte();
+-		type &= 0xfe;	// Mask off the least significant bit
++		type &= 0xfe;	// Mask off the least significant bit => 16/32 bit flag
+ 		switch(type) {
+ 		case THEADR:
+ 		case LHEADR:
+@@ -153,11 +182,42 @@ public abstract class OmfRecord {
  		case LCOMDEF:
  			res = new OmfComdefRecord(reader,true);
  			break;
++		case RHEADR:
++		case REGINT:
++		case REDATA:
++		case RIDATA:
++		case OVLDEF:
++		case ENDREC:
++		case BLKDEF:
++		case BLKEND:
++		case DEBSYM:
++		case PEDATA:
++		case PIDATA:
++		case LOCSYM:
++		case LIBHED:
++		case LIBNAM:
++		case LIBLOC:
++		case LIBDIC:
++		case TYPDEF:
 +		case CEXTDEF:
 +		case COMDAT:
-+		case LINKSYM:
++		case LINSYM:
 +		case ALIAS:
++		case BAKPAT:
 +		case NBKPAT:
 +		case LLNAMES:
 +		case VERNUM:
@@ -88,12 +591,65 @@ index 853c2ace9..1fc3bbc8f 100644
  		default:
  			throw new OmfException("Unrecognized record type");
  		}
+ 		return res;
+ 	}
++
++	abstract
++	public void handle(OmfFileHeader header) throws OmfException;
+ 	
+ 	/**
+ 	 * Read the OMF string format,  1-byte length, followed by that many ascii characters
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfSegmentHeader.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfSegmentHeader.java
+index 78b503cf6..ebeb8106b 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfSegmentHeader.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfSegmentHeader.java
+@@ -80,6 +80,11 @@ public class OmfSegmentHeader extends OmfRecord {
+ 		}
+ 	}
+ 	
++	/**
++	 * Create segment header record from reader
++	 * @param reader
++	 * @throws IOException
++	 */
+ 	public OmfSegmentHeader(BinaryReader reader) throws IOException {
+ 		readRecordHeader(reader);
+ 		boolean hasBigFields = hasBigFields();
+@@ -105,6 +110,13 @@ public class OmfSegmentHeader extends OmfRecord {
+ 			}
+ 		}
+ 	}
++
++	/**
++	 * Added this record to the list of segments
++	 */
++	public void handle(OmfFileHeader header) {
++		header.getSegments().add(this);
++	}
+ 	
+ 	/**
+ 	 * @return true if this is a code segment
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfSymbolRecord.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfSymbolRecord.java
+index 5739a6db8..15114b05d 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfSymbolRecord.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfSymbolRecord.java
+@@ -51,6 +51,10 @@ public class OmfSymbolRecord extends OmfRecord {
+ 		symbollist.toArray(symbol);
+ 	}
+ 
++	public void handle(OmfFileHeader header) {
++		header.getPublicSymbols().add(this);
++	}
++
+ 	public boolean isStatic() {
+ 		return isStatic;
+ 	}
 diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfUnsupportedRecord.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfUnsupportedRecord.java
 new file mode 100644
-index 000000000..85ffd95dc
+index 000000000..8ce3bb9e3
 --- /dev/null
 +++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfUnsupportedRecord.java
-@@ -0,0 +1,46 @@
+@@ -0,0 +1,53 @@
 +/* ###
 + * IP: GHIDRA
 + * REVIEWED: NO
@@ -114,6 +670,7 @@ index 000000000..85ffd95dc
 +
 +import java.io.IOException;
 +import ghidra.app.util.bin.BinaryReader;
++import ghidra.app.util.importer.MessageLog;
 +
 +public class OmfUnsupportedRecord extends OmfRecord {
 +	private long offset;
@@ -132,15 +689,20 @@ index 000000000..85ffd95dc
 +	}
 +
 +	/***
-+	 * Get a message suitable for logging about this record
-+	 * @return String Message text about record
++	 * Message about the unsupported record should be logged
 +	 */
-+	public String getMessage() {
-+		return "Unsupported OMF record of type " + (getRecordType() & 0xff) + " of length " + getRecordLength() + " at " + offset;
++	@Override
++	public void handle(OmfFileHeader header) throws OmfException {};
++
++	/***
++	 * Log a message about the unsupported record
++	 */
++	public void handle(OmfFileHeader header, MessageLog log) {
++		log.appendMsg("Unsupported OMF record of type " + Long.toHexString((getRecordType() & 0xff)) +
++				" of length " + getRecordLength() + " at " + offset);
 +	}
 +
 +}
-\ No newline at end of file
 diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/opinion/OmfLoader.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/opinion/OmfLoader.java
 index 4a1ced92b..32341f1c8 100644
 --- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/opinion/OmfLoader.java
