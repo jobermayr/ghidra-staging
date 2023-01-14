@@ -1,0 +1,189 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Obermayr <johannesobermayr@gmx.de>
+Date: Sat, 14 Jan 2023 21:41:44 +0100
+Subject: [PATCH] 4896: Show noreturn information in function signature
+
+Adapted version of:
+https://github.com/rizinorg/ghidra/commit/af424fd
+---
+ .../src/decompile/cpp/prettyprint.cc          | 27 ++++++++++++++++++-
+ .../src/decompile/cpp/prettyprint.hh          | 18 +++++++++++++
+ .../Decompiler/src/decompile/cpp/printc.cc    |  5 ++--
+ .../ghidra/app/decompiler/ClangToken.java     |  3 +++
+ 4 files changed, 50 insertions(+), 3 deletions(-)
+
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/prettyprint.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/prettyprint.cc
+index fa631ccf1..e2ca98bde 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/prettyprint.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/prettyprint.cc
+@@ -186,6 +186,16 @@ void EmitMarkup::tagFuncName(const string &name,syntax_highlight hl,const Funcda
+   encoder->closeElement(ELEM_FUNCNAME);
+ }
+ 
++void EmitMarkup::tagNoreturn(syntax_highlight hl)
++
++{
++  encoder->openElement(ELEM_NORETURN);
++  if (hl != no_color)
++    encoder->writeUnsignedInteger(ATTRIB_COLOR,hl);
++  encoder->writeString(ATTRIB_CONTENT," noreturn ");
++  encoder->closeElement(ELEM_NORETURN);
++}
++
+ void EmitMarkup::tagType(const string &name,syntax_highlight hl,const Datatype *ct)
+ 
+ {
+@@ -343,6 +353,9 @@ void TokenSplit::print(Emit *emit) const
+   case fnam_t:	// tagFuncName
+     emit->tagFuncName(tok,hl,ptr_second.fd,op);
+     break;
++  case noret_t: // tagNoreturn
++    emit->tagNoreturn(hl);
++    break;
+   case type_t:	// tagType
+     emit->tagType(tok,hl,ptr_second.ct);
+     break;
+@@ -428,12 +441,15 @@ void TokenSplit::printDebug(ostream &s) const
+   case vari_t:	// tagVariable
+     s << "vari_t";
+     break;
+-  case op_t:		// tagOp
++  case op_t:	// tagOp
+     s << "op_t";
+     break;
+   case fnam_t:	// tagFuncName
+     s << "fnam_t";
+     break;
++  case noret_t:	// tagNoreturn
++    s << "noret_t";
++    break;
+   case type_t:	// tagType
+     s << "type_t";
+     break;
+@@ -973,6 +989,15 @@ void EmitPrettyPrint::tagFuncName(const string &name,syntax_highlight hl,const F
+   scan();
+ }
+ 
++void EmitPrettyPrint::tagNoreturn(syntax_highlight hl)
++
++{
++  checkstring();
++  TokenSplit &tok( tokqueue.push() );
++  tok.tagNoreturn(hl);
++  scan();
++}
++
+ void EmitPrettyPrint::tagType(const string &name,syntax_highlight hl,const Datatype *ct)
+ 
+ {
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/prettyprint.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/prettyprint.hh
+index 046ac8b40..a953ad36d 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/prettyprint.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/prettyprint.hh
+@@ -39,6 +39,7 @@ extern AttributeId ATTRIB_VARREF;	///< Marshaling attribute "varref"
+ extern ElementId ELEM_BREAK;		///< Marshaling element \<break>
+ extern ElementId ELEM_CLANG_DOCUMENT;	///< Marshaling element \<clang_document>
+ extern ElementId ELEM_FUNCNAME;		///< Marshaling element \<funcname>
++extern ElementId ELEM_NORETURN;		///< Marshaling element \<noreturn>
+ extern ElementId ELEM_FUNCPROTO;	///< Marshaling element \<funcproto>
+ extern ElementId ELEM_LABEL;		///< Marshaling element \<label>
+ extern ElementId ELEM_RETURN_TYPE;	///< Marshaling element \<return_type>
+@@ -249,6 +250,12 @@ public:
+   /// \param op is the CALL operation associated within the syntax tree or null for a declaration
+   virtual void tagFuncName(const std::string &name,syntax_highlight hl,const Funcdata *fd,const PcodeOp *op)=0;
+ 
++  /// \brief Create a function noreturn identifiertoken
++  ///
++  /// \param hl indicates how the identifier should be highlighted
++  /// An identifier string representing noreturn information of the function is emitted
++  virtual void tagNoreturn(syntax_highlight hl)=0;
++
+   /// \brief Emit a data-type identifier
+   ///
+   /// A string representing the name of a data-type, as appropriate for the source language
+@@ -467,6 +474,7 @@ public:
+   virtual void tagVariable(const std::string &name,syntax_highlight hl,const Varnode *vn,const PcodeOp *op);
+   virtual void tagOp(const std::string &name,syntax_highlight hl,const PcodeOp *op);
+   virtual void tagFuncName(const std::string &name,syntax_highlight hl,const Funcdata *fd,const PcodeOp *op);
++  virtual void tagNoreturn(syntax_highlight hl);
+   virtual void tagType(const std::string &name,syntax_highlight hl,const Datatype *ct);
+   virtual void tagField(const std::string &name,syntax_highlight hl,const Datatype *ct,int4 off,const PcodeOp *op);
+   virtual void tagComment(const std::string &name,syntax_highlight hl,const AddrSpace *spc,uintb off);
+@@ -512,6 +520,8 @@ public:
+     *s << name; }
+   virtual void tagFuncName(const std::string &name,syntax_highlight hl,const Funcdata *fd,const PcodeOp *op) {
+     *s << name; }
++  virtual void tagNoreturn(syntax_highlight hl) {
++    *s << " noreturn "; }
+   virtual void tagType(const std::string &name,syntax_highlight hl,const Datatype *ct) {
+     *s << name; }
+   virtual void tagField(const std::string &name,syntax_highlight hl,const Datatype *ct,int4 off,const PcodeOp *op) {
+@@ -578,6 +588,7 @@ public:
+     vari_t,		///< A variable identifier
+     op_t,		///< An operator
+     fnam_t,		///< A function identifier
++    noret_t,		///< A function noreturn identifier
+     type_t,		///< A data-type identifier
+     field_t,		///< A field name for a structured data-type
+     comm_t,		///< Part of a comment block
+@@ -732,6 +743,12 @@ public:
+     tok = name; size = tok.size();
+     tagtype=fnam_t; delimtype=tokenstring; hl=h; ptr_second.fd=f; op=o; }
+ 
++  /// \ brief Create a function noreturn identifiertoken
++  ///
++  /// \parm h indicated how the identifier should be highlighted
++  void tagNoreturn(EmitMarkup::syntax_highlight h) {
++    tagtype=noret_t; delimtype=tokenstring; hl=h; }
++
+   /// \brief Create a data-type identifier token
+   ///
+   /// \param name is the character data for the identifier
+@@ -1013,6 +1030,7 @@ public:
+   virtual void tagVariable(const std::string &name,syntax_highlight hl,const Varnode *vn,const PcodeOp *op);
+   virtual void tagOp(const std::string &name,syntax_highlight hl,const PcodeOp *op);
+   virtual void tagFuncName(const std::string &name,syntax_highlight hl,const Funcdata *fd,const PcodeOp *op);
++  virtual void tagNoreturn(syntax_highlight hl);
+   virtual void tagType(const std::string &name,syntax_highlight hl,const Datatype *ct);
+   virtual void tagField(const std::string &name,syntax_highlight hl,const Datatype *ct,int4 off,const PcodeOp *op);
+   virtual void tagComment(const std::string &name,syntax_highlight hl,const AddrSpace *spc,uintb off);
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/printc.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/printc.cc
+index 8c43788a5..e58853dee 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/printc.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/printc.cc
+@@ -2568,7 +2568,9 @@ void PrintC::emitFunctionDeclaration(const Funcdata *fd)
+   int4 id1 = emit->openGroup();
+   emitSymbolScope(fd->getSymbol());
+   emit->tagFuncName(fd->getName(),EmitMarkup::funcname_color,fd,(PcodeOp *)0);
+-
++  if (proto->isNoReturn()) {
++    emit->tagNoreturn(EmitMarkup::no_color);
++  }
+   emit->spaces(function_call.spacing,function_call.bump);
+   int4 id2 = emit->openParen(OPEN_PAREN);
+   emit->spaces(0,function_call.bump);
+@@ -2576,7 +2578,6 @@ void PrintC::emitFunctionDeclaration(const Funcdata *fd)
+   emitPrototypeInputs(proto);
+   emit->closeParen(CLOSE_PAREN,id2);
+   emit->closeGroup(id1);
+-
+   emit->endFuncProto(id);
+ }
+ 
+diff --git a/Ghidra/Features/Decompiler/src/main/java/ghidra/app/decompiler/ClangToken.java b/Ghidra/Features/Decompiler/src/main/java/ghidra/app/decompiler/ClangToken.java
+index 23609af97..4bc0fad7e 100644
+--- a/Ghidra/Features/Decompiler/src/main/java/ghidra/app/decompiler/ClangToken.java
++++ b/Ghidra/Features/Decompiler/src/main/java/ghidra/app/decompiler/ClangToken.java
+@@ -199,6 +199,9 @@ public class ClangToken implements ClangNode {
+ 		else if (node == ELEM_FUNCNAME.id()) {
+ 			token = new ClangFuncNameToken(par, null);
+ 		}
++		else if (node == ELEM_NORETURN.id()) {
++			token = new ClangTypeToken(par);
++		}
+ 		else if (node == ELEM_TYPE.id()) {
+ 			token = new ClangTypeToken(par);
+ 		}
+-- 
+2.39.0
+
