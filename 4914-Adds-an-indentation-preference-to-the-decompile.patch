@@ -1,0 +1,601 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Obermayr <johannesobermayr@gmx.de>
+Date: Sun, 22 Jan 2023 15:06:04 +0100
+Subject: [PATCH] 4914: Adds an indentation preference to the decompiler output
+
+Fixes: #81, #1240, #1937
+Obsoletes: #1938
+
+This change adds support for four indentation styles:
+
+K&R style [with tracking],
+
+while (x == y) { [commented out: z]
+    something();
+    somethingelse();
+} [z commented out]
+
+Allman style [with tracking],
+
+while (x == y) [commented out: z]
+{
+    something();
+    somethingelse();
+} [commented out: z]
+
+The default style is K&R.
+---
+ .../Decompiler/src/decompile/cpp/block.hh     |   3 +
+ .../Decompiler/src/decompile/cpp/options.cc   |  13 ++
+ .../Decompiler/src/decompile/cpp/options.hh   |   6 +
+ .../Decompiler/src/decompile/cpp/printc.cc    | 135 +++++++++++++++---
+ .../Decompiler/src/decompile/cpp/printc.hh    |  12 ++
+ .../src/decompile/cpp/printlanguage.cc        |  11 ++
+ .../src/decompile/cpp/printlanguage.hh        |   6 +
+ .../app/decompiler/DecompileOptions.java      |  45 ++++++
+ 8 files changed, 212 insertions(+), 19 deletions(-)
+
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/block.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/block.hh
+index 3ca33e41f..89e69d3c7 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/block.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/block.hh
+@@ -120,6 +120,7 @@ private:
+   FlowBlock *immed_dom;		///< Immediate dominating block
+   FlowBlock *copymap;		///< Back reference to a BlockCopy of \b this
+   int4 index;			///< Reference index for this block (reverse post order)
++  int4 printIndex = 0;		///< Print index for this block
+   int4 visitcount;		///< A count of visits of this node for various algorithms
+   int4 numdesc;			///< Number of descendants of this block in spanning tree (+1)
+   vector<BlockEdge> intothis;	///< Blocks which (can) fall into this block
+@@ -156,6 +157,8 @@ public:
+   FlowBlock(void);				///< Construct a block with no edges
+   virtual ~FlowBlock(void) {}			///< Destructor
+   int4 getIndex(void) const { return index; }	///< Get the index assigned to \b this block
++  int4 getPrintIndex(void) const { return printIndex; }		///< Get the unique print index assigned to \b this block
++  void setPrintIndex(int4 printindex) { printIndex = printindex; } ///< Set the unique print index for \b this block
+   FlowBlock *getParent(void) { return parent; }	///< Get the parent FlowBlock of \b this
+   FlowBlock *getImmedDom(void) const { return immed_dom; }	///< Get the immediate dominator FlowBlock
+   FlowBlock *getCopyMap(void) const { return copymap; }		///< Get the mapped FlowBlock
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/options.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/options.cc
+index 0b66769a4..1d38db57f 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/options.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/options.cc
+@@ -115,6 +115,7 @@ OptionDatabase::OptionDatabase(Architecture *g)
+   registerOption(new OptionCommentStyle());
+   registerOption(new OptionCommentHeader());
+   registerOption(new OptionCommentInstruction());
++  registerOption(new OptionIndentationStyle());
+   registerOption(new OptionIntegerFormat());
+   registerOption(new OptionCurrentAction());
+   registerOption(new OptionAllowContextSet());
+@@ -589,6 +590,18 @@ string OptionCommentInstruction::apply(Architecture *glb,const string &p1,const
+   return "Instruction comment type "+p1+" turned "+prop;
+ }
+ 
++/// \class OptionIndentationStyle
++/// \brief Set the style of indentation emitted by the decompiler
++///
++/// The first parameter is either "allman", or "kr", other styles could be
++/// supported in the future
++string OptionIndentationStyle::apply(Architecture *glb,const string &p1,const string &p2,const string &p3) const
++
++{
++	glb->print->setIndentationStyle(p1);
++	return "Indentation style set to "+p1;
++}
++
+ /// \class OptionIntegerFormat
+ /// \brief Set the formatting strategy used by the decompiler to emit integers
+ ///
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/options.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/options.hh
+index 2ba09d575..ff351f8e3 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/options.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/options.hh
+@@ -236,6 +236,12 @@ public:
+  virtual string apply(Architecture *glb,const string &p1,const string &p2,const string &p3) const;
+ };
+ 
++class OptionIndentationStyle : public ArchOption {
++public:
++  OptionIndentationStyle(void) { name = "indentationstyle"; }	///< Constructor
++  virtual string apply(Architecture *glb,const string &p1,const string &p2,const string &p3) const;
++};
++
+ class OptionIntegerFormat : public ArchOption {
+ public:
+   OptionIntegerFormat(void) { name = "integerformat"; }	///< Constructor
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/printc.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/printc.cc
+index 4911a7745..d5e749c91 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/printc.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/printc.cc
+@@ -104,6 +104,8 @@ const string PrintC::KEYWORD_RETURN = "return";
+ const string PrintC::KEYWORD_NEW = "new";
+ const string PrintC::typePointerRelToken = "ADJ";
+ 
++int4 printIndex = 0;
++
+ // Constructing this registers the capability
+ PrintCCapability PrintCCapability::printCCapability;
+ 
+@@ -1523,6 +1525,9 @@ void PrintC::resetDefaultsPrintC(void)
+   option_nocasts = false;
+   option_NULL = false;
+   option_unplaced = false;
++  option_indentationStyle = indentation_style_kr;
++  option_indentationStyleTracking = false;
++  printIndex = 0;
+   setCStyleComments();
+ }
+ 
+@@ -2048,7 +2053,7 @@ void PrintC::emitStructDefinition(const TypeStruct *ct)
+   emit->print("typedef struct",EmitMarkup::keyword_color);
+   emit->spaces(1);
+   int4 id = emit->startIndent();
+-  emit->print(OPEN_CURLY);
++  emitFormattedStartBrace(id,0);
+   emit->tagLine();
+   iter = ct->beginField();
+   while(iter!=ct->endField()) {
+@@ -2063,7 +2068,7 @@ void PrintC::emitStructDefinition(const TypeStruct *ct)
+   }
+   emit->stopIndent(id);
+   emit->tagLine();
+-  emit->print(CLOSE_CURLY);
++  emitFormattedCloseBrace(0);
+   emit->spaces(1);
+   emit->print(ct->getName());
+   emit->print(SEMICOLON);
+@@ -2087,7 +2092,7 @@ void PrintC::emitEnumDefinition(const TypeEnum *ct)
+   emit->print("typedef enum",EmitMarkup::keyword_color);
+   emit->spaces(1);
+   int4 id = emit->startIndent();
+-  emit->print(OPEN_CURLY);
++  emitFormattedStartBrace(id,0);
+   emit->tagLine();
+   iter = ct->beginEnum();
+   while(iter!=ct->endEnum()) {
+@@ -2106,7 +2111,7 @@ void PrintC::emitEnumDefinition(const TypeEnum *ct)
+   popMod();
+   emit->stopIndent(id);
+   emit->tagLine();
+-  emit->print(CLOSE_CURLY);
++  emitFormattedCloseBrace(0);
+   emit->spaces(1);
+   emit->print(ct->getName());
+   emit->print(SEMICOLON);
+@@ -2286,6 +2291,29 @@ void PrintC::setCommentStyle(const string &nm)
+     throw LowlevelError("Unknown comment style. Use \"c\" or \"cplusplus\"");
+ }
+ 
++void PrintC::setIndentationStyle(const string &nm)
++
++{
++  if (nm=="kr") {
++    option_indentationStyle = indentation_style_kr;
++    option_indentationStyleTracking = false;
++  }
++  else if (nm=="kr_track") {
++    option_indentationStyle = indentation_style_kr;
++    option_indentationStyleTracking = true;
++  }
++  else if (nm=="allman") {
++    option_indentationStyle = indentation_style_allman;
++    option_indentationStyleTracking = false;
++  }
++  else if (nm=="allman_track") {
++    option_indentationStyle = indentation_style_allman;
++    option_indentationStyleTracking = true;
++  }
++  else
++    throw LowlevelError("Unknown indentation style. Use \"kr\", \"kr_track\", \"allman\" or \"allman_track\"");
++}
++
+ /// \brief Emit the definition of the given data-type
+ ///
+ /// This is currently limited to a 'struct' or 'enum' definitions. The
+@@ -2621,6 +2649,8 @@ void PrintC::docFunction(const Funcdata *fd)
+     emit->tagLine();
+     emit->tagLine();
+     int4 id = emit->startIndent();
++    // Intentionally not using a formatted start brace
++    // Currently supported indentation styles both place a function's opening brace on a new line
+     emit->print(OPEN_CURLY);
+     emitLocalVarDecls(fd);
+     if (isSet(flat))
+@@ -2889,13 +2919,15 @@ void PrintC::emitBlockIf(const BlockIf *bl)
+     setMod(no_branch);
+     emit->spaces(1);
+     int4 id = emit->startIndent();
+-    emit->print(OPEN_CURLY);
++    printIndex++;
++    ((FlowBlock*)bl)->setPrintIndex(printIndex);
++    emitFormattedStartBrace(id,printIndex);
+     int4 id1 = emit->beginBlock(bl->getBlock(1));
+     bl->getBlock(1)->emit(this);
+     emit->endBlock(id1);
+     emit->stopIndent(id);
+     emit->tagLine();
+-    emit->print(CLOSE_CURLY);
++    emitFormattedCloseBrace(bl->getPrintIndex());
+     if (bl->getSize() == 3) {
+       emit->tagLine();
+       emit->print(KEYWORD_ELSE,EmitMarkup::keyword_color);
+@@ -2910,13 +2942,15 @@ void PrintC::emitBlockIf(const BlockIf *bl)
+       }
+       else {
+ 	int4 id2 = emit->startIndent();
+-	emit->print(OPEN_CURLY);
++	printIndex++;
++	((FlowBlock*)elseBlock)->setPrintIndex(printIndex);
++	emitFormattedStartBrace(id2,printIndex);
+ 	int4 id3 = emit->beginBlock(elseBlock);
+ 	elseBlock->emit(this);
+ 	emit->endBlock(id3);
+ 	emit->stopIndent(id2);
+ 	emit->tagLine();
+-	emit->print(CLOSE_CURLY);
++	emitFormattedCloseBrace(elseBlock->getPrintIndex());
+       }
+     }
+   }
+@@ -2924,7 +2958,7 @@ void PrintC::emitBlockIf(const BlockIf *bl)
+   if (pendingBrace.getIndentId() >= 0) {
+     emit->stopIndent(pendingBrace.getIndentId());
+     emit->tagLine();
+-    emit->print(CLOSE_CURLY);
++    emitFormattedCloseBrace(0);
+   }
+ }
+ 
+@@ -2971,14 +3005,16 @@ void PrintC::emitForLoop(const BlockWhileDo *bl)
+   emit->closeParen(CLOSE_PAREN,id1);
+   emit->spaces(1);
+   indent = emit->startIndent();
+-  emit->print(OPEN_CURLY);
++  printIndex++;
++  ((FlowBlock*)bl)->setPrintIndex(printIndex);
++  emitFormattedStartBrace(indent,printIndex);
+   setMod(no_branch); // Dont print goto at bottom of clause
+   int4 id2 = emit->beginBlock(bl->getBlock(1));
+   bl->getBlock(1)->emit(this);
+   emit->endBlock(id2);
+   emit->stopIndent(indent);
+   emit->tagLine();
+-  emit->print(CLOSE_CURLY);
++  emitFormattedCloseBrace(bl->getPrintIndex());
+   popMod();
+ }
+ 
+@@ -3012,7 +3048,9 @@ void PrintC::emitBlockWhileDo(const BlockWhileDo *bl)
+     emit->closeParen(CLOSE_PAREN,id1);
+     emit->spaces(1);
+     indent = emit->startIndent();
+-    emit->print(OPEN_CURLY);
++    printIndex++;
++    ((FlowBlock*)bl)->setPrintIndex(printIndex);
++    emitFormattedStartBrace(indent,printIndex);
+     pushMod();
+     setMod(no_branch);
+     condBlock->emit(this);
+@@ -3043,7 +3081,9 @@ void PrintC::emitBlockWhileDo(const BlockWhileDo *bl)
+     emit->closeParen(CLOSE_PAREN,id1);
+     emit->spaces(1);
+     indent = emit->startIndent();
+-    emit->print(OPEN_CURLY);
++    printIndex++;
++    ((FlowBlock*)condBlock)->setPrintIndex(printIndex);
++    emitFormattedStartBrace(indent,printIndex);
+   }
+   setMod(no_branch); // Dont print goto at bottom of clause
+   int4 id2 = emit->beginBlock(bl->getBlock(1));
+@@ -3051,8 +3091,8 @@ void PrintC::emitBlockWhileDo(const BlockWhileDo *bl)
+   emit->endBlock(id2);
+   emit->stopIndent(indent);
+   emit->tagLine();
+-  emit->print(CLOSE_CURLY);
+   popMod();
++  emitFormattedCloseBrace(bl->getPrintIndex());
+ }
+ 
+ void PrintC::emitBlockDoWhile(const BlockDoWhile *bl)
+@@ -3068,7 +3108,9 @@ void PrintC::emitBlockDoWhile(const BlockDoWhile *bl)
+   emit->print(KEYWORD_DO,EmitMarkup::keyword_color);
+   emit->spaces(1);
+   int4 id = emit->startIndent();
+-  emit->print(OPEN_CURLY);
++  printIndex++;
++  ((FlowBlock*)bl)->setPrintIndex(printIndex);
++  emitFormattedStartBrace(id,printIndex);
+   pushMod();
+   int4 id2 = emit->beginBlock(bl->getBlock(0));
+   setMod(no_branch);
+@@ -3086,6 +3128,10 @@ void PrintC::emitBlockDoWhile(const BlockDoWhile *bl)
+   bl->getBlock(0)->emit(this);
+   emit->print(SEMICOLON);
+   popMod();
++  if (option_indentationStyleTracking) {
++    string index_ = to_string(bl->getPrintIndex());
++    emit->print(PrintLanguage::makeComment(index_),EmitMarkup::comment_color);
++  }
+ }
+ 
+ void PrintC::emitBlockInfLoop(const BlockInfLoop *bl)
+@@ -3100,13 +3146,15 @@ void PrintC::emitBlockInfLoop(const BlockInfLoop *bl)
+   emit->print(KEYWORD_DO,EmitMarkup::keyword_color);
+   emit->spaces(1);
+   int4 id = emit->startIndent();
+-  emit->print(OPEN_CURLY);
++  printIndex++;
++  ((FlowBlock*)bl)->setPrintIndex(printIndex++);
++  emitFormattedStartBrace(id,printIndex);
+   int4 id1 = emit->beginBlock(bl->getBlock(0));
+   bl->getBlock(0)->emit(this);
+   emit->endBlock(id1);
+   emit->stopIndent(id);
+   emit->tagLine();
+-  emit->print(CLOSE_CURLY);
++  emitFormattedCloseBrace(0);
+   emit->spaces(1);
+   op = bl->getBlock(0)->lastOp();
+   emit->tagOp(KEYWORD_WHILE,EmitMarkup::keyword_color,op);
+@@ -3117,6 +3165,10 @@ void PrintC::emitBlockInfLoop(const BlockInfLoop *bl)
+   emit->closeParen(CLOSE_PAREN,id2);
+   emit->print(SEMICOLON);
+   popMod();
++  if (option_indentationStyleTracking) {
++    string index_ = to_string(bl->getPrintIndex() + 1);
++    emit->print(PrintLanguage::makeComment(index_),EmitMarkup::comment_color);
++  }
+ }
+ 
+ /// Given a \e switch block and an index indicating a particular \e case block,
+@@ -3326,7 +3378,7 @@ void PrintC::emitBlockSwitch(const BlockSwitch *bl)
+   bl->getSwitchBlock()->emit(this);
+   popMod();
+   emit->spaces(1);
+-  emit->print(OPEN_CURLY);
++  emitFormattedStartBrace(0,bl->getPrintIndex());
+ 
+   for(int4 i=0;i<bl->getNumCaseBlocks();++i) {
+     emitSwitchCase(i,bl);
+@@ -3348,10 +3400,55 @@ void PrintC::emitBlockSwitch(const BlockSwitch *bl)
+     emit->stopIndent(id);
+   }
+   emit->tagLine();
+-  emit->print(CLOSE_CURLY);
++  emitFormattedCloseBrace(bl->getPrintIndex());
+   popMod();
+ }
+ 
++/// \brief Emits an opening brace according to the indentation style selected in options
++///
++/// \param indent is the current indent level
++/// \param index is the index of current starting block
++void PrintC::emitFormattedStartBrace(int4 indent,int4 index)
++
++{
++  string idString;
++  if (index && option_indentationStyleTracking)
++    idString = PrintLanguage::makeComment(to_string(index));
++  else
++    idString = "";
++  switch(option_indentationStyle) {
++  case indentation_style_allman:
++    // Reduce one layer of indentation, emit new line, emit opening brace, update new indentation
++    if (indent) {
++      emit->stopIndent(indent);
++    }
++    emit->tagLine();
++    emit->print(OPEN_CURLY);
++    emit->print(idString,EmitMarkup::comment_color);
++    emit->startIndent();
++    break;
++  case indentation_style_kr:
++    // Emit opening brace, indentation is unaffected
++    emit->print(OPEN_CURLY);
++    emit->print(idString,EmitMarkup::comment_color);
++    break;
++  default:
++    throw LowlevelError("Unknown indentation style");
++  }
++}
++
++/// \brief Emits an opening brace according to the indentation style selected in options
++///
++/// \param index is the index of current closing block
++void PrintC::emitFormattedCloseBrace(int4 index)
++
++{
++  string idString = PrintLanguage::makeComment(to_string(index));
++  emit->print(CLOSE_CURLY);
++  if (index && option_indentationStyleTracking)
++    emit->print(idString,EmitMarkup::comment_color);
++}
++
+ /// \brief Create a generic function name base on the entry point address
+ ///
+ /// \param addr is the entry point address of the function
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/printc.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/printc.hh
+index 3b0645b09..29536ea22 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/printc.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/printc.hh
+@@ -62,6 +62,13 @@ struct PartialSymbolEntry {
+ ///  - etc.
+ class PrintC : public PrintLanguage {
+ protected:
++  /// \brief Possible types of indentation style
++  enum indentation_style {
++    indentation_style_kr = 0,		/// K&R style indentation
++    indentation_style_kr_track = 1,	/// with tracking
++    indentation_style_allman = 2,	/// Allman styles indentation
++    indentation_style_allman_track = 3	/// with tracking
++  };
+   static OpToken hidden;		///< Hidden functional (that may force parentheses)
+   static OpToken scope;			///< The sub-scope/namespace operator
+   static OpToken object_member;		///< The \e member operator
+@@ -150,6 +157,8 @@ protected:
+   bool option_nocasts;		///< Don't print a cast if \b true
+   bool option_unplaced;		///< Set to \b true if we should display unplaced comments
+   bool option_hide_exts;	///< Set to \b true if we should hide implied extension operations
++  indentation_style option_indentationStyle;  ///< Set to the prefered type of indentation style
++  bool option_indentationStyleTracking;       ///< Whether to track braces
+   string nullToken;		///< Token to use for 'null'
+   string sizeSuffix;		///< Characters to print to indicate a \e long integer token
+   CommentSorter commsorter;	///< Container/organizer for comments in the current function
+@@ -246,6 +255,7 @@ public:
+   virtual void adjustTypeOperators(void);
+   virtual void setCommentStyle(const string &nm);
+   virtual void docTypeDefinitions(const TypeFactory *typegrp);
++  virtual void setIndentationStyle(const string &nm);
+   virtual void docAllGlobals(void);
+   virtual void docSingleGlobal(const Symbol *sym);
+   virtual void docFunction(const Funcdata *fd);
+@@ -261,6 +271,8 @@ public:
+   virtual void emitBlockDoWhile(const BlockDoWhile *bl);
+   virtual void emitBlockInfLoop(const BlockInfLoop *bl);
+   virtual void emitBlockSwitch(const BlockSwitch *bl);
++  virtual void emitFormattedStartBrace(int4 indent,int4 index);
++  virtual void emitFormattedCloseBrace(int4 index);
+ 
+   virtual void opCopy(const PcodeOp *op);
+   virtual void opLoad(const PcodeOp *op);
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/printlanguage.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/printlanguage.cc
+index 469d5280e..13743566b 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/printlanguage.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/printlanguage.cc
+@@ -680,6 +680,17 @@ void PrintLanguage::setFlat(bool val)
+     mods &= ~flat;
+ }
+ 
++string PrintLanguage::makeComment(string val)
++
++{
++  string ret;
++  ret.append(" ");
++  ret.append(commentstart);
++  ret.append(val);
++  ret.append(commentend);
++  return ret;
++}
++
+ void PrintLanguage::resetDefaults(void)
+ 
+ {
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/printlanguage.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/printlanguage.hh
+index 70841943b..cbe0b2b58 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/printlanguage.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/printlanguage.hh
+@@ -442,6 +442,7 @@ public:
+   bool emitsMarkup(void) const { return emit->emitsMarkup(); }		///< Does the low-level emitter, emit markup
+   void setMarkup(bool val);						///< Set whether the low-level emitter, emits markup
+   void setFlat(bool val);						///< Set whether nesting code structure should be emitted
++  std::string makeComment(std::string val);
+ 
+   virtual void initializeFromArchitecture(void)=0;		///< Initialize architecture specific aspects of printer
+   virtual void adjustTypeOperators(void)=0;			///< Set basic data-type information for p-code operators
+@@ -456,6 +457,11 @@ public:
+   /// \param nm is the configuration description
+   virtual void setCommentStyle(const string &nm)=0;
+ 
++  /// \brief Set the indentation style used in the decompiler output
++  ///
++  /// \param nm is the configuration description
++  virtual void setIndentationStyle(const string &nm)=0;
++
+   /// \brief Emit definitions of data-types
+   ///
+   /// \param typegrp is the container for the data-types that should be defined
+diff --git a/Ghidra/Features/Decompiler/src/main/java/ghidra/app/decompiler/DecompileOptions.java b/Ghidra/Features/Decompiler/src/main/java/ghidra/app/decompiler/DecompileOptions.java
+index 2db700a58..baf26c113 100644
+--- a/Ghidra/Features/Decompiler/src/main/java/ghidra/app/decompiler/DecompileOptions.java
++++ b/Ghidra/Features/Decompiler/src/main/java/ghidra/app/decompiler/DecompileOptions.java
+@@ -252,6 +252,35 @@ public class DecompileOptions {
+ 	private final static boolean COMMENTHEAD_OPTIONDEFAULT = true;	// Must match PrintLanguage::resetDefaultsInternal
+ 	private boolean commentHeadInclude;
+ 
++	private final static String INDENTATIONSTYLE_OPTIONSTRING = "Display.Indentation style";
++	private final static String INDENTATIONSTYLE_OPTIONDESCRIPTION = "The indentation style to be used";
++
++	public enum IndentationStyleEnum {
++
++		KR("kr", "K&R style"), KR_track("kr_track", "K&R style with tracking"),
++		Allman("allman", "Allman style"), Allman_track("allman_track", "Allman style with tracking");
++
++		private String label;
++		private String optionString;
++
++		private IndentationStyleEnum(String optString, String label) {
++			this.label = label;
++			this.optionString = optString;
++		}
++
++		public String getOptionString() {
++			return optionString;
++		}
++
++		@Override
++		public String toString() {
++			return label;
++		}
++	}
++
++	private final static IndentationStyleEnum INDENTATIONSTYLE_OPTIONDEFAULT = IndentationStyleEnum.KR;
++	private IndentationStyleEnum indentationStyle;
++
+ 	public enum NamespaceStrategy {
+ 		Minimal("minimal", "Minimally"), All("all", "Always"), Never("none", "Never");
+ 
+@@ -407,6 +436,7 @@ public class DecompileOptions {
+ 		commentWARNInclude = COMMENTWARN_OPTIONDEFAULT;
+ 		commentHeadInclude = COMMENTHEAD_OPTIONDEFAULT;
+ 		namespaceStrategy = NAMESPACE_OPTIONDEFAULT;
++		indentationStyle = INDENTATIONSTYLE_OPTIONDEFAULT;
+ 		integerFormat = INTEGERFORMAT_OPTIONDEFAULT;
+ 		displayLineNumbers = LINE_NUMBER_DEF;
+ 		displayLanguage = ProgramCompilerSpec.DECOMPILER_OUTPUT_DEF;
+@@ -460,6 +490,7 @@ public class DecompileOptions {
+ 		commentWARNInclude = opt.getBoolean(COMMENTWARN_OPTIONSTRING, COMMENTWARN_OPTIONDEFAULT);
+ 		commentHeadInclude = opt.getBoolean(COMMENTHEAD_OPTIONSTRING, COMMENTHEAD_OPTIONDEFAULT);
+ 		namespaceStrategy = opt.getEnum(NAMESPACE_OPTIONSTRING, NAMESPACE_OPTIONDEFAULT);
++		indentationStyle = opt.getEnum(INDENTATIONSTYLE_OPTIONSTRING, INDENTATIONSTYLE_OPTIONDEFAULT);
+ 		integerFormat = opt.getEnum(INTEGERFORMAT_OPTIONSTRING, INTEGERFORMAT_OPTIONDEFAULT);
+ 
+ 		displayLineNumbers = opt.getBoolean(LINE_NUMBER_MSG, LINE_NUMBER_DEF);
+@@ -595,6 +626,9 @@ public class DecompileOptions {
+ 		opt.registerOption(NAMESPACE_OPTIONSTRING, NAMESPACE_OPTIONDEFAULT,
+ 			new HelpLocation(HelpTopics.DECOMPILER, "DisplayNamespaces"),
+ 			NAMESPACE_OPTIONDESCRIPTION);
++		opt.registerOption(INDENTATIONSTYLE_OPTIONSTRING, INDENTATIONSTYLE_OPTIONDEFAULT,
++			new HelpLocation(HelpTopics.DECOMPILER, "IndendationStyle"),
++			INDENTATIONSTYLE_OPTIONDESCRIPTION);
+ 		opt.registerOption(INTEGERFORMAT_OPTIONSTRING, INTEGERFORMAT_OPTIONDEFAULT,
+ 			new HelpLocation(HelpTopics.DECOMPILER, "DisplayIntegerFormat"),
+ 			INTEGERFORMAT_OPTIONDESCRIPTION);
+@@ -781,6 +815,9 @@ public class DecompileOptions {
+ 			appendOption(encoder, ELEM_MAXINSTRUCTION, Integer.toString(maxIntructionsPer), "", "");
+ 		}
+ 		appendOption(encoder, ELEM_PROTOEVAL, protoEvalModel, "", "");
++		if (indentationStyle != INDENTATIONSTYLE_OPTIONDEFAULT) {
++			appendOption(encoder, ELEM_INDENTATIONSTYLE, indentationStyle.getOptionString(), "", "");
++		}
+ 		encoder.closeElement(ELEM_OPTIONSLIST);
+ 	}
+ 
+@@ -1045,6 +1082,14 @@ public class DecompileOptions {
+ 		this.commentStyle = commentStyle;
+ 	}
+ 
++	public IndentationStyleEnum getIndentationStyle() {
++		return indentationStyle;
++	}
++
++	public void setIndentationStyle(IndentationStyleEnum indentationStyle) {
++		this.indentationStyle = indentationStyle;
++	}
++
+ 	public int getCacheSize() {
+ 		return cachedResultsSize;
+ 	}
+-- 
+2.39.0
+
