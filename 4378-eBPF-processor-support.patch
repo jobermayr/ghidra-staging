@@ -1,30 +1,8 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
-From: Nalen98 <52778977+Nalen98@users.noreply.github.com>
-Date: Fri, 24 Jun 2022 18:04:07 +0300
+From: Nalen98 <nalenaskeyx@gmail.com>
+Date: Wed, 25 Jan 2023 18:15:00 +0300
 Subject: [PATCH] 4378: eBPF processor support
 
-LDDW instructions with negative values
-
-https://github.com/Nalen98/eBPF-for-Ghidra/pull/12
-
-Fix ugly tabs
-
-Signed-off-by: Nalen <nalenaskeyx@gmail.com>
-
-Fixing issues
-
-* ALU32 instructions added
-* BPF_JMP32 instructions added
-* JSET instruction fixed
-* added support for all BPF_ATOMIC operations
-
-Fix size restriction error during build
-Fixed by wrapping operations results (u32) in "zext()" assuming that "src_reg" value and "dst_reg" value are unsigned (u64).
-Tested using EmulatorHelper, works like:
-R1 = 0x1000000010
-R2 = 0x1000000011
-ADD R1, R2  ->
-R1 = 0x21
 ---
  Ghidra/Processors/eBPF/Module.manifest        |    0
  Ghidra/Processors/eBPF/build.gradle           |   26 +
@@ -35,7 +13,7 @@ R1 = 0x21
  .../eBPF/data/languages/eBPF.opinion          |    5 +
  .../Processors/eBPF/data/languages/eBPF.pspec |   73 +
  .../Processors/eBPF/data/languages/eBPF.sinc  |  519 ++++++++
- .../eBPF/data/languages/eBPF.slaspec          |    3 +
+ .../eBPF/data/languages/eBPF_le.slaspec       |    3 +
  .../plugin/core/analysis/eBPFAnalyzer.java    | 1169 +++++++++++++++++
  .../format/elf/extend/eBPF_ElfExtension.java  |   47 +
  .../ElfeBPFRelocationFixupHandler.java        |   47 +
@@ -50,7 +28,7 @@ R1 = 0x21
  create mode 100644 Ghidra/Processors/eBPF/data/languages/eBPF.opinion
  create mode 100644 Ghidra/Processors/eBPF/data/languages/eBPF.pspec
  create mode 100644 Ghidra/Processors/eBPF/data/languages/eBPF.sinc
- create mode 100644 Ghidra/Processors/eBPF/data/languages/eBPF.slaspec
+ create mode 100644 Ghidra/Processors/eBPF/data/languages/eBPF_le.slaspec
  create mode 100644 Ghidra/Processors/eBPF/src/main/java/ghidra/app/plugin/core/analysis/eBPFAnalyzer.java
  create mode 100644 Ghidra/Processors/eBPF/src/main/java/ghidra/app/util/bin/format/elf/extend/eBPF_ElfExtension.java
  create mode 100644 Ghidra/Processors/eBPF/src/main/java/ghidra/app/util/bin/format/elf/relocation/ElfeBPFRelocationFixupHandler.java
@@ -93,7 +71,7 @@ index 000000000..4fd6f5034
 +}
 diff --git a/Ghidra/Processors/eBPF/certification.manifest b/Ghidra/Processors/eBPF/certification.manifest
 new file mode 100644
-index 000000000..d4c4a0218
+index 000000000..c709be028
 --- /dev/null
 +++ b/Ghidra/Processors/eBPF/certification.manifest
 @@ -0,0 +1,9 @@
@@ -105,7 +83,7 @@ index 000000000..d4c4a0218
 +data/languages/eBPF.opinion||GHIDRA||||END|
 +data/languages/eBPF.pspec||GHIDRA||||END|
 +data/languages/eBPF.sinc||GHIDRA||||END|
-+data/languages/eBPF.slaspec||GHIDRA||||END|
++data/languages/eBPF_le.slaspec||GHIDRA||||END|
 diff --git a/Ghidra/Processors/eBPF/data/languages/eBPF.cspec b/Ghidra/Processors/eBPF/data/languages/eBPF.cspec
 new file mode 100644
 index 000000000..ffb346876
@@ -199,7 +177,7 @@ index 000000000..93997279f
 +</dwarf>
 diff --git a/Ghidra/Processors/eBPF/data/languages/eBPF.ldefs b/Ghidra/Processors/eBPF/data/languages/eBPF.ldefs
 new file mode 100644
-index 000000000..cfce8de76
+index 000000000..c2924c996
 --- /dev/null
 +++ b/Ghidra/Processors/eBPF/data/languages/eBPF.ldefs
 @@ -0,0 +1,15 @@
@@ -210,7 +188,7 @@ index 000000000..cfce8de76
 +            size="64"
 +            variant="default"
 +            version="1.0"
-+            slafile="eBPF.sla"
++            slafile="eBPF_le.sla"
 +            processorspec="eBPF.pspec"
 +            id="eBPF:LE:64:default">
 +    <description>eBPF processor 64-bit little-endian</description>
@@ -833,16 +811,15 @@ index 000000000..4037f1cfa
 +}
 +
 +:EXIT is op_alu_jmp_opcode=0x9 & op_alu_jmp_source=0 & op_insn_class=0x5 { return [*:8 R10]; }
-diff --git a/Ghidra/Processors/eBPF/data/languages/eBPF.slaspec b/Ghidra/Processors/eBPF/data/languages/eBPF.slaspec
+diff --git a/Ghidra/Processors/eBPF/data/languages/eBPF_le.slaspec b/Ghidra/Processors/eBPF/data/languages/eBPF_le.slaspec
 new file mode 100644
-index 000000000..213778df8
+index 000000000..1f16bfe96
 --- /dev/null
-+++ b/Ghidra/Processors/eBPF/data/languages/eBPF.slaspec
++++ b/Ghidra/Processors/eBPF/data/languages/eBPF_le.slaspec
 @@ -0,0 +1,3 @@
 +define endian=little;
 +
 +@include "eBPF.sinc"
-\ No newline at end of file
 diff --git a/Ghidra/Processors/eBPF/src/main/java/ghidra/app/plugin/core/analysis/eBPFAnalyzer.java b/Ghidra/Processors/eBPF/src/main/java/ghidra/app/plugin/core/analysis/eBPFAnalyzer.java
 new file mode 100644
 index 000000000..a9b8c6a3e
