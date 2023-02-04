@@ -33,12 +33,12 @@ fix ElfRelocation::toBytes()
  .../bin/ByteArrayMutableByteProvider.java     | 111 ++++
  .../format/elf/ElfDefaultGotPltMarkup.java    |   2 +-
  .../util/bin/format/elf/ElfDynamicTable.java  |  40 +-
- .../util/bin/format/elf/ElfFileSection.java   |  64 ++-
+ .../util/bin/format/elf/ElfFileSection.java   |  64 +-
  .../bin/format/elf/ElfFileSectionWrapper.java |  74 +++
- .../app/util/bin/format/elf/ElfHeader.java    | 528 ++++++++----------
+ .../app/util/bin/format/elf/ElfHeader.java    | 546 ++++++++----------
  .../util/bin/format/elf/ElfProgramHeader.java |  31 +-
  .../util/bin/format/elf/ElfRelocation.java    |  10 +-
- .../bin/format/elf/ElfRelocationTable.java    |  88 ++-
+ .../bin/format/elf/ElfRelocationTable.java    |  88 +--
  .../util/bin/format/elf/ElfSectionHeader.java |  72 ++-
  .../util/bin/format/elf/ElfStringTable.java   |  77 ++-
  .../app/util/bin/format/elf/ElfSymbol.java    |  78 ++-
@@ -53,7 +53,7 @@ fix ElfRelocation::toBytes()
  .../elf/extend/HCS12X_ElfExtension.java       |   2 +-
  .../format/elf/extend/PIC30_ElfExtension.java |   2 +-
  .../relocation/eBPF_ElfRelocationHandler.java |   2 +-
- 24 files changed, 805 insertions(+), 628 deletions(-)
+ 24 files changed, 818 insertions(+), 633 deletions(-)
  create mode 100644 Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/ByteArrayMutableByteProvider.java
  create mode 100644 Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/elf/ElfFileSectionWrapper.java
 
@@ -581,7 +581,7 @@ index 000000000..7257c6967
 +    }
 +}
 diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/elf/ElfHeader.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/elf/ElfHeader.java
-index 346bc685d..64447f178 100644
+index 346bc685d..4645eb8c2 100644
 --- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/elf/ElfHeader.java
 +++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/elf/ElfHeader.java
 @@ -47,8 +47,6 @@ public class ElfHeader implements StructConverter, Writeable {
@@ -1361,25 +1361,50 @@ index 346bc685d..64447f178 100644
  				return stringTable;
  			}
  		}
-@@ -1855,7 +1760,7 @@ public class ElfHeader implements StructConverter, Writeable {
+@@ -1847,15 +1752,15 @@ public class ElfHeader implements StructConverter, Writeable {
+ 	/**
+ 	 * Returns the symbol table associated to the specified section header.
+ 	 * Or, null if one does not exist.
+-	 * @param symbolTableSection symbol table section header
++	 * @param section symbol table section header
+ 	 * @return the symbol table associated to the specified section header
+ 	 */
+-	public ElfSymbolTable getSymbolTable(ElfSectionHeader symbolTableSection) {
+-		if (symbolTableSection == null) {
++	public ElfSymbolTable getSymbolTable(ElfSectionHeader section) {
++		if (section == null) {
  			return null;
  		}
  		for (ElfSymbolTable symbolTable : symbolTables) {
 -			if (symbolTable.getFileOffset() == symbolTableSection.getOffset()) {
-+			if (symbolTable.getFileSection() == symbolTableSection) {
++			if (symbolTable.getFileSection() == section) {
  				return symbolTable;
  			}
  		}
-@@ -1877,7 +1782,7 @@ public class ElfHeader implements StructConverter, Writeable {
+@@ -1873,11 +1778,19 @@ public class ElfHeader implements StructConverter, Writeable {
+ 	/**
+ 	 * Returns the relocation table associated to the specified section header,
+ 	 * or null if one does not exist.
+-	 * @param relocSection section header corresponding to relocation table
++	 * @param section section header corresponding to relocation table
  	 * @return the relocation table associated to the specified section header
  	 */
- 	public ElfRelocationTable getRelocationTable(ElfSectionHeader relocSection) {
+-	public ElfRelocationTable getRelocationTable(ElfSectionHeader relocSection) {
 -		return getRelocationTableAtOffset(relocSection.getOffset());
-+		return getRelocationTableAtOffset(relocSection.getFileOffset());
++	public ElfRelocationTable getRelocationTable(ElfSectionHeader section) {
++		if (section == null) {
++			return null;
++		}
++		for (ElfRelocationTable relocationTable : relocationTables) {
++			if (relocationTable.getFileSection() == section) {
++				return relocationTable;
++			}
++		}
++		return null;
  	}
  
  	/**
-@@ -1888,7 +1793,7 @@ public class ElfHeader implements StructConverter, Writeable {
+@@ -1888,7 +1801,7 @@ public class ElfHeader implements StructConverter, Writeable {
  	 */
  	public ElfRelocationTable getRelocationTableAtOffset(long fileOffset) {
  		for (ElfRelocationTable relocationTable : relocationTables) {
@@ -1388,7 +1413,7 @@ index 346bc685d..64447f178 100644
  				return relocationTable;
  			}
  		}
-@@ -1997,44 +1902,87 @@ public class ElfHeader implements StructConverter, Writeable {
+@@ -1997,44 +1910,87 @@ public class ElfHeader implements StructConverter, Writeable {
  	}
  
  	/**
@@ -1511,7 +1536,7 @@ index 346bc685d..64447f178 100644
  	}
  
  	/**
-@@ -2114,14 +2062,14 @@ public class ElfHeader implements StructConverter, Writeable {
+@@ -2114,14 +2070,14 @@ public class ElfHeader implements StructConverter, Writeable {
  			throw new IOException(
  				"Unsupported program header count serialization: " + e_phnum);
  		}
