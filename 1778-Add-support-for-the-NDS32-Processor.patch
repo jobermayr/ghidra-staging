@@ -47,10 +47,10 @@ Add baseline v3
  Ghidra/Processors/NDS32/data/sleighArgs.txt   |    6 +
  .../plugin/core/analysis/NDS32Analyzer.java   |  187 +++
  .../NDS32_ElfRelocationConstants.java         |   74 ++
- .../NDS32_ElfRelocationHandler.java           |  111 ++
+ .../NDS32_ElfRelocationHandler.java           |  116 ++
  .../processors/NDS32_LE_O0_EmulatorTest.java  |   41 +
  .../processors/NDS32_LE_O3_EmulatorTest.java  |   41 +
- 21 files changed, 2387 insertions(+)
+ 21 files changed, 2392 insertions(+)
  create mode 100644 Ghidra/Processors/NDS32/Module.manifest
  create mode 100644 Ghidra/Processors/NDS32/build.gradle
  create mode 100644 Ghidra/Processors/NDS32/certification.manifest
@@ -2375,10 +2375,10 @@ index 000000000..7aaf363cf
 +}
 diff --git a/Ghidra/Processors/NDS32/src/main/java/ghidra/app/util/bin/format/elf/relocation/NDS32_ElfRelocationHandler.java b/Ghidra/Processors/NDS32/src/main/java/ghidra/app/util/bin/format/elf/relocation/NDS32_ElfRelocationHandler.java
 new file mode 100644
-index 000000000..122f5a455
+index 000000000..1dd825a84
 --- /dev/null
 +++ b/Ghidra/Processors/NDS32/src/main/java/ghidra/app/util/bin/format/elf/relocation/NDS32_ElfRelocationHandler.java
-@@ -0,0 +1,111 @@
+@@ -0,0 +1,116 @@
 +/* ###
 + * IP: GHIDRA
 + *
@@ -2409,6 +2409,8 @@ index 000000000..122f5a455
 +import ghidra.program.model.listing.Program;
 +import ghidra.program.model.mem.Memory;
 +import ghidra.program.model.mem.MemoryAccessException;
++import ghidra.program.model.reloc.RelocationResult;
++import ghidra.program.model.reloc.Relocation.Status;
 +import ghidra.util.exception.NotFoundException;
 +
 +public class NDS32_ElfRelocationHandler extends ElfRelocationHandler {
@@ -2425,16 +2427,16 @@ index 000000000..122f5a455
 +	}
 +
 +	@Override
-+	public void relocate(ElfRelocationContext elfRelocationContext, ElfRelocation relocation, Address relocationAddress)
++	public RelocationResult relocate(ElfRelocationContext elfRelocationContext, ElfRelocation relocation, Address relocationAddress)
 +			throws MemoryAccessException, NotFoundException {
 +		ElfHeader elf = elfRelocationContext.getElfHeader();
 +
 +		if (elf.e_machine() != ElfConstants.EM_NDS32) {
-+			return;
++			return RelocationResult.FAILURE;
 +		}
 +
 +		if (!elf.is32Bit()) {
-+			return;
++			return RelocationResult.FAILURE;
 +		}
 +
 +		NDS32_ElfRelocationContext nds32RelocationContext =
@@ -2442,10 +2444,10 @@ index 000000000..122f5a455
 +
 +		int type = relocation.getType();
 +		int symbolIndex = relocation.getSymbolIndex();
-+		doRelocate(nds32RelocationContext, type, symbolIndex, relocation, relocationAddress);
++		return doRelocate(nds32RelocationContext, type, symbolIndex, relocation, relocationAddress);
 +	}
 +
-+	private void doRelocate(NDS32_ElfRelocationContext nds32RelocationContext, int relocType,
++	private RelocationResult doRelocate(NDS32_ElfRelocationContext nds32RelocationContext, int relocType,
 +			int symbolIndex, ElfRelocation relocation, Address relocationAddress)
 +			throws MemoryAccessException, NotFoundException, AddressOutOfBoundsException {
 +		Program program = nds32RelocationContext.getProgram();
@@ -2465,6 +2467,7 @@ index 000000000..122f5a455
 +
 +		int value = 0;
 +		int newValue = 0;
++		int byteLength = 4; // most relocations affect 4-bytes (change if different)
 +
 +		switch(relocType) {
 +		case NDS32_ElfRelocationConstants.R_NDS32_HI20_RELA:
@@ -2479,7 +2482,9 @@ index 000000000..122f5a455
 +			break;
 +		default:
 +			markAsUnhandled(program, relocationAddress, relocType, symbolIndex, symbolName, log);
++			return RelocationResult.UNSUPPORTED;
 +		}
++		return new RelocationResult(Status.APPLIED, byteLength);
 +	}
 +
 +	private static class NDS32_ElfRelocationContext extends ElfRelocationContext {

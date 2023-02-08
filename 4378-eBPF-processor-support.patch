@@ -17,8 +17,8 @@ Subject: [PATCH] 4378: eBPF processor support
  .../plugin/core/analysis/eBPFAnalyzer.java    | 1169 +++++++++++++++++
  .../format/elf/extend/eBPF_ElfExtension.java  |   47 +
  .../ElfeBPFRelocationFixupHandler.java        |   47 +
- .../relocation/eBPF_ElfRelocationHandler.java |  110 ++
- 14 files changed, 2102 insertions(+)
+ .../relocation/eBPF_ElfRelocationHandler.java |  114 ++
+ 14 files changed, 2106 insertions(+)
  create mode 100644 Ghidra/Processors/eBPF/Module.manifest
  create mode 100644 Ghidra/Processors/eBPF/build.gradle
  create mode 100644 Ghidra/Processors/eBPF/certification.manifest
@@ -2103,10 +2103,10 @@ index 000000000..d079b3cd9
 +}
 diff --git a/Ghidra/Processors/eBPF/src/main/java/ghidra/app/util/bin/format/elf/relocation/eBPF_ElfRelocationHandler.java b/Ghidra/Processors/eBPF/src/main/java/ghidra/app/util/bin/format/elf/relocation/eBPF_ElfRelocationHandler.java
 new file mode 100644
-index 000000000..51c952607
+index 000000000..48acd3a98
 --- /dev/null
 +++ b/Ghidra/Processors/eBPF/src/main/java/ghidra/app/util/bin/format/elf/relocation/eBPF_ElfRelocationHandler.java
-@@ -0,0 +1,110 @@
+@@ -0,0 +1,114 @@
 +/* ###
 + * IP: GHIDRA
 + *
@@ -2130,6 +2130,8 @@ index 000000000..51c952607
 +import ghidra.program.model.mem.Memory;
 +import ghidra.program.model.mem.MemoryAccessException;
 +import ghidra.program.model.symbol.SymbolTable;
++import ghidra.program.model.reloc.RelocationResult;
++import ghidra.program.model.reloc.Relocation.Status;
 +import ghidra.util.exception.NotFoundException;
 +
 +public class eBPF_ElfRelocationHandler extends ElfRelocationHandler {
@@ -2139,10 +2141,10 @@ index 000000000..51c952607
 +    }
 +
 +    @Override
-+    public void relocate(ElfRelocationContext elfRelocationContext, ElfRelocation relocation, Address relocationAddress) throws MemoryAccessException, NotFoundException {
++    public RelocationResult relocate(ElfRelocationContext elfRelocationContext, ElfRelocation relocation, Address relocationAddress) throws MemoryAccessException, NotFoundException {
 +        ElfHeader elf = elfRelocationContext.getElfHeader();
 +        if (elf.e_machine() != ElfConstants.EM_BPF) {
-+            return;
++            return RelocationResult.FAILURE;
 +        }
 +
 +        Program program = elfRelocationContext.getProgram();
@@ -2152,6 +2154,7 @@ index 000000000..51c952607
 +        int symbolIndex = relocation.getSymbolIndex();
 +        long value;
 +        boolean appliedSymbol = true;
++	int byteLength = 4; // most relocations affect 4-bytes (change if different)
 +
 +        if (type == 1) {
 +            try {
@@ -2163,7 +2166,7 @@ index 000000000..51c952607
 +                Address mapAddr = table.getSymbols(map).next().getAddress();
 +                String sec_name = elfRelocationContext.relocationTable.getSectionToBeRelocated().getNameAsString();
 +                if (sec_name.toString().contains("debug")) {
-+                return;
++                return RelocationResult.SKIPPED;
 +                }
 +
 +                value = mapAddr.getAddressableWordOffset();
@@ -2186,7 +2189,7 @@ index 000000000..51c952607
 +                    Address funcAddr = table.getSymbols(func_or_sec).next().getAddress();
 +                    String sec_name = elfRelocationContext.relocationTable.getSectionToBeRelocated().getNameAsString();
 +                    if (sec_name.toString().contains("debug")) {
-+                        return;
++                        return RelocationResult.SKIPPED;
 +                    }
 +                    value = funcAddr.getAddressableWordOffset();
 +                    int offset = (int)(value - instr_next);
@@ -2214,7 +2217,8 @@ index 000000000..51c952607
 +        }
 +        if (appliedSymbol && symbolIndex == 0) {
 +            markAsWarning(program, relocationAddress, Long.toString(type), "applied relocation with symbol-index of 0", elfRelocationContext.getLog());
-+        }
++	}
++	return new RelocationResult(Status.APPLIED, byteLength);
 +    }
 +}
 -- 

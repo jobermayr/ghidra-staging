@@ -4,17 +4,17 @@ Date: Thu, 18 Feb 2021 17:06:57 -0500
 Subject: [PATCH] 2779: Prevent unaligned inputs from sharing storage
 
 ---
- .../Decompiler/src/decompile/cpp/fspec.cc     | 56 ++++++++++++++++---
+ .../Decompiler/src/decompile/cpp/fspec.cc     | 55 ++++++++++++++++---
  .../Decompiler/src/decompile/cpp/fspec.hh     |  3 +-
  .../Decompiler/src/decompile/cpp/translate.hh |  1 +
- .../program/model/lang/ParamListStandard.java | 46 +++++++++++++--
- 4 files changed, 92 insertions(+), 14 deletions(-)
+ .../program/model/lang/ParamListStandard.java | 44 +++++++++++++--
+ 4 files changed, 90 insertions(+), 13 deletions(-)
 
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.cc
-index e64530b92..cbc40132f 100644
+index fea6d6661..2c579562e 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.cc
-@@ -157,6 +157,21 @@ bool ParamEntry::subsumesDefinition(const ParamEntry &op2) const
+@@ -164,6 +164,21 @@ bool ParamEntry::subsumesDefinition(const ParamEntry &op2) const
  
  {
    if ((type!=TYPE_UNKNOWN)&&(op2.type != type)) return false;
@@ -36,7 +36,7 @@ index e64530b92..cbc40132f 100644
    if (spaceid != op2.spaceid) return false;
    if (op2.addressbase < addressbase) return false;
    if ((op2.addressbase+op2.size-1) > (addressbase+size-1)) return false;
-@@ -641,9 +656,7 @@ int4 ParamListStandard::characterizeAsParam(const Address &loc,int4 size) const
+@@ -647,9 +662,7 @@ int4 ParamListStandard::characterizeAsParam(const Address &loc,int4 size) const
  Address ParamListStandard::assignAddress(const Datatype *tp,vector<int4> &status) const
  
  {
@@ -46,15 +46,15 @@ index e64530b92..cbc40132f 100644
 +  for(const ParamEntry &curEntry : entry) {
      int4 grp = curEntry.getGroup();
      if (status[grp]<0) continue;
-     if ((curEntry.getType() != TYPE_UNKNOWN)&&
-@@ -652,16 +665,43 @@ Address ParamListStandard::assignAddress(const Datatype *tp,vector<int4> &status
+     if ((curEntry.getType() != TYPE_UNKNOWN) && tp->getMetatype() != curEntry.getType())
+@@ -657,16 +670,42 @@ Address ParamListStandard::assignAddress(const Datatype *tp,vector<int4> &status
  
      Address res = curEntry.getAddrBySlot(status[grp],tp->getSize());
      if (res.isInvalid()) continue; // If -tp- doesn't fit an invalid address is returned
 -    if (curEntry.isExclusion()) {
--      int4 maxgrp = grp + curEntry.getGroupSize();
--      for(int4 j=grp;j<maxgrp;++j) // For an exclusion entry
--	status[j] = -1;		// some number of groups are taken up
+-      const vector<int4> &groupSet(curEntry.getAllGroups());
+-      for(int4 j=0;j<groupSet.size();++j) 	// For an exclusion entry
+-	status[groupSet[j]] = -1;		// some number of groups are taken up
 -    }
 +    if (curEntry.isExclusion()) consumeGroups(status, curEntry);
      return res;
@@ -74,10 +74,9 @@ index e64530b92..cbc40132f 100644
 +void ParamListStandard::consumeGroups(vector<int4> &status,const ParamEntry &element) const
 +
 +{
-+  int4 grp = element.getGroup();
-+  const int4 maxgrp = grp + element.getGroupSize();
-+  for(int4 j=grp;j<maxgrp;++j) // For an exclusion entry
-+    status[j] = -1;		// some number of groups are taken up
++  const vector<int4> &groupSet(element.getAllGroups());
++  for(int4 i=0;i<groupSet.size();++i)	// For an exclusion entry
++    status[groupSet[i]] = -1;		// some number of groups are taken up
 +
 +  // any entries which this element contains must also be set as taken
 +  for (const ParamEntry &e : entry) {
@@ -97,10 +96,10 @@ index e64530b92..cbc40132f 100644
  
  {
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.hh
-index 50c54824e..63601136f 100644
+index 64ec45e2c..675142059 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.hh
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.hh
-@@ -109,7 +109,7 @@ private:
+@@ -108,7 +108,7 @@ private:
    int4 minsize;			///< Minimum bytes allowed for the logical value
    int4 alignment;		///< How much alignment (0 means only 1 logical value is allowed)
    int4 numslots;		///< (Maximum) number of slots that can store separate parameters
@@ -130,33 +129,31 @@ index 34a4709a8..e9dd11d64 100644
  
  /// \brief Comparator for JoinRecord objects
 diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/ParamListStandard.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/ParamListStandard.java
-index 2f712fdb7..e48afea62 100644
+index 56665b001..48ba2f241 100644
 --- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/ParamListStandard.java
 +++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/ParamListStandard.java
-@@ -107,11 +107,7 @@ public class ParamListStandard implements ParamList {
+@@ -107,10 +107,7 @@ public class ParamListStandard implements ParamList {
  				continue;	// -tp- does not fit in this entry
  			}
  			if (element.isExclusion()) {
--				int maxgrp = grp + element.getGroupSize();
--				for (int j = grp; j < maxgrp; ++j) {
+-				for (int group : element.getAllGroups()) {
 -					// For an exclusion entry
--					status[j] = -1;			// some number of groups are taken up
+-					status[group] = -1;			// some number of groups are taken up
 -				}
 +				excludeGroups(status, element);
  				if (element.isFloatExtended()) {
  					sz = element.getSize();			// Still use the entire container size, when assigning storage
  				}
-@@ -417,4 +413,44 @@ public class ParamListStandard implements ParamList {
+@@ -417,4 +414,43 @@ public class ParamListStandard implements ParamList {
  	public boolean isThisBeforeRetPointer() {
  		return thisbeforeret;
  	}
 +
 +	private void excludeGroups(int[] status, ParamEntry element) {
-+		int grp = element.getGroup();
-+		int maxgrp = grp + element.getGroupSize();
-+		for (int j = grp; j < maxgrp; ++j)
++		for (int group : element.getAllGroups()) {
 +			// For an exclusion entry
-+			status[j] = -1;			// some number of groups are taken up
++			status[group] = -1;			// some number of groups are taken up
++		}
 +
 +		// any entries which this element contains must also be set as taken
 +		for (ParamEntry e : entry) {

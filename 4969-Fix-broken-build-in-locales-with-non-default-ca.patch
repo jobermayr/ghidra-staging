@@ -1,0 +1,165 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Can Acar <canacar@imcan.dev>
+Date: Wed, 1 Feb 2023 02:02:35 +0300
+Subject: [PATCH] 4969: Fix broken build in locales with non-default
+ capitalization maps (e.g. tr_TR)
+
+Fix failing build in tr_TR locale
+i.e. pass The Turkey Test TM
+set Locale.ROOT on relevant parsing .toLowerCase invocations
+set en_US locale jvmargs in gradle.properties
+---
+ .../src/main/java/ghidra/util/WebColors.java  |  7 +--
+ .../test/java/ghidra/util/WebColorsTest.java  | 10 +++++
+ .../help/validator/ReferenceTagProcessor.java |  4 +-
+ .../validator/ReferenceTagProcessorTest.java  | 44 +++++++++++++++++++
+ gradle.properties                             |  3 +-
+ 5 files changed, 62 insertions(+), 6 deletions(-)
+ create mode 100644 Ghidra/Framework/Help/src/test/java/help/validator/ReferenceTagProcessorTest.java
+
+diff --git a/Ghidra/Framework/Gui/src/main/java/ghidra/util/WebColors.java b/Ghidra/Framework/Gui/src/main/java/ghidra/util/WebColors.java
+index 789fc4057..f2567d6d3 100644
+--- a/Ghidra/Framework/Gui/src/main/java/ghidra/util/WebColors.java
++++ b/Ghidra/Framework/Gui/src/main/java/ghidra/util/WebColors.java
+@@ -18,6 +18,7 @@ package ghidra.util;
+ import java.awt.Color;
+ import java.util.HashMap;
+ import java.util.Map;
++import java.util.Locale;
+ 
+ /**
+  * Class for web color support. This class defines many of the colors used by html. This class
+@@ -239,7 +240,7 @@ public abstract class WebColors {
+ 	}
+ 
+ 	private static Color registerColor(String name, Color color) {
+-		nameToColorMap.put(name.toLowerCase(), color);
++		nameToColorMap.put(name.toLowerCase(Locale.ROOT), color);
+ 		colorToNameMap.put(color.getRGB(), name);
+ 		return color;
+ 	}
+@@ -266,8 +267,8 @@ public abstract class WebColors {
+ 	 * @return a color for the given string or null
+ 	 */
+ 	public static Color getColor(String colorString) {
+-		String value = colorString.trim().toLowerCase();
+-		Color color = nameToColorMap.get(value.toLowerCase());
++		String value = colorString.trim().toLowerCase(Locale.ROOT);
++		Color color = nameToColorMap.get(value.toLowerCase(Locale.ROOT)); // Locale not necessary, but nice to have
+ 		if (color != null) {
+ 			return color;
+ 		}
+diff --git a/Ghidra/Framework/Gui/src/test/java/ghidra/util/WebColorsTest.java b/Ghidra/Framework/Gui/src/test/java/ghidra/util/WebColorsTest.java
+index 50784cdf8..f2c27d26e 100644
+--- a/Ghidra/Framework/Gui/src/test/java/ghidra/util/WebColorsTest.java
++++ b/Ghidra/Framework/Gui/src/test/java/ghidra/util/WebColorsTest.java
+@@ -18,6 +18,7 @@ package ghidra.util;
+ import static org.junit.Assert.*;
+ 
+ import java.awt.Color;
++import java.util.Locale;
+ 
+ import org.junit.Test;
+ 
+@@ -51,6 +52,15 @@ public class WebColorsTest {
+ 		assertEquals(new Color(0x80102030, true), WebColors.getColor("rgba(16, 32, 48, 0.5)"));
+ 
+ 		assertNull(WebColors.getColor("asdfasdfas"));
++
++		// The Turkey Test
++		Locale defaultLocale = Locale.getDefault();
++		Locale.setDefault(new Locale("tr", "TR"));
++		assertEquals(WebColors.INDIGO, WebColors.getColor("INDIGO"));
++		assertEquals(WebColors.INDIGO, WebColors.getColor("indigo"));
++		assertNull(WebColors.getColor("İNDİGO"));
++		assertNull(WebColors.getColor("ındıgo"));
++		Locale.setDefault(defaultLocale);
+ 	}
+ 
+ 	@Test
+diff --git a/Ghidra/Framework/Help/src/main/java/help/validator/ReferenceTagProcessor.java b/Ghidra/Framework/Help/src/main/java/help/validator/ReferenceTagProcessor.java
+index 3770b57c6..ef38dad0b 100644
+--- a/Ghidra/Framework/Help/src/main/java/help/validator/ReferenceTagProcessor.java
++++ b/Ghidra/Framework/Help/src/main/java/help/validator/ReferenceTagProcessor.java
+@@ -61,7 +61,7 @@ public class ReferenceTagProcessor extends TagProcessor {
+ 			return false;
+ 		}
+ 
+-		tagType = tagType.toLowerCase();
++		tagType = tagType.toLowerCase(Locale.ROOT);
+ 		return "a".equals(tagType) || "img".equals(tagType) || "title".equals(tagType) ||
+ 			"/title".equals(tagType) || "link".equals(tagType);
+ 	}
+@@ -70,7 +70,7 @@ public class ReferenceTagProcessor extends TagProcessor {
+ 	public void processTag(String tagType, LinkedHashMap<String, String> tagAttributes, Path file,
+ 			int lineNum) throws IOException {
+ 
+-		tagType = tagType.toLowerCase();
++		tagType = tagType.toLowerCase(Locale.ROOT);
+ 		if ("a".equals(tagType)) {
+ 			if (tagAttributes.containsKey("href")) {
+ 				try {
+diff --git a/Ghidra/Framework/Help/src/test/java/help/validator/ReferenceTagProcessorTest.java b/Ghidra/Framework/Help/src/test/java/help/validator/ReferenceTagProcessorTest.java
+new file mode 100644
+index 000000000..79b88ceae
+--- /dev/null
++++ b/Ghidra/Framework/Help/src/test/java/help/validator/ReferenceTagProcessorTest.java
+@@ -0,0 +1,44 @@
++/* ###
++ * IP: GHIDRA
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package help.validator;
++
++import static org.junit.Assert.assertTrue;
++
++import org.junit.Test;
++import java.util.Locale;
++
++import help.AbstractHelpTest;
++
++public class ReferenceTagProcessorTest extends AbstractHelpTest {
++	@Test
++	public void testIsTagSupported() {
++		ReferenceTagProcessor processor = new ReferenceTagProcessor(null, null);
++
++		// The Turkey Test
++		Locale defaultLocale = Locale.getDefault();
++		Locale.setDefault(new Locale("tr", "TR"));
++		assertTrue(processor.isTagSupported("title"));
++		assertTrue(processor.isTagSupported("TITLE"));
++		assertTrue(!processor.isTagSupported("tıtle"));
++		assertTrue(!processor.isTagSupported("TİTLE"));
++		Locale.setDefault(defaultLocale);
++	}
++
++	@Test
++	public void testProcessTag() {
++		// Not sure how to test this
++	}
++}
+diff --git a/gradle.properties b/gradle.properties
+index 902e64b26..d0d1c7f76 100644
+--- a/gradle.properties
++++ b/gradle.properties
+@@ -1,4 +1,5 @@
+ # Increase maximum Gradle heap size (default is 1G)
+-org.gradle.jvmargs=-Xmx2G
++# And fix build in locales with non-default capitalizations (e.g. tr_TR)
++org.gradle.jvmargs=-Xmx2G -Duser.language=en -Duser.country=US
+ org.gradle.caching=true
+ org.gradle.parallel=true
+-- 
+2.39.1
+

@@ -11,8 +11,8 @@ Add additional analysis to Tricore processor module -
  .../data/patterns/patternconstraints.xml      |   5 +
  .../data/patterns/tricore_patterns.xml        |  31 ++
  .../TRICOREElfRelocationConstants.java        |  53 +++
- .../TRICOREElfRelocationHandler.java          | 352 ++++++++++++++++++
- 6 files changed, 443 insertions(+), 3 deletions(-)
+ .../TRICOREElfRelocationHandler.java          | 356 ++++++++++++++++++
+ 6 files changed, 447 insertions(+), 3 deletions(-)
  create mode 100644 Ghidra/Processors/tricore/data/patterns/patternconstraints.xml
  create mode 100644 Ghidra/Processors/tricore/data/patterns/tricore_patterns.xml
  create mode 100644 Ghidra/Processors/tricore/src/main/java/ghidra/app/util/bin/format/elf/relocation/TRICOREElfRelocationConstants.java
@@ -149,10 +149,10 @@ index 000000000..891be060e
 +}
 diff --git a/Ghidra/Processors/tricore/src/main/java/ghidra/app/util/bin/format/elf/relocation/TRICOREElfRelocationHandler.java b/Ghidra/Processors/tricore/src/main/java/ghidra/app/util/bin/format/elf/relocation/TRICOREElfRelocationHandler.java
 new file mode 100644
-index 000000000..e295b98b2
+index 000000000..6ae589253
 --- /dev/null
 +++ b/Ghidra/Processors/tricore/src/main/java/ghidra/app/util/bin/format/elf/relocation/TRICOREElfRelocationHandler.java
-@@ -0,0 +1,352 @@
+@@ -0,0 +1,356 @@
 +/* ###
 + * IP: GHIDRA
 + *
@@ -178,6 +178,8 @@ index 000000000..e295b98b2
 +import ghidra.program.model.listing.Program;
 +import ghidra.program.model.mem.Memory;
 +import ghidra.program.model.mem.MemoryAccessException;
++import ghidra.program.model.reloc.RelocationResult;
++import ghidra.program.model.reloc.Relocation.Status;
 +import ghidra.util.exception.NotFoundException;
 +
 +public class TRICOREElfRelocationHandler extends ElfRelocationHandler {
@@ -188,12 +190,12 @@ index 000000000..e295b98b2
 +	}
 +
 +	@Override
-+	public void relocate(ElfRelocationContext elfRelocationContext, ElfRelocation relocation, Address relocationAddress)
++	public RelocationResult relocate(ElfRelocationContext elfRelocationContext, ElfRelocation relocation, Address relocationAddress)
 +			throws MemoryAccessException, NotFoundException {
 +
 +		ElfHeader elf = elfRelocationContext.getElfHeader();
 +		if (!canRelocate(elf)) {
-+			return;
++			return RelocationResult.FAILURE;
 +		}
 +
 +		Program program = elfRelocationContext.getProgram();
@@ -202,7 +204,7 @@ index 000000000..e295b98b2
 +		int type = relocation.getType();
 +
 +		if (TRICOREElfRelocationConstants.R_TRICORE_NONE == type) {
-+			return;
++			return RelocationResult.FAILURE;
 +		}
 +
 +		long addend = relocation.hasAddend() ? relocation.getAddend() : memory.getInt(relocationAddress);
@@ -218,6 +220,7 @@ index 000000000..e295b98b2
 +		}
 +
 +		int rv = 0;
++		int byteLength = 4; // most relocations affect 4-bytes (change if different)
 +
 +		 /**
 +		  * Key S indicates the final value assigned to the symbol referenced in the relocation record.
@@ -246,7 +249,7 @@ index 000000000..e295b98b2
 +			markAsWarning(program, relocationAddress, "R_TRICORE_16SM", symbolName, symbolIndex,
 +					"TODO, needs support ", elfRelocationContext.getLog());
 +			//relocate_BOL(memory, relocationAddress, rv);
-+			break;
++			return RelocationResult.UNSUPPORTED;
 +		case TRICOREElfRelocationConstants.R_TRICORE_HI:      //RLC S + A + 8000H >> 16
 +			rv = ((int)(symbolValue + addend) + 0x8000) >> 16;
 +			relocate_RLC(memory, relocationAddress, rv);
@@ -267,7 +270,7 @@ index 000000000..e295b98b2
 +			markAsWarning(program, relocationAddress, "R_TRICORE_10SM", symbolName, symbolIndex,
 +					"TODO, needs support ", elfRelocationContext.getLog());
 +			//relocate_BO(memory, relocationAddress, rv);
-+			break;
++			return RelocationResult.UNSUPPORTED;
 +		case TRICOREElfRelocationConstants.R_TRICORE_15REL:   //BR S + A - P
 +			rv = (int)(symbolValue + addend - offset);
 +			relocate_BR(memory, relocationAddress, rv);
@@ -276,32 +279,32 @@ index 000000000..e295b98b2
 +			markAsWarning(program, relocationAddress, "R_TRICORE_10LI", symbolName, symbolIndex,
 +					"TODO, needs support ", elfRelocationContext.getLog());
 +			//relocate_BO(memory, relocationAddress, rv);
-+			break;
++			return RelocationResult.UNSUPPORTED;
 +		case TRICOREElfRelocationConstants.R_TRICORE_16LI:    //BOL S + A - A[1]
 +			markAsWarning(program, relocationAddress, "R_TRICORE_16LI", symbolName, symbolIndex,
 +					"TODO, needs support ", elfRelocationContext.getLog());
 +			//relocate_BOL(memory, relocationAddress, rv);
-+			break;
++			return RelocationResult.UNSUPPORTED;
 +		case TRICOREElfRelocationConstants.R_TRICORE_10A8:    //BO S + A - A[8]
 +			markAsWarning(program, relocationAddress, "R_TRICORE_10A8", symbolName, symbolIndex,
 +					"TODO, needs support ", elfRelocationContext.getLog());
 +			//relocate_BO(memory, relocationAddress, rv);
-+			break;
++			return RelocationResult.UNSUPPORTED;
 +		case TRICOREElfRelocationConstants.R_TRICORE_16A8:    //BOL S + A - A[8]
 +			markAsWarning(program, relocationAddress, "R_TRICORE_16A8", symbolName, symbolIndex,
 +					"TODO, needs support ", elfRelocationContext.getLog());
 +			//relocate_BOL(memory, relocationAddress, rv);
-+			break;
++			return RelocationResult.UNSUPPORTED;
 +		case TRICOREElfRelocationConstants.R_TRICORE_10A9:    //BO S + A - A[9]
 +			markAsWarning(program, relocationAddress, "R_TRICORE_16A9", symbolName, symbolIndex,
 +					"TODO, needs support ", elfRelocationContext.getLog());
 +			//relocate_BO(memory, relocationAddress, rv);
-+			break;
++			return RelocationResult.UNSUPPORTED;
 +		case TRICOREElfRelocationConstants.R_TRICORE_16A9:    //BOL S + A - A[9]
 +			markAsWarning(program, relocationAddress, "R_TRICORE_16A9", symbolName, symbolIndex,
 +					"TODO, needs support ", elfRelocationContext.getLog());
 +			//relocate_BOL(memory, relocationAddress, rv);
-+			break;
++			return RelocationResult.UNSUPPORTED;
 +		case TRICOREElfRelocationConstants.R_TRICORE_PCPHI:   //word16 S + A >> 16
 +			rv = (int)(symbolValue + addend) >> 16;
 +			relocate_word16(memory, relocationAddress, rv);
@@ -324,8 +327,9 @@ index 000000000..e295b98b2
 +			break;
 +		default:
 +			markAsUnhandled(program, relocationAddress, type, symbolIndex, symbolName, elfRelocationContext.getLog());
-+			break;
++			return RelocationResult.SKIPPED;
 +		}
++		return new RelocationResult(Status.APPLIED, byteLength);
 +	}
 +
 +	//TODO  how bad is this approach, not sure how java handles bit manipulation
