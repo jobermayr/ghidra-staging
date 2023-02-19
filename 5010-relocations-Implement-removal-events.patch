@@ -1,0 +1,738 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Jean-Baptiste Boric <jblbeurope@gmail.com>
+Date: Sun, 19 Feb 2023 15:11:00 +0100
+Subject: [PATCH] 5010: relocations: Implement removal & events
+
+implement Relocation::hashCode() and Relocation::equals()
+implement RelocationDBAdapter::remove()
+wire relocation program events
+add ability to remove relocations
+support relocations removal in clear plugin
+---
+ .../app/plugin/core/clear/ClearCmd.java       | 41 ++++++++++
+ .../app/plugin/core/clear/ClearDialog.java    |  9 ++-
+ .../app/plugin/core/clear/ClearOptions.java   | 15 +++-
+ .../plugin/core/reloc/RelocationProvider.java | 13 +++
+ .../core/reloc/RelocationTableModel.java      | 26 +++++-
+ .../core/reloc/RelocationTablePlugin.java     | 80 +++++++++++++++++++
+ .../ghidra/program/database/ProgramDB.java    | 15 ++++
+ .../database/reloc/RelocationDBAdapter.java   |  7 ++
+ .../reloc/RelocationDBAdapterNoTable.java     |  5 ++
+ .../database/reloc/RelocationDBAdapterV1.java |  5 ++
+ .../database/reloc/RelocationDBAdapterV2.java |  5 ++
+ .../database/reloc/RelocationDBAdapterV3.java |  5 ++
+ .../database/reloc/RelocationDBAdapterV4.java |  5 ++
+ .../database/reloc/RelocationDBAdapterV5.java |  5 ++
+ .../database/reloc/RelocationDBAdapterV6.java |  5 ++
+ .../database/reloc/RelocationManager.java     | 38 ++++++++-
+ .../program/model/reloc/Relocation.java       | 23 ++++++
+ .../program/model/reloc/RelocationTable.java  |  6 ++
+ .../ghidra/program/util/ChangeManager.java    | 16 ++++
+ 19 files changed, 318 insertions(+), 6 deletions(-)
+
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/clear/ClearCmd.java b/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/clear/ClearCmd.java
+index 0e6e20e34..55a5da143 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/clear/ClearCmd.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/clear/ClearCmd.java
+@@ -23,6 +23,7 @@ import ghidra.framework.model.DomainObject;
+ import ghidra.program.model.address.*;
+ import ghidra.program.model.lang.Register;
+ import ghidra.program.model.listing.*;
++import ghidra.program.model.reloc.*;
+ import ghidra.program.model.symbol.*;
+ import ghidra.util.Msg;
+ import ghidra.util.Swing;
+@@ -128,6 +129,9 @@ public class ClearCmd extends BackgroundCommand {
+ 		if (options.clearSymbols()) {
+ 			clearSymbols(program, view, monitor);
+ 		}
++		if (options.clearRelocations()) {
++			clearRelocations(program, view, monitor);
++		}
+ 		if (options.clearProperties()) {
+ 			clearProperties(program, view, monitor);
+ 		}
+@@ -190,6 +194,43 @@ public class ClearCmd extends BackgroundCommand {
+ 		}
+ 	}
+ 
++	private void clearRelocations(Program program, AddressSetView clearView, TaskMonitor monitor)
++			throws CancelledException {
++
++		if (clearView.isEmpty()) {
++			return;
++		}
++
++		monitor.initialize(clearView.getNumAddresses());
++		monitor.setMessage("Clearing relocations...");
++
++		RelocationTable relocationTable = program.getRelocationTable();
++
++		// Use ranges to keep track of progress
++		int numDone = 0;
++		int previousRangeAddrCnt = 0;
++		for (AddressRange range : clearView.getAddressRanges()) {
++			Address rangeMin = range.getMinAddress();
++			Iterator<Relocation> relocationIter = relocationTable.getRelocations(new AddressSet(range));
++			while (relocationIter.hasNext()) {
++				monitor.checkCanceled();
++				Relocation r = relocationIter.next();
++
++				relocationTable.remove(r);
++				numDone++;
++
++				if ((numDone % 10000) == 0) {
++					int progress = previousRangeAddrCnt + (int) (r.getAddress().subtract(rangeMin));
++					monitor.setProgress(progress);
++
++					// Allow Swing a chance to paint components that may require a DB lock
++					Swing.allowSwingToProcessEvents();
++				}
++			}
++			previousRangeAddrCnt += range.getLength();
++		}
++	}
++
+ 	private void clearComments(Program program, AddressSetView clearView, TaskMonitor monitor)
+ 			throws CancelledException {
+ 
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/clear/ClearDialog.java b/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/clear/ClearDialog.java
+index 09c61c748..db244bb6b 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/clear/ClearDialog.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/clear/ClearDialog.java
+@@ -32,13 +32,14 @@ import ghidra.util.HelpLocation;
+ 
+ /**
+  * Dialog that shows options for "Clear All." User can choose to clear
+- * symbols, comments, properties, code, and functions.
++ * symbols, relocations, comments, properties, code, and functions.
+  */
+ public class ClearDialog extends DialogComponentProvider {
+ 
+ 	private ClearPlugin plugin;
+ 	private JPanel panel;
+ 	private JCheckBox symbolsCb;
++	private JCheckBox relocationsCb;
+ 	private JCheckBox commentsCb;
+ 	private JCheckBox propertiesCb;
+ 	private JCheckBox codeCb;
+@@ -76,6 +77,7 @@ public class ClearDialog extends DialogComponentProvider {
+ 
+ 		opts.setClearCode(codeCb.isSelected());
+ 		opts.setClearSymbols(symbolsCb.isSelected());
++		opts.setClearRelocations(relocationsCb.isSelected());
+ 		opts.setClearComments(commentsCb.isSelected());
+ 		opts.setClearProperties(propertiesCb.isSelected());
+ 		opts.setClearFunctions(functionsCb.isSelected());
+@@ -123,6 +125,7 @@ public class ClearDialog extends DialogComponentProvider {
+ 		cbPanel.setLayout(bl);
+ 
+ 		symbolsCb = new GCheckBox("Symbols");
++		relocationsCb = new GCheckBox("Relocations");
+ 		commentsCb = new GHtmlCheckBox(
+ 			"<HTML>Comments <FONT SIZE=\"2\">(does not affect automatic comments)</FONT>");
+ 		commentsCb.setVerticalTextPosition(SwingConstants.TOP);
+@@ -139,6 +142,8 @@ public class ClearDialog extends DialogComponentProvider {
+ 
+ 		symbolsCb.setSelected(true);
+ 		symbolsCb.addKeyListener(listener);
++		relocationsCb.setSelected(true);
++		relocationsCb.addKeyListener(listener);
+ 		commentsCb.setSelected(true);
+ 		commentsCb.addKeyListener(listener);
+ 		propertiesCb.setSelected(true);
+@@ -163,6 +168,7 @@ public class ClearDialog extends DialogComponentProvider {
+ 		bookmarksCb.addKeyListener(listener);
+ 
+ 		cbPanel.add(symbolsCb);
++		cbPanel.add(relocationsCb);
+ 		cbPanel.add(commentsCb);
+ 		cbPanel.add(propertiesCb);
+ 		cbPanel.add(codeCb);
+@@ -207,6 +213,7 @@ public class ClearDialog extends DialogComponentProvider {
+ 		// record the checkboxes for later use
+ 		final List<JCheckBox> checkBoxList = new ArrayList<>(10);
+ 		checkBoxList.add(symbolsCb);
++		checkBoxList.add(relocationsCb);
+ 		checkBoxList.add(commentsCb);
+ 		checkBoxList.add(propertiesCb);
+ 		checkBoxList.add(codeCb);
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/clear/ClearOptions.java b/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/clear/ClearOptions.java
+index 33b7ea8fd..411f60f27 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/clear/ClearOptions.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/clear/ClearOptions.java
+@@ -25,6 +25,7 @@ public class ClearOptions {
+ 
+     private boolean code;
+     private boolean symbols;
++    private boolean relocations;
+     private boolean comments;
+     private boolean properties;
+     private boolean functions;
+@@ -46,11 +47,13 @@ public class ClearOptions {
+ 	public ClearOptions( boolean defaultClearValue ) {
+ 	    this(defaultClearValue, defaultClearValue, defaultClearValue, defaultClearValue, 
+ 	        defaultClearValue, defaultClearValue, defaultClearValue, defaultClearValue, 
+-	        defaultClearValue, defaultClearValue, defaultClearValue, defaultClearValue);
++	        defaultClearValue, defaultClearValue, defaultClearValue, defaultClearValue,
++	        defaultClearValue);
+ 	}
+ 	
+     private ClearOptions(boolean code,
+                 		boolean symbols,
++				boolean relocations,
+                 		boolean comments,
+                 		boolean properties,
+                 		boolean functions,
+@@ -63,6 +66,7 @@ public class ClearOptions {
+                 		boolean bookmarks) {
+         this.code = code;
+         this.symbols = symbols;
++        this.relocations = relocations;
+         this.comments = comments;
+         this.properties = properties;
+         this.functions = functions;
+@@ -83,6 +87,10 @@ public class ClearOptions {
+         this.symbols = symbols;
+     }
+ 
++    public void setClearRelocations( boolean relocations ) {
++        this.relocations = relocations;
++    }
++
+     public void setClearComments( boolean comments ) {
+         this.comments = comments;
+     }
+@@ -135,6 +143,9 @@ public class ClearOptions {
+     boolean clearSymbols() {
+         return symbols;
+     }
++    boolean clearRelocations() {
++        return relocations;
++    }
+     boolean clearFunctions() {
+         return functions;
+     }
+@@ -178,7 +189,7 @@ public class ClearOptions {
+     }
+ 
+     boolean clearAny() {
+-        return code || symbols || comments || properties || functions
++        return code || symbols || relocations || comments || properties || functions
+                 || registers || equates || userReferences || analysisReferences
+                 || importReferences || defaultReferences || bookmarks;
+     }
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/reloc/RelocationProvider.java b/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/reloc/RelocationProvider.java
+index b7a13edb6..03871ae7b 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/reloc/RelocationProvider.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/reloc/RelocationProvider.java
+@@ -25,6 +25,7 @@ import ghidra.app.services.GoToService;
+ import ghidra.framework.plugintool.ComponentProviderAdapter;
+ import ghidra.framework.plugintool.ServiceProvider;
+ import ghidra.program.model.listing.Program;
++import ghidra.program.model.reloc.Relocation;
+ import ghidra.util.HelpLocation;
+ import ghidra.util.table.*;
+ 
+@@ -113,4 +114,16 @@ class RelocationProvider extends ComponentProviderAdapter {
+ 		tableFilterPanel.dispose();
+ 
+ 	}
++
++	void relocationAdded(Relocation relocation) {
++		if (isVisible()) {
++			tableModel.relocationAdded(relocation);
++		}
++	}
++
++	void relocationRemoved(Relocation relocation) {
++		if (isVisible()) {
++			tableModel.relocationRemoved(relocation);
++		}
++	}
+ }
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/reloc/RelocationTableModel.java b/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/reloc/RelocationTableModel.java
+index cd81034fc..16ac3fa7f 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/reloc/RelocationTableModel.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/reloc/RelocationTableModel.java
+@@ -67,6 +67,8 @@ class RelocationTableModel extends AddressBasedTableModel<RelocationRowObject> {
+ 	static final String RELOCATION_CURRENT_BYTES = "Current Bytes";
+ 	static final String RELOCATION_NAME = "Name";
+ 
++	private int relocationIndex = 0;
++
+ 	public RelocationTableModel(ServiceProvider serviceProvider, Program program,
+ 			TaskMonitor monitor) {
+ 		super("Relocation Table Model", serviceProvider, program, monitor);
+@@ -110,7 +112,7 @@ class RelocationTableModel extends AddressBasedTableModel<RelocationRowObject> {
+ 			return;
+ 		}
+ 
+-		int relocationIndex = 0;
++		relocationIndex = 0;
+ 		RelocationTable relocationTable = getProgram().getRelocationTable();
+ 		Iterator<Relocation> iterator = relocationTable.getRelocations();
+ 		while (iterator.hasNext()) {
+@@ -160,6 +162,20 @@ class RelocationTableModel extends AddressBasedTableModel<RelocationRowObject> {
+ 			this.relocationIndex = relocationIndex;
+ 			this.relocation = r;
+ 		}
++
++		@Override
++		public boolean equals(Object obj) {
++			if (!(obj instanceof RelocationRowObject)) {
++				return false;
++			}
++			RelocationRowObject other = (RelocationRowObject) obj;
++			return relocation.equals(other.relocation);
++		}
++
++		@Override
++		public int hashCode() {
++			return relocation.hashCode();
++		}
+ 	}
+ 
+ 	private static class RelocationStatusColumn extends
+@@ -281,4 +297,12 @@ class RelocationTableModel extends AddressBasedTableModel<RelocationRowObject> {
+ 		}
+ 
+ 	}
++
++	public void relocationAdded(Relocation relocation) {
++		addObject(new RelocationRowObject(relocation, ++relocationIndex));
++	}
++
++	public void relocationRemoved(Relocation relocation) {
++		removeObject(new RelocationRowObject(relocation, -1));
++	}
+ }
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/reloc/RelocationTablePlugin.java b/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/reloc/RelocationTablePlugin.java
+index c06ce6277..20951f9a2 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/reloc/RelocationTablePlugin.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/reloc/RelocationTablePlugin.java
+@@ -25,9 +25,14 @@ import ghidra.framework.model.*;
+ import ghidra.framework.plugintool.*;
+ import ghidra.framework.plugintool.util.PluginStatus;
+ import ghidra.program.model.listing.Program;
++import ghidra.program.model.reloc.Relocation;
+ import ghidra.program.util.ChangeManager;
++import ghidra.program.util.ProgramChangeRecord;
+ import ghidra.util.table.SelectionNavigationAction;
+ import ghidra.util.table.actions.MakeProgramSelectionAction;
++import ghidra.util.task.TaskMonitor;
++import ghidra.util.worker.Job;
++import ghidra.util.worker.Worker;
+ 
+ //@formatter:off
+ @PluginInfo(
+@@ -47,6 +52,11 @@ public class RelocationTablePlugin extends Plugin implements DomainObjectListene
+ 	private Program currentProgram;
+ 	private RelocationProvider provider;
+ 
++	/**
++	 * A worker that will process domain object change event work off of the Swing thread.
++	 */
++	private Worker domainObjectWorker = Worker.createGuiWorker();
++
+ 	public RelocationTablePlugin(PluginTool tool) {
+ 		super(tool);
+ 	}
+@@ -107,6 +117,76 @@ public class RelocationTablePlugin extends Plugin implements DomainObjectListene
+ 			provider.setProgram(currentProgram);
+ 		}
+ 
++		int eventCnt = ev.numRecords();
++		for (int i = 0; i < eventCnt; ++i) {
++			DomainObjectChangeRecord doRecord = ev.getChangeRecord(i);
++
++			int eventType = doRecord.getEventType();
++			if (!(doRecord instanceof ProgramChangeRecord)) {
++				continue;
++			}
++
++			ProgramChangeRecord rec = (ProgramChangeRecord) doRecord;
++			switch (eventType) {
++				case ChangeManager.DOCR_RELOCATION_ADDED:
++					Relocation relocation = (Relocation) rec.getNewValue();
++					domainObjectWorker.schedule(new RelocationAddedJob(currentProgram, relocation));
++					break;
++
++				case ChangeManager.DOCR_RELOCATION_REMOVED:
++					relocation = (Relocation) rec.getOldValue();
++					domainObjectWorker.schedule(new RelocationRemovedJob(currentProgram, relocation));
++					break;
++			}
++		}
+ 	}
+ 
++	private abstract class AbstractRelocationUpdateJob extends Job {
++
++		protected Program program;
++
++		AbstractRelocationUpdateJob(Program program) {
++			this.program = program;
++		}
++
++		@Override
++		public final void run(TaskMonitor taskMonitor) {
++			if (program != currentProgram) {
++				return;
++			}
++			doRun();
++		}
++
++		protected abstract void doRun();
++	}
++
++	private class RelocationAddedJob extends AbstractRelocationUpdateJob {
++
++		private Relocation relocation;
++
++		RelocationAddedJob(Program program, Relocation relocation) {
++			super(program);
++			this.relocation = relocation;
++		}
++
++		@Override
++		protected void doRun() {
++			provider.relocationAdded(relocation);
++		}
++	}
++
++	private class RelocationRemovedJob extends AbstractRelocationUpdateJob {
++
++		private Relocation relocation;
++
++		RelocationRemovedJob(Program program, Relocation relocation) {
++			super(program);
++			this.relocation = relocation;
++		}
++
++		@Override
++		protected void doRun() {
++			provider.relocationRemoved(relocation);
++		}
++	}
+ }
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/ProgramDB.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/ProgramDB.java
+index 80cfeb814..86409d44f 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/ProgramDB.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/ProgramDB.java
+@@ -54,6 +54,7 @@ import ghidra.program.model.listing.*;
+ import ghidra.program.model.mem.MemoryBlock;
+ import ghidra.program.model.mem.MemoryConflictException;
+ import ghidra.program.model.pcode.Varnode;
++import ghidra.program.model.reloc.Relocation;
+ import ghidra.program.model.symbol.*;
+ import ghidra.program.model.util.AddressSetPropertyMap;
+ import ghidra.program.model.util.PropertyMapManager;
+@@ -1015,6 +1016,20 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
+ 		fireEvent(new ProgramChangeRecord(type, addr, addr, null, oldValue, newValue));
+ 	}
+ 
++	public void relocationAdded(Relocation relocation) {
++		Address addr = relocation.getAddress();
++
++		changed = true;
++		fireEvent(new ProgramChangeRecord(ChangeManager.DOCR_RELOCATION_ADDED, addr, addr, null, null, relocation));
++	}
++
++	public void relocationRemoved(Relocation relocation) {
++		Address addr = relocation.getAddress();
++
++		changed = true;
++		fireEvent(new ProgramChangeRecord(ChangeManager.DOCR_RELOCATION_REMOVED, addr, addr, relocation, relocation, null));
++	}
++
+ 	@Override
+ 	public void setRegisterValuesChanged(Register register, Address start, Address end) {
+ 		if (recordChanges) {
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/reloc/RelocationDBAdapter.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/reloc/RelocationDBAdapter.java
+index 327578e6b..cf07618a9 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/reloc/RelocationDBAdapter.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/reloc/RelocationDBAdapter.java
+@@ -218,6 +218,13 @@ abstract class RelocationDBAdapter {
+ 	abstract void add(Address addr, byte flags, int type, long[] values, byte[] bytes,
+ 			String symbolName) throws IOException;
+ 
++	/**
++	 * Remove a relocation record.
++	 * @param id the relocation id to remove
++	 * @throws IOException if a database error occurs
++	 */
++	abstract void remove(long id) throws IOException;
++
+ 	/**
+ 	 * Iterator over all records in address order.
+ 	 * @return record iterator
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/reloc/RelocationDBAdapterNoTable.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/reloc/RelocationDBAdapterNoTable.java
+index 158a58761..077d43157 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/reloc/RelocationDBAdapterNoTable.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/reloc/RelocationDBAdapterNoTable.java
+@@ -48,6 +48,11 @@ class RelocationDBAdapterNoTable extends RelocationDBAdapter {
+ 		throw new UnsupportedOperationException();
+ 	}
+ 
++	@Override
++	void remove(long id) throws IOException {
++		throw new UnsupportedOperationException();
++	}
++
+ 	@Override
+ 	int getRecordCount() {
+ 		return 0;
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/reloc/RelocationDBAdapterV1.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/reloc/RelocationDBAdapterV1.java
+index 18957a7e4..dec6ca510 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/reloc/RelocationDBAdapterV1.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/reloc/RelocationDBAdapterV1.java
+@@ -60,6 +60,11 @@ class RelocationDBAdapterV1 extends RelocationDBAdapter {
+ 		throw new UnsupportedOperationException();
+ 	}
+ 
++	@Override
++	void remove(long id) throws IOException {
++		throw new UnsupportedOperationException();
++	}
++
+ 	@Override
+ 	int getRecordCount() {
+ 		return relocTable.getRecordCount();
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/reloc/RelocationDBAdapterV2.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/reloc/RelocationDBAdapterV2.java
+index 2882b86c1..c2819d2c0 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/reloc/RelocationDBAdapterV2.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/reloc/RelocationDBAdapterV2.java
+@@ -61,6 +61,11 @@ class RelocationDBAdapterV2 extends RelocationDBAdapter {
+ 		throw new UnsupportedOperationException();
+ 	}
+ 
++	@Override
++	void remove(long id) throws IOException {
++		throw new UnsupportedOperationException();
++	}
++
+ 	@Override
+ 	int getRecordCount() {
+ 		return relocTable.getRecordCount();
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/reloc/RelocationDBAdapterV3.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/reloc/RelocationDBAdapterV3.java
+index e1097c435..ccfe54455 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/reloc/RelocationDBAdapterV3.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/reloc/RelocationDBAdapterV3.java
+@@ -64,6 +64,11 @@ class RelocationDBAdapterV3 extends RelocationDBAdapter {
+ 		throw new UnsupportedOperationException();
+ 	}
+ 
++	@Override
++	void remove(long id) throws IOException {
++		throw new UnsupportedOperationException();
++	}
++
+ 	@Override
+ 	int getRecordCount() {
+ 		return relocTable.getRecordCount();
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/reloc/RelocationDBAdapterV4.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/reloc/RelocationDBAdapterV4.java
+index ac8b14886..ccbbd1f6c 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/reloc/RelocationDBAdapterV4.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/reloc/RelocationDBAdapterV4.java
+@@ -64,6 +64,11 @@ public class RelocationDBAdapterV4 extends RelocationDBAdapter {
+ 		throw new UnsupportedOperationException();
+ 	}
+ 
++	@Override
++	void remove(long id) throws IOException {
++		throw new UnsupportedOperationException();
++	}
++
+ 	@Override
+ 	int getRecordCount() {
+ 		return relocTable.getRecordCount();
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/reloc/RelocationDBAdapterV5.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/reloc/RelocationDBAdapterV5.java
+index 97faf4b94..d0cf02bbe 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/reloc/RelocationDBAdapterV5.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/reloc/RelocationDBAdapterV5.java
+@@ -65,6 +65,11 @@ public class RelocationDBAdapterV5 extends RelocationDBAdapter {
+ 		throw new UnsupportedOperationException();
+ 	}
+ 
++	@Override
++	void remove(long id) throws IOException {
++		throw new UnsupportedOperationException();
++	}
++
+ 	@Override
+ 	int getRecordCount() {
+ 		return relocTable.getRecordCount();
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/reloc/RelocationDBAdapterV6.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/reloc/RelocationDBAdapterV6.java
+index 683719b78..7816cbefc 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/reloc/RelocationDBAdapterV6.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/reloc/RelocationDBAdapterV6.java
+@@ -90,6 +90,11 @@ public class RelocationDBAdapterV6 extends RelocationDBAdapter {
+ 		relocTable.putRecord(r);
+ 	}
+ 
++	@Override
++	void remove(long id) throws IOException {
++		relocTable.deleteRecord(id);
++	}
++
+ 	@Override
+ 	int getRecordCount() {
+ 		return relocTable.getRecordCount();
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/reloc/RelocationManager.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/reloc/RelocationManager.java
+index dad8abd66..c18fd83fe 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/reloc/RelocationManager.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/reloc/RelocationManager.java
+@@ -147,9 +147,10 @@ public class RelocationManager implements RelocationTable, ManagerDB {
+ 		try {
+ 			byte flags = RelocationDBAdapter.getFlags(status, 0);
+ 			adapter.add(addr, flags, type, values, bytes, symbolName);
+-			return new Relocation(addr, status, type, values,
++			Relocation relocation = new Relocation(addr, status, type, values,
+ 				getOriginalBytes(addr, status, bytes, 0),
+ 				symbolName);
++			relocationAdded(relocation);
+ 		}
+ 		catch (IOException e) {
+ 			program.dbError(e);
+@@ -167,9 +168,10 @@ public class RelocationManager implements RelocationTable, ManagerDB {
+ 		try {
+ 			byte flags = RelocationDBAdapter.getFlags(status, byteLength);
+ 			adapter.add(addr, flags, type, values, null, symbolName);
+-			return new Relocation(addr, status, type, values,
++			Relocation relocation = new Relocation(addr, status, type, values,
+ 				getOriginalBytes(addr, status, null, byteLength),
+ 				symbolName);
++			relocationAdded(relocation);
+ 		}
+ 		catch (IOException e) {
+ 			program.dbError(e);
+@@ -180,6 +182,29 @@ public class RelocationManager implements RelocationTable, ManagerDB {
+ 		return null;
+ 	}
+ 
++	@Override
++	public void remove(Relocation relocation) {
++		lock.acquire();
++		try {
++			RecordIterator it = adapter.iterator(relocation.getAddress());
++			while (it.hasNext()) {
++				DBRecord record = it.next();
++				Relocation candidate = getRelocation(record);
++				if (candidate.equals(relocation)) {
++					adapter.remove(record.getKey());
++					relocationRemoved(candidate);
++					break;
++				}
++			}
++		}
++		catch (IOException e) {
++			program.dbError(e);
++		}
++		finally {
++			lock.release();
++		}
++	}
++
+ 	@Override
+ 	public boolean hasRelocation(Address addr) {
+ 		lock.acquire();
+@@ -376,4 +401,13 @@ public class RelocationManager implements RelocationTable, ManagerDB {
+ 		// do nothing here
+ 	}
+ 
++	private void relocationAdded(Relocation relocation) {
++		// fire event
++		program.relocationAdded(relocation);
++	}
++
++	private void relocationRemoved(Relocation relocation) {
++		// fire event
++		program.relocationRemoved(relocation);
++	}
+ }
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/reloc/Relocation.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/reloc/Relocation.java
+index 76099b947..fc17d36ca 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/reloc/Relocation.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/reloc/Relocation.java
+@@ -15,6 +15,9 @@
+  */
+ package ghidra.program.model.reloc;
+ 
++import java.util.Arrays;
++import java.util.Objects;
++
+ import ghidra.program.model.address.Address;
+ 
+ /**
+@@ -192,4 +195,24 @@ public class Relocation {
+ 	public String getSymbolName() {
+ 		return symbolName;
+ 	}
++
++	@Override
++	public int hashCode() {
++		return Objects.hash(addr, status, type, symbolName) ^ Arrays.hashCode(values) ^ Arrays.hashCode(bytes);
++	}
++
++	@Override
++	public boolean equals(Object o) {
++		if (this == o) {
++			return true;
++		}
++		if (!(o instanceof Relocation)) {
++			return false;
++		}
++
++		Relocation other = (Relocation) o;
++		return Objects.equals(addr, other.addr) && Objects.equals(status, other.status) &&
++				type == other.type && Arrays.equals(values, other.values) &&
++				Arrays.equals(bytes, other.bytes) && Objects.equals(symbolName, other.symbolName);
++	}
+ }
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/reloc/RelocationTable.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/reloc/RelocationTable.java
+index b1a704038..f49758009 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/reloc/RelocationTable.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/reloc/RelocationTable.java
+@@ -68,6 +68,12 @@ public interface RelocationTable {
+ 	public Relocation add(Address addr, Status status, int type, long[] values, int byteLength,
+ 			String symbolName);
+ 
++	/**
++	 * Removes a relocation from the relocation table.
++	 * @param relocation the relocation to remove
++	 */
++	public void remove(Relocation relocation);
++
+ 	/**
+ 	 * Returns the ordered list of relocations which have been defined for the specified address.
+ 	 * In most cases there will be one or none, but in some cases multiple relocations may be
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/util/ChangeManager.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/util/ChangeManager.java
+index 26dc58490..0f18dce86 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/util/ChangeManager.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/util/ChangeManager.java
+@@ -724,6 +724,22 @@ public interface ChangeManager {
+ 	 */
+ 	public static final int DOCR_USER_DATA_CHANGED = 201;
+ 
++	////////////////////////////////////////////////////////////////////////////
++	//
++	//                              RELOCATIONS
++	//
++	////////////////////////////////////////////////////////////////////////////
++
++	/**
++	 * A symbol was created.
++	 */
++	public static final int DOCR_RELOCATION_ADDED = 210;
++
++	/**
++	 * A symbol was removed.
++	 */
++	public static final int DOCR_RELOCATION_REMOVED = 211;
++
+ 	////////////////////////////////////////////////////////////////////////////
+ 	/**
+ 	 * Mark the state of a Program as having changed and generate
+-- 
+2.39.1
+
