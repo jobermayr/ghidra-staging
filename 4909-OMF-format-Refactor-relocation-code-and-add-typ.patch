@@ -7,15 +7,15 @@ Subject: [PATCH] 4909: OMF format: Refactor relocation code and add type 2 and
 OMf format: Refactor relocation code and add type 2 and 3 (Fixes: #4777, #4793)
 ---
  .../app/util/bin/format/omf/OmfData.java      |  30 +-
- .../bin/format/omf/OmfEnumeratedData.java     |  22 +-
+ .../bin/format/omf/OmfEnumeratedData.java     |  33 +-
  .../util/bin/format/omf/OmfFileHeader.java    |   2 +-
- .../util/bin/format/omf/OmfFixupRecord.java   | 348 +++++-------------
- .../util/bin/format/omf/OmfIteratedData.java  |  22 +-
+ .../util/bin/format/omf/OmfFixupRecord.java   | 369 ++++++------------
+ .../util/bin/format/omf/OmfIteratedData.java  |  45 ++-
  .../app/util/bin/format/omf/OmfModuleEnd.java |  16 +-
  .../app/util/bin/format/omf/OmfSymbol.java    |  15 +
  .../util/bin/format/omf/OmfSymbolRecord.java  |   6 +
  .../ghidra/app/util/opinion/OmfLoader.java    | 179 ++++++---
- 9 files changed, 290 insertions(+), 350 deletions(-)
+ 9 files changed, 339 insertions(+), 356 deletions(-)
 
 diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfData.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfData.java
 index c0d9b803b..543219928 100644
@@ -76,7 +76,7 @@ index c0d9b803b..543219928 100644
 +	abstract public boolean isAllZeroes();
  }
 diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfEnumeratedData.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfEnumeratedData.java
-index 0f5156829..d04546442 100644
+index 0f5156829..13abdcbd6 100644
 --- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfEnumeratedData.java
 +++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfEnumeratedData.java
 @@ -19,9 +19,7 @@ import java.io.IOException;
@@ -90,7 +90,7 @@ index 0f5156829..d04546442 100644
  	private long streamOffset;		// Position in stream where data starts
  	private int streamLength;		// Number of bytes of data
  
-@@ -36,29 +34,11 @@ public class OmfEnumeratedData extends OmfRecord implements OmfData {
+@@ -36,29 +34,18 @@ public class OmfEnumeratedData extends OmfRecord implements OmfData {
  		readCheckSumByte(reader);
  	}
  
@@ -103,6 +103,9 @@ index 0f5156829..d04546442 100644
 -		return dataOffset;
 -	}
 -
++	/**
++	 * @return The length of the block
++	 */
  	@Override
  	public int getLength() {
  		return streamLength;
@@ -117,14 +120,29 @@ index 0f5156829..d04546442 100644
 -		return (dataOffset < otherOffset) ? -1 : 1;
 -	}
 -
++	/**
++	 * @param The inputfile to read from
++	 * @return The array of bytes
++	 */
  	@Override
  	public byte[] getByteArray(BinaryReader reader) throws IOException {
  		reader.setPointerIndex(streamOffset);
+@@ -66,6 +53,10 @@ public class OmfEnumeratedData extends OmfRecord implements OmfData {
+ 		return buffer;
+ 	}
+ 
++	/**
++	 * Assume that all zeros are done with OmfIteratedData
++	 * @return True if the block is all zeroes
++	 */
+ 	@Override
+ 	public boolean isAllZeroes() {
+ 		return false;
 diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfFileHeader.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfFileHeader.java
-index 9b8aae7bd..d49e63b50 100644
+index b2154f0ae..39c79f9d5 100644
 --- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfFileHeader.java
 +++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfFileHeader.java
-@@ -307,7 +307,7 @@ public class OmfFileHeader extends OmfRecord {
+@@ -306,7 +306,7 @@ public class OmfFileHeader extends OmfRecord {
  			throw new OmfException("Object file does not start with proper header");
  		}
  		OmfFileHeader header = (OmfFileHeader) record;
@@ -134,10 +152,10 @@ index 9b8aae7bd..d49e63b50 100644
  		while (true) {
  			record = OmfRecord.readRecord(reader);
 diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfFixupRecord.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfFixupRecord.java
-index 4ae4bd056..a6d64fdb4 100644
+index 6bf157cdb..702d94b41 100644
 --- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfFixupRecord.java
 +++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfFixupRecord.java
-@@ -17,312 +17,164 @@ package ghidra.app.util.bin.format.omf;
+@@ -17,312 +17,173 @@ package ghidra.app.util.bin.format.omf;
  
  import java.io.IOException;
  import java.util.ArrayList;
@@ -148,22 +166,26 @@ index 4ae4bd056..a6d64fdb4 100644
  
  public class OmfFixupRecord extends OmfRecord {
 -
- 	private Subrecord[] subrecs;
+-	private Subrecord[] subrecs;
 -	private OmfEnumeratedData lastLEData = null;
 -	private OmfIteratedData lastLIData = null;
+-
++	private final Subrecord[] subrecs;
 +	private OmfData lastData = null;
- 
++
 +	/**
 +	 * Read a Fixup record from the input reader
 +	 * @param reader The actual reader
 +	 * @throws IOException
 +	 */
  	public OmfFixupRecord(BinaryReader reader) throws IOException {
- 		ArrayList<Subrecord> subreclist = new ArrayList<Subrecord>();
+-		ArrayList<Subrecord> subreclist = new ArrayList<Subrecord>();
 -		boolean hasBigFields = ((getRecordType() & 1) != 0);
++		final var subreclist = new ArrayList<>();
  
  		readRecordHeader(reader);
- 		long max = reader.getPointerIndex() + getRecordLength() - 1;
+-		long max = reader.getPointerIndex() + getRecordLength() - 1;
++		final var max = reader.getPointerIndex() + getRecordLength() - 1;
  		while (reader.getPointerIndex() < max) {
 -			byte peek = reader.peekNextByte();
 -			if ((peek & 0x80) == 0) {
@@ -271,6 +293,8 @@ index 4ae4bd056..a6d64fdb4 100644
 -
 -		public int getMethod() {
 -			return (type >> 2) & 7;
+-		}
+-
 +		/**
 +		 * Read the next subrecord from the input reader
 +		 *
@@ -319,10 +343,16 @@ index 4ae4bd056..a6d64fdb4 100644
 +			return (first >> 2) & 7;
 +		}
 +
++		/**
++		 * @return True if this is a frame reference
++		 */
 +		public boolean isFrameInSubThread() {
 +			return (first & 0x40) != 0;
- 		}
- 
++		}
++
++		/**
++		 * @return Get the index for explicit thread or frame
++		 */
  		public int getIndex() {
  			return index;
  		}
@@ -331,6 +361,9 @@ index 4ae4bd056..a6d64fdb4 100644
 -			return ((type >> 6) & 1) != 0;
 -		}
 -
++		/**
++		 * @return Get the thread index from flag
++		 */
  		public int getThreadNum() {
 -			return (type & 3);
 +			return (first & 3);
@@ -350,11 +383,11 @@ index 4ae4bd056..a6d64fdb4 100644
 -			ThreadSubrecord thread = new ThreadSubrecord();
 -			thread.type = reader.readNextByte();
 -			int method = thread.getMethod();
--			if (method < 4) {
--				thread.index = OmfRecord.readInt1Or2(reader, hasBigFields);
+-			if (method >= 4 && thread.isFrameThread()) {
+-				thread.index = -1;
 -			}
 -			else {
--				thread.index = -1;
+-				thread.index = OmfRecord.readInt1Or2(reader, hasBigFields);
 -			}
 -			return thread;
 -		}
@@ -551,7 +584,7 @@ index 4ae4bd056..a6d64fdb4 100644
 +
  }
 diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfIteratedData.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfIteratedData.java
-index 99c7fb691..875154791 100644
+index 99c7fb691..b93527386 100644
 --- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfIteratedData.java
 +++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfIteratedData.java
 @@ -20,11 +20,9 @@ import java.util.ArrayList;
@@ -567,7 +600,7 @@ index 99c7fb691..875154791 100644
  	private DataBlock[] datablock;
  
  	public OmfIteratedData(BinaryReader reader) throws IOException {
-@@ -43,15 +41,6 @@ public class OmfIteratedData extends OmfRecord implements OmfData {
+@@ -43,15 +41,9 @@ public class OmfIteratedData extends OmfRecord implements OmfData {
  		blocklist.toArray(datablock);
  	}
  
@@ -580,10 +613,34 @@ index 99c7fb691..875154791 100644
 -		return dataOffset;
 -	}
 -
++	/**
++	 * @return true if the block is all zeros
++	 */
  	@Override
  	public boolean isAllZeroes() {
  		for (int i = 0; i < datablock.length; ++i) {
-@@ -85,15 +74,6 @@ public class OmfIteratedData extends OmfRecord implements OmfData {
+@@ -62,6 +54,9 @@ public class OmfIteratedData extends OmfRecord implements OmfData {
+ 		return true;
+ 	}
+ 
++	/**
++	 * @return the length of the block after expansion
++	 */
+ 	@Override
+ 	public int getLength() {
+ 		int length = 0;
+@@ -71,6 +66,10 @@ public class OmfIteratedData extends OmfRecord implements OmfData {
+ 		return length;
+ 	}
+ 
++	/**
++	 * @param reader The file to read from
++	 * @return The block created from the read data
++	 */
+ 	@Override
+ 	public byte[] getByteArray(BinaryReader reader) throws IOException {
+ 		int length = getLength();
+@@ -85,15 +84,9 @@ public class OmfIteratedData extends OmfRecord implements OmfData {
  		return buffer;
  	}
  
@@ -596,9 +653,36 @@ index 99c7fb691..875154791 100644
 -		return (dataOffset < otherOffset) ? -1 : 1;
 -	}
 -
++	/**
++	 * Contain the definition of one part of a datablock with possible recursion
++	 */
  	public static class DataBlock {
  		private int repeatCount;
  		private int blockCount;
+@@ -120,6 +113,13 @@ public class OmfIteratedData extends OmfRecord implements OmfData {
+ 			return subblock;
+ 		}
+ 
++
++		/**
++		 * Fill part of the buffer
++		 * @param buffer The buffer to fill
++		 * @param pos The next position to fill
++		 * @return The position after the block
++		 */
+ 		public int fillBuffer(byte[] buffer, int pos) {
+ 			for (int i = 0; i < repeatCount; ++i) {
+ 				if (simpleBlock != null) {
+@@ -137,6 +137,9 @@ public class OmfIteratedData extends OmfRecord implements OmfData {
+ 			return pos;
+ 		}
+ 
++		/**
++		 * @return The length of this block
++		 */
+ 		public int getLength() {
+ 			int length = 0;
+ 			if (simpleBlock != null) {
 diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfModuleEnd.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfModuleEnd.java
 index a5def4055..2b90c9327 100644
 --- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfModuleEnd.java
@@ -705,7 +789,7 @@ index e1bb3c33f..323befa77 100644
 +
  }
 diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/opinion/OmfLoader.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/opinion/OmfLoader.java
-index 1be2ff7bc..d6440554f 100644
+index 596b9efaa..6b9873da3 100644
 --- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/opinion/OmfLoader.java
 +++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/opinion/OmfLoader.java
 @@ -17,6 +17,8 @@ package ghidra.app.util.opinion;
@@ -958,7 +1042,7 @@ index 1be2ff7bc..d6440554f 100644
  				}
  			}
  		}
-@@ -474,6 +543,11 @@ public class OmfLoader extends AbstractProgramWrapperLoader {
+@@ -498,6 +567,11 @@ public class OmfLoader extends AbstractProgramWrapperLoader {
  		SymbolTable symbolTable = program.getSymbolTable();
  		Language language = program.getLanguage();
  
@@ -970,7 +1054,7 @@ index 1be2ff7bc..d6440554f 100644
  		monitor.setMessage("Creating External Symbols");
  
  		for (OmfExternalSymbol symbolrec : symbolrecs) {
-@@ -483,6 +557,11 @@ public class OmfLoader extends AbstractProgramWrapperLoader {
+@@ -506,6 +580,11 @@ public class OmfLoader extends AbstractProgramWrapperLoader {
  				if (monitor.isCancelled()) {
  					break;
  				}
