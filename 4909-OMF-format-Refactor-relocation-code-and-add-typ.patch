@@ -6,17 +6,33 @@ Subject: [PATCH] 4909: OMF format: Refactor relocation code and add type 2 and
 
 OMf format: Refactor relocation code and add type 2 and 3 (Fixes: #4777, #4793)
 ---
+ .../util/bin/format/omf/OmfCommentRecord.java |   3 +
  .../app/util/bin/format/omf/OmfData.java      |  30 +-
  .../bin/format/omf/OmfEnumeratedData.java     |  33 +-
- .../util/bin/format/omf/OmfFileHeader.java    |   2 +-
- .../util/bin/format/omf/OmfFixupRecord.java   | 369 ++++++------------
+ .../util/bin/format/omf/OmfFileHeader.java    |  10 +-
+ .../util/bin/format/omf/OmfFixupRecord.java   | 363 ++++++------------
  .../util/bin/format/omf/OmfIteratedData.java  |  45 ++-
  .../app/util/bin/format/omf/OmfModuleEnd.java |  16 +-
+ .../app/util/bin/format/omf/OmfRecord.java    |   4 +-
  .../app/util/bin/format/omf/OmfSymbol.java    |  15 +
  .../util/bin/format/omf/OmfSymbolRecord.java  |   6 +
- .../ghidra/app/util/opinion/OmfLoader.java    | 179 ++++++---
- 9 files changed, 339 insertions(+), 356 deletions(-)
+ .../ghidra/app/util/opinion/OmfLoader.java    | 222 +++++++----
+ 11 files changed, 372 insertions(+), 375 deletions(-)
 
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfCommentRecord.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfCommentRecord.java
+index 1f840b8fe..e93d4def4 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfCommentRecord.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfCommentRecord.java
+@@ -47,6 +47,9 @@ public class OmfCommentRecord extends OmfRecord {
+ 			case COMMENT_CLASS_LIBMOD:
+ 				value = readString(reader);
+ 				break;
++			default:
++				reader.setPointerIndex(reader.getPointerIndex() + getRecordLength() - 3);
++				break;
+ 		}
+ 		readCheckSumByte(reader);
+ 	}
 diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfData.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfData.java
 index c0d9b803b..543219928 100644
 --- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfData.java
@@ -139,9 +155,21 @@ index 0f5156829..13abdcbd6 100644
  	public boolean isAllZeroes() {
  		return false;
 diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfFileHeader.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfFileHeader.java
-index b2154f0ae..39c79f9d5 100644
+index b2154f0ae..5e8014253 100644
 --- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfFileHeader.java
 +++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfFileHeader.java
+@@ -17,10 +17,10 @@ package ghidra.app.util.bin.format.omf;
+ 
+ import java.io.IOException;
+ import java.util.ArrayList;
+-
+ import ghidra.app.util.bin.BinaryReader;
+ import ghidra.app.util.bin.ByteProvider;
+ import ghidra.app.util.importer.MessageLog;
++import ghidra.util.Msg;
+ import ghidra.util.task.TaskMonitor;
+ 
+ public class OmfFileHeader extends OmfRecord {
 @@ -306,7 +306,7 @@ public class OmfFileHeader extends OmfRecord {
  			throw new OmfException("Object file does not start with proper header");
  		}
@@ -151,15 +179,45 @@ index b2154f0ae..39c79f9d5 100644
  
  		while (true) {
  			record = OmfRecord.readRecord(reader);
+@@ -360,7 +360,7 @@ public class OmfFileHeader extends OmfRecord {
+ 			}
+ 			else if (record instanceof OmfIteratedData iterheader) {
+ 				if (iterheader.getSegmentIndex() <= 0 ||
+-					iterheader.getSegmentIndex() > header.segments.size()) {
++						iterheader.getSegmentIndex() > header.segments.size()) {
+ 					throw new OmfException("Bad segment index on LIDATA");
+ 				}
+ 				OmfSegmentHeader segheader2 = header.segments.get(iterheader.getSegmentIndex() - 1);
+@@ -368,6 +368,10 @@ public class OmfFileHeader extends OmfRecord {
+ 				lastDataBlock = iterheader;
+ 			}
+ 			else if (record instanceof OmfUnsupportedRecord) {
++				// lastDataBlock is set to null, because comdat records need to flag that fixup
++				// for this datablock should be skipped. Fixup thread records come before datablocks
++				// so those fixups should be handled.
++				lastDataBlock = null;
+ 				logRecord("Unsupported OMF record", record, log);
+ 			}
+ 			else if (record instanceof OmfObsoleteRecord) {
 diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfFixupRecord.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfFixupRecord.java
-index 6bf157cdb..702d94b41 100644
+index 6bf157cdb..ebca3e687 100644
 --- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfFixupRecord.java
 +++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfFixupRecord.java
-@@ -17,312 +17,173 @@ package ghidra.app.util.bin.format.omf;
- 
- import java.io.IOException;
+@@ -4,9 +4,9 @@
+  * Licensed under the Apache License, Version 2.0 (the "License");
+  * you may not use this file except in compliance with the License.
+  * You may obtain a copy of the License at
+- * 
++ *
+  *      http://www.apache.org/licenses/LICENSE-2.0
+- * 
++ *
+  * Unless required by applicable law or agreed to in writing, software
+  * distributed under the License is distributed on an "AS IS" BASIS,
+  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+@@ -19,310 +19,175 @@ import java.io.IOException;
  import java.util.ArrayList;
--
+ 
  import ghidra.app.util.bin.BinaryReader;
 -import ghidra.program.model.address.Address;
 -import ghidra.program.model.lang.Language;
@@ -267,34 +325,16 @@ index 6bf157cdb..702d94b41 100644
  
  	public static class Subrecord {
 -		private boolean isThread;
--
--		public Subrecord(boolean isthread) {
--			isThread = isthread;
--		}
--
--		public boolean isThread() {
--			return isThread;
--		}
--	}
--
--	public static class ThreadSubrecord extends Subrecord {
--		private byte type;
 +		private byte first;
 +		private byte hiFixup;
 +		private byte fixData;
- 		private int index;
++		private int index;
 +		private int frameDatum;
 +		private int targetDatum;
 +		private int targetDisplacement;
  
--		public ThreadSubrecord() {
--			super(true);
--		}
--
--		public int getMethod() {
--			return (type >> 2) & 7;
--		}
--
+-		public Subrecord(boolean isthread) {
+-			isThread = isthread;
 +		/**
 +		 * Read the next subrecord from the input reader
 +		 *
@@ -306,13 +346,14 @@ index 6bf157cdb..702d94b41 100644
 +		public static Subrecord readSubrecord(BinaryReader reader, boolean hasBigFields)
 +				throws IOException {
 +			int method;
-+			Subrecord rec = new Subrecord();
++			final var rec = new Subrecord();
 +			rec.first = reader.readNextByte();
 +			rec.index = -1;
 +			if (rec.isThreadSubrecord()) {
 +				method = rec.getThreadMethod();
-+				if (method < 4)
-+					rec.index = OmfRecord.readInt1Or2(reader, hasBigFields);
++				if (method < 4) {
++					rec.index = readIndex(reader);
++				}
 +				return rec;
 +			}
 +			rec.targetDisplacement = 0;
@@ -320,36 +361,50 @@ index 6bf157cdb..702d94b41 100644
 +			rec.hiFixup = reader.readNextByte();
 +			rec.fixData = reader.readNextByte();
 +			method = rec.getFrameMethod();
-+			if ((rec.fixData & 0x80) == 0 && method < 3) 	// F=0  (explicit frame method (and datum))
++			if (!rec.isFrameThread() && method < 3) { // F=0  (explicit frame method (and datum))
 +				rec.frameDatum = readIndex(reader);
-+			if ((rec.fixData & 0x08) == 0) 	// T=0  (explicit target)
++			}
++			if (!rec.isTargetThread()) { // T=0  (explicit target)
 +				rec.targetDatum = readIndex(reader);
-+			if ((rec.fixData & 0x04) == 0)		// P=0
++			}
++			if ((rec.fixData & 0x04) == 0) { // P=0
 +				rec.targetDisplacement = readInt2Or4(reader, hasBigFields);
++			}
 +			return rec;
-+		}
-+
+ 		}
+ 
+-		public boolean isThread() {
+-			return isThread;
 +		/**
 +		 * @return True if this is a Thread subrecord type
 +		 */
 +		public boolean isThreadSubrecord() {
 +			return (first & 0x80) == 0;
-+		}
-+
+ 		}
+-	}
+-
+-	public static class ThreadSubrecord extends Subrecord {
+-		private byte type;
+-		private int index;
+ 
+-		public ThreadSubrecord() {
+-			super(true);
 +		/**
 +		 * @return The method value from a Thread subrecord
 +		 */
 +		public int getThreadMethod() {
-+			return (first >> 2) & 7;
-+		}
-+
++			return first >> 2 & 7;
+ 		}
+ 
+-		public int getMethod() {
+-			return (type >> 2) & 7;
 +		/**
 +		 * @return True if this is a frame reference
 +		 */
 +		public boolean isFrameInSubThread() {
 +			return (first & 0x40) != 0;
-+		}
-+
+ 		}
+ 
 +		/**
 +		 * @return Get the index for explicit thread or frame
 +		 */
@@ -366,7 +421,7 @@ index 6bf157cdb..702d94b41 100644
 +		 */
  		public int getThreadNum() {
 -			return (type & 3);
-+			return (first & 3);
++			return first & 3;
  		}
  
 -		public void updateState(FixupState state) {
@@ -410,7 +465,8 @@ index 6bf157cdb..702d94b41 100644
  		}
  
  		public int getFrameMethod() {
- 			return ((fixData >> 4) & 7);
+-			return ((fixData >> 4) & 7);
++			return fixData >> 4 & 7;
  		}
  
 -		public int getP() {
@@ -460,7 +516,7 @@ index 6bf157cdb..702d94b41 100644
 -					state.frameState = -1;			// Indicate an error condition
 -			}
 +		public int getFixMethodWithSub(Subrecord rec) {
-+			return (fixData & 0x04) | (rec.getThreadMethod() & 0x3);
++			return fixData & 0x04 | rec.getThreadMethod() & 0x3;
  		}
  
 -		public void resolveTarget(FixupState state) throws OmfException {
@@ -529,12 +585,12 @@ index 6bf157cdb..702d94b41 100644
 +			return targetDatum;
  		}
 -	}
--
+ 
 -	public static class FixupSubrecord extends Subrecord {
 -		private byte lobyte;			// lo-byte of location
 -		private byte hibyte;			// hi-byte of location
 -		private FixupTarget target;
- 
+-
 -		public FixupSubrecord() {
 -			super(false);
 +		public int getTargetDisplacement() {
@@ -543,7 +599,7 @@ index 6bf157cdb..702d94b41 100644
  
 -		public void resolveFixup(FixupState state) throws OmfException {
 +		public int getLocationType() {
-+			return (first >> 2) & 0xf;
++			return first >> 2 & 0xf;
 +		}
  
 -			target.resolveTarget(state);		// Resolve target first as frame may need to reference results
@@ -566,7 +622,7 @@ index 6bf157cdb..702d94b41 100644
 -			OmfSegmentHeader seg = state.header.resolveSegment(segIndex);
 -			state.locAddress = seg.getAddress(state.language).add(blockDisplace + dataRecordOffset);
 +		public int getDataRecordOffset() {
-+			return ((first & 3) << 8) | (hiFixup & 0xff);
++			return (first & 3) << 8 | hiFixup & 0xff;
  		}
  
 -		public static FixupSubrecord readFixupSubrecord(BinaryReader reader, boolean hasBigFields)
@@ -579,12 +635,11 @@ index 6bf157cdb..702d94b41 100644
 +		public boolean isSegmentRelative() {
 +			return (first & 0x40) != 0;
  		}
-+
  	}
 +
  }
 diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfIteratedData.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfIteratedData.java
-index 99c7fb691..b93527386 100644
+index 99c7fb691..20a10a9dc 100644
 --- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfIteratedData.java
 +++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfIteratedData.java
 @@ -20,11 +20,9 @@ import java.util.ArrayList;
@@ -640,7 +695,7 @@ index 99c7fb691..b93527386 100644
  	@Override
  	public byte[] getByteArray(BinaryReader reader) throws IOException {
  		int length = getLength();
-@@ -85,15 +84,9 @@ public class OmfIteratedData extends OmfRecord implements OmfData {
+@@ -85,15 +84,10 @@ public class OmfIteratedData extends OmfRecord implements OmfData {
  		return buffer;
  	}
  
@@ -655,15 +710,15 @@ index 99c7fb691..b93527386 100644
 -
 +	/**
 +	 * Contain the definition of one part of a datablock with possible recursion
++	 *
 +	 */
  	public static class DataBlock {
  		private int repeatCount;
  		private int blockCount;
-@@ -120,6 +113,13 @@ public class OmfIteratedData extends OmfRecord implements OmfData {
+@@ -120,6 +114,12 @@ public class OmfIteratedData extends OmfRecord implements OmfData {
  			return subblock;
  		}
  
-+
 +		/**
 +		 * Fill part of the buffer
 +		 * @param buffer The buffer to fill
@@ -728,6 +783,29 @@ index a5def4055..2b90c9327 100644
  	}
 +*/
  }
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfRecord.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfRecord.java
+index cbabc4411..afaab9620 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfRecord.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfRecord.java
+@@ -18,8 +18,10 @@ package ghidra.app.util.bin.format.omf;
+ import java.io.IOException;
+ import java.lang.reflect.Field;
+ import java.lang.reflect.Modifier;
++import java.util.ArrayList;
+ 
+ import ghidra.app.util.bin.BinaryReader;
++import ghidra.util.Msg;
+ 
+ public abstract class OmfRecord {
+ 	public final static byte RHEADR = (byte) 0x6E; // Obsolete
+@@ -247,6 +249,6 @@ public abstract class OmfRecord {
+ 	@Override
+ 	public String toString() {
+ 		return String.format("name: %s, type: 0x%x, offset: 0x%x, length: 0x%x",
+-			getRecordName(recordType & 0xfe), recordType, recordOffset, recordLength);
++			getRecordName(recordType & ~1), recordType, recordOffset, recordLength);
+ 	}
+ }
 diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfSymbol.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfSymbol.java
 index 2a2f00c91..2dd8b85e9 100644
 --- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/omf/OmfSymbol.java
@@ -789,19 +867,36 @@ index e1bb3c33f..323befa77 100644
 +
  }
 diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/opinion/OmfLoader.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/opinion/OmfLoader.java
-index 596b9efaa..6b9873da3 100644
+index 596b9efaa..69ce2e1cd 100644
 --- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/opinion/OmfLoader.java
 +++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/opinion/OmfLoader.java
-@@ -17,6 +17,8 @@ package ghidra.app.util.opinion;
+@@ -17,6 +17,7 @@ package ghidra.app.util.opinion;
  
  import java.io.IOException;
  import java.util.*;
-+import java.util.function.Function;
 +import java.util.stream.Collectors;
  
  import ghidra.app.util.MemoryBlockUtils;
  import ghidra.app.util.Option;
-@@ -134,8 +136,8 @@ public class OmfLoader extends AbstractProgramWrapperLoader {
+@@ -46,7 +47,7 @@ public class OmfLoader extends AbstractProgramWrapperLoader {
+ 	public final static long IMAGE_BASE = 0x2000; // Base offset to start loading segments
+ 	public final static long MAX_UNINITIALIZED_FILL = 0x2000;	// Maximum zero bytes added to pad initialized segments
+ 
+-	private ArrayList<OmfSymbol> externsyms = null;
++	private ArrayList<OmfSymbol> externsyms = new ArrayList<>();
+ 
+ 	/**
+ 	 * OMF usually stores a string describing the compiler that produced it in a
+@@ -110,7 +111,7 @@ public class OmfLoader extends AbstractProgramWrapperLoader {
+ 	@Override
+ 	protected void load(ByteProvider provider, LoadSpec loadSpec, List<Option> options,
+ 			Program program, TaskMonitor monitor, MessageLog log)
+-			throws IOException, CancelledException {
++					throws IOException, CancelledException {
+ 
+ 		OmfFileHeader header = null;
+ 		BinaryReader reader = OmfFileHeader.createReader(provider);
+@@ -134,8 +135,8 @@ public class OmfLoader extends AbstractProgramWrapperLoader {
  
  		try {
  			processSegmentHeaders(reader, header, program, monitor, log);
@@ -811,7 +906,7 @@ index 596b9efaa..6b9873da3 100644
  			processRelocations(header, program, monitor, log);
  		}
  		catch (AddressOverflowException e) {
-@@ -149,13 +151,13 @@ public class OmfLoader extends AbstractProgramWrapperLoader {
+@@ -149,13 +150,13 @@ public class OmfLoader extends AbstractProgramWrapperLoader {
  	 * @param log will receive the error message
  	 * @param state is the relocation record that could not be processed
  	 */
@@ -825,13 +920,13 @@ index 596b9efaa..6b9873da3 100644
 -				"Relocations", message);
 +		if (addr != null) {
 +			message = "Unable to process relocation at " + addr + " with type 0x" +
-+				Integer.toHexString(type);
++					Integer.toHexString(type);
 +			program.getBookmarkManager()
-+					.setBookmark(addr, BookmarkType.ERROR, "Relocations", message);
++			.setBookmark(addr, BookmarkType.ERROR, "Relocations", message);
  		}
  		else {
  			message = "Badly broken relocation";
-@@ -172,100 +174,167 @@ public class OmfLoader extends AbstractProgramWrapperLoader {
+@@ -172,100 +173,171 @@ public class OmfLoader extends AbstractProgramWrapperLoader {
  	 */
  	private void processRelocations(OmfFileHeader header, Program program, TaskMonitor monitor,
  			MessageLog log) {
@@ -872,6 +967,10 @@ index 596b9efaa..6b9873da3 100644
 +					int method, index, locationType = -1;
 +					locAddress = null;
  
++					// This is a fixup for comdat block, skip those until they are handled.
++					if(fixup.getDataBlock() == null) {
++						break;
++					}
  					try {
 -						OmfFixupRecord.FixupSubrecord fixsub =
 -							(OmfFixupRecord.FixupSubrecord) subrec;
@@ -915,11 +1014,11 @@ index 596b9efaa..6b9873da3 100644
 +							targetAddr += subrec.getTargetDisplacement();
 +						locationType = subrec.getLocationType();
 +						OmfSegmentHeader seg =
-+							header.resolveSegment(fixup.getDataBlock().getSegmentIndex());
++								header.resolveSegment(fixup.getDataBlock().getSegmentIndex());
 +						locAddress = seg.getAddress(language)
 +								.add(
 +									fixup.getDataBlock().getDataOffset() +
-+										subrec.getDataRecordOffset());
++									subrec.getDataRecordOffset());
 +						if (locAddress == null) {
 +							log.appendMsg("Couldn't find address for fixup");
  							continue;
@@ -957,12 +1056,9 @@ index 596b9efaa..6b9873da3 100644
  								else {
 -									finalvalue -= (state.locAddress.getOffset() + 2);
 +									finalvalue -= (locAddress.getOffset() + 2);
- 								}
--								memory.setShort(state.locAddress, (short) finalvalue);
++								}
 +								memory.setShort(locAddress, (short) finalvalue);
- 								break;
--							// case 2: // 16-bit base -- logical segment base (selector)
--							// case 3: // 32-bit Long pointer (16-bit base:16-bit offset
++								break;
 +							case 2: // 16-bit base -- logical segment base (selector)
 +								if (!subrec.isSegmentRelative()) {
 +									// Segment can't be self relative
@@ -980,16 +1076,19 @@ index 596b9efaa..6b9873da3 100644
 +									// Far can't be self relative
 +									relocationError(program, log, locAddress, locationType);
 +									continue;
-+								}
+ 								}
+-								memory.setShort(state.locAddress, (short) finalvalue);
 +								origbytes = new byte[4];
 +								memory.getBytes(locAddress, origbytes);
 +								finalvalue += converter.getInt(origbytes);
 +								// Convert to segment:offset in 64K blocks
 +								finalvalue =
-+									((finalvalue & 0xffff0000L) << 12) | (finalvalue & 0xffff);
++										((finalvalue & 0xffff0000L) << 12) | (finalvalue & 0xffff);
 +								memory.setInt(locAddress, (int) finalvalue);
-+								break;
-+							// case 11: // 48-bit far pointer (16-bit segment:32-bit offset)
+ 								break;
+-							// case 2: // 16-bit base -- logical segment base (selector)
+-							// case 3: // 32-bit Long pointer (16-bit base:16-bit offset
++								// case 11: // 48-bit far pointer (16-bit segment:32-bit offset)
  							case 4: // High-order byte (high byte of 16-bit offset)
  							case 9: // 32-bit offset
  							case 13: // 32-bit loader-resolved offset (treated same as 9)
@@ -1013,8 +1112,8 @@ index 596b9efaa..6b9873da3 100644
  								log.appendMsg("Unsupported relocation type " +
 -									Integer.toString(state.locationType) + " at 0x" +
 -									Long.toHexString(state.locAddress.getOffset()));
-+									Integer.toString(locationType) + " at 0x" +
-+									Long.toHexString(locAddress.getOffset()));
++										Integer.toString(locationType) + " at 0x" +
++										Long.toHexString(locAddress.getOffset()));
  								break;
  						}
  					}
@@ -1037,24 +1136,109 @@ index 596b9efaa..6b9873da3 100644
  					program.getRelocationTable()
 -							.add(state.locAddress, Status.APPLIED,
 -								state.locationType, values, origbytes, null);
-+							.add(locAddress, Status.APPLIED,
-+								locationType, values, origbytes, null);
++					.add(locAddress, Status.APPLIED,
++						locationType, values, origbytes, null);
  				}
  			}
  		}
-@@ -498,6 +567,11 @@ public class OmfLoader extends AbstractProgramWrapperLoader {
+@@ -315,9 +387,9 @@ public class OmfLoader extends AbstractProgramWrapperLoader {
+ 				block = MemoryBlockUtils.createInitializedBlock(program, false, segment.getName(),
+ 					segmentAddr, segment.getRawDataStream(reader, log), segmentSize,
+ 					"Address:0x" + Long.toHexString(segmentAddr.getOffset()) + " " + "Size:0x" +
+-						Long.toHexString(segmentSize),
+-					null/*source*/, segment.isReadable(), segment.isWritable(),
+-					segment.isExecutable(), log, monitor);
++							Long.toHexString(segmentSize),
++							null/*source*/, segment.isReadable(), segment.isWritable(),
++							segment.isExecutable(), log, monitor);
+ 				if (block != null) {
+ 					log.appendMsg(
+ 						"Created Initialized Block: " + segment.getName() + " @ " + segmentAddr);
+@@ -327,9 +399,9 @@ public class OmfLoader extends AbstractProgramWrapperLoader {
+ 				block = MemoryBlockUtils.createUninitializedBlock(program, false, segment.getName(),
+ 					segmentAddr, segmentSize,
+ 					"Address:0x" + Long.toHexString(segmentAddr.getOffset()) + " " + "Size:0x" +
+-						Long.toHexString(segmentSize),
+-					null/*source*/, segment.isReadable(), segment.isWritable(),
+-					segment.isExecutable(), log);
++							Long.toHexString(segmentSize),
++							null/*source*/, segment.isReadable(), segment.isWritable(),
++							segment.isExecutable(), log);
+ 				if (block != null) {
+ 					log.appendMsg(
+ 						"Created Uninitialized Block: " + segment.getName() + " @ " + segmentAddr);
+@@ -404,7 +476,7 @@ public class OmfLoader extends AbstractProgramWrapperLoader {
+ 				addrBase = baseGroup.getAddress(language);
+ 			}
+ 			else { // Absolute address
+-					// The base frame is ignored by most linkers
++				// The base frame is ignored by most linkers
+ 				addrBase = language.getDefaultSpace().getAddress(0);
+ 			}
+ 
+@@ -420,16 +492,16 @@ public class OmfLoader extends AbstractProgramWrapperLoader {
+ 						// Create a dummy function so that EntryPointAnalyzer will disassemble it
+ 						try {
+ 							program.getFunctionManager()
+-									.createFunction(symbol.getName(), address,
+-										new AddressSet(address), SourceType.IMPORTED);
++							.createFunction(symbol.getName(), address,
++								new AddressSet(address), SourceType.IMPORTED);
+ 						}
+ 						catch (OverlappingFunctionException e) {
+ 							log.appendMsg("Function already exists at address " + address + ": " +
+-								e.getMessage());
++									e.getMessage());
+ 						}
+ 						catch (InvalidInputException e) {
+ 							log.appendMsg("Unable to create function with invalid name " +
+-								symbol.getName() + ": " + e.getMessage());
++									symbol.getName() + ": " + e.getMessage());
+ 						}
+ 					}
+ 				}
+@@ -461,7 +533,7 @@ public class OmfLoader extends AbstractProgramWrapperLoader {
+ 			}
+ 			catch (InvalidInputException e) {
+ 				log.appendMsg("Unable to create symbol " + symbol.getName() + " at 0x" +
+-					Long.toHexString(address.getOffset()));
++						Long.toHexString(address.getOffset()));
+ 				return false;
+ 			}
+ 		}
+@@ -474,10 +546,10 @@ public class OmfLoader extends AbstractProgramWrapperLoader {
+ 	/**
+ 	 * Process any external symbol records and create the corresponding Ghidra symbols.
+ 	 * Build an external memory block to hold them if necessary
+-	 * @param header is the file header for the program
+-	 * @param program is the Program
+-	 * @param monitor is checked for cancellation
+-	 * @param log receives error messages
++	 * @param header The file header for the program
++	 * @param program ghidra program
++	 * @param monitor Monitor checked for cancellation
++	 * @param log Log messages messages
+ 	 */
+ 	private void processExternalSymbols(OmfFileHeader header, Program program, TaskMonitor monitor,
+ 			MessageLog log) {
+@@ -493,11 +565,14 @@ public class OmfLoader extends AbstractProgramWrapperLoader {
+ 			return;
+ 		}
+ 		Address externalAddressStart = externalAddress;
+-		externsyms = new ArrayList<>();
+-
  		SymbolTable symbolTable = program.getSymbolTable();
  		Language language = program.getLanguage();
  
 +		Map<String, OmfSymbol> publicSymbols = header.getPublicSymbols()
 +				.stream()
 +				.flatMap(symbolRec -> symbolRec.getSymbols().stream())
-+				.collect(Collectors.toMap(sym -> sym.getName(), Function.identity()));
++				.collect(Collectors.toMap(sym -> sym.getName(), java.util.function.Function.identity()));
 +
  		monitor.setMessage("Creating External Symbols");
  
  		for (OmfExternalSymbol symbolrec : symbolrecs) {
-@@ -506,6 +580,11 @@ public class OmfLoader extends AbstractProgramWrapperLoader {
+@@ -506,10 +581,15 @@ public class OmfLoader extends AbstractProgramWrapperLoader {
  				if (monitor.isCancelled()) {
  					break;
  				}
@@ -1066,6 +1250,11 @@ index 596b9efaa..6b9873da3 100644
  				Address address = null;
  				if (symbol.getSegmentRef() != 0) { // Look for special Borland segment symbols
  					OmfSegmentHeader segment =
+-						header.getExtraSegments().get(symbol.getSegmentRef() - 1);
++							header.getExtraSegments().get(symbol.getSegmentRef() - 1);
+ 					address = segment.getAddress(language);
+ 					symbol.setAddress(address);
+ 					externsyms.add(symbol);
 -- 
 2.39.1
 
