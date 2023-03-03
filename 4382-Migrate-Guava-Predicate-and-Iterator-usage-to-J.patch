@@ -10,22 +10,22 @@ Sadly, for now, we cannot do the same with Function because the JUNG library dep
 
 Move from Iterators to Java streams.
 ---
- .../DBTraceProgramViewBookmarkManager.java    |  8 ++--
- .../trace/util/WrappingFunctionIterator.java  | 10 +++--
- .../database/spatial/RStarTreeMapTest.java    | 36 ++++++++++------
+ .../DBTraceProgramViewBookmarkManager.java    |  6 ++-
+ .../trace/util/WrappingFunctionIterator.java  |  6 ++-
+ .../database/spatial/RStarTreeMapTest.java    | 15 +++++++
  .../compositeeditor/BitFieldEditorPanel.java  | 13 +++---
  .../graph/layout/DNLEdgeLabelRenderer.java    |  9 ++--
  .../graph/graphs/FilteringVisualGraph.java    | 41 +++++++------------
  .../ghidra/graph/job/FilterVerticesJob.java   | 11 +++--
  .../graph/viewer/edge/VisualEdgeRenderer.java |  8 ++--
  .../database/data/DataTypeSettingsDB.java     | 13 +++---
- 9 files changed, 72 insertions(+), 77 deletions(-)
+ 9 files changed, 63 insertions(+), 59 deletions(-)
 
 diff --git a/Ghidra/Debug/Framework-TraceModeling/src/main/java/ghidra/trace/database/program/DBTraceProgramViewBookmarkManager.java b/Ghidra/Debug/Framework-TraceModeling/src/main/java/ghidra/trace/database/program/DBTraceProgramViewBookmarkManager.java
-index 1b4ec3431..2d05b9888 100644
+index ba1c5bb32..35781913c 100644
 --- a/Ghidra/Debug/Framework-TraceModeling/src/main/java/ghidra/trace/database/program/DBTraceProgramViewBookmarkManager.java
 +++ b/Ghidra/Debug/Framework-TraceModeling/src/main/java/ghidra/trace/database/program/DBTraceProgramViewBookmarkManager.java
-@@ -18,13 +18,13 @@ package ghidra.trace.database.program;
+@@ -18,6 +18,8 @@ package ghidra.trace.database.program;
  import java.awt.Color;
  import java.util.*;
  import java.util.function.Predicate;
@@ -34,18 +34,11 @@ index 1b4ec3431..2d05b9888 100644
  
  import javax.swing.Icon;
  
- import org.apache.commons.collections4.IteratorUtils;
- 
--import com.google.common.collect.Iterators;
--
- import generic.NestedIterator;
- import ghidra.program.model.address.*;
- import ghidra.program.model.listing.Bookmark;
-@@ -293,7 +293,9 @@ public class DBTraceProgramViewBookmarkManager implements TraceProgramViewBookma
+@@ -292,7 +294,9 @@ public class DBTraceProgramViewBookmarkManager implements TraceProgramViewBookma
  	@SuppressWarnings("unchecked")
  	protected static <T, U extends T> Iterator<T> filteredIterator(Iterator<U> it,
  			Predicate<? super U> predicate) {
--		return (Iterator<T>) Iterators.filter(it, e -> predicate.test(e));
+-		return (Iterator<T>) IteratorUtils.filteredIterator(it, e -> predicate.test(e));
 +		Iterable<U> iterable = () -> it;
 +		Stream<U> filterStream = StreamSupport.stream(iterable.spliterator(), false);
 +		return (Iterator<T>) filterStream.filter(e -> predicate.test(e)).iterator();
@@ -53,27 +46,23 @@ index 1b4ec3431..2d05b9888 100644
  
  	@Override
 diff --git a/Ghidra/Debug/Framework-TraceModeling/src/main/java/ghidra/trace/util/WrappingFunctionIterator.java b/Ghidra/Debug/Framework-TraceModeling/src/main/java/ghidra/trace/util/WrappingFunctionIterator.java
-index 19981b712..a20ef8398 100644
+index 553cce6f4..85c83de8b 100644
 --- a/Ghidra/Debug/Framework-TraceModeling/src/main/java/ghidra/trace/util/WrappingFunctionIterator.java
 +++ b/Ghidra/Debug/Framework-TraceModeling/src/main/java/ghidra/trace/util/WrappingFunctionIterator.java
-@@ -16,9 +16,9 @@
- package ghidra.trace.util;
+@@ -17,6 +17,8 @@ package ghidra.trace.util;
  
  import java.util.Iterator;
--
--import com.google.common.base.Predicate;
--import com.google.common.collect.Iterators;
-+import java.util.function.Predicate;
+ import java.util.function.Predicate;
 +import java.util.stream.Stream;
 +import java.util.stream.StreamSupport;
  
- import ghidra.program.model.listing.Function;
- import ghidra.program.model.listing.FunctionIterator;
-@@ -32,7 +32,9 @@ public class WrappingFunctionIterator implements FunctionIterator {
+ import org.apache.commons.collections4.IteratorUtils;
+ 
+@@ -32,7 +34,9 @@ public class WrappingFunctionIterator implements FunctionIterator {
  
  	public <T extends Function> WrappingFunctionIterator(Iterator<T> it,
  			Predicate<? super T> filter) {
--		this.it = Iterators.filter(it, filter);
+-		this.it = IteratorUtils.filteredIterator(it, e -> filter.test(e));
 +		Iterable<T> iterable = () -> it;
 +		Stream<T> filterStream = StreamSupport.stream(iterable.spliterator(), false);
 +		this.it = filterStream.filter(filter).iterator();
@@ -81,7 +70,7 @@ index 19981b712..a20ef8398 100644
  
  	@Override
 diff --git a/Ghidra/Debug/ProposedUtils/src/test/java/ghidra/util/database/spatial/RStarTreeMapTest.java b/Ghidra/Debug/ProposedUtils/src/test/java/ghidra/util/database/spatial/RStarTreeMapTest.java
-index e38175c4a..1d8fef013 100644
+index 960b770ba..cb8a4103e 100644
 --- a/Ghidra/Debug/ProposedUtils/src/test/java/ghidra/util/database/spatial/RStarTreeMapTest.java
 +++ b/Ghidra/Debug/ProposedUtils/src/test/java/ghidra/util/database/spatial/RStarTreeMapTest.java
 @@ -28,6 +28,8 @@ import java.util.*;
@@ -93,16 +82,7 @@ index e38175c4a..1d8fef013 100644
  
  import javax.swing.JFrame;
  import javax.swing.JPanel;
-@@ -36,8 +38,6 @@ import org.apache.commons.lang3.tuple.ImmutablePair;
- import org.apache.commons.lang3.tuple.Pair;
- import org.junit.*;
- 
--import com.google.common.collect.Iterators;
--
- import db.DBHandle;
- import db.DBRecord;
- import generic.theme.GThemeDefaults.Colors.Palette;
-@@ -724,56 +724,66 @@ public class RStarTreeMapTest {
+@@ -722,6 +724,9 @@ public class RStarTreeMapTest {
  
  	@Test
  	public void testQueryIntersecting() {
@@ -110,16 +90,9 @@ index e38175c4a..1d8fef013 100644
 +		Stream<IntRect> filterStream = StreamSupport.stream(it.spliterator(), false);
 +
  		List<IntRect> expected = new ArrayList<>();
--		Iterators.filter(allRects(range), queryRect::intersects).forEachRemaining(expected::add);
-+		filterStream.filter(queryRect::intersects).iterator().forEachRemaining(expected::add);
- 
- 		IntRectQuery query = IntRectQuery.intersecting(queryRect);
- 		List<IntRect> actual = new ArrayList<>();
--		Iterators.filter(allRects(range), query::testData).forEachRemaining(actual::add);
-+		filterStream.filter(query::testData).iterator().forEachRemaining(actual::add);
- 
- 		assertEquals(expected, actual);
- 	}
+ 		IteratorUtils.filteredIterator(allRects(range), queryRect::intersects)
+ 				.forEachRemaining(expected::add);
+@@ -736,6 +741,9 @@ public class RStarTreeMapTest {
  
  	@Test
  	public void testQueryEnclosing() {
@@ -127,16 +100,9 @@ index e38175c4a..1d8fef013 100644
 +		Stream<IntRect> filterStream = StreamSupport.stream(it.spliterator(), false);
 +
  		List<IntRect> expected = new ArrayList<>();
--		Iterators.filter(allRects(range), queryRect::enclosedBy).forEachRemaining(expected::add);
-+		filterStream.filter(queryRect::enclosedBy).iterator().forEachRemaining(expected::add);
- 
- 		IntRectQuery query = IntRectQuery.enclosing(queryRect);
- 		List<IntRect> actual = new ArrayList<>();
--		Iterators.filter(allRects(range), query::testData).forEachRemaining(actual::add);
-+		filterStream.filter(query::testData).iterator().forEachRemaining(actual::add);
- 
- 		assertEquals(expected, actual);
- 	}
+ 		IteratorUtils.filteredIterator(allRects(range), queryRect::enclosedBy)
+ 				.forEachRemaining(expected::add);
+@@ -750,6 +758,9 @@ public class RStarTreeMapTest {
  
  	@Test
  	public void testQueryEnclosed() {
@@ -144,16 +110,9 @@ index e38175c4a..1d8fef013 100644
 +		Stream<IntRect> filterStream = StreamSupport.stream(it.spliterator(), false);
 +
  		List<IntRect> expected = new ArrayList<>();
--		Iterators.filter(allRects(range), queryRect::encloses).forEachRemaining(expected::add);
-+		filterStream.filter(queryRect::encloses).iterator().forEachRemaining(expected::add);
- 
- 		IntRectQuery query = IntRectQuery.enclosed(queryRect);
- 		List<IntRect> actual = new ArrayList<>();
--		Iterators.filter(allRects(range), query::testData).forEachRemaining(actual::add);
-+		filterStream.filter(query::testData).iterator().forEachRemaining(actual::add);
- 
- 		assertEquals(expected, actual);
- 	}
+ 		IteratorUtils.filteredIterator(allRects(range), queryRect::encloses)
+ 				.forEachRemaining(expected::add);
+@@ -764,8 +775,12 @@ public class RStarTreeMapTest {
  
  	@Test
  	public void testQueryIntersectionAndIntersection() {
@@ -164,22 +123,8 @@ index e38175c4a..1d8fef013 100644
  		IntRect queryRect2 = rect(4, 4, 12, 13);
 +
  		List<IntRect> expected = new ArrayList<>();
--		Iterators.filter(allRects(range),
--			r -> queryRect1.intersects(r) && queryRect2.intersects(r))
--				.forEachRemaining(
--					expected::add);
-+		filterStream.filter(r -> queryRect1.intersects(r) && queryRect2.intersects(r)).iterator().forEachRemaining(expected::add);
- 
- 		System.out.println(expected);
- 
- 		IntRectQuery query =
- 			IntRectQuery.intersecting(queryRect1).and(IntRectQuery.intersecting(queryRect2));
- 		List<IntRect> actual = new ArrayList<>();
--		Iterators.filter(allRects(range), query::testData).forEachRemaining(actual::add);
-+		filterStream.filter(query::testData).iterator().forEachRemaining(actual::add);
- 
- 		assertEquals(expected, actual);
- 	}
+ 		IteratorUtils.filteredIterator(allRects(range),
+ 			r -> queryRect1.intersects(r) && queryRect2.intersects(r))
 diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/compositeeditor/BitFieldEditorPanel.java b/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/compositeeditor/BitFieldEditorPanel.java
 index 1717f5977..345bba4b2 100644
 --- a/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/compositeeditor/BitFieldEditorPanel.java
