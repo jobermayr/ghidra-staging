@@ -9,29 +9,38 @@ Fix Frida debugger agent executableJar build
 Note the linkages in the Frida README
 Use env to locate bash in Frida executable Jar
 On macOS bash is in a different path
+WIP: Update build gradle to strip signed files
+Fix typo in Frida build notes
+Add signature strip set to Frida gradle script
+Note the location of the example compiler invocation for Frida
 ---
- .../Debug/Debugger-agent-frida/FridaNotes.txt |  3 +++
- .../Debug/Debugger-agent-frida/build.gradle   |  2 +-
+ .../Debug/Debugger-agent-frida/FridaNotes.txt |  6 ++++-
+ .../Debug/Debugger-agent-frida/build.gradle   |  4 +++-
  .../src/main/sh/execjar.sh                    | 22 +++++++++++++++++++
- 3 files changed, 26 insertions(+), 1 deletion(-)
+ .../Debug/Debugger-agent-frida/unsign_jar.sh  |  4 ++++
+ 4 files changed, 34 insertions(+), 2 deletions(-)
  create mode 100644 Ghidra/Debug/Debugger-agent-frida/src/main/sh/execjar.sh
+ create mode 100755 Ghidra/Debug/Debugger-agent-frida/unsign_jar.sh
 
 diff --git a/Ghidra/Debug/Debugger-agent-frida/FridaNotes.txt b/Ghidra/Debug/Debugger-agent-frida/FridaNotes.txt
-index 50ad5712d..d1cdb3959 100644
+index 50ad5712d..10eb8fcb2 100644
 --- a/Ghidra/Debug/Debugger-agent-frida/FridaNotes.txt
 +++ b/Ghidra/Debug/Debugger-agent-frida/FridaNotes.txt
-@@ -12,6 +12,9 @@ Ghidra needs a dynamically-loadable version of libfrida-core.a which you can gen
+@@ -12,7 +12,11 @@ Ghidra needs a dynamically-loadable version of libfrida-core.a which you can gen
  	cp ghidra_wrapper.c into the directory with libfrida-core.a and frida-core.h (distro or DEVKIT)
  	g++ -shared ghidra_wrapper.c ./libfrida-core.a -o libfrida-core.so
  
+-Libfrida-core.so should then be added to the jna.library.path or put someplace like /usr/lib/x86_64-linux-gnu, where it will get picked up by Native.load().
 +On macOS you will need to also link Objective-C, libresolv and the AppKit and Foundation frameworks:
 +	clang++ -lobjc -lresolv -framework Foundation -framework AppKit -shared ghidra_wrapper.c ./libfrida-core.a -o libfrida-core.so
++An example compiler invocation is available in the example from the Frida devkit at the top of the example C file.
 +
- Libfrida-core.so should then be added to the jna.library.path or put someplace like /usr/lib/x86_64-linux-gnu, where it will get picked up by Native.load().
++Libfrida-core.so should then be added to the jni.library.path or put someplace like /usr/lib/x86_64-linux-gnu, where it will get picked up by Native.load().
  
  - Frida Functionality
+ 	The most interesting bits of Frida are available as "methods" from the Objects Tree.  For instance, if you select a function and hit "M", you will get a dialog with available methods.  Selecting, for example, "intercept" will bring up a second dialog with the relevant parameters.  For many of these, you will want to provide your own Javascript "on" functions, e.g. onEnter for the Interceptor. Stalking is available on Threads and the individual thread entries. Scan, protect, and watch functions are available on Memory. You can also redirect the output to GhidraScript, although this relies on a bit of a hack.  If your Javascript "Name" parameter is something like "interpreter", prepend "interpreter<=" to the output from your Javascript, and the results will be passed to both the console and the script.
 diff --git a/Ghidra/Debug/Debugger-agent-frida/build.gradle b/Ghidra/Debug/Debugger-agent-frida/build.gradle
-index d4a95dca6..8ec1593cb 100644
+index d4a95dca6..4c50b0b74 100644
 --- a/Ghidra/Debug/Debugger-agent-frida/build.gradle
 +++ b/Ghidra/Debug/Debugger-agent-frida/build.gradle
 @@ -64,7 +64,7 @@ task nodepJar(type: Jar) {
@@ -43,6 +52,22 @@ index d4a95dca6..8ec1593cb 100644
  	archiveAppendix = 'nodep'
  	manifest {
  		attributes['Main-Class'] = 'agent.lldb.gadp.FridaGadpServer'
+@@ -77,6 +77,7 @@ task executableJar {
+ 	ext.execsh = file("src/main/sh/execjar.sh")
+ 	ext.jarfile = file(nodepJar.archivePath)
+ 	ext.outjar = file("${buildDir}/bin/gadp-agent-frida")
++	ext.unsign_jar = file("unsign_jar.sh")
+ 	dependsOn(nodepJar)
+ 	inputs.file(execsh)
+ 	inputs.file(jarfile)
+@@ -92,6 +93,7 @@ task executableJar {
+ 			}
+ 		}
+ 		exec {
++			commandLine(ext.unsign_jar, outjar)
+ 			commandLine("chmod", "+x", outjar)
+ 		}
+ 	}
 diff --git a/Ghidra/Debug/Debugger-agent-frida/src/main/sh/execjar.sh b/Ghidra/Debug/Debugger-agent-frida/src/main/sh/execjar.sh
 new file mode 100644
 index 000000000..b1cab936f
@@ -71,6 +96,16 @@ index 000000000..b1cab936f
 +
 +java -jar "$0"
 +exit
+diff --git a/Ghidra/Debug/Debugger-agent-frida/unsign_jar.sh b/Ghidra/Debug/Debugger-agent-frida/unsign_jar.sh
+new file mode 100755
+index 000000000..0dcf78d92
+--- /dev/null
++++ b/Ghidra/Debug/Debugger-agent-frida/unsign_jar.sh
+@@ -0,0 +1,4 @@
++#!/usr/bin/env bash
++set -e
++echo "Removing signature files from ${1}"
++zip ${1} -d $(unzip -l Debugger-agent-frida-nodep.jar| grep '.SF$' | awk '{ print $4}')
 -- 
 2.39.1
 
