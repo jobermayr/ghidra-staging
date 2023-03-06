@@ -1,0 +1,99 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E3=81=8B=E3=81=84=E3=81=A0?= <kaida@cyberkaida.gg>
+Date: Fri, 3 Mar 2023 15:05:05 +0900
+Subject: [PATCH] 5061: Add quick script to build the lldb-swig from brew on
+ macOS
+
+This script downloads llvm and its source code from homebrew,
+builds the liblldb-java library against this llvm and configures
+Ghidra to use this library.
+---
+ Ghidra/RuntimeScripts/build.gradle            |  6 ++
+ .../macos_debugger_lldb_build_from_brew.sh    | 58 +++++++++++++++++++
+ 2 files changed, 64 insertions(+)
+ create mode 100755 Ghidra/RuntimeScripts/macOS/support/macos_debugger_lldb_build_from_brew.sh
+
+diff --git a/Ghidra/RuntimeScripts/build.gradle b/Ghidra/RuntimeScripts/build.gradle
+index 5dbe5f73e..d05e3b890 100644
+--- a/Ghidra/RuntimeScripts/build.gradle
++++ b/Ghidra/RuntimeScripts/build.gradle
+@@ -43,6 +43,12 @@ rootProject.PLATFORMS.each { platform ->
+ 			t.from (p.file("Linux/ghidra.desktop"))
+ 		}
+ 
++		if (isMac(platform.name)) {
++			t.from ("${p.projectDir}/macOS/support") {
++				into "support"
++			}
++		}
++
+ 		if (isWindows(platform.name)) {
+ 			t.from ("${p.projectDir}/Windows/support") {
+ 				into "support"
+diff --git a/Ghidra/RuntimeScripts/macOS/support/macos_debugger_lldb_build_from_brew.sh b/Ghidra/RuntimeScripts/macOS/support/macos_debugger_lldb_build_from_brew.sh
+new file mode 100755
+index 000000000..69cd60f66
+--- /dev/null
++++ b/Ghidra/RuntimeScripts/macOS/support/macos_debugger_lldb_build_from_brew.sh
+@@ -0,0 +1,58 @@
++#!/usr/bin/env bash
++# This script will download lldb from homebrew and
++# build the Ghidra JNI bindings for this version of
++# lldb. It will then patch your Ghidra distribution
++# to use these built libraries.
++
++set -ex
++
++if [ -z "${GHIDRA_INSTALL_DIR}" ]; then
++	echo "Please set the GHIDRA_INSTALL_DIR environment variable to your Ghidra install location"
++	exit 1
++fi
++
++if [ ! -z "${GHIDRA_INSTALL_DIR}" ]; then
++	pushd "${GHIDRA_INSTALL_DIR}/Ghidra/Debug/Debugger-swig-lldb"
++fi
++
++# Pin to 14, as this is what Ghidra's built in bindings are built against
++LLVM_VERSION="14"
++
++# Install llvm and unpack the source code for this version, patched
++# with the brew patches
++brew install llvm@${LLVM_VERSION}
++
++LLVM_TEMP_DIR=$(mktemp -d)
++
++# Download the source code brew used to build llvm, including
++# brew specific patches.
++brew unpack --patch --destdir ${LLVM_TEMP_DIR} llvm@${LLVM_VERSION}
++export LLVM_HOME="$(echo ${LLVM_TEMP_DIR}/llvm@${LLVM_VERSION}-*)"
++
++# Set the appropriate build variables to link and compile the
++# liblldb-java library below.
++BREW_LLVM="$(brew --prefix llvm@${LLVM_VERSION})"
++export LDFLAGS="-L${BREW_LLVM}/lib/c++ -Wl,-rpath,${BREW_LLVM}/lib/c++,-L${BREW_LLVM}/lib"
++export PATH="${BREW_LLVM}/bin:$PATH"
++export CPPFLAGS="-I${BREW_LLVM}/include"
++
++export LLVM_BUILD="$(echo ${BREW_LLVM})"
++
++# Build native components
++gradle buildNatives
++
++# Build only the library required for our architecture.
++# The brew llvm package installs a thinned binary containing
++# only the native architecture of your machine.
++if [ $(arch) == "arm64" ]; then
++	gradle :Debugger-swig-lldb:linkMainMac_arm_64SharedLibrary
++	export LIBLLDB_JAVA_DIR=Ghidra/Debug/Debugger-swig-lldb/build/os/mac_arm_64/
++else
++	gradle :Debugger-swig-lldb:linkMainMac_x86_64SharedLibrary
++	export LIBLLDB_JAVA_DIR=Ghidra/Debug/Debugger-swig-lldb/build/os/mac_x86_64/
++fi
++
++# Patch the launch.properties with our library location
++LAUNCH_PROPERTIES=${GHIDRA_INSTALL_DIR}/support/launch.properties
++sed -i '' /llvm/d ${LAUNCH_PROPERTIES}
++echo "VMARGS=-Djava.library.path=${GHIDRA_INSTALL_DIR}/${LIBLLDB_JAVA_DIR}:${BREW_LLVM}/lib" >> ${LAUNCH_PROPERTIES}
+-- 
+2.39.1
+
