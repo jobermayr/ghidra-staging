@@ -14,12 +14,11 @@ Fix typo in Frida build notes
 Add signature strip set to Frida gradle script
 Note the location of the example compiler invocation for Frida
 ---
- .../Debug/Debugger-agent-frida/FridaNotes.txt |  6 ++++-
- .../Debug/Debugger-agent-frida/build.gradle   |  4 +++-
- .../src/main/sh/execjar.sh                    | 22 +++++++++++++++++++
- .../Debug/Debugger-agent-frida/unsign_jar.sh  |  4 ++++
- 4 files changed, 34 insertions(+), 2 deletions(-)
- create mode 100644 Ghidra/Debug/Debugger-agent-frida/src/main/sh/execjar.sh
+ Ghidra/Debug/Debugger-agent-frida/FridaNotes.txt | 6 +++++-
+ Ghidra/Debug/Debugger-agent-frida/unsign_jar.sh  | 4 ++++
+ gradle/debugger/hasExecutableJar.gradle          | 2 ++
+ gradle/debugger/hasNodepJar.gradle               | 2 +-
+ 4 files changed, 12 insertions(+), 2 deletions(-)
  create mode 100755 Ghidra/Debug/Debugger-agent-frida/unsign_jar.sh
 
 diff --git a/Ghidra/Debug/Debugger-agent-frida/FridaNotes.txt b/Ghidra/Debug/Debugger-agent-frida/FridaNotes.txt
@@ -39,63 +38,6 @@ index 50ad5712d..10eb8fcb2 100644
  
  - Frida Functionality
  	The most interesting bits of Frida are available as "methods" from the Objects Tree.  For instance, if you select a function and hit "M", you will get a dialog with available methods.  Selecting, for example, "intercept" will bring up a second dialog with the relevant parameters.  For many of these, you will want to provide your own Javascript "on" functions, e.g. onEnter for the Interceptor. Stalking is available on Threads and the individual thread entries. Scan, protect, and watch functions are available on Memory. You can also redirect the output to GhidraScript, although this relies on a bit of a hack.  If your Javascript "Name" parameter is something like "interpreter", prepend "interpreter<=" to the output from your Javascript, and the results will be passed to both the console and the script.
-diff --git a/Ghidra/Debug/Debugger-agent-frida/build.gradle b/Ghidra/Debug/Debugger-agent-frida/build.gradle
-index d4a95dca6..4c50b0b74 100644
---- a/Ghidra/Debug/Debugger-agent-frida/build.gradle
-+++ b/Ghidra/Debug/Debugger-agent-frida/build.gradle
-@@ -64,7 +64,7 @@ task nodepJar(type: Jar) {
- 	inputs.file(file(jar.archivePath))
- 	dependsOn(configureNodepJar)
- 	dependsOn(jar)
--	
-+	duplicatesStrategy = 'exclude'
- 	archiveAppendix = 'nodep'
- 	manifest {
- 		attributes['Main-Class'] = 'agent.lldb.gadp.FridaGadpServer'
-@@ -77,6 +77,7 @@ task executableJar {
- 	ext.execsh = file("src/main/sh/execjar.sh")
- 	ext.jarfile = file(nodepJar.archivePath)
- 	ext.outjar = file("${buildDir}/bin/gadp-agent-frida")
-+	ext.unsign_jar = file("unsign_jar.sh")
- 	dependsOn(nodepJar)
- 	inputs.file(execsh)
- 	inputs.file(jarfile)
-@@ -92,6 +93,7 @@ task executableJar {
- 			}
- 		}
- 		exec {
-+			commandLine(ext.unsign_jar, outjar)
- 			commandLine("chmod", "+x", outjar)
- 		}
- 	}
-diff --git a/Ghidra/Debug/Debugger-agent-frida/src/main/sh/execjar.sh b/Ghidra/Debug/Debugger-agent-frida/src/main/sh/execjar.sh
-new file mode 100644
-index 000000000..b1cab936f
---- /dev/null
-+++ b/Ghidra/Debug/Debugger-agent-frida/src/main/sh/execjar.sh
-@@ -0,0 +1,22 @@
-+#!/usr/bin/env bash
-+## ###
-+#  IP: GHIDRA
-+#
-+#  Licensed under the Apache License, Version 2.0 (the "License");
-+#  you may not use this file except in compliance with the License.
-+#  You may obtain a copy of the License at
-+#
-+#       http://www.apache.org/licenses/LICENSE-2.0
-+#
-+#  Unless required by applicable law or agreed to in writing, software
-+#  distributed under the License is distributed on an "AS IS" BASIS,
-+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-+#  See the License for the specific language governing permissions and
-+#  limitations under the License.
-+##
-+# This clever bit can be prepended to a JAR to make it self-executable
-+
-+set -e
-+
-+java -jar "$0"
-+exit
 diff --git a/Ghidra/Debug/Debugger-agent-frida/unsign_jar.sh b/Ghidra/Debug/Debugger-agent-frida/unsign_jar.sh
 new file mode 100755
 index 000000000..0dcf78d92
@@ -106,6 +48,39 @@ index 000000000..0dcf78d92
 +set -e
 +echo "Removing signature files from ${1}"
 +zip ${1} -d $(unzip -l Debugger-agent-frida-nodep.jar| grep '.SF$' | awk '{ print $4}')
+diff --git a/gradle/debugger/hasExecutableJar.gradle b/gradle/debugger/hasExecutableJar.gradle
+index bca8f24fd..9f92675e0 100644
+--- a/gradle/debugger/hasExecutableJar.gradle
++++ b/gradle/debugger/hasExecutableJar.gradle
+@@ -20,6 +20,7 @@ task executableJar {
+ 	ext.execsh = file("src/main/sh/execjar.sh")
+ 	ext.jarfile = file(nodepJar.archivePath)
+ 	ext.outjar = file("${buildDir}/bin/run")
++	ext.unsign_jar = file("unsign_jar.sh")
+ 	dependsOn(nodepJar)
+ 	inputs.file { execsh }
+ 	inputs.file { jarfile }
+@@ -35,6 +36,7 @@ task executableJar {
+ 			}
+ 		}
+ 		exec {
++			commandLine(ext.unsign_jar, outjar)
+ 			commandLine("chmod", "+x", outjar)
+ 		}
+ 	}
+diff --git a/gradle/debugger/hasNodepJar.gradle b/gradle/debugger/hasNodepJar.gradle
+index a309d000d..61b73d1d5 100644
+--- a/gradle/debugger/hasNodepJar.gradle
++++ b/gradle/debugger/hasNodepJar.gradle
+@@ -53,7 +53,7 @@ task nodepJar(type: Jar) {
+ 	inputs.file(file(jar.archivePath))
+ 	dependsOn(configureNodepJar)
+ 	dependsOn(jar)
+-
++	duplicatesStrategy = 'exclude'
+ 	archiveAppendix = 'nodep'
+ 
+ 	from(zipTree(jar.archivePath))
 -- 
 2.39.1
 
