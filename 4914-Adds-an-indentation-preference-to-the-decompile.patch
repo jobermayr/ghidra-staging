@@ -28,12 +28,12 @@ The default style is K&R.
  .../Decompiler/src/decompile/cpp/block.hh     |   3 +
  .../Decompiler/src/decompile/cpp/options.cc   |  13 ++
  .../Decompiler/src/decompile/cpp/options.hh   |   6 +
- .../Decompiler/src/decompile/cpp/printc.cc    | 142 +++++++++++++++---
+ .../Decompiler/src/decompile/cpp/printc.cc    | 155 +++++++++++++++---
  .../Decompiler/src/decompile/cpp/printc.hh    |  14 ++
  .../src/decompile/cpp/printlanguage.cc        |  11 ++
  .../src/decompile/cpp/printlanguage.hh        |   6 +
- .../app/decompiler/DecompileOptions.java      |  45 ++++++
- 8 files changed, 221 insertions(+), 19 deletions(-)
+ .../app/decompiler/DecompileOptions.java      |  45 +++++
+ 8 files changed, 230 insertions(+), 23 deletions(-)
 
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/block.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/block.hh
 index 3ca33e41f..89e69d3c7 100644
@@ -105,7 +105,7 @@ index 2ba09d575..ff351f8e3 100644
  public:
    OptionIntegerFormat(void) { name = "integerformat"; }	///< Constructor
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/printc.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/printc.cc
-index 4911a7745..253aff3ec 100644
+index 4911a7745..f18ca79d9 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/printc.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/printc.cc
 @@ -104,6 +104,8 @@ const string PrintC::KEYWORD_RETURN = "return";
@@ -255,23 +255,26 @@ index 4911a7745..253aff3ec 100644
        if (elseBlock->getType() == FlowBlock::t_if) {
  	// Attempt to merge the "else" and "if" syntax
  	setMod(pending_brace);
-@@ -2910,13 +2951,13 @@ void PrintC::emitBlockIf(const BlockIf *bl)
+@@ -2910,13 +2951,16 @@ void PrintC::emitBlockIf(const BlockIf *bl)
        }
        else {
  	int4 id2 = emit->startIndent();
 -	emit->print(OPEN_CURLY);
-+	emitFormattedStartBrace(id2,printIndex);
++	// printIndex must be saved because printIndex or elseBlock->getPrintIndex()
++	// can be increased and emitFormattedCloseBrace could show wrong tracking info
++	int4 printIndex_ = printIndex;
++	emitFormattedStartBrace(id2,printIndex_);
  	int4 id3 = emit->beginBlock(elseBlock);
  	elseBlock->emit(this);
  	emit->endBlock(id3);
  	emit->stopIndent(id2);
  	emit->tagLine();
 -	emit->print(CLOSE_CURLY);
-+	emitFormattedCloseBrace(printIndex);
++	emitFormattedCloseBrace(printIndex_);
        }
      }
    }
-@@ -2924,7 +2965,7 @@ void PrintC::emitBlockIf(const BlockIf *bl)
+@@ -2924,7 +2968,7 @@ void PrintC::emitBlockIf(const BlockIf *bl)
    if (pendingBrace.getIndentId() >= 0) {
      emit->stopIndent(pendingBrace.getIndentId());
      emit->tagLine();
@@ -280,7 +283,7 @@ index 4911a7745..253aff3ec 100644
    }
  }
  
-@@ -2971,14 +3012,16 @@ void PrintC::emitForLoop(const BlockWhileDo *bl)
+@@ -2971,14 +3015,16 @@ void PrintC::emitForLoop(const BlockWhileDo *bl)
    emit->closeParen(CLOSE_PAREN,id1);
    emit->spaces(1);
    indent = emit->startIndent();
@@ -299,7 +302,7 @@ index 4911a7745..253aff3ec 100644
    popMod();
  }
  
-@@ -3012,7 +3055,9 @@ void PrintC::emitBlockWhileDo(const BlockWhileDo *bl)
+@@ -3012,7 +3058,9 @@ void PrintC::emitBlockWhileDo(const BlockWhileDo *bl)
      emit->closeParen(CLOSE_PAREN,id1);
      emit->spaces(1);
      indent = emit->startIndent();
@@ -310,7 +313,7 @@ index 4911a7745..253aff3ec 100644
      pushMod();
      setMod(no_branch);
      condBlock->emit(this);
-@@ -3043,7 +3088,9 @@ void PrintC::emitBlockWhileDo(const BlockWhileDo *bl)
+@@ -3043,7 +3091,9 @@ void PrintC::emitBlockWhileDo(const BlockWhileDo *bl)
      emit->closeParen(CLOSE_PAREN,id1);
      emit->spaces(1);
      indent = emit->startIndent();
@@ -321,7 +324,7 @@ index 4911a7745..253aff3ec 100644
    }
    setMod(no_branch); // Dont print goto at bottom of clause
    int4 id2 = emit->beginBlock(bl->getBlock(1));
-@@ -3051,8 +3098,8 @@ void PrintC::emitBlockWhileDo(const BlockWhileDo *bl)
+@@ -3051,8 +3101,8 @@ void PrintC::emitBlockWhileDo(const BlockWhileDo *bl)
    emit->endBlock(id2);
    emit->stopIndent(indent);
    emit->tagLine();
@@ -331,7 +334,7 @@ index 4911a7745..253aff3ec 100644
  }
  
  void PrintC::emitBlockDoWhile(const BlockDoWhile *bl)
-@@ -3068,7 +3115,9 @@ void PrintC::emitBlockDoWhile(const BlockDoWhile *bl)
+@@ -3068,7 +3118,9 @@ void PrintC::emitBlockDoWhile(const BlockDoWhile *bl)
    emit->print(KEYWORD_DO,EmitMarkup::keyword_color);
    emit->spaces(1);
    int4 id = emit->startIndent();
@@ -342,18 +345,17 @@ index 4911a7745..253aff3ec 100644
    pushMod();
    int4 id2 = emit->beginBlock(bl->getBlock(0));
    setMod(no_branch);
-@@ -3086,6 +3135,10 @@ void PrintC::emitBlockDoWhile(const BlockDoWhile *bl)
+@@ -3086,6 +3138,9 @@ void PrintC::emitBlockDoWhile(const BlockDoWhile *bl)
    bl->getBlock(0)->emit(this);
    emit->print(SEMICOLON);
    popMod();
 +  if (option_indentationStyleTracking) {
-+    string index_ = to_string(bl->getPrintIndex());
-+    emit->print(PrintLanguage::makeComment(index_),EmitMarkup::comment_color);
++    emit->print(PrintLanguage::makeComment(to_string(printIndex)),EmitMarkup::comment_color);
 +  }
  }
  
  void PrintC::emitBlockInfLoop(const BlockInfLoop *bl)
-@@ -3100,13 +3153,15 @@ void PrintC::emitBlockInfLoop(const BlockInfLoop *bl)
+@@ -3100,13 +3155,15 @@ void PrintC::emitBlockInfLoop(const BlockInfLoop *bl)
    emit->print(KEYWORD_DO,EmitMarkup::keyword_color);
    emit->spaces(1);
    int4 id = emit->startIndent();
@@ -371,29 +373,50 @@ index 4911a7745..253aff3ec 100644
    emit->spaces(1);
    op = bl->getBlock(0)->lastOp();
    emit->tagOp(KEYWORD_WHILE,EmitMarkup::keyword_color,op);
-@@ -3117,6 +3172,10 @@ void PrintC::emitBlockInfLoop(const BlockInfLoop *bl)
+@@ -3117,6 +3174,9 @@ void PrintC::emitBlockInfLoop(const BlockInfLoop *bl)
    emit->closeParen(CLOSE_PAREN,id2);
    emit->print(SEMICOLON);
    popMod();
 +  if (option_indentationStyleTracking) {
-+    string index_ = to_string(bl->getPrintIndex());
-+    emit->print(PrintLanguage::makeComment(index_),EmitMarkup::comment_color);
++    emit->print(PrintLanguage::makeComment(to_string(bl->getPrintIndex())),EmitMarkup::comment_color);
 +  }
  }
  
  /// Given a \e switch block and an index indicating a particular \e case block,
-@@ -3326,7 +3385,7 @@ void PrintC::emitBlockSwitch(const BlockSwitch *bl)
+@@ -3326,32 +3386,81 @@ void PrintC::emitBlockSwitch(const BlockSwitch *bl)
    bl->getSwitchBlock()->emit(this);
    popMod();
    emit->spaces(1);
 -  emit->print(OPEN_CURLY);
-+  emitFormattedStartBrace(0,bl->getPrintIndex());
++  printIndex++;
++  ((FlowBlock *)bl)->setPrintIndex(printIndex);
++  int id = emit->startIndent();
++  emitFormattedStartBrace(id,printIndex);
  
    for(int4 i=0;i<bl->getNumCaseBlocks();++i) {
      emitSwitchCase(i,bl);
-@@ -3348,10 +3407,55 @@ void PrintC::emitBlockSwitch(const BlockSwitch *bl)
-     emit->stopIndent(id);
+-    int4 id = emit->startIndent();
++    int4 id2 = emit->startIndent();
+     if (bl->getGotoType(i)!=0) {
+       emit->tagLine();
+       emitGotoStatement(bl->getBlock(0),bl->getCaseBlock(i),bl->getGotoType(i));
+     }
+     else {
+       bl2 = bl->getCaseBlock(i);
+-      int4 id2 = emit->beginBlock(bl2);
++      int4 id3 = emit->beginBlock(bl2);
+       bl2->emit(this);
+       if (bl->isExit(i)&&(i!=bl->getNumCaseBlocks()-1)) {	// Blocks that formally exit the switch
+ 	emit->tagLine();
+ 	emitGotoStatement(bl2,(const FlowBlock *)0,FlowBlock::f_break_goto); // need an explicit break statement
+       }
+-      emit->endBlock(id2);
++      emit->endBlock(id3);
+     }
+-    emit->stopIndent(id);
++    emit->stopIndent(id2);
    }
++  emit->stopIndent(id);
    emit->tagLine();
 -  emit->print(CLOSE_CURLY);
 +  emitFormattedCloseBrace(bl->getPrintIndex());
