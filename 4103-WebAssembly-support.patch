@@ -69,11 +69,77 @@ Without this, we get the error "<pentry> tags within a group must be
 distinguished by size or type" when attempting to load the pos-stack compiler
 spec. This will break functions that have multiple output arguments, but those
 are expected to be rare (and they are not well-supported by Ghidra anyway).
+
+WebAssembly: Add a new script to handle "flat" dyncall namespaces.
+
+It seems like LLVM, for instance, uses table indices as function pointers, so
+this script is likely to be useful for anything compiled with LLVM. As a guess,
+analyze_dyncalls is probably only useful for programs compiled using the
+Emscripten fastcomp backend.
+
+WebAssembly: Mark __wasm prototypes as register strategies
+
+WebAssembly: Add a stack analyzer which creates C stack variables for Wasm.
+
+The traditional stack analyzer, StackVariableAnalyzer
+(NewFunctionStackAnalysisCmd) depends on having registers that contain stack
+addresses visible as assembly operands. However, due to the Wasm disassembler
+design, which hides the Wasm stack registers from the disassembly, this stack
+analysis cannot automatically extract stack variables.
+
+As a fix, adapt FunctionStackAnalysisCmd to operate on the hidden Wasm stack
+register operands to detect operations that interact with C stack addresses.
+
+This helps with cross references to C stack variables, as well as allowing C
+stack variables to be properly interacted with in the decompiler.
+
+WebAssembly: update ConstantExpression comment
+
+WebAssembly: add wasm build instructions to pcodetest
+
+This successfully builds a working binary with Clang 15.
+
+- `mem*` definitions in `misc_BODY.c` and new `main` definition in `tpp.py`
+  are for C99 compatibility
+- `encoding='utf8'` in build.py produces a more readable log
+- `TestInfo_force` in pcode_test.c ensures that the entire `MainInfo` structure
+  is included in the binary
+
+WebAssembly: implement pcodetest tests.
+
+We pass almost every test with -O0 and -O3, with the exception of pcode_conversions_Main.
+
+There's a rather ugly hack needed to convert certain function pointers from
+table indices (used by the actual code) to byte addresses (used by the emulator
+to set PC). The way this is implemented is decidedly not ideal; a much better
+solution would be to somehow hook readCodePointer in the
+ProcessorEmulatorTestAdapter subclass; this would also enable the "procedure
+descriptor indirection" fix to be moved into a processor-specific
+implementation.
+
+Changing the structs to protected in `ProcessorEmulatorTestAdapter` is for
+convenience, so that the subclass does not need to go look those up again.
+
+The zero-size check added to `BytesPcodeExecutorStateSpace#read` fixes a bug
+which caused an exception when reading 0 bytes (`offset + size - 1` is not a
+valid calculation in that case).
+
+WebAssembly: Fix pcode_conversions_Main test.
+
+This is fixed by implementing unsigned-to-float conversions properly.
 ---
+ .../SleighDevTools/pcodetest/build.py         |    2 +-
+ .../pcodetest/c_src/misc_BODY.c               |    7 +
+ .../pcodetest/c_src/pcode_test.c              |    5 +
+ .../SleighDevTools/pcodetest/pcode_defs.py    |    8 +
+ .../SleighDevTools/pcodetest/pcodetest.py     |   51 +
+ .../SleighDevTools/pcodetest/tpp.py           |    2 +-
+ .../support/ProcessorEmulatorTestAdapter.java |    4 +-
+ .../exec/BytesPcodeExecutorStateSpace.java    |    3 +
  Ghidra/Processors/WebAssembly/Module.manifest |    0
  Ghidra/Processors/WebAssembly/build.gradle    |   28 +
- .../WebAssembly/certification.manifest        |   21 +
- .../WebAssembly/data/languages/BasicOps.sinc  |  514 +++++
+ .../WebAssembly/certification.manifest        |   20 +
+ .../WebAssembly/data/languages/BasicOps.sinc  |  518 +++++
  .../WebAssembly/data/languages/Leb128.sinc    |   60 +
  .../data/languages/Leb128_opc2.sinc           | 1152 ++++++++++
  .../data/languages/Leb128_opc2_1b.sinc        |    5 +
@@ -88,8 +154,9 @@ are expected to be rare (and they are not well-supported by Ghidra anyway).
  .../data/languages/WebAssembly.pspec          |   17 +
  .../data/languages/WebAssembly.sinc           |  497 +++++
  .../data/languages/WebAssembly.slaspec        | 1906 +++++++++++++++++
- .../ghidra_scripts/analyze_dyncalls.py        |  117 +
+ .../ghidra_scripts/analyze_dyncalls.py        |  120 ++
  .../ghidra_scripts/emulate_writev.py          |   57 +
+ .../ghidra_scripts/rename_table_funcs.py      |   47 +
  .../src/main/help/help/TOC_Source.xml         |    7 +
  .../help/help/topics/WebAssembly/help.html    |  111 +
  .../main/help/help/topics/WebAssembly/help.md |  104 +
@@ -103,6 +170,7 @@ are expected to be rare (and they are not well-supported by Ghidra anyway).
  .../wasm/analysis/WasmFunctionAnalysis.java   | 1514 +++++++++++++
  .../java/wasm/analysis/WasmPreAnalyzer.java   |  194 ++
  .../wasm/analysis/WasmSignatureAnalyzer.java  |  118 +
+ .../analysis/WasmStackVariableAnalyzer.java   |  264 +++
  .../java/wasm/format/StructureBuilder.java    |  135 ++
  .../main/java/wasm/format/WasmConstants.java  |   21 +
  .../src/main/java/wasm/format/WasmEnums.java  |  108 +
@@ -123,7 +191,7 @@ are expected to be rare (and they are not well-supported by Ghidra anyway).
  .../format/sections/WasmTableSection.java     |   58 +
  .../wasm/format/sections/WasmTypeSection.java |   61 +
  .../sections/WasmUnknownCustomSection.java    |   52 +
- .../structures/ConstantExpression.java        |  218 ++
+ .../structures/ConstantExpression.java        |  223 ++
  .../sections/structures/WasmCodeEntry.java    |   87 +
  .../sections/structures/WasmDataSegment.java  |  103 +
  .../structures/WasmElementSegment.java        |  214 ++
@@ -148,7 +216,10 @@ are expected to be rare (and they are not well-supported by Ghidra anyway).
  .../wasm/pcode/InjectPayloadWasmPush.java     |   73 +
  .../wasm/pcode/PcodeInjectLibraryWasm.java    |   53 +
  .../main/java/wasm/pcode/PcodeOpEmitter.java  |   70 +
- 78 files changed, 13909 insertions(+)
+ .../processors/WasmEmulatorTestAdapter.java   |  150 ++
+ .../WebAssembly_O0_EmulatorTest.java          |   38 +
+ .../WebAssembly_O3_EmulatorTest.java          |   38 +
+ 91 files changed, 14535 insertions(+), 4 deletions(-)
  create mode 100644 Ghidra/Processors/WebAssembly/Module.manifest
  create mode 100644 Ghidra/Processors/WebAssembly/build.gradle
  create mode 100644 Ghidra/Processors/WebAssembly/certification.manifest
@@ -169,6 +240,7 @@ are expected to be rare (and they are not well-supported by Ghidra anyway).
  create mode 100644 Ghidra/Processors/WebAssembly/data/languages/WebAssembly.slaspec
  create mode 100644 Ghidra/Processors/WebAssembly/ghidra_scripts/analyze_dyncalls.py
  create mode 100644 Ghidra/Processors/WebAssembly/ghidra_scripts/emulate_writev.py
+ create mode 100644 Ghidra/Processors/WebAssembly/ghidra_scripts/rename_table_funcs.py
  create mode 100644 Ghidra/Processors/WebAssembly/src/main/help/help/TOC_Source.xml
  create mode 100644 Ghidra/Processors/WebAssembly/src/main/help/help/topics/WebAssembly/help.html
  create mode 100644 Ghidra/Processors/WebAssembly/src/main/help/help/topics/WebAssembly/help.md
@@ -182,6 +254,7 @@ are expected to be rare (and they are not well-supported by Ghidra anyway).
  create mode 100644 Ghidra/Processors/WebAssembly/src/main/java/wasm/analysis/WasmFunctionAnalysis.java
  create mode 100644 Ghidra/Processors/WebAssembly/src/main/java/wasm/analysis/WasmPreAnalyzer.java
  create mode 100644 Ghidra/Processors/WebAssembly/src/main/java/wasm/analysis/WasmSignatureAnalyzer.java
+ create mode 100644 Ghidra/Processors/WebAssembly/src/main/java/wasm/analysis/WasmStackVariableAnalyzer.java
  create mode 100644 Ghidra/Processors/WebAssembly/src/main/java/wasm/format/StructureBuilder.java
  create mode 100644 Ghidra/Processors/WebAssembly/src/main/java/wasm/format/WasmConstants.java
  create mode 100644 Ghidra/Processors/WebAssembly/src/main/java/wasm/format/WasmEnums.java
@@ -227,7 +300,185 @@ are expected to be rare (and they are not well-supported by Ghidra anyway).
  create mode 100644 Ghidra/Processors/WebAssembly/src/main/java/wasm/pcode/InjectPayloadWasmPush.java
  create mode 100644 Ghidra/Processors/WebAssembly/src/main/java/wasm/pcode/PcodeInjectLibraryWasm.java
  create mode 100644 Ghidra/Processors/WebAssembly/src/main/java/wasm/pcode/PcodeOpEmitter.java
+ create mode 100644 Ghidra/Processors/WebAssembly/src/test.processors/java/ghidra/test/processors/WasmEmulatorTestAdapter.java
+ create mode 100644 Ghidra/Processors/WebAssembly/src/test.processors/java/ghidra/test/processors/WebAssembly_O0_EmulatorTest.java
+ create mode 100644 Ghidra/Processors/WebAssembly/src/test.processors/java/ghidra/test/processors/WebAssembly_O3_EmulatorTest.java
 
+diff --git a/Ghidra/Extensions/SleighDevTools/pcodetest/build.py b/Ghidra/Extensions/SleighDevTools/pcodetest/build.py
+index 00023bfcc..3e5cbb1a2 100644
+--- a/Ghidra/Extensions/SleighDevTools/pcodetest/build.py
++++ b/Ghidra/Extensions/SleighDevTools/pcodetest/build.py
+@@ -48,7 +48,7 @@ class BuildUtil:
+                 f = subprocess.PIPE
+             if verbose: self.log_info(string)
+             try:
+-                sp = subprocess.Popen(cmd, stdout=f, stderr=subprocess.PIPE)
++                sp = subprocess.Popen(cmd, stdout=f, stderr=subprocess.PIPE, encoding="utf8")
+             except OSError as e:
+                 self.log_err("Command: " + string)
+                 self.log_err(e.strerror)
+diff --git a/Ghidra/Extensions/SleighDevTools/pcodetest/c_src/misc_BODY.c b/Ghidra/Extensions/SleighDevTools/pcodetest/c_src/misc_BODY.c
+index 131404c87..e089e34f9 100644
+--- a/Ghidra/Extensions/SleighDevTools/pcodetest/c_src/misc_BODY.c
++++ b/Ghidra/Extensions/SleighDevTools/pcodetest/c_src/misc_BODY.c
+@@ -15,6 +15,13 @@
+  */
+ #include "pcode_test.h"
+ #include "big_struct.h"
++#ifdef HAS_LIBC
++#include <string.h>
++#else
++void *memset(void *b, int c, size_t len);
++void *memcpy(void *dst, const void *src, size_t n);
++int memcmp(const void *s1, const void *s2, size_t n);
++#endif
+ 
+ static i4 int_expectedValue;
+ static i4 int_actualValue;
+diff --git a/Ghidra/Extensions/SleighDevTools/pcodetest/c_src/pcode_test.c b/Ghidra/Extensions/SleighDevTools/pcodetest/c_src/pcode_test.c
+index e31d9fccd..a011ddaba 100644
+--- a/Ghidra/Extensions/SleighDevTools/pcodetest/c_src/pcode_test.c
++++ b/Ghidra/Extensions/SleighDevTools/pcodetest/c_src/pcode_test.c
+@@ -72,6 +72,11 @@ static TestInfo MainInfo = {
+ 	mainFunctionInfoTable,		/* function table */
+ };
+ 
++NOINLINE TestInfo TestInfo_force(void)
++{
++	return MainInfo;
++}
++
+ NOINLINE void TestInfo_reset(void)
+ {
+ 	MainInfo.numpass = 0;
+diff --git a/Ghidra/Extensions/SleighDevTools/pcodetest/pcode_defs.py b/Ghidra/Extensions/SleighDevTools/pcodetest/pcode_defs.py
+index 29bf00101..e14f572a3 100644
+--- a/Ghidra/Extensions/SleighDevTools/pcodetest/pcode_defs.py
++++ b/Ghidra/Extensions/SleighDevTools/pcodetest/pcode_defs.py
+@@ -752,4 +752,12 @@ PCodeTest({
+     'toolchain': 'ARC/arc700-elf',
+     'language_id': 'ARCompact:LE:32:default',
+     'ccflags': '-mcpu=arc700 -lgcc',
++
++PCodeTest({
++    'name': 'WebAssembly',
++    'compile_exe': 'bin/clang',
++    'toolchain': 'LLVM/llvm',
++    'toolchain_type': 'llvm',
++    'ccflags': '-std=c99 --target=wasm32-wasi -Wl,--export-dynamic -Wl,--no-gc-sections -Wl,--no-entry',
++    'language_id': 'Wasm:LE:32:default',
+ })
+diff --git a/Ghidra/Extensions/SleighDevTools/pcodetest/pcodetest.py b/Ghidra/Extensions/SleighDevTools/pcodetest/pcodetest.py
+index c464ad6ce..8b55b53dc 100644
+--- a/Ghidra/Extensions/SleighDevTools/pcodetest/pcodetest.py
++++ b/Ghidra/Extensions/SleighDevTools/pcodetest/pcodetest.py
+@@ -78,6 +78,8 @@ class PCodeTestBuild(BuildUtil):
+             return PCodeBuildCCS(pcode_test)
+         elif pcode_test.config.toolchain_type == 'sdcc':
+             return PCodeBuildSDCC(pcode_test)
++        elif pcode_test.config.toolchain_type == 'llvm':
++            return PCodeBuildLLVM(pcode_test)
+         else:
+             raise Exception(pcode_test.config.format('Toolchain type %(toolchain_type)s not known'))
+ 
+@@ -330,6 +332,55 @@ class PCodeBuildCCS(PCodeTestBuild):
+             self.log_err('output not created %s' % output_file)
+             return
+ 
++class PCodeBuildLLVM(PCodeTestBuild):
++
++    def __init__(self, PCodeTest):
++        super(PCodeBuildLLVM, self).__init__(PCodeTest)
++
++    # Set options for compiler depending on needs.
++    def cflags(self, output_file):
++        f = []
++        f += ['-DHAS_FLOAT=1' if self.config.has_float else '-DHAS_FLOAT_OVERRIDE=1']
++        f += ['-DHAS_DOUBLE=1' if self.config.has_double else '-DHAS_DOUBLE_OVERRIDE=1']
++        f += ['-DHAS_LONGLONG=1' if self.config.has_longlong else '-DHAS_LONGLONG_OVERRIDE=1']
++        if self.config.has_shortfloat: f += ['-DHAS_SHORTFLOAT=1']
++        if self.config.has_vector: f += ['-DHAS_VECTOR=1']
++        if self.config.has_decimal128: f += ['-DHAS_DECIMAL128=1']
++        if self.config.has_decimal32: f += ['-DHAS_DECIMAL32=1']
++        if self.config.has_decimal64: f += ['-DHAS_DECIMAL64=1']
++
++        f += ['-DNAME=NAME:%s' % output_file]
++
++        f += ['-static', '-Wno-unused-macros', '-nodefaultlibs', '-nostartfiles', '-fno-builtin']
++
++        f += self.config.ccflags.split()
++        f += self.config.add_ccflags.split()
++
++        return f
++
++    def compile(self, input_files, opt_cflag, output_base):
++
++        # Name the output file, and delete it if it exists
++
++        output_file = '%s.out' % (output_base)
++        self.remove(output_file)
++
++        # Construct the compile command line and execute it
++
++        cmp = self.which('compile_exe')
++        cmd = [cmp] + input_files + self.cflags(output_file) + [opt_cflag, "-o", output_file]
++        out, err = self.run(cmd)
++        if out: self.log_info(out)
++
++        # print error messages, which may just be warnings
++        if err: self.log_warn(err)
++
++        # return now if the error preempted the binary
++
++        if not self.is_readable_file(output_file):
++            self.log_err('output not created %s' % output_file)
++            return
++
+ class PCodeBuildGCC(PCodeTestBuild):
+ 
+     def __init__(self, PCodeTest):
+diff --git a/Ghidra/Extensions/SleighDevTools/pcodetest/tpp.py b/Ghidra/Extensions/SleighDevTools/pcodetest/tpp.py
+index c796388b5..96a202ab1 100644
+--- a/Ghidra/Extensions/SleighDevTools/pcodetest/tpp.py
++++ b/Ghidra/Extensions/SleighDevTools/pcodetest/tpp.py
+@@ -198,7 +198,7 @@ void %(main)s(TestInfo* not_used) {
+         self.c_write('')
+         #for l in extern_lines:
+         #    self.c_write(l)
+-        self.c_write('void main(void) {')
++        self.c_write('int main(int argc, char **argv) {')
+         self.c_write('\tTestInfo info;')
+         #for l in main_lines:
+         #    self.c_write(l)
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/test/processors/support/ProcessorEmulatorTestAdapter.java b/Ghidra/Features/Base/src/main/java/ghidra/test/processors/support/ProcessorEmulatorTestAdapter.java
+index 246d81982..9a3a812d5 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/test/processors/support/ProcessorEmulatorTestAdapter.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/test/processors/support/ProcessorEmulatorTestAdapter.java
+@@ -208,8 +208,8 @@ public abstract class ProcessorEmulatorTestAdapter extends TestCase implements E
+ 	private File resourcesTestDataDir;
+ 
+ 	private FileDataTypeManager archiveDtMgr;
+-	private Structure testInfoStruct;
+-	private Structure groupInfoStruct;
++	protected Structure testInfoStruct;
++	protected Structure groupInfoStruct;
+ 
+ 	private ParallelInstructionLanguageHelper parallelHelper;
+ 
+diff --git a/Ghidra/Framework/Emulation/src/main/java/ghidra/pcode/exec/BytesPcodeExecutorStateSpace.java b/Ghidra/Framework/Emulation/src/main/java/ghidra/pcode/exec/BytesPcodeExecutorStateSpace.java
+index 33eabd48c..c4cc614a7 100644
+--- a/Ghidra/Framework/Emulation/src/main/java/ghidra/pcode/exec/BytesPcodeExecutorStateSpace.java
++++ b/Ghidra/Framework/Emulation/src/main/java/ghidra/pcode/exec/BytesPcodeExecutorStateSpace.java
+@@ -151,6 +151,9 @@ public class BytesPcodeExecutorStateSpace<B> {
+ 	 * @return the bytes read
+ 	 */
+ 	public byte[] read(long offset, int size, Reason reason) {
++		if (size == 0) {
++			return new byte[0];
++		}
+ 		if (backing != null) {
+ 			readUninitializedFromBacking(bytes.getUninitialized(offset, offset + size - 1));
+ 		}
 diff --git a/Ghidra/Processors/WebAssembly/Module.manifest b/Ghidra/Processors/WebAssembly/Module.manifest
 new file mode 100644
 index 000000000..e69de29bb
@@ -267,14 +518,13 @@ index 000000000..77fff32f3
 +}
 diff --git a/Ghidra/Processors/WebAssembly/certification.manifest b/Ghidra/Processors/WebAssembly/certification.manifest
 new file mode 100644
-index 000000000..3ddae21c5
+index 000000000..63d922004
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/certification.manifest
-@@ -0,0 +1,21 @@
+@@ -0,0 +1,20 @@
 +##VERSION: 2.0
 +Module.manifest||GHIDRA||||END|
 +src/main/help/help/TOC_Source.xml||GHIDRA||||END|
-+src/main/help/help/shared/Frontpage.css||GHIDRA||||END|
 +src/main/help/help/topics/WebAssembly/help.html||GHIDRA||||END|
 +src/main/help/help/topics/WebAssembly/help.md||GHIDRA||||END|
 +data/languages/BasicOps.sinc||GHIDRA||||END|
@@ -294,10 +544,10 @@ index 000000000..3ddae21c5
 +data/languages/WebAssembly.slaspec||GHIDRA||||END|
 diff --git a/Ghidra/Processors/WebAssembly/data/languages/BasicOps.sinc b/Ghidra/Processors/WebAssembly/data/languages/BasicOps.sinc
 new file mode 100644
-index 000000000..d045218e8
+index 000000000..14baf5563
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/data/languages/BasicOps.sinc
-@@ -0,0 +1,514 @@
+@@ -0,0 +1,518 @@
 +## Memory Instructions
 +memalign: "align="^ULeb128 is ULeb128 {
 +	export ULeb128;
@@ -739,13 +989,15 @@ index 000000000..d045218e8
 +	sp1_32 = int2float(sp1_32);
 +}
 +:f32.convert_i32_u  is opc=0xB3; sp1_32; ctx_is_directive=0 {
-+	sp1_32 = int2float(sp1_32);
++	local tmp:8 = zext(sp1_32);
++	sp1_32 = int2float(tmp);
 +}
 +:f32.convert_i64_s  is opc=0xB4; sp1_32; sp1_64; ctx_is_directive=0 {
 +	sp1_32 = int2float(sp1_64);
 +}
 +:f32.convert_i64_u  is opc=0xB5; sp1_32; sp1_64; ctx_is_directive=0 {
-+	sp1_32 = int2float(sp1_64);
++	local tmp:9 = zext(sp1_64);
++	sp1_32 = int2float(tmp);
 +}
 +:f32.demote_f64  is opc=0xB6; sp1_32; sp1_64; ctx_is_directive=0 {
 +	sp1_32 = float2float(sp1_64);
@@ -754,13 +1006,15 @@ index 000000000..d045218e8
 +	sp1_64 = int2float(sp1_32);
 +}
 +:f64.convert_i32_u  is opc=0xB8; sp1_32; sp1_64; ctx_is_directive=0 {
-+	sp1_64 = int2float(sp1_32);
++	local tmp:8 = zext(sp1_32);
++	sp1_64 = int2float(tmp);
 +}
 +:f64.convert_i64_s  is opc=0xB9; sp1_64; ctx_is_directive=0 {
 +	sp1_64 = int2float(sp1_64);
 +}
 +:f64.convert_i64_u  is opc=0xBA; sp1_64; ctx_is_directive=0 {
-+	sp1_64 = int2float(sp1_64);
++	local tmp:9 = zext(sp1_64);
++	sp1_64 = int2float(tmp);
 +}
 +:f64.promote_f32  is opc=0xBB; sp1_32; sp1_64; ctx_is_directive=0 {
 +	sp1_64 = float2float(sp1_32);
@@ -3594,7 +3848,7 @@ index 000000000..eb5b90848
 +}
 diff --git a/Ghidra/Processors/WebAssembly/data/languages/WebAssembly-pos-stack.cspec b/Ghidra/Processors/WebAssembly/data/languages/WebAssembly-pos-stack.cspec
 new file mode 100644
-index 000000000..28d5e1b2c
+index 000000000..94bb0d0ca
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/data/languages/WebAssembly-pos-stack.cspec
 @@ -0,0 +1,831 @@
@@ -3620,7 +3874,7 @@ index 000000000..28d5e1b2c
 +  </global>
 +  <stackpointer register="SP" space="ram" growth="positive"/>
 +  <default_proto>
-+    <prototype name="__wasm" extrapop="0" stackshift="0">
++    <prototype name="__wasm" extrapop="0" stackshift="0" strategy="register">
 +      <input>
 +        <!-- With the positive stack direction, Ghidra will allocate
 +        starting at the highest addresses in any <addr> pentry, which is
@@ -4431,7 +4685,7 @@ index 000000000..28d5e1b2c
 +</compiler_spec>
 diff --git a/Ghidra/Processors/WebAssembly/data/languages/WebAssembly.cspec b/Ghidra/Processors/WebAssembly/data/languages/WebAssembly.cspec
 new file mode 100644
-index 000000000..1d5b021b5
+index 000000000..1b3c1e8d5
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/data/languages/WebAssembly.cspec
 @@ -0,0 +1,62 @@
@@ -4457,7 +4711,7 @@ index 000000000..1d5b021b5
 +  </global>
 +  <stackpointer register="SP" space="ram"/>
 +  <default_proto>
-+    <prototype name="__wasm" extrapop="0" stackshift="0">
++    <prototype name="__wasm" extrapop="0" stackshift="0" strategy="register">
 +      <input>
 +        <pentry minsize="1" maxsize="500" align="16">
 +          <addr offset="0x20000000" space="register"/>
@@ -6986,10 +7240,10 @@ index 000000000..8f7d2a616
 +@include "WebAssembly.sinc"
 diff --git a/Ghidra/Processors/WebAssembly/ghidra_scripts/analyze_dyncalls.py b/Ghidra/Processors/WebAssembly/ghidra_scripts/analyze_dyncalls.py
 new file mode 100644
-index 000000000..b4d3f2a40
+index 000000000..3ef82c81c
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/ghidra_scripts/analyze_dyncalls.py
-@@ -0,0 +1,117 @@
+@@ -0,0 +1,120 @@
 +## ###
 +#  IP: GHIDRA
 +#
@@ -7010,6 +7264,9 @@ index 000000000..b4d3f2a40
 +# elements they call, and rename functions listed in the table by their dynCall
 +# type and index. These dynCall indices are often used as function pointers in
 +# compiled C/C++ code.
++# This script should only be used if your dynCall_ functions contain binary AND
++# operations (i.e. i32.and), indicating that the table is segmented into type-
++# specific power-of-two-sized chunks.
 +# @author nneonneo
 +# @category Analysis.Wasm
 +# @keybinding
@@ -7170,6 +7427,59 @@ index 000000000..96d56814d
 +            wasmHelper.simulateReturn(emuHelper.emulator, len(msg))
 +        else:
 +            wasmHelper.simulateReturn(emuHelper.emulator, -1)
+diff --git a/Ghidra/Processors/WebAssembly/ghidra_scripts/rename_table_funcs.py b/Ghidra/Processors/WebAssembly/ghidra_scripts/rename_table_funcs.py
+new file mode 100644
+index 000000000..4c4350a0b
+--- /dev/null
++++ b/Ghidra/Processors/WebAssembly/ghidra_scripts/rename_table_funcs.py
+@@ -0,0 +1,47 @@
++## ###
++#  IP: GHIDRA
++#
++#  Licensed under the Apache License, Version 2.0 (the "License");
++#  you may not use this file except in compliance with the License.
++#  You may obtain a copy of the License at
++#
++#       http://www.apache.org/licenses/LICENSE-2.0
++#
++#  Unless required by applicable law or agreed to in writing, software
++#  distributed under the License is distributed on an "AS IS" BASIS,
++#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++#  See the License for the specific language governing permissions and
++#  limitations under the License.
++##
++
++# Rename dynamically-callable functions from the function table.
++# This is useful for analyzing programs where table indices are used as
++# function pointers, e.g. programs compiled with LLVM.
++# Note: if you have "dynCall_" functions that contain arithmetic operations
++# (AND, ADD, etc.) you may want to use analyze_dyncalls.py instead.
++# @author nneonneo
++# @category Analysis.Wasm
++# @keybinding
++# @menupath
++# @toolbar
++
++from __future__ import print_function
++from wasm.analysis import WasmAnalysis
++from ghidra.program.model.symbol import SourceType
++
++progspace = currentProgram.addressFactory.getAddressSpace("ram")
++tablespace = currentProgram.addressFactory.getAddressSpace("table")
++dynCallNamespace = currentProgram.symbolTable.getOrCreateNameSpace(currentProgram.globalNamespace, "dynCall", SourceType.USER_DEFINED)
++
++def getTableFunction(offset):
++    funcAddr = getInt(tablespace.getAddress(offset * 4)) & 0xffffffff
++    return getFunctionAt(progspace.getAddress(funcAddr))
++
++count = WasmAnalysis.getState(currentProgram).module.nonImportedTables[0].limits.initial
++for i in range(1, count):
++    func = getTableFunction(i)
++    if func:
++        name = "func_%d" % i
++        if func.name.startswith("unnamed_function_"):
++            func.setName(name, SourceType.ANALYSIS)
++        currentProgram.symbolTable.createLabel(func.entryPoint, name, dynCallNamespace, SourceType.USER_DEFINED)
 diff --git a/Ghidra/Processors/WebAssembly/src/main/help/help/TOC_Source.xml b/Ghidra/Processors/WebAssembly/src/main/help/help/TOC_Source.xml
 new file mode 100644
 index 000000000..dbad6be64
@@ -10729,6 +11039,276 @@ index 000000000..829d68dd7
 +		return true;
 +	}
 +}
+diff --git a/Ghidra/Processors/WebAssembly/src/main/java/wasm/analysis/WasmStackVariableAnalyzer.java b/Ghidra/Processors/WebAssembly/src/main/java/wasm/analysis/WasmStackVariableAnalyzer.java
+new file mode 100644
+index 000000000..eab1b17bc
+--- /dev/null
++++ b/Ghidra/Processors/WebAssembly/src/main/java/wasm/analysis/WasmStackVariableAnalyzer.java
+@@ -0,0 +1,264 @@
++/* ###
++ * IP: GHIDRA
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package wasm.analysis;
++
++import java.util.ArrayList;
++import java.util.Collections;
++import java.util.List;
++
++import ghidra.app.cmd.function.CallDepthChangeInfo;
++import ghidra.app.services.AbstractAnalyzer;
++import ghidra.app.services.AnalysisPriority;
++import ghidra.app.services.AnalyzerType;
++import ghidra.app.util.importer.MessageLog;
++import ghidra.program.model.address.AddressSetView;
++import ghidra.program.model.data.ArrayDataType;
++import ghidra.program.model.data.ByteDataType;
++import ghidra.program.model.data.CharDataType;
++import ghidra.program.model.data.DataType;
++import ghidra.program.model.data.DefaultDataType;
++import ghidra.program.model.data.Float4DataType;
++import ghidra.program.model.data.Float8DataType;
++import ghidra.program.model.data.IntegerDataType;
++import ghidra.program.model.data.ShortDataType;
++import ghidra.program.model.data.SignedByteDataType;
++import ghidra.program.model.data.Undefined;
++import ghidra.program.model.data.Undefined1DataType;
++import ghidra.program.model.data.Undefined2DataType;
++import ghidra.program.model.data.Undefined4DataType;
++import ghidra.program.model.data.Undefined8DataType;
++import ghidra.program.model.data.UnsignedIntegerDataType;
++import ghidra.program.model.data.UnsignedShortDataType;
++import ghidra.program.model.lang.Processor;
++import ghidra.program.model.lang.Register;
++import ghidra.program.model.listing.Function;
++import ghidra.program.model.listing.Instruction;
++import ghidra.program.model.listing.InstructionIterator;
++import ghidra.program.model.listing.Program;
++import ghidra.program.model.listing.StackFrame;
++import ghidra.program.model.listing.Variable;
++import ghidra.program.model.scalar.Scalar;
++import ghidra.program.model.symbol.RefType;
++import ghidra.program.model.symbol.Reference;
++import ghidra.program.model.symbol.ReferenceManager;
++import ghidra.program.model.symbol.SourceType;
++import ghidra.program.model.symbol.StackReference;
++import ghidra.util.Msg;
++import ghidra.util.exception.CancelledException;
++import ghidra.util.exception.DuplicateNameException;
++import ghidra.util.exception.InvalidInputException;
++import ghidra.util.task.TaskMonitor;
++
++public class WasmStackVariableAnalyzer extends AbstractAnalyzer {
++	private static final String NAME = "Wasm Stack Analyzer";
++	private static final String DESCRIPTION = "Creates C stack variables for Wasm functions.";
++
++	public WasmStackVariableAnalyzer() {
++		super(NAME, DESCRIPTION, AnalyzerType.FUNCTION_ANALYZER);
++		setPriority(AnalysisPriority.DATA_TYPE_PROPOGATION.after().after().after());
++		setDefaultEnablement(true);
++	}
++
++	@Override
++	public boolean canAnalyze(Program program) {
++		return program.getLanguage().getProcessor().equals(Processor.findOrPossiblyCreateProcessor("WebAssembly"));
++	}
++
++	@Override
++	public boolean added(Program program, AddressSetView set, TaskMonitor monitor, MessageLog log) throws CancelledException {
++		monitor.initialize(program.getFunctionManager().getFunctionCount());
++
++		for (Function function : program.getListing().getFunctions(set, true)) {
++			monitor.checkCanceled();
++			monitor.setMessage("C Stack " + function.getName());
++			monitor.incrementProgress(1);
++
++			createStackPointerVariables(program, function, monitor);
++		}
++
++		return true;
++	}
++
++	private static DataType getMemoryDataType(String mnemonic) {
++		switch (mnemonic) {
++		case "i32.load":
++		case "i32.store":
++			return Undefined4DataType.dataType;
++		case "i64.load":
++		case "i64.store":
++			return Undefined8DataType.dataType;
++		case "f32.store":
++		case "f32.load":
++			return Float4DataType.dataType;
++		case "f64.store":
++		case "f64.load":
++			return Float8DataType.dataType;
++		case "i32.load8_s":
++		case "i64.load8_s":
++			return CharDataType.dataType;
++		case "i32.load8_u":
++		case "i64.load8_u":
++			return ByteDataType.dataType;
++		case "i32.store8":
++		case "i64.store8":
++			return Undefined1DataType.dataType;
++		case "i32.load16_s":
++		case "i64.load16_s":
++			return ShortDataType.dataType;
++		case "i32.load16_u":
++		case "i64.load16_u":
++			return UnsignedShortDataType.dataType;
++		case "i32.store16":
++		case "i64.store16":
++			return Undefined2DataType.dataType;
++		case "i64.load32_s":
++			return IntegerDataType.dataType;
++		case "i64.load32_u":
++			return UnsignedIntegerDataType.dataType;
++		case "i64.store32":
++			return Undefined4DataType.dataType;
++		case "v128.load":
++		case "v128.store":
++			return Undefined.getUndefinedDataType(16);
++		case "v128.load8_lane":
++		case "v128.load8_splat":
++		case "v128.store8_lane":
++			return Undefined1DataType.dataType;
++		case "v128.load16_lane":
++		case "v128.load16_splat":
++		case "v128.store16_lane":
++			return Undefined2DataType.dataType;
++		case "v128.load32_lane":
++		case "v128.load32_splat":
++		case "v128.load32_zero":
++		case "v128.store32_lane":
++			return Undefined4DataType.dataType;
++		case "v128.load64_lane":
++		case "v128.load64_splat":
++		case "v128.load64_zero":
++		case "v128.store64_lane":
++			return Undefined8DataType.dataType;
++		case "v128.load8x8_s":
++			return new ArrayDataType(SignedByteDataType.dataType, 8, 1);
++		case "v128.load8x8_u":
++			return new ArrayDataType(ByteDataType.dataType, 8, 1);
++		case "v128.load16x4_s":
++			return new ArrayDataType(ShortDataType.dataType, 4, 2);
++		case "v128.load16x4_u":
++			return new ArrayDataType(UnsignedShortDataType.dataType, 4, 2);
++		case "v128.load32x2_s":
++			return new ArrayDataType(IntegerDataType.dataType, 2, 4);
++		case "v128.load32x2_u":
++			return new ArrayDataType(UnsignedIntegerDataType.dataType, 2, 4);
++		}
++		return DefaultDataType.dataType;
++	}
++
++	private Variable createVar(Function func, int frameOffset, int offset, DataType dataType) throws InvalidInputException, DuplicateNameException {
++		StackFrame frame = func.getStackFrame();
++		int frameLoc = offset + frameOffset;
++		Variable var = frame.getVariableContaining(frameLoc);
++		if (var == null) {
++			var = frame.createVariable(null, frameLoc, dataType, SourceType.ANALYSIS);
++		} else if (var.getStackOffset() == frameLoc) {
++			DataType oldDt = var.getDataType();
++			if ((Undefined.isUndefined(oldDt) && !Undefined.isUndefined(dataType)) ||
++			(oldDt == DefaultDataType.DEFAULT && dataType != DefaultDataType.DEFAULT)) {
++				var.setDataType(dataType, SourceType.ANALYSIS);
++			}
++		}
++		return var;
++	}
++
++	private void defineFuncVariable(Program program, Function func, Instruction instr, int opIndex, int stackOffset, RefType refType) throws InvalidInputException, DuplicateNameException {
++		ReferenceManager refMgr = program.getReferenceManager();
++
++		Reference ref = instr.getPrimaryReference(opIndex);
++		DataType dataType = getMemoryDataType(instr.getMnemonicString());
++
++		if (ref != null && ref instanceof StackReference)
++			return;
++
++		refMgr.addStackReference(instr.getMinAddress(), opIndex, stackOffset, refType, SourceType.ANALYSIS);
++		createVar(func, 0, stackOffset, dataType);
++	}
++
++	// Get registers sorted by position within the register file
++	private List<Register> getRegisters(Object[] collection) {
++		List<Register> registers = new ArrayList<>();
++		for (Object obj : collection) {
++			if (obj instanceof Register) {
++				registers.add((Register) obj);
++			}
++		}
++		Collections.sort(registers);
++		return registers;
++	}
++
++	private void createStackPointerVariables(Program program, Function func, TaskMonitor monitor) throws CancelledException {
++		CallDepthChangeInfo info = new CallDepthChangeInfo(func, monitor);
++
++		InstructionIterator iter = program.getListing().getInstructions(func.getBody(), true);
++		while (iter.hasNext()) {
++			monitor.checkCanceled();
++			Instruction instr = iter.next();
++
++			try {
++				String mnemonic = instr.getMnemonicString();
++				if (mnemonic.contains(".load")) {
++					// Note: inputObjects is not sorted in any particular order (it may be derived
++					// from a HashSet)
++					Register base = getRegisters(instr.getInputObjects()).get(0);
++					// get offset from "align=A offset=O" operand
++					Scalar offset = (Scalar) instr.getOpObjects(0)[1];
++					int stackOffset = info.getRegDepth(instr.getMinAddress(), base);
++					if (stackOffset == Function.INVALID_STACK_DEPTH_CHANGE) {
++						continue;
++					}
++					defineFuncVariable(program, func, instr, 0, (int) (stackOffset + offset.getUnsignedValue()), RefType.READ);
++				} else if (mnemonic.contains(".store")) {
++					// Note: inputObjects is not sorted in any particular order (it may be derived
++					// from a HashSet)
++					Register base = getRegisters(instr.getInputObjects()).get(0);
++					// get offset from "align=A offset=O" operand
++					Scalar offset = (Scalar) instr.getOpObjects(0)[1];
++					int stackOffset = info.getRegDepth(instr.getMinAddress(), base);
++					if (stackOffset == Function.INVALID_STACK_DEPTH_CHANGE) {
++						continue;
++					}
++					defineFuncVariable(program, func, instr, 0, (int) (stackOffset + offset.getUnsignedValue()), RefType.WRITE);
++				} else if (mnemonic.equals("local.get") || mnemonic.equals("local.set")) {
++					// These instructions will only have one input
++					Register input = (Register) instr.getInputObjects()[0];
++					int stackOffset = info.getRegDepth(instr.getMinAddress(), input);
++					if (stackOffset == Function.INVALID_STACK_DEPTH_CHANGE) {
++						continue;
++					}
++					if (stackOffset == info.getDepth(instr.getMinAddress()) || stackOffset == 0) {
++						/*
++						 * Heuristically, avoid simple references to the frame or stack base, as they're
++						 * likely to be operands for a later operation
++						 */
++						continue;
++					}
++					defineFuncVariable(program, func, instr, 0, stackOffset, RefType.DATA);
++				}
++			} catch (Exception e) {
++				Msg.warn(this, "Failed to process instruction at " + instr.getMinAddress() + ": " + instr + ": " + e.getMessage());
++			}
++		}
++	}
++}
 diff --git a/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/StructureBuilder.java b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/StructureBuilder.java
 new file mode 100644
 index 000000000..2fa3f5141
@@ -12438,10 +13018,10 @@ index 000000000..d0c8d7319
 +}
 diff --git a/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/ConstantExpression.java b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/ConstantExpression.java
 new file mode 100644
-index 000000000..852bdb87d
+index 000000000..e12f684ac
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/ConstantExpression.java
-@@ -0,0 +1,218 @@
+@@ -0,0 +1,223 @@
 +/* ###
 + * IP: GHIDRA
 + *
@@ -12477,14 +13057,19 @@ index 000000000..852bdb87d
 +
 +/* A reader for expressions containing a single constant instruction.
 +
-+In principle, constant expressions could contain more than one
-+
 +Such expressions consist of an instruction from the following list:
 +- t.const c
 +- ref.null
 +- ref.func x
 +- global.get x
 +followed by an explicit end byte (0x0b).
++
++In principle, constant expressions could contain more than one instruction.
++However, a constant expression must produce a single value, so with the
++current list of allowed instructions, no valid expression can contain two
++or more instructions. This may change in the future: the extended-const
++proposal will add add/sub/mul instructions, at which point this class will
++need to be updated to handle multiple instructions in a single expression.
 +*/
 +public final class ConstantExpression implements StructConverter {
 +
@@ -14603,6 +15188,250 @@ index 000000000..5f9edb034
 +		PcodeOp op = newOp(PcodeOp.COPY);
 +		op.setInput(new Varnode(fromAddr, size), 0);
 +		op.setOutput(new Varnode(toAddr, size));
++	}
++}
+diff --git a/Ghidra/Processors/WebAssembly/src/test.processors/java/ghidra/test/processors/WasmEmulatorTestAdapter.java b/Ghidra/Processors/WebAssembly/src/test.processors/java/ghidra/test/processors/WasmEmulatorTestAdapter.java
+new file mode 100644
+index 000000000..65fba2a22
+--- /dev/null
++++ b/Ghidra/Processors/WebAssembly/src/test.processors/java/ghidra/test/processors/WasmEmulatorTestAdapter.java
+@@ -0,0 +1,150 @@
++/* ###
++ * IP: GHIDRA
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package ghidra.test.processors;
++
++import ghidra.app.plugin.core.analysis.AutoAnalysisManager;
++import ghidra.program.model.address.Address;
++import ghidra.program.model.data.CategoryPath;
++import ghidra.program.model.data.DataTypeComponent;
++import ghidra.program.model.data.Structure;
++import ghidra.program.model.listing.Program;
++import ghidra.program.model.mem.Memory;
++import ghidra.program.model.mem.MemoryBlock;
++import ghidra.program.util.GhidraProgramUtilities;
++import ghidra.test.processors.support.EmulatorTestRunner;
++import ghidra.test.processors.support.PCodeTestControlBlock;
++import ghidra.test.processors.support.ProcessorEmulatorTestAdapter;
++import ghidra.util.task.TaskMonitor;
++
++public class WasmEmulatorTestAdapter extends ProcessorEmulatorTestAdapter {
++
++	private static final String[] REG_DUMP_SET = new String[] {};
++	private static final byte[] MAIN_CONTROL_BLOCK_MAGIC = "AbCdEFgH".getBytes();
++	private static final byte[] GROUP_CONTROL_BLOCK_MAGIC = "aBcDefGh".getBytes();
++
++	public WasmEmulatorTestAdapter(String name, String languageID, String compilerSpecID) throws Exception {
++		super(name, languageID, compilerSpecID, REG_DUMP_SET);
++		setIgnoredBlocks(".module");
++	}
++
++	private static int getStructureComponent(Structure testInfoStruct, String fieldName) {
++		for (DataTypeComponent component : testInfoStruct.getDefinedComponents()) {
++			if (fieldName.equals(component.getFieldName())) {
++				return component.getOffset();
++			}
++		}
++		throw new RuntimeException(fieldName + " field not found within " +
++				testInfoStruct.getName() + " structure definition");
++	}
++
++	private Address findBytes(Memory memory, Address startAddr, Address endAddr, byte[] bytes) throws Exception {
++		return memory.findBytes(startAddr, endAddr, bytes, null, true, TaskMonitor.DUMMY);
++	}
++
++	private Address readPointer(Program program, Address address) throws Exception {
++		int pointerSize = program.getDefaultPointerSize();
++		long offset = pointerSize == 4 ? (long) program.getMemory().getInt(address)
++				: program.getMemory().getLong(address);
++		return program.getAddressFactory().getDefaultAddressSpace().getAddress(offset);
++	}
++
++	private void writePointer(Program program, Address address, Address target) throws Exception {
++		int pointerSize = program.getDefaultPointerSize();
++		if (pointerSize == 4) {
++			program.getMemory().setInt(address, (int) target.getOffset());
++		} else {
++			program.getMemory().setLong(address, target.getOffset());
++		}
++	}
++
++	private void mungeFuncPointer(Program program, Address address) throws Exception {
++		long index = readPointer(program, address).getOffset();
++		Address tableAddress = program.getAddressFactory().getAddressSpace("table")
++				.getAddress(index * program.getDefaultPointerSize());
++		Address funcAddress = readPointer(program, tableAddress);
++		writePointer(program, address, funcAddress);
++	}
++
++	private void mungeFuncTable(Program program, Address tableAddress, int funcOffset, int funcSize) throws Exception {
++		while (true) {
++			Address functionAddress = readPointer(program, tableAddress.add(funcOffset));
++			if (functionAddress.getOffset() == 0)
++				break;
++			mungeFuncPointer(program, tableAddress.add(funcOffset));
++			tableAddress = tableAddress.add(funcSize);
++		}
++	}
++
++	@Override
++	protected void postImport(Program program) throws Exception {
++		/*
++		 * munge in-memory function pointer addresses so they point to the actual code.
++		 * The better way to handle this would be to override readCodePointer...
++		 */
++		Memory memory = program.getMemory();
++		MemoryBlock memory0 = memory.getBlock(".memory0");
++		Structure functionInfoStruct = (Structure) testInfoStruct.getDataTypeManager().getDataType(CategoryPath.ROOT,
++				"FunctionInfo");
++		int mainArrayOffset = getStructureComponent(testInfoStruct, "funcInfoArrayPtr");
++		int groupArrayOffset = getStructureComponent(groupInfoStruct, "funcInfoArrayPtr");
++		int funcOffset = getStructureComponent(functionInfoStruct, "func");
++		int funcSize = functionInfoStruct.getLength();
++
++		Address mainControlBlock = findBytes(memory, memory0.getStart(), memory0.getEnd(), MAIN_CONTROL_BLOCK_MAGIC);
++		mungeFuncPointer(program, mainControlBlock.add(getStructureComponent(testInfoStruct, "onPass")));
++		mungeFuncPointer(program, mainControlBlock.add(getStructureComponent(testInfoStruct, "onError")));
++		mungeFuncPointer(program, mainControlBlock.add(getStructureComponent(testInfoStruct, "onDone")));
++		mungeFuncPointer(program, mainControlBlock.add(getStructureComponent(testInfoStruct, "sprintf5")));
++		Address mainFuncTable = readPointer(program, mainControlBlock.add(mainArrayOffset));
++		mungeFuncTable(program, mainFuncTable, funcOffset, funcSize);
++
++		Address start = memory0.getStart();
++		while (true) {
++			Address groupControlBlock = findBytes(memory, start, memory0.getEnd(), GROUP_CONTROL_BLOCK_MAGIC);
++			if (groupControlBlock == null) {
++				break;
++			}
++			Address groupFuncTable = readPointer(program, groupControlBlock.add(groupArrayOffset));
++			// XXX hack: we can't munge the whole table because they'll get called from assembly,
++			// so only munge the first entry which points to the group Main and gets read by
++			// PCodeTestGroupControlBlock. Only table indices  1 and above are used by the emulated
++			// code, so this munge is safe (if hackish)
++			mungeFuncPointer(program, groupFuncTable.add(funcOffset));
++			start = groupControlBlock.add(GROUP_CONTROL_BLOCK_MAGIC.length);
++		}
++
++		/* Run analysis now so that all the code segments are properly defined */
++		setAnalysisOptions(program.getOptions(Program.ANALYSIS_PROPERTIES));
++		GhidraProgramUtilities.setAnalyzedFlag(program, true);
++		AutoAnalysisManager analysisMgr = AutoAnalysisManager.getAnalysisManager(program);
++		analysisMgr.cancelQueuedTasks(); // GhidraProject import utility jumped the gun with analysis initialization
++		analysisMgr.initializeOptions();
++		analysisMgr.reAnalyzeAll(null);
++		analysisMgr.startAnalysis(TaskMonitor.DUMMY); // method blocks during analysis
++	}
++
++	@Override
++	protected void analyze(Program program, PCodeTestControlBlock testControlBlock) throws Exception {
++		/* Nothing: we ran analysis already */
++	}
++
++	@Override
++	protected void initializeState(EmulatorTestRunner testRunner, Program program) throws Exception {
++		super.initializeState(testRunner, program);
++		MemoryBlock memory0 = program.getMemory().getBlock(".memory0");
++		testRunner.setRegister("SP", memory0.getEnd().add(0x10000).getOffset());
++	}
++}
+diff --git a/Ghidra/Processors/WebAssembly/src/test.processors/java/ghidra/test/processors/WebAssembly_O0_EmulatorTest.java b/Ghidra/Processors/WebAssembly/src/test.processors/java/ghidra/test/processors/WebAssembly_O0_EmulatorTest.java
+new file mode 100644
+index 000000000..aa67d46b3
+--- /dev/null
++++ b/Ghidra/Processors/WebAssembly/src/test.processors/java/ghidra/test/processors/WebAssembly_O0_EmulatorTest.java
+@@ -0,0 +1,38 @@
++/* ###
++ * IP: GHIDRA
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package ghidra.test.processors;
++
++import ghidra.test.processors.support.ProcessorEmulatorTestAdapter;
++import junit.framework.Test;
++
++public class WebAssembly_O0_EmulatorTest extends WasmEmulatorTestAdapter {
++
++	private static final String LANGUAGE_ID = "Wasm:LE:32:default";
++	private static final String COMPILER_SPEC_ID = "default";
++
++	public WebAssembly_O0_EmulatorTest(String name) throws Exception {
++		super(name, LANGUAGE_ID, COMPILER_SPEC_ID);
++	}
++
++	@Override
++	protected String getProcessorDesignator() {
++		return "WebAssembly_LLVM_O0";
++	}
++
++	public static Test suite() {
++		return ProcessorEmulatorTestAdapter.buildEmulatorTestSuite(WebAssembly_O0_EmulatorTest.class);
++	}
++}
+diff --git a/Ghidra/Processors/WebAssembly/src/test.processors/java/ghidra/test/processors/WebAssembly_O3_EmulatorTest.java b/Ghidra/Processors/WebAssembly/src/test.processors/java/ghidra/test/processors/WebAssembly_O3_EmulatorTest.java
+new file mode 100644
+index 000000000..65ebbbc0d
+--- /dev/null
++++ b/Ghidra/Processors/WebAssembly/src/test.processors/java/ghidra/test/processors/WebAssembly_O3_EmulatorTest.java
+@@ -0,0 +1,38 @@
++/* ###
++ * IP: GHIDRA
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package ghidra.test.processors;
++
++import ghidra.test.processors.support.ProcessorEmulatorTestAdapter;
++import junit.framework.Test;
++
++public class WebAssembly_O3_EmulatorTest extends WasmEmulatorTestAdapter {
++
++	private static final String LANGUAGE_ID = "Wasm:LE:32:default";
++	private static final String COMPILER_SPEC_ID = "default";
++
++	public WebAssembly_O3_EmulatorTest(String name) throws Exception {
++		super(name, LANGUAGE_ID, COMPILER_SPEC_ID);
++	}
++
++	@Override
++	protected String getProcessorDesignator() {
++		return "WebAssembly_LLVM_O3";
++	}
++
++	public static Test suite() {
++		return ProcessorEmulatorTestAdapter.buildEmulatorTestSuite(WebAssembly_O3_EmulatorTest.class);
 +	}
 +}
 -- 
