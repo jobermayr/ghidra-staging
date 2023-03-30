@@ -127,11 +127,31 @@ valid calculation in that case).
 WebAssembly: Fix pcode_conversions_Main test.
 
 This is fixed by implementing unsigned-to-float conversions properly.
+
+WebAssembly: add a SIMD pcodetest.
+
+Similarly to the x86 AVX2 test, this will allow us to do (basic) testing of Wasm
+SIMD opcodes via autovectorization. Only the -O3 binary is expected to contain
+SIMD opcodes.
+
+WebAssembly: Simplify laneidx vector operands.
+
+laneidx is actually just a byte, not a LEB128. Attempting to use 16 arguments in
+a pcodeop hits a hardcoded limit of 8 args in PcodeEmit, so switch i8x16.shuffle
+to using 4 32-bit arguments instead. This is the same syntax as used by
+wasm-objdump by default.
+
+WebAssembly: fix load32/load64, simplify some SIMD pcode
+
+load32/load64 were incorrectly taking a laneidx, causing disassembly failures.
+Also, take this opportunity to implement some of the SIMD operations using
+common pcodeops. This will reduce emulation burden, as well as making loads and
+stores explicit for dataflow analysis.
 ---
  .../SleighDevTools/pcodetest/build.py         |    2 +-
  .../pcodetest/c_src/misc_BODY.c               |    7 +
  .../pcodetest/c_src/pcode_test.c              |    5 +
- .../SleighDevTools/pcodetest/pcode_defs.py    |    8 +
+ .../SleighDevTools/pcodetest/pcode_defs.py    |   18 +
  .../SleighDevTools/pcodetest/pcodetest.py     |   51 +
  .../SleighDevTools/pcodetest/tpp.py           |    2 +-
  .../support/ProcessorEmulatorTestAdapter.java |    4 +-
@@ -145,7 +165,7 @@ This is fixed by implementing unsigned-to-float conversions properly.
  .../data/languages/Leb128_opc2_1b.sinc        |    5 +
  .../data/languages/Leb128_opc2_2b.sinc        |    4 +
  .../data/languages/Leb128_u32.sinc            |   30 +
- .../WebAssembly/data/languages/VectorOps.sinc | 1493 +++++++++++++
+ .../WebAssembly/data/languages/VectorOps.sinc | 1439 +++++++++++++
  .../languages/WebAssembly-pos-stack.cspec     |  831 +++++++
  .../data/languages/WebAssembly.cspec          |   62 +
  .../data/languages/WebAssembly.dwarf          |    6 +
@@ -167,7 +187,7 @@ This is fixed by implementing unsigned-to-float conversions properly.
  .../main/java/wasm/analysis/WasmAnalysis.java |  154 ++
  .../java/wasm/analysis/WasmDWARFAnalyzer.java |   36 +
  .../java/wasm/analysis/WasmFuncSignature.java |   80 +
- .../wasm/analysis/WasmFunctionAnalysis.java   | 1514 +++++++++++++
+ .../wasm/analysis/WasmFunctionAnalysis.java   | 1513 +++++++++++++
  .../java/wasm/analysis/WasmPreAnalyzer.java   |  194 ++
  .../wasm/analysis/WasmSignatureAnalyzer.java  |  118 +
  .../analysis/WasmStackVariableAnalyzer.java   |  264 +++
@@ -219,7 +239,9 @@ This is fixed by implementing unsigned-to-float conversions properly.
  .../processors/WasmEmulatorTestAdapter.java   |  150 ++
  .../WebAssembly_O0_EmulatorTest.java          |   38 +
  .../WebAssembly_O3_EmulatorTest.java          |   38 +
- 91 files changed, 14535 insertions(+), 4 deletions(-)
+ .../WebAssembly_SIMD_O0_EmulatorTest.java     |   38 +
+ .../WebAssembly_SIMD_O3_EmulatorTest.java     |   38 +
+ 93 files changed, 14566 insertions(+), 4 deletions(-)
  create mode 100644 Ghidra/Processors/WebAssembly/Module.manifest
  create mode 100644 Ghidra/Processors/WebAssembly/build.gradle
  create mode 100644 Ghidra/Processors/WebAssembly/certification.manifest
@@ -303,6 +325,8 @@ This is fixed by implementing unsigned-to-float conversions properly.
  create mode 100644 Ghidra/Processors/WebAssembly/src/test.processors/java/ghidra/test/processors/WasmEmulatorTestAdapter.java
  create mode 100644 Ghidra/Processors/WebAssembly/src/test.processors/java/ghidra/test/processors/WebAssembly_O0_EmulatorTest.java
  create mode 100644 Ghidra/Processors/WebAssembly/src/test.processors/java/ghidra/test/processors/WebAssembly_O3_EmulatorTest.java
+ create mode 100644 Ghidra/Processors/WebAssembly/src/test.processors/java/ghidra/test/processors/WebAssembly_SIMD_O0_EmulatorTest.java
+ create mode 100644 Ghidra/Processors/WebAssembly/src/test.processors/java/ghidra/test/processors/WebAssembly_SIMD_O3_EmulatorTest.java
 
 diff --git a/Ghidra/Extensions/SleighDevTools/pcodetest/build.py b/Ghidra/Extensions/SleighDevTools/pcodetest/build.py
 index 00023bfcc..3e5cbb1a2 100644
@@ -352,22 +376,31 @@ index e31d9fccd..a011ddaba 100644
  {
  	MainInfo.numpass = 0;
 diff --git a/Ghidra/Extensions/SleighDevTools/pcodetest/pcode_defs.py b/Ghidra/Extensions/SleighDevTools/pcodetest/pcode_defs.py
-index 29bf00101..e14f572a3 100644
+index 29bf00101..e5740bc2c 100644
 --- a/Ghidra/Extensions/SleighDevTools/pcodetest/pcode_defs.py
 +++ b/Ghidra/Extensions/SleighDevTools/pcodetest/pcode_defs.py
-@@ -752,4 +752,12 @@ PCodeTest({
-     'toolchain': 'ARC/arc700-elf',
+@@ -753,3 +753,21 @@ PCodeTest({
      'language_id': 'ARCompact:LE:32:default',
      'ccflags': '-mcpu=arc700 -lgcc',
+ })
 +
 +PCodeTest({
 +    'name': 'WebAssembly',
 +    'compile_exe': 'bin/clang',
 +    'toolchain': 'LLVM/llvm',
 +    'toolchain_type': 'llvm',
-+    'ccflags': '-std=c99 --target=wasm32-wasi -Wl,--export-dynamic -Wl,--no-gc-sections -Wl,--no-entry',
++    'ccflags': '-std=c99 --target=wasm32 -Wl,--export-dynamic -Wl,--no-gc-sections -Wl,--no-entry',
 +    'language_id': 'Wasm:LE:32:default',
- })
++})
++
++PCodeTest({
++    'name': 'WebAssembly_SIMD',
++    'compile_exe': 'bin/clang',
++    'toolchain': 'LLVM/llvm',
++    'toolchain_type': 'llvm',
++    'ccflags': '-std=c99 --target=wasm32 -msimd128 -Wl,--export-dynamic -Wl,--no-gc-sections -Wl,--no-entry',
++    'language_id': 'Wasm:LE:32:default',
++})
 diff --git a/Ghidra/Extensions/SleighDevTools/pcodetest/pcodetest.py b/Ghidra/Extensions/SleighDevTools/pcodetest/pcodetest.py
 index c464ad6ce..8b55b53dc 100644
 --- a/Ghidra/Extensions/SleighDevTools/pcodetest/pcodetest.py
@@ -2349,14 +2382,25 @@ index 000000000..a98eb4c72
 +{ $(EXPORT_EXPR) }
 diff --git a/Ghidra/Processors/WebAssembly/data/languages/VectorOps.sinc b/Ghidra/Processors/WebAssembly/data/languages/VectorOps.sinc
 new file mode 100644
-index 000000000..eb5b90848
+index 000000000..f87ba860c
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/data/languages/VectorOps.sinc
-@@ -0,0 +1,1493 @@
+@@ -0,0 +1,1439 @@
 +# Ghidra only supports scalars up to 64 bits
 +define token I128 (64)
-+	f128_0 = (0, 63)
-+	f128_1 = (0, 63)
++	f128_0 = (0, 63) hex
++	f128_1 = (0, 63) hex
++;
++
++define token laneidx_1 (8)
++    laneidx = (0, 7) dec
++;
++
++define token laneidx_4 (32)
++    laneidx0_3 = (0, 31) hex
++    laneidx4_7 = (0, 31) hex
++    laneidx8_11 = (0, 31) hex
++    laneidx12_15 = (0, 31) hex
 +;
 +
 +loadaddr2: memalign memoffset is memalign; memoffset; sp2_32 {
@@ -2364,73 +2408,21 @@ index 000000000..eb5b90848
 +	export addr;
 +}
 +
-+laneidx: ULeb128 is ULeb128 {
-+	export ULeb128;
-+}
-+
-+laneidx0: ULeb128 is ULeb128 {
-+	export ULeb128;
-+}
-+
-+laneidx1: ULeb128 is ULeb128 {
-+	export ULeb128;
-+}
-+
-+laneidx2: ULeb128 is ULeb128 {
-+	export ULeb128;
-+}
-+
-+laneidx3: ULeb128 is ULeb128 {
-+	export ULeb128;
-+}
-+
-+laneidx4: ULeb128 is ULeb128 {
-+	export ULeb128;
-+}
-+
-+laneidx5: ULeb128 is ULeb128 {
-+	export ULeb128;
-+}
-+
-+laneidx6: ULeb128 is ULeb128 {
-+	export ULeb128;
-+}
-+
-+laneidx7: ULeb128 is ULeb128 {
-+	export ULeb128;
-+}
-+
-+laneidx8: ULeb128 is ULeb128 {
-+	export ULeb128;
-+}
-+
-+laneidx9: ULeb128 is ULeb128 {
-+	export ULeb128;
-+}
-+
-+laneidx10: ULeb128 is ULeb128 {
-+	export ULeb128;
-+}
-+
-+laneidx11: ULeb128 is ULeb128 {
-+	export ULeb128;
-+}
-+
-+laneidx12: ULeb128 is ULeb128 {
-+	export ULeb128;
-+}
-+
-+laneidx13: ULeb128 is ULeb128 {
-+	export ULeb128;
-+}
-+
-+laneidx14: ULeb128 is ULeb128 {
-+	export ULeb128;
-+}
-+
-+laneidx15: ULeb128 is ULeb128 {
-+	export ULeb128;
-+}
++# splatN(value) construct vector by replicating the N-bit value
++define pcodeop splat8;
++define pcodeop splat16;
++define pcodeop splat32;
++define pcodeop splat64;
++# extractN(vector, laneidx) extract a single N-bit lane from the vector
++define pcodeop extract8;
++define pcodeop extract16;
++define pcodeop extract32;
++define pcodeop extract64;
++# replaceN(vector, laneidx, value) replace a single N-bit lane with provided value
++define pcodeop replace8;
++define pcodeop replace16;
++define pcodeop replace32;
++define pcodeop replace64;
 +
 +## Vector instructions
 +# [i32] -> [v128]
@@ -2438,64 +2430,76 @@ index 000000000..eb5b90848
 +    sp1_128 = *:16 loadaddr;
 +}
 +
-+define pcodeop v128_load8x8_s;
 +# [i32] -> [v128]
 +:v128.load8x8_s loadaddr is opc=0xFD; opc2_1; loadaddr; sp1_128; ctx_is_directive=0 {
-+    sp1_128 = v128_load8x8_s(loadaddr);
++    sp1_128[0,16] = sext(*:1 loadaddr);
++    sp1_128[16,16] = sext(*:1 (loadaddr + 1));
++    sp1_128[32,16] = sext(*:1 (loadaddr + 2));
++    sp1_128[48,16] = sext(*:1 (loadaddr + 3));
++    sp1_128[64,16] = sext(*:1 (loadaddr + 4));
++    sp1_128[80,16] = sext(*:1 (loadaddr + 5));
++    sp1_128[96,16] = sext(*:1 (loadaddr + 6));
++    sp1_128[112,16] = sext(*:1 (loadaddr + 7));
 +}
 +
-+define pcodeop v128_load8x8_u;
 +# [i32] -> [v128]
 +:v128.load8x8_u loadaddr is opc=0xFD; opc2_2; loadaddr; sp1_128; ctx_is_directive=0 {
-+    sp1_128 = v128_load8x8_u(loadaddr);
++    sp1_128[0,16] = zext(*:1 loadaddr);
++    sp1_128[16,16] = zext(*:1 (loadaddr + 1));
++    sp1_128[32,16] = zext(*:1 (loadaddr + 2));
++    sp1_128[48,16] = zext(*:1 (loadaddr + 3));
++    sp1_128[64,16] = zext(*:1 (loadaddr + 4));
++    sp1_128[80,16] = zext(*:1 (loadaddr + 5));
++    sp1_128[96,16] = zext(*:1 (loadaddr + 6));
++    sp1_128[112,16] = zext(*:1 (loadaddr + 7));
 +}
 +
-+define pcodeop v128_load16x4_s;
 +# [i32] -> [v128]
 +:v128.load16x4_s loadaddr is opc=0xFD; opc2_3; loadaddr; sp1_128; ctx_is_directive=0 {
-+    sp1_128 = v128_load16x4_s(loadaddr);
++    sp1_128[0,32] = sext(*:2 loadaddr);
++    sp1_128[32,32] = sext(*:2 (loadaddr + 2));
++    sp1_128[64,32] = sext(*:2 (loadaddr + 4));
++    sp1_128[96,32] = sext(*:2 (loadaddr + 6));
 +}
 +
-+define pcodeop v128_load16x4_u;
 +# [i32] -> [v128]
 +:v128.load16x4_u loadaddr is opc=0xFD; opc2_4; loadaddr; sp1_128; ctx_is_directive=0 {
-+    sp1_128 = v128_load16x4_u(loadaddr);
++    sp1_128[0,32] = zext(*:2 loadaddr);
++    sp1_128[32,32] = zext(*:2 (loadaddr + 2));
++    sp1_128[64,32] = zext(*:2 (loadaddr + 4));
++    sp1_128[96,32] = zext(*:2 (loadaddr + 6));
 +}
 +
-+define pcodeop v128_load32x2_s;
 +# [i32] -> [v128]
 +:v128.load32x2_s loadaddr is opc=0xFD; opc2_5; loadaddr; sp1_128; ctx_is_directive=0 {
-+    sp1_128 = v128_load32x2_s(loadaddr);
++    sp1_128[0,64] = sext(*:4 loadaddr);
++    sp1_128[64,64] = sext(*:4 (loadaddr + 4));
 +}
 +
-+define pcodeop v128_load32x2_u;
 +# [i32] -> [v128]
 +:v128.load32x2_u loadaddr is opc=0xFD; opc2_6; loadaddr; sp1_128; ctx_is_directive=0 {
-+    sp1_128 = v128_load32x2_u(loadaddr);
++    sp1_128[0,64] = zext(*:4 loadaddr);
++    sp1_128[64,64] = zext(*:4 (loadaddr + 4));
 +}
 +
-+define pcodeop v128_load8_splat;
 +# [i32] -> [v128]
 +:v128.load8_splat loadaddr is opc=0xFD; opc2_7; loadaddr; sp1_128; ctx_is_directive=0 {
-+    sp1_128 = v128_load8_splat(loadaddr);
++    sp1_128 = splat8(*:1 loadaddr);
 +}
 +
-+define pcodeop v128_load16_splat;
 +# [i32] -> [v128]
 +:v128.load16_splat loadaddr is opc=0xFD; opc2_8; loadaddr; sp1_128; ctx_is_directive=0 {
-+    sp1_128 = v128_load16_splat(loadaddr);
++    sp1_128 = splat16(*:2 loadaddr);
 +}
 +
-+define pcodeop v128_load32_splat;
 +# [i32] -> [v128]
 +:v128.load32_splat loadaddr is opc=0xFD; opc2_9; loadaddr; sp1_128; ctx_is_directive=0 {
-+    sp1_128 = v128_load32_splat(loadaddr);
++    sp1_128 = splat32(*:4 loadaddr);
 +}
 +
-+define pcodeop v128_load64_splat;
 +# [i32] -> [v128]
 +:v128.load64_splat loadaddr is opc=0xFD; opc2_10; loadaddr; sp1_128; ctx_is_directive=0 {
-+    sp1_128 = v128_load64_splat(loadaddr);
++    sp1_128 = splat64(*:8 loadaddr);
 +}
 +
 +# [i32 v128] -> []
@@ -2511,8 +2515,8 @@ index 000000000..eb5b90848
 +
 +define pcodeop i8x16_shuffle;
 +# [v128 v128] -> [v128]
-+:i8x16.shuffle laneidx0 laneidx1 laneidx2 laneidx3 laneidx4 laneidx5 laneidx6 laneidx7 laneidx8 laneidx9 laneidx10 laneidx11 laneidx12 laneidx13 laneidx14 laneidx15 is opc=0xFD; opc2_13; laneidx0; laneidx1; laneidx2; laneidx3; laneidx4; laneidx5; laneidx6; laneidx7; laneidx8; laneidx9; laneidx10; laneidx11; laneidx12; laneidx13; laneidx14; laneidx15; sp1_128; sp2_128; ctx_is_directive=0 {
-+    sp2_128 = i8x16_shuffle(laneidx0, laneidx1, laneidx2, laneidx3, laneidx4, laneidx5, laneidx6, laneidx7, laneidx8, laneidx9, laneidx10, laneidx11, laneidx12, laneidx13, laneidx14, laneidx15, sp1_128, sp2_128);
++:i8x16.shuffle laneidx0_3 laneidx4_7 laneidx8_11 laneidx12_15 is opc=0xFD; opc2_13; laneidx0_3; laneidx4_7; laneidx8_11; laneidx12_15; sp1_128; sp2_128; ctx_is_directive=0 {
++    sp2_128 = i8x16_shuffle(laneidx0_3:4, laneidx4_7:4, laneidx8_11:4, laneidx12_15:4, sp1_128, sp2_128);
 +}
 +
 +define pcodeop i8x16_swizzle;
@@ -2521,124 +2525,108 @@ index 000000000..eb5b90848
 +    sp2_128 = i8x16_swizzle(sp1_128, sp2_128);
 +}
 +
-+define pcodeop i8x16_splat;
 +# [i32] -> [v128]
 +:i8x16.splat is opc=0xFD; opc2_15; sp1_128; sp1_32; ctx_is_directive=0 {
-+    sp1_128 = i8x16_splat(sp1_32);
++    sp1_128 = splat8(sp1_32:1);
 +}
 +
-+define pcodeop i16x8_splat;
 +# [i32] -> [v128]
 +:i16x8.splat is opc=0xFD; opc2_16; sp1_128; sp1_32; ctx_is_directive=0 {
-+    sp1_128 = i16x8_splat(sp1_32);
++    sp1_128 = splat16(sp1_32:2);
 +}
 +
-+define pcodeop i32x4_splat;
 +# [i32] -> [v128]
 +:i32x4.splat is opc=0xFD; opc2_17; sp1_128; sp1_32; ctx_is_directive=0 {
-+    sp1_128 = i32x4_splat(sp1_32);
++    sp1_128 = splat32(sp1_32:4);
 +}
 +
-+define pcodeop i64x2_splat;
 +# [i64] -> [v128]
 +:i64x2.splat is opc=0xFD; opc2_18; sp1_128; sp1_64; ctx_is_directive=0 {
-+    sp1_128 = i64x2_splat(sp1_64);
++    sp1_128 = splat64(sp1_64:8);
 +}
 +
-+define pcodeop f32x4_splat;
 +# [f32] -> [v128]
 +:f32x4.splat is opc=0xFD; opc2_19; sp1_128; sp1_32; ctx_is_directive=0 {
-+    sp1_128 = f32x4_splat(sp1_32);
++    sp1_128 = splat32(sp1_32:4);
 +}
 +
-+define pcodeop f64x2_splat;
 +# [f64] -> [v128]
 +:f64x2.splat is opc=0xFD; opc2_20; sp1_128; sp1_64; ctx_is_directive=0 {
-+    sp1_128 = f64x2_splat(sp1_64);
++    sp1_128 = splat64(sp1_64:8);
 +}
 +
-+define pcodeop i8x16_extract_lane_s;
 +# [v128] -> [i32]
 +:i8x16.extract_lane_s laneidx is opc=0xFD; opc2_21; laneidx; sp1_128; sp1_32; ctx_is_directive=0 {
-+    sp1_32 = i8x16_extract_lane_s(laneidx, sp1_128);
++    local tmp:1 = extract8(sp1_128, laneidx:1);
++    sp1_32 = sext(tmp);
 +}
 +
-+define pcodeop i8x16_extract_lane_u;
 +# [v128] -> [i32]
 +:i8x16.extract_lane_u laneidx is opc=0xFD; opc2_22; laneidx; sp1_128; sp1_32; ctx_is_directive=0 {
-+    sp1_32 = i8x16_extract_lane_u(laneidx, sp1_128);
++    local tmp:1 = extract8(sp1_128, laneidx:1);
++    sp1_32 = zext(tmp);
 +}
 +
-+define pcodeop i8x16_replace_lane;
 +# [v128 i32] -> [v128]
 +:i8x16.replace_lane laneidx is opc=0xFD; opc2_23; laneidx; sp1_32; sp2_128; ctx_is_directive=0 {
-+    sp2_128 = i8x16_replace_lane(laneidx, sp1_32, sp2_128);
++    sp2_128 = replace8(sp2_128, laneidx:1, sp1_32:1);
 +}
 +
-+define pcodeop i16x8_extract_lane_s;
 +# [v128] -> [i32]
 +:i16x8.extract_lane_s laneidx is opc=0xFD; opc2_24; laneidx; sp1_128; sp1_32; ctx_is_directive=0 {
-+    sp1_32 = i16x8_extract_lane_s(laneidx, sp1_128);
++    local tmp:2 = extract16(sp1_128, laneidx:1);
++    sp1_32 = sext(tmp);
 +}
 +
-+define pcodeop i16x8_extract_lane_u;
 +# [v128] -> [i32]
 +:i16x8.extract_lane_u laneidx is opc=0xFD; opc2_25; laneidx; sp1_128; sp1_32; ctx_is_directive=0 {
-+    sp1_32 = i16x8_extract_lane_u(laneidx, sp1_128);
++    local tmp:2 = extract16(sp1_128, laneidx:1);
++    sp1_32 = zext(tmp);
 +}
 +
-+define pcodeop i16x8_replace_lane;
 +# [v128 i32] -> [v128]
 +:i16x8.replace_lane laneidx is opc=0xFD; opc2_26; laneidx; sp1_32; sp2_128; ctx_is_directive=0 {
-+    sp2_128 = i16x8_replace_lane(laneidx, sp1_32, sp2_128);
++    sp2_128 = replace16(sp2_128, laneidx:1, sp1_32:2);
 +}
 +
-+define pcodeop i32x4_extract_lane;
 +# [v128] -> [i32]
 +:i32x4.extract_lane laneidx is opc=0xFD; opc2_27; laneidx; sp1_128; sp1_32; ctx_is_directive=0 {
-+    sp1_32 = i32x4_extract_lane(laneidx, sp1_128);
++    sp1_32 = extract32(sp1_128, laneidx:1);
 +}
 +
-+define pcodeop i32x4_replace_lane;
 +# [v128 i32] -> [v128]
 +:i32x4.replace_lane laneidx is opc=0xFD; opc2_28; laneidx; sp1_32; sp2_128; ctx_is_directive=0 {
-+    sp2_128 = i32x4_replace_lane(laneidx, sp1_32, sp2_128);
++    sp2_128 = replace32(sp2_128, laneidx:1, sp1_32);
 +}
 +
-+define pcodeop i64x2_extract_lane;
 +# [v128] -> [i64]
 +:i64x2.extract_lane laneidx is opc=0xFD; opc2_29; laneidx; sp1_128; sp1_64; ctx_is_directive=0 {
-+    sp1_64 = i64x2_extract_lane(laneidx, sp1_128);
++    sp1_64 = extract64(sp1_128, laneidx:1);
 +}
 +
-+define pcodeop i64x2_replace_lane;
 +# [v128 i64] -> [v128]
 +:i64x2.replace_lane laneidx is opc=0xFD; opc2_30; laneidx; sp1_64; sp2_128; ctx_is_directive=0 {
-+    sp2_128 = i64x2_replace_lane(laneidx, sp1_64, sp2_128);
++    sp2_128 = replace64(sp2_128, laneidx:1, sp1_64);
 +}
 +
-+define pcodeop f32x4_extract_lane;
 +# [v128] -> [f32]
 +:f32x4.extract_lane laneidx is opc=0xFD; opc2_31; laneidx; sp1_128; sp1_32; ctx_is_directive=0 {
-+    sp1_32 = f32x4_extract_lane(laneidx, sp1_128);
++    sp1_32 = extract32(sp1_128, laneidx:1);
 +}
 +
-+define pcodeop f32x4_replace_lane;
 +# [v128 f32] -> [v128]
 +:f32x4.replace_lane laneidx is opc=0xFD; opc2_32; laneidx; sp1_32; sp2_128; ctx_is_directive=0 {
-+    sp2_128 = f32x4_replace_lane(laneidx, sp1_32, sp2_128);
++    sp2_128 = replace32(sp2_128, laneidx:1, sp1_32);
 +}
 +
-+define pcodeop f64x2_extract_lane;
 +# [v128] -> [f64]
 +:f64x2.extract_lane laneidx is opc=0xFD; opc2_33; laneidx; sp1_128; sp1_64; ctx_is_directive=0 {
-+    sp1_64 = f64x2_extract_lane(laneidx, sp1_128);
++    sp1_64 = extract64(sp1_128, laneidx:1);
 +}
 +
-+define pcodeop f64x2_replace_lane;
 +# [v128 f64] -> [v128]
 +:f64x2.replace_lane laneidx is opc=0xFD; opc2_34; laneidx; sp1_64; sp2_128; ctx_is_directive=0 {
-+    sp2_128 = f64x2_replace_lane(laneidx, sp1_64, sp2_128);
++    sp2_128 = replace64(sp2_128, laneidx:1, sp1_64);
 +}
 +
 +define pcodeop i8x16_eq;
@@ -2935,64 +2923,55 @@ index 000000000..eb5b90848
 +    sp1_32 = v128_any_true(sp1_128);
 +}
 +
-+define pcodeop v128_load8_lane;
 +# [i32 v128] -> [v128]
 +:v128.load8_lane loadaddr2 laneidx is opc=0xFD; opc2_84; loadaddr2; laneidx; sp1_128; sp2_128; ctx_is_directive=0 {
-+    sp2_128 = v128_load8_lane(loadaddr2, laneidx, sp1_128);
++    sp2_128 = replace8(sp1_128, laneidx:1, *:1 loadaddr2);
 +}
 +
 +define pcodeop v128_load16_lane;
 +# [i32 v128] -> [v128]
 +:v128.load16_lane loadaddr2 laneidx is opc=0xFD; opc2_85; loadaddr2; laneidx; sp1_128; sp2_128; ctx_is_directive=0 {
-+    sp2_128 = v128_load16_lane(loadaddr2, laneidx, sp1_128);
++    sp2_128 = replace16(sp1_128, laneidx:1, *:2 loadaddr2);
 +}
 +
-+define pcodeop v128_load32_lane;
 +# [i32 v128] -> [v128]
 +:v128.load32_lane loadaddr2 laneidx is opc=0xFD; opc2_86; loadaddr2; laneidx; sp1_128; sp2_128; ctx_is_directive=0 {
-+    sp2_128 = v128_load32_lane(loadaddr2, laneidx, sp1_128);
++    sp2_128 = replace32(sp1_128, laneidx:1, *:4 loadaddr2);
 +}
 +
-+define pcodeop v128_load64_lane;
 +# [i32 v128] -> [v128]
 +:v128.load64_lane loadaddr2 laneidx is opc=0xFD; opc2_87; loadaddr2; laneidx; sp1_128; sp2_128; ctx_is_directive=0 {
-+    sp2_128 = v128_load64_lane(loadaddr2, laneidx, sp1_128);
++    sp2_128 = replace64(sp1_128, laneidx:1, *:8 loadaddr2);
 +}
 +
-+define pcodeop v128_store8_lane;
 +# [i32 v128] -> []
 +:v128.store8_lane storeaddr laneidx is opc=0xFD; opc2_88; storeaddr; laneidx; sp1_128; ctx_is_directive=0 {
-+    v128_store8_lane(storeaddr, laneidx, sp1_128);
++    *:1 storeaddr = extract8(sp1_128, laneidx:1);
 +}
 +
-+define pcodeop v128_store16_lane;
 +# [i32 v128] -> []
 +:v128.store16_lane storeaddr laneidx is opc=0xFD; opc2_89; storeaddr; laneidx; sp1_128; ctx_is_directive=0 {
-+    v128_store16_lane(storeaddr, laneidx, sp1_128);
++    *:2 storeaddr = extract16(sp1_128, laneidx:1);
 +}
 +
-+define pcodeop v128_store32_lane;
 +# [i32 v128] -> []
 +:v128.store32_lane storeaddr laneidx is opc=0xFD; opc2_90; storeaddr; laneidx; sp1_128; ctx_is_directive=0 {
-+    v128_store32_lane(storeaddr, laneidx, sp1_128);
++    *:4 storeaddr = extract32(sp1_128, laneidx:1);
 +}
 +
-+define pcodeop v128_store64_lane;
 +# [i32 v128] -> []
 +:v128.store64_lane storeaddr laneidx is opc=0xFD; opc2_91; storeaddr; laneidx; sp1_128; ctx_is_directive=0 {
-+    v128_store64_lane(storeaddr, laneidx, sp1_128);
++    *:8 storeaddr = extract64(sp1_128, laneidx:1);
 +}
 +
-+define pcodeop v128_load32_zero;
 +# [i32] -> [v128]
-+:v128.load32_zero loadaddr laneidx is opc=0xFD; opc2_92; loadaddr; laneidx; sp1_128; ctx_is_directive=0 {
-+    sp1_128 = v128_load32_zero(loadaddr, laneidx);
++:v128.load32_zero loadaddr is opc=0xFD; opc2_92; loadaddr; sp1_128; ctx_is_directive=0 {
++    sp1_128 = zext(*:4 loadaddr);
 +}
 +
-+define pcodeop v128_load64_zero;
 +# [i32] -> [v128]
-+:v128.load64_zero loadaddr laneidx is opc=0xFD; opc2_93; loadaddr; laneidx; sp1_128; ctx_is_directive=0 {
-+    sp1_128 = v128_load64_zero(loadaddr, laneidx);
++:v128.load64_zero loadaddr is opc=0xFD; opc2_93; loadaddr; sp1_128; ctx_is_directive=0 {
++    sp1_128 = zext(*:8 loadaddr);
 +}
 +
 +define pcodeop f32x4_demote_f64x2_zero;
@@ -9197,10 +9176,10 @@ index 000000000..9c3d9c41d
 +}
 diff --git a/Ghidra/Processors/WebAssembly/src/main/java/wasm/analysis/WasmFunctionAnalysis.java b/Ghidra/Processors/WebAssembly/src/main/java/wasm/analysis/WasmFunctionAnalysis.java
 new file mode 100644
-index 000000000..de2d47d5a
+index 000000000..8377ce858
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/src/main/java/wasm/analysis/WasmFunctionAnalysis.java
-@@ -0,0 +1,1514 @@
+@@ -0,0 +1,1513 @@
 +/* ###
 + * IP: GHIDRA
 + *
@@ -10274,7 +10253,7 @@ index 000000000..de2d47d5a
 +				break;
 +			case 0xD: /* i8x16.shuffle */
 +				for (int i = 0; i < 16; i++)
-+					readLeb128(reader); /* laneidx16 */
++					reader.readNextByte(); /* laneidx16 */
 +				binaryOp(instAddress, ValType.v128, ValType.v128);
 +				break;
 +			case 0xE: /* i8x16.swizzle */
@@ -10296,62 +10275,62 @@ index 000000000..de2d47d5a
 +				break;
 +			case 0x15: /* i8x16.extract_lane_s */
 +			case 0x16: /* i8x16.extract_lane_u */
-+				readLeb128(reader); /* laneidx */
++				reader.readNextByte(); /* laneidx */
 +				unaryOp(instAddress, ValType.v128, ValType.i32);
 +				break;
 +			case 0x17: /* i8x16.replace_lane */
-+				readLeb128(reader); /* laneidx */
++				reader.readNextByte(); /* laneidx */
 +				popValue(instAddress, ValType.i32);
 +				popValue(instAddress, ValType.v128);
 +				pushValue(instAddress, ValType.v128);
 +				break;
 +			case 0x18: /* i16x8.extract_lane_s */
 +			case 0x19: /* i16x8.extract_lane_u */
-+				readLeb128(reader); /* laneidx */
++				reader.readNextByte(); /* laneidx */
 +				unaryOp(instAddress, ValType.v128, ValType.i32);
 +				break;
 +			case 0x1A: /* i16x8.replace_lane */
-+				readLeb128(reader); /* laneidx */
++				reader.readNextByte(); /* laneidx */
 +				popValue(instAddress, ValType.i32);
 +				popValue(instAddress, ValType.v128);
 +				pushValue(instAddress, ValType.v128);
 +				break;
 +			case 0x1B: /* i32x4.extract_lane */
-+				readLeb128(reader); /* laneidx */
++				reader.readNextByte(); /* laneidx */
 +				unaryOp(instAddress, ValType.v128, ValType.i32);
 +				break;
 +			case 0x1C: /* i32x4.replace_lane */
-+				readLeb128(reader); /* laneidx */
++				reader.readNextByte(); /* laneidx */
 +				popValue(instAddress, ValType.i32);
 +				popValue(instAddress, ValType.v128);
 +				pushValue(instAddress, ValType.v128);
 +				break;
 +			case 0x1D: /* i64x2.extract_lane */
-+				readLeb128(reader); /* laneidx */
++				reader.readNextByte(); /* laneidx */
 +				unaryOp(instAddress, ValType.v128, ValType.i64);
 +				break;
 +			case 0x1E: /* i64x2.replace_lane */
-+				readLeb128(reader); /* laneidx */
++				reader.readNextByte(); /* laneidx */
 +				popValue(instAddress, ValType.i64);
 +				popValue(instAddress, ValType.v128);
 +				pushValue(instAddress, ValType.v128);
 +				break;
 +			case 0x1F: /* f32x4.extract_lane */
-+				readLeb128(reader); /* laneidx */
++				reader.readNextByte(); /* laneidx */
 +				unaryOp(instAddress, ValType.v128, ValType.f32);
 +				break;
 +			case 0x20: /* f32x4.replace_lane */
-+				readLeb128(reader); /* laneidx */
++				reader.readNextByte(); /* laneidx */
 +				popValue(instAddress, ValType.f32);
 +				popValue(instAddress, ValType.v128);
 +				pushValue(instAddress, ValType.v128);
 +				break;
 +			case 0x21: /* f64x2.extract_lane */
-+				readLeb128(reader); /* laneidx */
++				reader.readNextByte(); /* laneidx */
 +				unaryOp(instAddress, ValType.v128, ValType.f64);
 +				break;
 +			case 0x22: /* f64x2.replace_lane */
-+				readLeb128(reader); /* laneidx */
++				reader.readNextByte(); /* laneidx */
 +				popValue(instAddress, ValType.f64);
 +				popValue(instAddress, ValType.v128);
 +				pushValue(instAddress, ValType.v128);
@@ -10424,7 +10403,7 @@ index 000000000..de2d47d5a
 +			case 0x57: /* v128.load64_lane */
 +				readLeb128(reader); /* align */
 +				readLeb128(reader); /* offset */
-+				readLeb128(reader); /* laneidx */
++				reader.readNextByte(); /* laneidx */
 +				popValue(instAddress, ValType.v128);
 +				popValue(instAddress, ValType.i32);
 +				pushValue(instAddress, ValType.v128);
@@ -10435,7 +10414,7 @@ index 000000000..de2d47d5a
 +			case 0x5B: /* v128.store64_lane */
 +				readLeb128(reader); /* align */
 +				readLeb128(reader); /* offset */
-+				readLeb128(reader); /* laneidx */
++				reader.readNextByte(); /* laneidx */
 +				popValue(instAddress, ValType.v128);
 +				popValue(instAddress, ValType.i32);
 +				break;
@@ -10443,7 +10422,6 @@ index 000000000..de2d47d5a
 +			case 0x5D: /* v128.load64_zero */
 +				readLeb128(reader); /* align */
 +				readLeb128(reader); /* offset */
-+				readLeb128(reader); /* laneidx */
 +				popValue(instAddress, ValType.i32);
 +				pushValue(instAddress, ValType.v128);
 +				break;
@@ -15432,6 +15410,94 @@ index 000000000..65ebbbc0d
 +
 +	public static Test suite() {
 +		return ProcessorEmulatorTestAdapter.buildEmulatorTestSuite(WebAssembly_O3_EmulatorTest.class);
++	}
++}
+diff --git a/Ghidra/Processors/WebAssembly/src/test.processors/java/ghidra/test/processors/WebAssembly_SIMD_O0_EmulatorTest.java b/Ghidra/Processors/WebAssembly/src/test.processors/java/ghidra/test/processors/WebAssembly_SIMD_O0_EmulatorTest.java
+new file mode 100644
+index 000000000..e718cb52c
+--- /dev/null
++++ b/Ghidra/Processors/WebAssembly/src/test.processors/java/ghidra/test/processors/WebAssembly_SIMD_O0_EmulatorTest.java
+@@ -0,0 +1,38 @@
++/* ###
++ * IP: GHIDRA
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package ghidra.test.processors;
++
++import ghidra.test.processors.support.ProcessorEmulatorTestAdapter;
++import junit.framework.Test;
++
++public class WebAssembly_SIMD_O0_EmulatorTest extends WasmEmulatorTestAdapter {
++
++	private static final String LANGUAGE_ID = "Wasm:LE:32:default";
++	private static final String COMPILER_SPEC_ID = "default";
++
++	public WebAssembly_SIMD_O0_EmulatorTest(String name) throws Exception {
++		super(name, LANGUAGE_ID, COMPILER_SPEC_ID);
++	}
++
++	@Override
++	protected String getProcessorDesignator() {
++		return "WebAssembly_SIMD_LLVM_O0";
++	}
++
++	public static Test suite() {
++		return ProcessorEmulatorTestAdapter.buildEmulatorTestSuite(WebAssembly_SIMD_O0_EmulatorTest.class);
++	}
++}
+diff --git a/Ghidra/Processors/WebAssembly/src/test.processors/java/ghidra/test/processors/WebAssembly_SIMD_O3_EmulatorTest.java b/Ghidra/Processors/WebAssembly/src/test.processors/java/ghidra/test/processors/WebAssembly_SIMD_O3_EmulatorTest.java
+new file mode 100644
+index 000000000..8226b3594
+--- /dev/null
++++ b/Ghidra/Processors/WebAssembly/src/test.processors/java/ghidra/test/processors/WebAssembly_SIMD_O3_EmulatorTest.java
+@@ -0,0 +1,38 @@
++/* ###
++ * IP: GHIDRA
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package ghidra.test.processors;
++
++import ghidra.test.processors.support.ProcessorEmulatorTestAdapter;
++import junit.framework.Test;
++
++public class WebAssembly_SIMD_O3_EmulatorTest extends WasmEmulatorTestAdapter {
++
++	private static final String LANGUAGE_ID = "Wasm:LE:32:default";
++	private static final String COMPILER_SPEC_ID = "default";
++
++	public WebAssembly_SIMD_O3_EmulatorTest(String name) throws Exception {
++		super(name, LANGUAGE_ID, COMPILER_SPEC_ID);
++	}
++
++	@Override
++	protected String getProcessorDesignator() {
++		return "WebAssembly_SIMD_LLVM_O3";
++	}
++
++	public static Test suite() {
++		return ProcessorEmulatorTestAdapter.buildEmulatorTestSuite(WebAssembly_SIMD_O3_EmulatorTest.class);
 +	}
 +}
 -- 
