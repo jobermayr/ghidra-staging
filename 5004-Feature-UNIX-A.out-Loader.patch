@@ -3,13 +3,21 @@ From: Colin Bourassa <colin.bourassa@gmail.com>
 Date: Fri, 17 Feb 2023 11:48:14 -0500
 Subject: [PATCH] 5004: Feature: UNIX A.out Loader
 
+Address review comments; fix bss block init
+
+This addresses review comments concerning (a) the unreliability of A.out format
+consistency for OLDSUN2 files, (b) the behavior of NetBSD with respect to header
+field endianness, and (c) formatting errors in some of the language specs.
+
+This also adds generation of the .bss block when the object file specifies a
+nonzero size for .bss.
 ---
- .../bin/format/unixaout/UnixAoutHeader.java   | 501 ++++++++++++++++++
+ .../bin/format/unixaout/UnixAoutHeader.java   | 492 +++++++++++++++++
  .../format/unixaout/UnixAoutMachineType.java  |  79 +++
  .../UnixAoutRelocationTableEntry.java         |  64 +++
  .../unixaout/UnixAoutSymbolTableEntry.java    |  66 +++
- .../app/util/opinion/UnixAoutLoader.java      | 468 ++++++++++++++++
- 5 files changed, 1178 insertions(+)
+ .../app/util/opinion/UnixAoutLoader.java      | 503 ++++++++++++++++++
+ 5 files changed, 1204 insertions(+)
  create mode 100644 Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/unixaout/UnixAoutHeader.java
  create mode 100644 Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/unixaout/UnixAoutMachineType.java
  create mode 100644 Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/unixaout/UnixAoutRelocationTableEntry.java
@@ -18,10 +26,10 @@ Subject: [PATCH] 5004: Feature: UNIX A.out Loader
 
 diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/unixaout/UnixAoutHeader.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/unixaout/UnixAoutHeader.java
 new file mode 100644
-index 000000000..e98a1d66c
+index 000000000..fcb2fb72b
 --- /dev/null
 +++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/unixaout/UnixAoutHeader.java
-@@ -0,0 +1,501 @@
+@@ -0,0 +1,492 @@
 +/* ###
 + * IP: GHIDRA
 + *
@@ -58,7 +66,6 @@ index 000000000..e98a1d66c
 +    private String compilerSpec = "default";
 +    private long pageSize;
 +
-+    private boolean isOldSun2 = false;
 +    private boolean isNetBSD = false;
 +    private boolean isSparc = false;
 +
@@ -111,14 +118,15 @@ index 000000000..e98a1d66c
 +        this.a_drsize = reader.readNextUnsignedInt();
 +        this.binarySize = reader.length();
 +
-+        // NOTE: In NetBSD/i386 examples of a.out, the 32-bit a_magic/midmag word seems to
-+        // always be written in big-endian regardless of the data endianness in the rest of
-+        // the file. Are there other examples of this?
-+        if (isLittleEndian) {
++        checkExecutableType();
++
++        // NOTE: In NetBSD/i386 examples of a.out, the "new-style" 32-bit a_magic/midmag word
++        // is written in big-endian regardless of the data endianness in the rest of the file.
++        if ((this.exeType == ExecutableType.UNKNOWN) && isLittleEndian) {
 +            this.a_magic = Integer.reverseBytes((int)this.a_magic);
++            checkExecutableType();
 +        }
 +
-+        checkExecutableType();
 +        checkMachineTypeValidity(isLittleEndian);
 +        determineTextOffset(isLittleEndian);
 +
@@ -249,9 +257,6 @@ index 000000000..e98a1d66c
 +        case UnixAoutMachineType.M_68010:
 +            this.languageSpec = "68000:BE:32:MC68010";
 +            break;
-+        case UnixAoutMachineType.M_OLDSUN2:
-+            this.isOldSun2 = true;
-+            this.pageSize = 2048;
 +        case UnixAoutMachineType.M_68020:
 +            this.languageSpec = "68000:BE:32:MC68020";
 +            break;
@@ -324,10 +329,10 @@ index 000000000..e98a1d66c
 +        case UnixAoutMachineType.M_ARM6_NETBSD:
 +            this.isNetBSD = true;
 +        case UnixAoutMachineType.M_ARM:
-+            this.languageSpec = "ARM:" + readEndianness + "32:default";
++            this.languageSpec = "ARM:" + readEndianness + ":32:default";
 +            break;
 +        case UnixAoutMachineType.M_AARCH64:
-+            this.languageSpec = "AARCH64:" + readEndianness + "64:default";
++            this.languageSpec = "AARCH64:" + readEndianness + ":64:default";
 +            break;
 +
 +            /**
@@ -348,15 +353,15 @@ index 000000000..e98a1d66c
 +             */
 +        case UnixAoutMachineType.M_POWERPC_NETBSD:
 +            this.isNetBSD = true;
-+            this.languageSpec = "PowerPC:" + readEndianness + "32:default";
++            this.languageSpec = "PowerPC:" + readEndianness + ":32:default";
 +            break;
 +        case UnixAoutMachineType.M_POWERPC64:
-+            this.languageSpec = "PowerPC:" + readEndianness + "64:default";
++            this.languageSpec = "PowerPC:" + readEndianness + ":64:default";
 +            break;
 +
 +            /**
 +             * SuperH family
-+             * Note: It's unclear if there is support for SuperH SH-3 or SH-5 cores;
++             * NOTE: It's unclear if there is support for SuperH SH-3 or SH-5 cores;
 +             * the primary SuperH language seems to support SH-1 and SH-2 variants
 +             * and the alternative is the SuperH4 language.
 +             */
@@ -387,11 +392,14 @@ index 000000000..e98a1d66c
 +        case UnixAoutMachineType.M_ALPHA_NETBSD:
 +            this.isNetBSD = true;
 +        case UnixAoutMachineType.M_IA64:
-+            this.languageSpec = "UNKNOWN:" + readEndianness + "64:default";
++            this.languageSpec = "UNKNOWN:" + readEndianness + ":64:default";
 +            break;
 +        case UnixAoutMachineType.M_29K:
 +        case UnixAoutMachineType.M_88K_OPENBSD:
-+            this.languageSpec = "UNKNOWN:" + readEndianness + "32:default";
++            this.languageSpec = "UNKNOWN:" + readEndianness + ":32:default";
++            break;
++        case UnixAoutMachineType.M_UNKNOWN:
++            this.languageSpec = "UNKNOWN:" + readEndianness + ":32:default";
 +            break;
 +        default:
 +            this.machineTypeValid = false;
@@ -450,7 +458,7 @@ index 000000000..e98a1d66c
 +     * This routine should attempt to replicate the logic from the N_TXTOFF macro
 +     * that appears in the different incarnations of a.out.h.
 +     *
-+     * TODO: The FreeBSD imgact_aout.h implies that, if the a_magic word contains
++     * NOTE: The FreeBSD imgact_aout.h implies that, if the a_magic word contains
 +     * ZMAGIC when read as little endian, the file offset for .text is __LDPGSZ;
 +     * otherwise, if a_magic contains ZMAGIC when read as big endian, the file offset
 +     * for .text is 0. Indeed, it looks like NetBSD uses big-endian ordering for
@@ -459,14 +467,11 @@ index 000000000..e98a1d66c
 +     */
 +    private void determineTextOffset(boolean isLittleEndian) {
 +
-+        if (this.isOldSun2) {
-+            this.txtOffset = this.pageSize;
-+        }
 +        // Some combinations of executable type and architecture actually include the
 +        // header in the .text section. This includes QMAGIC type and some (most? all?)
 +        // big-endian ZMAGICs.
-+        else if ((this.exeType == ExecutableType.QMAGIC) ||
-+                (this.exeType == ExecutableType.ZMAGIC)) {
++        if ((this.exeType == ExecutableType.QMAGIC) ||
++            (this.exeType == ExecutableType.ZMAGIC)) {
 +            this.txtOffset = 0;
 +
 +        } else {
@@ -480,15 +485,9 @@ index 000000000..e98a1d66c
 +     */
 +    private void determineTextAddr() {
 +
-+        if (this.isOldSun2) {
-+            // Special case defined by SunOS 4.1.3, sys/sparc/a.out.h.
-+            // This is the SunOS 2 *segment size*, which we don't keep track of
-+            // separately from the page size.
-+            this.txtAddr = 0x8000;
-+
-+        } else if ( (this.isSparc && (this.exeType == ExecutableType.NMAGIC)) ||
-+                (this.isNetBSD) ||
-+                (this.exeType == ExecutableType.QMAGIC)) {
++        if ((this.isSparc && (this.exeType == ExecutableType.NMAGIC)) ||
++            (this.isNetBSD) ||
++            (this.exeType == ExecutableType.QMAGIC)) {
 +            this.txtAddr = this.pageSize;
 +
 +        } else {
@@ -525,7 +524,7 @@ index 000000000..e98a1d66c
 +}
 diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/unixaout/UnixAoutMachineType.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/unixaout/UnixAoutMachineType.java
 new file mode 100644
-index 000000000..6f7a5593d
+index 000000000..389ed6195
 --- /dev/null
 +++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/unixaout/UnixAoutMachineType.java
 @@ -0,0 +1,79 @@
@@ -561,7 +560,7 @@ index 000000000..6f7a5593d
 +    // The 10-bit Machine ID field would also interfere with flags used by VxWorks, NetBSD, and
 +    // probably others.
 +
-+    public final static short M_OLDSUN2        = 0x00;
++    public final static short M_UNKNOWN        = 0x00;
 +    public final static short M_68010          = 0x01;
 +    public final static short M_68020          = 0x02;
 +    public final static short M_SPARC          = 0x03;
@@ -752,10 +751,10 @@ index 000000000..e05e6350d
 +}
 diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/opinion/UnixAoutLoader.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/opinion/UnixAoutLoader.java
 new file mode 100644
-index 000000000..ed1837f76
+index 000000000..41ff1cc7a
 --- /dev/null
 +++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/opinion/UnixAoutLoader.java
-@@ -0,0 +1,468 @@
+@@ -0,0 +1,503 @@
 +/* ###
 + * IP: GHIDRA
 + *
@@ -808,12 +807,13 @@ index 000000000..ed1837f76
 + * A {@link Loader} for processing UNIX-style A.out executables
 + *
 + * This style was also used by UNIX-like systems such as SunOS, BSD, and
-+ * VxWorks, as well as some early distributions of Linux. Although there
-+ * do exist implementations of A.out with 64-bit and GNU extensions, this
-+ * loader does not currently support them.
++ * VxWorks, as well as some early distributions of Linux. Although there do
++ * exist implementations of A.out with 64-bit and GNU extensions, this loader
++ * does not currently support them.
 + *
 + * @see <a href="https://wiki.osdev.org/A.out">OSDev.org A.out</a>
-+ * @see <a href="https://man.freebsd.org/cgi/man.cgi?a.out(5)">FreeBSD manpage</a>
++ * @see <a href="https://man.freebsd.org/cgi/man.cgi?a.out(5)">FreeBSD
++ *      manpage</a>
 + */
 +public class UnixAoutLoader extends AbstractProgramWrapperLoader {
 +
@@ -853,9 +853,8 @@ index 000000000..ed1837f76
 +	}
 +
 +	@Override
-+	protected void load(ByteProvider provider, LoadSpec loadSpec, List<Option> options,
-+			Program program, TaskMonitor monitor, MessageLog log)
-+			throws CancelledException, IOException {
++	protected void load(ByteProvider provider, LoadSpec loadSpec, List<Option> options, Program program,
++			TaskMonitor monitor, MessageLog log) throws CancelledException, IOException {
 +
 +		FlatProgramAPI api = new FlatProgramAPI(program, monitor);
 +		final boolean bigEndian = program.getLanguage().isBigEndian();
@@ -886,8 +885,8 @@ index 000000000..ed1837f76
 +			Address textAddr = program.getAddressFactory().getDefaultAddressSpace().getAddress(header.getTextAddr());
 +			try {
 +				InputStream textStream = provider.getInputStream(header.getTextOffset());
-+				textBlock = program.getMemory().createInitializedBlock(
-+					filename + ".text", textAddr, textStream, textSize, monitor, isOverlay);
++				textBlock = program.getMemory().createInitializedBlock(filename + ".text", textAddr, textStream,
++						textSize, monitor, isOverlay);
 +				textAddrSpace = textBlock.getStart().getAddressSpace();
 +				textBlock.setRead(true);
 +				textBlock.setWrite(false);
@@ -902,8 +901,8 @@ index 000000000..ed1837f76
 +			Address dataAddr = program.getAddressFactory().getDefaultAddressSpace().getAddress(header.getDataAddr());
 +			try {
 +				InputStream dataStream = provider.getInputStream(header.getDataOffset());
-+				dataBlock = program.getMemory().createInitializedBlock(
-+					filename + ".data", dataAddr, dataStream, dataSize, monitor, isOverlay);
++				dataBlock = program.getMemory().createInitializedBlock(filename + ".data", dataAddr, dataStream,
++						dataSize, monitor, isOverlay);
 +				dataAddrSpace = dataBlock.getStart().getAddressSpace();
 +				dataBlock.setRead(true);
 +				dataBlock.setWrite(true);
@@ -913,42 +912,64 @@ index 000000000..ed1837f76
 +			}
 +		}
 +
++		// Create the .bss segment based on its reported starting address and size
++		if (bssSize > 0) {
++			Address bssAddr = program.getAddressFactory().getDefaultAddressSpace().getAddress(header.getBssAddr());
++			try {
++				bssBlock = program.getMemory().createUninitializedBlock(filename + ".bss", bssAddr, dataSize,
++						isOverlay);
++				bssAddrSpace = bssBlock.getStart().getAddressSpace();
++				bssBlock.setRead(true);
++				bssBlock.setWrite(true);
++				bssBlock.setExecute(false);
++			} catch (LockException | IllegalArgumentException | MemoryConflictException | AddressOverflowException e) {
++				e.printStackTrace();
++			}
++		}
++
 +		BinaryReader reader = new BinaryReader(provider, !bigEndian);
 +
-+		Vector<UnixAoutSymbolTableEntry> symTab =
-+			getSymbolTable(reader, header.getSymOffset(), header.getSymSize(), header.getStrOffset());
++		Vector<UnixAoutSymbolTableEntry> symTab = getSymbolTable(reader, header.getSymOffset(), header.getSymSize(),
++				header.getStrOffset());
 +
-+		Vector<UnixAoutRelocationTableEntry> textRelocTab =
-+			getRelocationTable(reader, header.getTextRelocOffset(), header.getTextRelocSize());
++		Vector<UnixAoutRelocationTableEntry> textRelocTab = getRelocationTable(reader, header.getTextRelocOffset(),
++				header.getTextRelocSize());
 +
-+		Vector<UnixAoutRelocationTableEntry> dataRelocTab =
-+			getRelocationTable(reader, header.getDataRelocOffset(), header.getDataRelocSize());
++		Vector<UnixAoutRelocationTableEntry> dataRelocTab = getRelocationTable(reader, header.getDataRelocOffset(),
++				header.getDataRelocSize());
 +
-+		Hashtable<String,Long> possibleBssSymbols = new Hashtable<String,Long>();
-+		Hashtable<Address,String> localFunctions = new Hashtable<Address,String>();
++		Hashtable<String, Long> possibleBssSymbols = new Hashtable<String, Long>();
++		Hashtable<Address, String> localFunctions = new Hashtable<Address, String>();
 +
-+		// Process the symbol table by applying labels to identify any symbols whose addresses are given
++		// Process the symbol table by applying labels to identify any symbols whose
++		// addresses are given
 +		for (Integer i = 0; i < symTab.size(); i++) {
 +			UnixAoutSymbolTableEntry symTabEntry = symTab.elementAt(i);
 +			try {
 +				if (symTabEntry.value != 0) {
 +					if (symTabEntry.type == UnixAoutSymbolTableEntry.SymbolType.N_TEXT) {
 +						if (symTabEntry.isExt) {
-+							// Save the entry point to this function in a list. Disassembly should wait until
++							// Save the entry point to this function in a list. Disassembly should wait
++							// until
 +							// after we've processed the relocation tables.
 +							Address funcAddr = textAddrSpace.getAddress(symTabEntry.value);
 +							localFunctions.put(funcAddr, symTabEntry.name);
 +						}
 +					} else if (symTabEntry.type == UnixAoutSymbolTableEntry.SymbolType.N_DATA) {
-+						api.createLabel(dataAddrSpace.getAddress(symTabEntry.value), symTabEntry.name,
-+							namespace, true, SourceType.IMPORTED);
++						api.createLabel(dataAddrSpace.getAddress(symTabEntry.value), symTabEntry.name, namespace, true,
++								SourceType.IMPORTED);
 +
 +					} else if (symTabEntry.type == UnixAoutSymbolTableEntry.SymbolType.N_BSS) {
-+						api.createLabel(bssAddrSpace.getAddress(symTabEntry.value), symTabEntry.name,
-+							namespace, true, SourceType.IMPORTED);
-+
++						if (bssAddrSpace != null) {
++							api.createLabel(bssAddrSpace.getAddress(symTabEntry.value), symTabEntry.name, namespace,
++									true, SourceType.IMPORTED);
++						} else {
++							log.appendMsg("Warning: symbol '" + symTabEntry.name
++									+ "' assigned to BSS but .bss segment size is 0");
++						}
 +					} else if (symTabEntry.type == UnixAoutSymbolTableEntry.SymbolType.N_UNDF) {
-+						// This is a special case given by the A.out spec: if the linker cannot find this
++						// This is a special case given by the A.out spec: if the linker cannot find
++						// this
 +						// symbol in any of the other binary files, then the fact that it is marked as
 +						// N_UNDF but has a non-zero value means that its value should be interpreted as
 +						// a size, and the linker should reserve space in .bss for it.
@@ -978,8 +999,8 @@ index 000000000..ed1837f76
 +
 +		if (bssSize > 0) {
 +			try {
-+				bssBlock = api.createMemoryBlock(filename + ".bss",
-+					api.toAddr(header.getBssAddr()), null, bssSize, isOverlay);
++				bssBlock = api.createMemoryBlock(filename + ".bss", api.toAddr(header.getBssAddr()), null, bssSize,
++						isOverlay);
 +				bssAddrSpace = bssBlock.getStart().getAddressSpace();
 +			} catch (Exception e) {
 +				e.printStackTrace();
@@ -991,170 +1012,178 @@ index 000000000..ed1837f76
 +
 +		///////////////////////////////////////
 +		// Process the .text relocation table
-+        ///////////////////////////////////////
++		///////////////////////////////////////
 +		for (Integer i = 0; i < textRelocTab.size(); i++) {
 +
-+		    UnixAoutRelocationTableEntry relocationEntry = textRelocTab.elementAt(i);
-+		    if (relocationEntry.symbolNum < symTab.size()) {
++			UnixAoutRelocationTableEntry relocationEntry = textRelocTab.elementAt(i);
++			if (relocationEntry.symbolNum < symTab.size()) {
 +
-+		        UnixAoutSymbolTableEntry symbolEntry = symTab.elementAt((int)relocationEntry.symbolNum);
-+		        AddressSpace addrSpace = textBlock.getStart().getAddressSpace();
-+		        Address relocAddr = addrSpace.getAddress(relocationEntry.address + header.getTextAddr());
++				UnixAoutSymbolTableEntry symbolEntry = symTab.elementAt((int) relocationEntry.symbolNum);
++				AddressSpace addrSpace = textBlock.getStart().getAddressSpace();
++				Address relocAddr = addrSpace.getAddress(relocationEntry.address + header.getTextAddr());
 +
-+		        // If this symbol's N_EXT flag is clear, then we didn't mark it as a function when
-+		        // we were processing the symbol table (above). This is because special symbols like
-+		        // "gcc2_compiled", "___gnu_compiled_c", and names of object files are in the symbol
-+		        // table for this segment, but do not point to disassemblable code. However, since
-+		        // there is now a reference from the relocation table, we should be able to
-+		        // disassemble at its address. Save the address for disassembly later.
-+		        if (!symbolEntry.isExt) {
-+		            Address funcAddr = textAddrSpace.getAddress(symbolEntry.value);
-+		            localFunctions.put(funcAddr, symbolEntry.name);
-+		        }
++				// If this symbol's N_EXT flag is clear, then we didn't mark it as a function
++				// when
++				// we were processing the symbol table (above). This is because special symbols
++				// like
++				// "gcc2_compiled", "___gnu_compiled_c", and names of object files are in the
++				// symbol
++				// table for this segment, but do not point to disassemblable code. However,
++				// since
++				// there is now a reference from the relocation table, we should be able to
++				// disassemble at its address. Save the address for disassembly later.
++				if (!symbolEntry.isExt) {
++					Address funcAddr = textAddrSpace.getAddress(symbolEntry.value);
++					localFunctions.put(funcAddr, symbolEntry.name);
++				}
 +
-+		        if (relocationEntry.extern && textBlock.contains(relocAddr)) {
++				if (relocationEntry.extern && textBlock.contains(relocAddr)) {
 +
-+		            List<Function> funcs = api.getCurrentProgram().getListing().getGlobalFunctions(symbolEntry.name);
-+		            List<Symbol> symbolsGlobal = api.getSymbols(symbolEntry.name, null);
-+		            List<Symbol> symbolsLocal = api.getSymbols(symbolEntry.name, namespace);
++					List<Function> funcs = api.getCurrentProgram().getListing().getGlobalFunctions(symbolEntry.name);
++					List<Symbol> symbolsGlobal = api.getSymbols(symbolEntry.name, null);
++					List<Symbol> symbolsLocal = api.getSymbols(symbolEntry.name, namespace);
 +
-+		            if (funcs.size() > 0) {
-+		                Address funcAddr = funcs.get(0).getEntryPoint();
-+		                fixAddress(textBlock, relocAddr, funcAddr,
-+		                        relocationEntry.pcRelativeAddressing, bigEndian, relocationEntry.pointerLength);
++					if (funcs.size() > 0) {
++						Address funcAddr = funcs.get(0).getEntryPoint();
++						fixAddress(textBlock, relocAddr, funcAddr, relocationEntry.pcRelativeAddressing, bigEndian,
++								relocationEntry.pointerLength);
 +
-+		            } else if (symbolsGlobal.size() > 0) {
-+		                Address globalSymbolAddr = symbolsGlobal.get(0).getAddress();
-+		                fixAddress(textBlock, relocAddr, globalSymbolAddr,
-+		                        relocationEntry.pcRelativeAddressing, bigEndian, relocationEntry.pointerLength);
++					} else if (symbolsGlobal.size() > 0) {
++						Address globalSymbolAddr = symbolsGlobal.get(0).getAddress();
++						fixAddress(textBlock, relocAddr, globalSymbolAddr, relocationEntry.pcRelativeAddressing,
++								bigEndian, relocationEntry.pointerLength);
 +
-+		            } else if (symbolsLocal.size() > 0) {
-+		                Address localSymbolAddr = symbolsLocal.get(0).getAddress();
-+		                fixAddress(textBlock, relocAddr, localSymbolAddr,
-+		                        relocationEntry.pcRelativeAddressing, bigEndian, relocationEntry.pointerLength);
++					} else if (symbolsLocal.size() > 0) {
++						Address localSymbolAddr = symbolsLocal.get(0).getAddress();
++						fixAddress(textBlock, relocAddr, localSymbolAddr, relocationEntry.pcRelativeAddressing,
++								bigEndian, relocationEntry.pointerLength);
 +
-+		            } else if (possibleBssSymbols.containsKey(symbolEntry.name)) {
-+		                try {
-+		                    Address bssSymbolAddress = bssBlock.getStart().getAddressSpace().getAddress(bssLocation);
-+		                    long bssSymbolSize = possibleBssSymbols.get(symbolEntry.name);
-+		                    api.createLabel(bssSymbolAddress,
-+		                            symbolEntry.name, namespace, true, SourceType.IMPORTED);
-+		                    fixAddress(textBlock, relocAddr, bssSymbolAddress,
-+		                            relocationEntry.pcRelativeAddressing, bigEndian, relocationEntry.pointerLength);
-+		                    program.getReferenceManager().addMemoryReference(
-+		                            relocAddr, bssSymbolAddress, RefType.DATA, SourceType.IMPORTED, 0);
-+		                    bssLocation += bssSymbolSize;
++					} else if (possibleBssSymbols.containsKey(symbolEntry.name)) {
++						try {
++							Address bssSymbolAddress = bssBlock.getStart().getAddressSpace().getAddress(bssLocation);
++							long bssSymbolSize = possibleBssSymbols.get(symbolEntry.name);
++							api.createLabel(bssSymbolAddress, symbolEntry.name, namespace, true, SourceType.IMPORTED);
++							fixAddress(textBlock, relocAddr, bssSymbolAddress, relocationEntry.pcRelativeAddressing,
++									bigEndian, relocationEntry.pointerLength);
++							program.getReferenceManager().addMemoryReference(relocAddr, bssSymbolAddress, RefType.DATA,
++									SourceType.IMPORTED, 0);
++							bssLocation += bssSymbolSize;
 +
-+		                } catch (Exception e) {
-+		                    e.printStackTrace();
-+		                }
-+		            } else {
-+		                log.appendMsg("Symbol '" + symbolEntry.name +
-+		                        "' was not found and was not a candidate for allocation in .bss.");
-+		            }
-+		        }
-+		    } else {
-+		        log.appendMsg("Symbol number " + relocationEntry.symbolNum +
-+		                " is beyond symbol table length of " + symTab.size());
-+		    }
++						} catch (Exception e) {
++							e.printStackTrace();
++						}
++					} else {
++						log.appendMsg("Symbol '" + symbolEntry.name
++								+ "' was not found and was not a candidate for allocation in .bss.");
++					}
++				}
++			} else {
++				log.appendMsg("Symbol number " + relocationEntry.symbolNum + " is beyond symbol table length of "
++						+ symTab.size());
++			}
 +		}
 +
 +		///////////////////////////////////////
 +		// Process the .data relocation table
-+        ///////////////////////////////////////
++		///////////////////////////////////////
 +		for (Integer i = 0; i < dataRelocTab.size(); i++) {
 +
-+		    UnixAoutRelocationTableEntry relocationEntry = dataRelocTab.elementAt(i);
-+		    if (relocationEntry.symbolNum < symTab.size()) {
++			UnixAoutRelocationTableEntry relocationEntry = dataRelocTab.elementAt(i);
++			if (relocationEntry.symbolNum < symTab.size()) {
 +
-+		        UnixAoutSymbolTableEntry symbolEntry = symTab.elementAt((int)relocationEntry.symbolNum);
-+		        AddressSpace addrSpace = dataBlock.getStart().getAddressSpace();
-+		        Address relocAddr = addrSpace.getAddress(relocationEntry.address + header.getDataAddr());
++				UnixAoutSymbolTableEntry symbolEntry = symTab.elementAt((int) relocationEntry.symbolNum);
++				AddressSpace addrSpace = dataBlock.getStart().getAddressSpace();
++				Address relocAddr = addrSpace.getAddress(relocationEntry.address + header.getDataAddr());
 +
-+		        if (dataBlock.contains(relocAddr)) {
++				if (dataBlock.contains(relocAddr)) {
 +
-+		            List<Function> funcs = api.getCurrentProgram().getListing().getGlobalFunctions(symbolEntry.name);
-+		            List<Symbol> symbolsGlobal = api.getSymbols(symbolEntry.name, null);
-+		            List<Symbol> symbolsLocal = api.getSymbols(symbolEntry.name, namespace);
++					List<Function> funcs = api.getCurrentProgram().getListing().getGlobalFunctions(symbolEntry.name);
++					List<Symbol> symbolsGlobal = api.getSymbols(symbolEntry.name, null);
++					List<Symbol> symbolsLocal = api.getSymbols(symbolEntry.name, namespace);
 +
-+		            if (funcs.size() > 0) {
-+		                Address funcAddr = funcs.get(0).getEntryPoint();
-+		                fixAddress(dataBlock, relocAddr, funcAddr,
-+		                        relocationEntry.pcRelativeAddressing, bigEndian, relocationEntry.pointerLength);
++					if (funcs.size() > 0) {
++						Address funcAddr = funcs.get(0).getEntryPoint();
++						fixAddress(dataBlock, relocAddr, funcAddr, relocationEntry.pcRelativeAddressing, bigEndian,
++								relocationEntry.pointerLength);
 +
-+		            } else if (symbolsGlobal.size() > 0) {
-+		                Address globalSymbolAddr = symbolsGlobal.get(0).getAddress();
-+		                fixAddress(dataBlock, relocAddr, globalSymbolAddr,
-+		                        relocationEntry.pcRelativeAddressing, bigEndian, relocationEntry.pointerLength);
++					} else if (symbolsGlobal.size() > 0) {
++						Address globalSymbolAddr = symbolsGlobal.get(0).getAddress();
++						fixAddress(dataBlock, relocAddr, globalSymbolAddr, relocationEntry.pcRelativeAddressing,
++								bigEndian, relocationEntry.pointerLength);
 +
-+		            } else if (symbolsLocal.size() > 0) {
-+		                Address localSymbolAddr = symbolsLocal.get(0).getAddress();
-+		                fixAddress(dataBlock, relocAddr, localSymbolAddr,
-+		                        relocationEntry.pcRelativeAddressing, bigEndian, relocationEntry.pointerLength);
++					} else if (symbolsLocal.size() > 0) {
++						Address localSymbolAddr = symbolsLocal.get(0).getAddress();
++						fixAddress(dataBlock, relocAddr, localSymbolAddr, relocationEntry.pcRelativeAddressing,
++								bigEndian, relocationEntry.pointerLength);
 +
-+		            } else if (possibleBssSymbols.containsKey(symbolEntry.name)) {
-+		                try {
-+		                    Address bssSymbolAddress = bssBlock.getStart().getAddressSpace().getAddress(bssLocation);
-+		                    api.createLabel(bssSymbolAddress,
-+		                            symbolEntry.name, namespace, true, SourceType.IMPORTED);
-+		                    fixAddress(dataBlock, relocAddr, bssSymbolAddress,
-+		                            relocationEntry.pcRelativeAddressing, bigEndian, relocationEntry.pointerLength);
-+		                    program.getReferenceManager().addMemoryReference(
-+		                            relocAddr, bssSymbolAddress, RefType.DATA, SourceType.IMPORTED, 0);
-+		                    bssLocation += possibleBssSymbols.get(symbolEntry.name);
++					} else if (possibleBssSymbols.containsKey(symbolEntry.name)) {
++						try {
++							Address bssSymbolAddress = bssBlock.getStart().getAddressSpace().getAddress(bssLocation);
++							api.createLabel(bssSymbolAddress, symbolEntry.name, namespace, true, SourceType.IMPORTED);
++							fixAddress(dataBlock, relocAddr, bssSymbolAddress, relocationEntry.pcRelativeAddressing,
++									bigEndian, relocationEntry.pointerLength);
++							program.getReferenceManager().addMemoryReference(relocAddr, bssSymbolAddress, RefType.DATA,
++									SourceType.IMPORTED, 0);
++							bssLocation += possibleBssSymbols.get(symbolEntry.name);
 +
-+		                } catch (Exception e) {
-+		                    e.printStackTrace();
-+		                }
-+		            } else {
-+		                log.appendMsg("Symbol '" + symbolEntry.name +
-+		                        "' was not found and was not a candidate for allocation in .bss.");
-+		            }
-+		        }
-+		    } else {
-+	              log.appendMsg("Symbol number " + relocationEntry.symbolNum +
-+	                        " is beyond symbol table length of " + symTab.size());
-+		    }
++						} catch (Exception e) {
++							e.printStackTrace();
++						}
++					} else {
++						log.appendMsg("Symbol '" + symbolEntry.name
++								+ "' was not found and was not a candidate for allocation in .bss.");
++					}
++				}
++			} else {
++				log.appendMsg("Symbol number " + relocationEntry.symbolNum + " is beyond symbol table length of "
++						+ symTab.size());
++			}
 +		}
 +
-+		// Now that all relocation addresses have been rewritten, it's safe to start disassembly
++		// Now that all relocation addresses have been rewritten, it's safe to start
++		// disassembly
 +		// at all the known function entry points.
 +		for (Address funcAddr : localFunctions.keySet()) {
 +			api.disassemble(funcAddr);
 +			api.createFunction(funcAddr, localFunctions.get(funcAddr));
 +		}
 +
-+		if ((header.getExecutableType() != UnixAoutHeader.ExecutableType.OMAGIC) &&
-+		    (header.getExecutableType() != UnixAoutHeader.ExecutableType.CMAGIC)) {
-+		    api.disassemble(textAddrSpace.getAddress(header.getEntryPoint()));
++		if ((header.getExecutableType() != UnixAoutHeader.ExecutableType.OMAGIC)
++				&& (header.getExecutableType() != UnixAoutHeader.ExecutableType.CMAGIC)) {
++			api.disassemble(textAddrSpace.getAddress(header.getEntryPoint()));
 +		}
 +	}
 +
 +	/**
 +	 * Rewrites the pointer at the specified location to instead point to the
 +	 * provided address.
-+	 * @param block Memory block in which the pointer to be rewritten exists.
-+	 * @param pointerLocation Address at which the pointer to be rewritten is stored.
-+	 * @param newAddress Address that is to be written as the new pointer target.
-+	 * @param isPcRelative Indicates whether the address is program counter relative,
-+	 *  in which case the pointer will be written with the delta between the pointer
-+	 *  location and the new destination address. Otherwise it will be written with
-+	 *  the absolute address.
-+	 * @param isBigEndian True if the program (and therefore the byte order of the
-+	 *  pointer) is big endian. False if little endian.
-+	 * @param pointerSize 1, 2, and 4-byte pointers are supported.
++	 *
++	 * @param block           Memory block in which the pointer to be rewritten
++	 *                        exists.
++	 * @param pointerLocation Address at which the pointer to be rewritten is
++	 *                        stored.
++	 * @param newAddress      Address that is to be written as the new pointer
++	 *                        target.
++	 * @param isPcRelative    Indicates whether the address is program counter
++	 *                        relative, in which case the pointer will be written
++	 *                        with the delta between the pointer location and the
++	 *                        new destination address. Otherwise it will be written
++	 *                        with the absolute address.
++	 * @param isBigEndian     True if the program (and therefore the byte order of
++	 *                        the pointer) is big endian. False if little endian.
++	 * @param pointerSize     1, 2, and 4-byte pointers are supported.
 +	 */
-+	private void fixAddress(MemoryBlock block, Address pointerLocation, Address newAddress,
-+			boolean isPcRelative, boolean isBigEndian, int pointerSize) {
++	private void fixAddress(MemoryBlock block, Address pointerLocation, Address newAddress, boolean isPcRelative,
++			boolean isBigEndian, int pointerSize) {
 +
-+		final long value = isPcRelative ?
-+				(newAddress.getOffset() - pointerLocation.getOffset()) : newAddress.getOffset();
++		final long value = isPcRelative ? (newAddress.getOffset() - pointerLocation.getOffset())
++				: newAddress.getOffset();
 +
 +		byte[] valueBytes = new byte[pointerSize];
 +
 +		for (int i = 0; i < pointerSize; i++) {
 +			int shiftCount = isBigEndian ? (24 - (i * 8)) : (i * 8);
-+			valueBytes[i] = (byte)((value >> shiftCount) & 0xff);
++			valueBytes[i] = (byte) ((value >> shiftCount) & 0xff);
 +		}
 +		try {
 +			block.putBytes(pointerLocation, valueBytes);
@@ -1164,11 +1193,12 @@ index 000000000..ed1837f76
 +	}
 +
 +	/**
-+	 * Reads a single relocation table for either text or data relocations, depending
-+	 * on the offset/length provided.
++	 * Reads a single relocation table for either text or data relocations,
++	 * depending on the offset/length provided.
++	 *
 +	 * @param reader Source of file data
 +	 * @param offset File byte offset to the start of the relocation table
-+	 * @param len Length of the relocation table in bytes
++	 * @param len    Length of the relocation table in bytes
 +	 * @return Vector of relocation table entries
 +	 */
 +	private Vector<UnixAoutRelocationTableEntry> getRelocationTable(BinaryReader reader, long offset, long len) {
@@ -1189,14 +1219,18 @@ index 000000000..ed1837f76
 +	}
 +
 +	/**
-+	 * Reads all the symbol table entries from the file, returning their representation.
-+	 * @param reader Source of file data
-+	 * @param offset File byte offset to the start of the symbol table
-+	 * @param len Length of the symbol table in bytes
-+	 * @param strTabBaseOffset File byte offset to the start of the string table (containing symbol names)
++	 * Reads all the symbol table entries from the file, returning their
++	 * representation.
++	 *
++	 * @param reader           Source of file data
++	 * @param offset           File byte offset to the start of the symbol table
++	 * @param len              Length of the symbol table in bytes
++	 * @param strTabBaseOffset File byte offset to the start of the string table
++	 *                         (containing symbol names)
 +	 * @return Vector of symbol table entries
 +	 */
-+	private Vector<UnixAoutSymbolTableEntry> getSymbolTable(BinaryReader reader, long offset, long len, long strTabBaseOffset) {
++	private Vector<UnixAoutSymbolTableEntry> getSymbolTable(BinaryReader reader, long offset, long len,
++			long strTabBaseOffset) {
 +		Vector<UnixAoutSymbolTableEntry> symtab = new Vector<UnixAoutSymbolTableEntry>();
 +		reader.setPointerIndex(offset);
 +
