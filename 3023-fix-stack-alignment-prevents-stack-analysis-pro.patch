@@ -6,9 +6,9 @@ Subject: [PATCH] 3023: fix stack alignment prevents stack analysis problem in
 
 ---
  .../src/decompile/cpp/coreaction.cc           |  1 +
- .../src/decompile/cpp/ruleaction.cc           | 86 +++++++++++++++++++
+ .../src/decompile/cpp/ruleaction.cc           | 89 +++++++++++++++++++
  .../src/decompile/cpp/ruleaction.hh           | 14 +++
- 3 files changed, 101 insertions(+)
+ 3 files changed, 104 insertions(+)
 
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
 index c543083ec..c42cdb03d 100644
@@ -23,10 +23,10 @@ index c543083ec..c42cdb03d 100644
  	actprop->addRule( new RulePropagateCopy("analysis") );
  	actprop->addRule( new RuleZextEliminate("analysis") );
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc
-index 8d9da9221..56e7d83bd 100644
+index 8d9da9221..f36408e71 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc
-@@ -3749,6 +3749,92 @@ int4 RuleXorCollapse::applyOp(PcodeOp *op,Funcdata &data)
+@@ -3749,6 +3749,95 @@ int4 RuleXorCollapse::applyOp(PcodeOp *op,Funcdata &data)
    return 1;
  }
  
@@ -97,21 +97,24 @@ index 8d9da9221..56e7d83bd 100644
 +  // Transform the (SP + C0) & C1 into SP = SP + C2 where C2 is the result of C0 & C1
 +
 +  Varnode *c0 = op->getIn(slot);
-+  Varnode *c1 = op->getIn(1 - slot)->getDef()->getIn(1);
-+  if (c1->isConstant()) {
-+    Varnode *base_vn = op->getIn(1 - slot)->getDef()->getIn(0);
++  PcodeOp *defOp = op->getIn(1 - slot)->getDef();
++  if (defOp) {
++    Varnode *c1 = defOp->getIn(1);
++    if (c1->isConstant()) {
++      Varnode *base_vn = defOp->getIn(0);
 +
-+    uintb val = op->getOpcode()->evaluateBinary(
-+      c0->getSize(),
-+      c0->getSize(),
-+      c0->getOffset(),
-+      c1->getOffset()
-+    );
-+    Varnode *new_vn = data.newConstant(op->getIn(slot)->getSize(), val);
-+    data.opSetOpcode(op, CPUI_INT_ADD);
-+    data.opSetInput(op, base_vn, 0);
-+    data.opSetInput(op, new_vn, 1);
-+    return 1;
++      uintb val = op->getOpcode()->evaluateBinary(
++        c0->getSize(),
++        c0->getSize(),
++        c0->getOffset(),
++        c1->getOffset()
++      );
++      Varnode *new_vn = data.newConstant(op->getIn(slot)->getSize(), val);
++      data.opSetOpcode(op, CPUI_INT_ADD);
++      data.opSetInput(op, base_vn, 0);
++      data.opSetInput(op, new_vn, 1);
++      return 1;
++    }
 +  }
 +  return 0;
 +}
