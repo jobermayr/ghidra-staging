@@ -12,13 +12,13 @@ Signed-off-by: Klaus Kämpf <kkaempf@gmail.com>
 Add operand_offset to sleigh Java
 Signed-off-by: Klaus Kämpf <kkaempf@gmail.com>
 ---
- .../src/decompile/cpp/pcodeparse.cc           |  850 ++++----
+ .../src/decompile/cpp/pcodeparse.cc           |  843 ++++----
  .../Decompiler/src/decompile/cpp/pcodeparse.y |    6 +
  .../Decompiler/src/decompile/cpp/semantics.cc |    8 +
  .../Decompiler/src/decompile/cpp/semantics.hh |    2 +-
  .../src/decompile/cpp/slgh_compile.cc         |    2 +
  .../Decompiler/src/decompile/cpp/slghparse.cc | 1891 +++++++++--------
- .../Decompiler/src/decompile/cpp/slghparse.hh |   23 +-
+ .../Decompiler/src/decompile/cpp/slghparse.hh |   12 +-
  .../Decompiler/src/decompile/cpp/slghparse.y  |    4 +
  .../src/decompile/cpp/slghpatexpress.cc       |    2 +
  .../src/decompile/cpp/slghpatexpress.hh       |   14 +
@@ -41,14 +41,14 @@ Signed-off-by: Klaus Kämpf <kkaempf@gmail.com>
  .../pcodeCPort/slghsymbol/SymbolTable.java    |    3 +
  .../pcodeCPort/slghsymbol/symbol_type.java    |    1 +
  .../program/model/lang/PcodeParser.java       |    1 +
- 29 files changed, 1865 insertions(+), 1383 deletions(-)
+ 29 files changed, 1855 insertions(+), 1375 deletions(-)
  create mode 100644 Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/processors/sleigh/expression/OffsetInstructionValue.java
  create mode 100644 Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/processors/sleigh/symbol/OffsetSymbol.java
  create mode 100644 Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/slghpatexpress/OffsetInstructionValue.java
  create mode 100644 Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/slghsymbol/OffsetSymbol.java
 
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/pcodeparse.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/pcodeparse.cc
-index a7baf39a2..f6fbe7ea6 100644
+index 7ced8757d..113f893f7 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/pcodeparse.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/pcodeparse.cc
 @@ -196,9 +196,10 @@ extern int pcodedebug;
@@ -65,21 +65,7 @@ index a7baf39a2..f6fbe7ea6 100644
    };
    typedef enum pcodetokentype pcodetoken_kind_t;
  #endif
-@@ -263,9 +264,10 @@ extern int pcodedebug;
- #define VARSYM 311
- #define OPERANDSYM 312
- #define STARTSYM 313
--#define ENDSYM 314
--#define NEXT2SYM 315
--#define LABELSYM 316
-+#define OFFSETSYM 314
-+#define ENDSYM 315
-+#define NEXT2SYM 316
-+#define LABELSYM 317
- 
- /* Value type.  */
- #if ! defined PCODESTYPE && ! defined PCODESTYPE_IS_DECLARED
-@@ -285,6 +287,7 @@ union PCODESTYPE
+@@ -221,6 +222,7 @@ union PCODESTYPE
    UserOpSymbol *useropsym;
    LabelSymbol *labelsym;
    StartSymbol *startsym;
@@ -87,7 +73,7 @@ index a7baf39a2..f6fbe7ea6 100644
    EndSymbol *endsym;
    Next2Symbol *next2sym;
    OperandSymbol *operandsym;
-@@ -382,29 +385,30 @@ enum yysymbol_kind_t
+@@ -318,29 +320,30 @@ enum yysymbol_kind_t
    YYSYMBOL_VARSYM = 69,                    /* VARSYM  */
    YYSYMBOL_OPERANDSYM = 70,                /* OPERANDSYM  */
    YYSYMBOL_STARTSYM = 71,                  /* STARTSYM  */
@@ -141,7 +127,7 @@ index a7baf39a2..f6fbe7ea6 100644
  };
  typedef enum yysymbol_kind_t yysymbol_kind_t;
  
-@@ -732,19 +736,19 @@ union yyalloc
+@@ -668,19 +671,19 @@ union yyalloc
  /* YYFINAL -- State number of the termination state.  */
  #define YYFINAL  3
  /* YYLAST -- Last index in YYTABLE.  */
@@ -166,7 +152,7 @@ index a7baf39a2..f6fbe7ea6 100644
  
  
  /* YYTRANSLATE(TOKEN-NUM) -- Symbol number corresponding to TOKEN-NUM
-@@ -762,12 +766,12 @@ static const yytype_int8 yytranslate[] =
+@@ -698,12 +701,12 @@ static const yytype_int8 yytranslate[] =
         2,     2,     2,     2,     2,     2,     2,     2,     2,     2,
         2,     2,     2,     2,     2,     2,     2,     2,     2,     2,
         2,     2,     2,    40,     2,     2,     2,    35,     9,     2,
@@ -183,7 +169,7 @@ index a7baf39a2..f6fbe7ea6 100644
         2,     2,     2,     2,     2,     2,     2,     2,     2,     2,
         2,     2,     2,     2,     2,     2,     2,     2,     2,     2,
         2,     2,     2,     2,     6,     2,    41,     2,     2,     2,
-@@ -789,26 +793,26 @@ static const yytype_int8 yytranslate[] =
+@@ -725,26 +728,26 @@ static const yytype_int8 yytranslate[] =
        36,    37,    38,    39,    42,    43,    44,    45,    46,    47,
        48,    49,    50,    51,    52,    53,    54,    55,    56,    57,
        58,    59,    60,    61,    62,    63,    64,    65,    66,    67,
@@ -224,7 +210,7 @@ index a7baf39a2..f6fbe7ea6 100644
  };
  #endif
  
-@@ -836,10 +840,11 @@ static const char *const yytname[] =
+@@ -772,10 +775,11 @@ static const char *const yytname[] =
    "OP_CEIL", "OP_FLOOR", "OP_ROUND", "OP_INT2FLOAT", "OP_FLOAT2FLOAT",
    "OP_TRUNC", "OP_NEW", "BADINTEGER", "GOTO_KEY", "CALL_KEY", "RETURN_KEY",
    "IF_KEY", "ENDOFSTREAM", "LOCAL_KEY", "INTEGER", "STRING", "SPACESYM",
@@ -240,7 +226,7 @@ index a7baf39a2..f6fbe7ea6 100644
  };
  
  static const char *
-@@ -849,7 +854,7 @@ yysymbol_name (yysymbol_kind_t yysymbol)
+@@ -785,7 +789,7 @@ yysymbol_name (yysymbol_kind_t yysymbol)
  }
  #endif
  
@@ -249,7 +235,7 @@ index a7baf39a2..f6fbe7ea6 100644
  
  #define yypact_value_is_default(Yyn) \
    ((Yyn) == YYPACT_NINF)
-@@ -863,36 +868,36 @@ yysymbol_name (yysymbol_kind_t yysymbol)
+@@ -799,36 +803,36 @@ yysymbol_name (yysymbol_kind_t yysymbol)
     STATE-NUM.  */
  static const yytype_int16 yypact[] =
  {
@@ -316,7 +302,7 @@ index a7baf39a2..f6fbe7ea6 100644
  };
  
  /* YYDEFACT[STATE-NUM] -- Default reduction number in state STATE-NUM.
-@@ -902,48 +907,48 @@ static const yytype_int8 yydefact[] =
+@@ -838,48 +842,48 @@ static const yytype_int8 yydefact[] =
  {
         3,     0,     0,     1,     0,     0,    92,   105,     0,     0,
         0,     0,     2,     0,   104,   103,     0,   113,   114,   115,
@@ -391,7 +377,7 @@ index a7baf39a2..f6fbe7ea6 100644
  };
  
  /* YYTABLE[YYPACT[STATE-NUM]] -- What to do in state STATE-NUM.  If
-@@ -951,368 +956,326 @@ static const yytype_uint8 yydefgoto[] =
+@@ -887,368 +891,326 @@ static const yytype_uint8 yydefgoto[] =
     number is the opposite.  If YYTABLE_NINF, syntax error.  */
  static const yytype_int16 yytable[] =
  {
@@ -987,7 +973,7 @@ index a7baf39a2..f6fbe7ea6 100644
        59,     3,     4,     5,     6,     7,     8,     9,    10,    11,
        12,    13,    14,    15,    16,    17,    18,    19,    20,    21,
        22,    23,    24,    25,    26,    27,    28,    29,    30,    31,
-@@ -1346,63 +1309,79 @@ static const yytype_int16 yycheck[] =
+@@ -1282,63 +1244,79 @@ static const yytype_int16 yycheck[] =
        -1,     8,     9,    10,    11,    12,    13,    14,    15,    16,
        17,    18,    19,    20,    21,    22,    23,    24,    25,    26,
        27,    28,    29,    30,    31,    32,    33,    34,    35,    36,
@@ -1110,7 +1096,7 @@ index a7baf39a2..f6fbe7ea6 100644
  };
  
  /* YYR2[RULE-NUM] -- Number of symbols on the right-hand side of rule RULE-NUM.  */
-@@ -1419,8 +1398,8 @@ static const yytype_int8 yyr2[] =
+@@ -1355,8 +1333,8 @@ static const yytype_int8 yyr2[] =
         4,     4,     4,     4,     6,     4,     3,     6,     4,     6,
         4,     3,     1,     1,     1,     1,     1,     1,     4,     1,
         1,     1,     1,     1,     1,     1,     3,     2,     4,     1,
@@ -1121,7 +1107,7 @@ index a7baf39a2..f6fbe7ea6 100644
  };
  
  
-@@ -2387,23 +2366,27 @@ yyreduce:
+@@ -2323,23 +2301,27 @@ yyreduce:
                                  { (yyval.specsym) = (yyvsp[0].startsym); }
      break;
  
@@ -1154,7 +1140,7 @@ index a7baf39a2..f6fbe7ea6 100644
                                  { (yyval.param) = (yyvsp[-2].param); (yyval.param)->push_back((yyvsp[0].tree)); }
      break;
  
-@@ -3114,6 +3097,9 @@ int4 PcodeSnippet::lex(void)
+@@ -3050,6 +3032,9 @@ int4 PcodeSnippet::lex(void)
        case SleighSymbol::start_symbol:
  	yylval.startsym = (StartSymbol *)sym;
  	return STARTSYM;
@@ -3538,7 +3524,7 @@ index b0b0dc32a..26565dd0c 100644
      break;
  
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/slghparse.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/slghparse.hh
-index f79a6e7ca..58c88ec60 100644
+index 284d403b0..32d7160d7 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/slghparse.hh
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/slghparse.hh
 @@ -164,11 +164,12 @@ extern int yydebug;
@@ -3559,25 +3545,7 @@ index f79a6e7ca..58c88ec60 100644
    };
    typedef enum yytokentype yytoken_kind_t;
  #endif
-@@ -287,11 +288,12 @@ extern int yydebug;
- #define VARLISTSYM 365
- #define OPERANDSYM 366
- #define STARTSYM 367
--#define ENDSYM 368
--#define NEXT2SYM 369
--#define MACROSYM 370
--#define LABELSYM 371
--#define SUBTABLESYM 372
-+#define OFFSETSYM 368
-+#define ENDSYM 369
-+#define NEXT2SYM 370
-+#define MACROSYM 371
-+#define LABELSYM 372
-+#define SUBTABLESYM 373
- 
- /* Value type.  */
- #if ! defined YYSTYPE && ! defined YYSTYPE_IS_DECLARED
-@@ -328,6 +330,7 @@ union YYSTYPE
+@@ -208,6 +209,7 @@ union YYSTYPE
    LabelSymbol *labelsym;
    SubtableSymbol *subtablesym;
    StartSymbol *startsym;
