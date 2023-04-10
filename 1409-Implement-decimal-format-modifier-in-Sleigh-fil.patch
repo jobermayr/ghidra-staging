@@ -29,10 +29,10 @@ Subject: [PATCH] 1409: Implement decimal format modifier in Sleigh files.
  22 files changed, 1922 insertions(+), 1821 deletions(-)
 
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/context.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/context.hh
-index 8ae7012a6..8771ddd37 100644
+index 79fbe1eff..405fb4953 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/context.hh
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/context.hh
-@@ -24,6 +24,7 @@ class Token {			// A multiple-byte sized chunk of pattern in a bitstream
+@@ -26,6 +26,7 @@ class Token {			// A multiple-byte sized chunk of pattern in a bitstream
    int4 size;			// Number of bytes in token;
    int4 index;			// Index of this token, for resolving offsets
    bool bigendian;
@@ -41,12 +41,12 @@ index 8ae7012a6..8771ddd37 100644
    Token(const string &nm,int4 sz,bool be,int4 ind) : name(nm) { size = sz; bigendian=be; index = ind; }
    int4 getSize(void) const { return size; }
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/sleighbase.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/sleighbase.cc
-index 6b170df8e..4786165a4 100644
+index 080de2b0b..791fc59c1 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/sleighbase.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/sleighbase.cc
-@@ -15,7 +15,7 @@
-  */
- #include "sleighbase.hh"
+@@ -17,7 +17,7 @@
+ 
+ namespace ghidra {
  
 -const int4 SleighBase::SLA_FORMAT_VERSION = 3;
 +const int4 SleighBase::SLA_FORMAT_VERSION = 4;
@@ -54,10 +54,10 @@ index 6b170df8e..4786165a4 100644
  const uint4 SleighBase::MAX_UNIQUE_SIZE = 128;
  
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/slgh_compile.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/slgh_compile.cc
-index df6cbe4e4..77a33b413 100644
+index b40f74389..4118cf4b4 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/slgh_compile.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/slgh_compile.cc
-@@ -73,7 +73,7 @@ FieldQuality::FieldQuality(string *nm,uintb *l,uintb *h)
+@@ -76,7 +76,7 @@ FieldQuality::FieldQuality(string *nm,uintb *l,uintb *h)
    high = *h;
    signext = false;
    flow = true;
@@ -66,7 +66,7 @@ index df6cbe4e4..77a33b413 100644
    delete nm;
    delete l;
    delete h;
-@@ -1885,7 +1885,7 @@ int4 SleighCompile::calcContextVarLayout(int4 start,int4 sz,int4 numbits)
+@@ -1888,7 +1888,7 @@ int4 SleighCompile::calcContextVarLayout(int4 start,int4 sz,int4 numbits)
        qual = contexttable[i+start].qual;
        uint4 l = qual->low - min + low;
        uint4 h = numbits-1-(max-qual->high);
@@ -75,7 +75,7 @@ index df6cbe4e4..77a33b413 100644
        addSymbol(new ContextSymbol(qual->name,field,sym,qual->low,qual->high,qual->flow));
      }
      
-@@ -2501,7 +2501,7 @@ void SleighCompile::addTokenField(TokenSymbol *sym,FieldQuality *qual)
+@@ -2504,7 +2504,7 @@ void SleighCompile::addTokenField(TokenSymbol *sym,FieldQuality *qual)
      s << "Field '" << qual->name << "' high must be less than token size";
      reportError(getCurrentLocation(), s.str());
    }
@@ -85,10 +85,10 @@ index df6cbe4e4..77a33b413 100644
    delete qual;
  }
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/slgh_compile.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/slgh_compile.hh
-index 91e12244b..5c4871807 100644
+index 83bc36154..46b4369c4 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/slgh_compile.hh
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/slgh_compile.hh
-@@ -93,7 +93,7 @@ struct FieldQuality {
+@@ -97,7 +97,7 @@ struct FieldQuality {
    uint4 high;		///< The most significant bit of the field within the token
    bool signext;		///< \b true if the field's value is signed
    bool flow;		///< \b true if the context \b flows for this field.
@@ -98,10 +98,10 @@ index 91e12244b..5c4871807 100644
  };
  
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/slghparse.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/slghparse.cc
-index 029218846..b0b0dc32a 100644
+index bac058438..4326ff244 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/slghparse.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/slghparse.cc
-@@ -192,130 +192,132 @@ enum yysymbol_kind_t
+@@ -201,130 +201,132 @@ enum yysymbol_kind_t
    YYSYMBOL_NOFLOW_KEY = 83,                /* NOFLOW_KEY  */
    YYSYMBOL_HEX_KEY = 84,                   /* HEX_KEY  */
    YYSYMBOL_DEC_KEY = 85,                   /* DEC_KEY  */
@@ -358,7 +358,7 @@ index 029218846..b0b0dc32a 100644
  };
  typedef enum yysymbol_kind_t yysymbol_kind_t;
  
-@@ -643,19 +645,19 @@ union yyalloc
+@@ -652,19 +654,19 @@ union yyalloc
  /* YYFINAL -- State number of the termination state.  */
  #define YYFINAL  5
  /* YYLAST -- Last index in YYTABLE.  */
@@ -383,7 +383,7 @@ index 029218846..b0b0dc32a 100644
  
  
  /* YYTRANSLATE(TOKEN-NUM) -- Symbol number corresponding to TOKEN-NUM
-@@ -672,16 +674,16 @@ static const yytype_uint8 yytranslate[] =
+@@ -681,16 +683,16 @@ static const yytype_uint8 yytranslate[] =
         0,     2,     2,     2,     2,     2,     2,     2,     2,     2,
         2,     2,     2,     2,     2,     2,     2,     2,     2,     2,
         2,     2,     2,     2,     2,     2,     2,     2,     2,     2,
@@ -406,7 +406,7 @@ index 029218846..b0b0dc32a 100644
         2,     2,     2,     2,     2,     2,     2,     2,     2,     2,
         2,     2,     2,     2,     2,     2,     2,     2,     2,     2,
         2,     2,     2,     2,     2,     2,     2,     2,     2,     2,
-@@ -706,7 +708,7 @@ static const yytype_uint8 yytranslate[] =
+@@ -715,7 +717,7 @@ static const yytype_uint8 yytranslate[] =
        98,    99,   100,   101,   102,   103,   104,   105,   106,   107,
       108,   109,   110,   111,   112,   113,   114,   115,   116,   117,
       118,   119,   120,   121,   122,   123,   124,   125,   126,   127,
@@ -414,71 +414,71 @@ index 029218846..b0b0dc32a 100644
 +     128,   129,   130
  };
  
- #if YYDEBUG
-@@ -716,38 +718,38 @@ static const yytype_int16 yyrline[] =
-        0,   158,   158,   159,   160,   161,   163,   164,   165,   166,
-      167,   168,   169,   170,   171,   172,   174,   175,   176,   177,
-      179,   180,   182,   184,   186,   187,   188,   189,   190,   192,
--     194,   195,   198,   199,   200,   201,   202,   204,   205,   206,
--     207,   208,   209,   211,   213,   214,   215,   216,   217,   218,
--     219,   221,   223,   225,   227,   228,   230,   233,   235,   237,
--     239,   241,   244,   246,   247,   248,   250,   252,   253,   254,
--     257,   258,   261,   263,   264,   265,   267,   268,   270,   271,
--     272,   273,   274,   275,   276,   277,   278,   280,   281,   282,
--     283,   285,   287,   290,   291,   292,   293,   294,   295,   296,
--     297,   298,   299,   300,   301,   302,   304,   305,   306,   307,
--     309,   310,   312,   313,   315,   316,   318,   319,   320,   321,
--     322,   323,   324,   327,   328,   329,   330,   332,   333,   335,
--     336,   337,   338,   339,   340,   342,   343,   345,   347,   348,
--     350,   351,   352,   353,   354,   356,   357,   358,   359,   361,
--     362,   363,   364,   365,   366,   367,   368,   369,   370,   371,
-+     194,   195,   198,   199,   200,   201,   202,   203,   204,   206,
-+     207,   208,   209,   210,   211,   212,   213,   215,   217,   218,
-+     219,   220,   221,   222,   223,   225,   227,   229,   231,   232,
-+     234,   237,   239,   241,   243,   245,   248,   250,   251,   252,
-+     254,   256,   257,   258,   261,   262,   265,   267,   268,   269,
-+     271,   272,   274,   275,   276,   277,   278,   279,   280,   281,
-+     282,   284,   285,   286,   287,   289,   291,   294,   295,   296,
-+     297,   298,   299,   300,   301,   302,   303,   304,   305,   306,
-+     308,   309,   310,   311,   313,   314,   316,   317,   319,   320,
-+     322,   323,   324,   325,   326,   327,   328,   331,   332,   333,
-+     334,   336,   337,   339,   340,   341,   342,   343,   344,   346,
-+     347,   349,   351,   352,   354,   355,   356,   357,   358,   360,
-+     361,   362,   363,   365,   366,   367,   368,   369,   370,   371,
-      372,   373,   374,   375,   376,   377,   378,   379,   380,   381,
--     382,   383,   384,   385,   387,   388,   389,   390,   391,   392,
-+     382,   383,   384,   385,   386,   387,   388,   389,   391,   392,
-      393,   394,   395,   396,   397,   398,   399,   400,   401,   402,
-      403,   404,   405,   406,   407,   408,   409,   410,   411,   412,
-      413,   414,   415,   416,   417,   418,   419,   420,   421,   422,
-      423,   424,   425,   426,   427,   428,   429,   430,   431,   432,
-      433,   434,   435,   436,   437,   438,   439,   440,   441,   442,
-      443,   444,   445,   446,   447,   448,   449,   450,   451,   452,
--     453,   455,   456,   457,   458,   460,   461,   462,   463,   464,
--     465,   466,   467,   468,   470,   471,   472,   473,   475,   476,
--     477,   478,   479,   481,   482,   483,   485,   486,   488,   489,
--     490,   491,   492,   493,   495,   496,   497,   498,   499,   501,
--     502,   503,   504,   505,   506,   508,   509,   511,   512,   513,
--     515,   516,   517,   519,   520,   521,   524,   525,   527,   528,
--     529,   531,   533,   534,   535,   536,   538,   539,   540,   542,
--     543,   544,   545,   546,   548,   549,   551,   552,   554,   555,
--     558,   559,   560,   562,   563,   564,   566,   567,   568,   569,
-+     453,   454,   455,   456,   457,   459,   460,   461,   462,   464,
-+     465,   466,   467,   468,   469,   470,   471,   472,   474,   475,
-+     476,   477,   479,   480,   481,   482,   483,   485,   486,   487,
-+     489,   490,   492,   493,   494,   495,   496,   497,   499,   500,
-+     501,   502,   503,   505,   506,   507,   508,   509,   510,   512,
-+     513,   515,   516,   517,   519,   520,   521,   523,   524,   525,
-+     528,   529,   531,   532,   533,   535,   537,   538,   539,   540,
-+     542,   543,   544,   546,   547,   548,   549,   550,   552,   553,
-+     555,   556,   558,   559,   562,   563,   564,   566,   567,   568,
-      570,   571,   572,   573,   574,   575,   576,   577,   578,   579,
--     580,   581,   582
-+     580,   581,   582,   583,   584,   585,   586
+ #if SLEIGHDEBUG
+@@ -725,38 +727,38 @@ static const yytype_int16 yyrline[] =
+        0,   160,   160,   161,   162,   163,   165,   166,   167,   168,
+      169,   170,   171,   172,   173,   174,   176,   177,   178,   179,
+      181,   182,   184,   186,   188,   189,   190,   191,   192,   194,
+-     196,   197,   200,   201,   202,   203,   204,   206,   207,   208,
+-     209,   210,   211,   213,   215,   216,   217,   218,   219,   220,
+-     221,   223,   225,   227,   229,   230,   232,   235,   237,   239,
+-     241,   243,   246,   248,   249,   250,   252,   254,   255,   256,
+-     259,   260,   263,   265,   266,   267,   269,   270,   272,   273,
+-     274,   275,   276,   277,   278,   279,   280,   282,   283,   284,
+-     285,   287,   289,   292,   293,   294,   295,   296,   297,   298,
+-     299,   300,   301,   302,   303,   304,   306,   307,   308,   309,
+-     311,   312,   314,   315,   317,   318,   320,   321,   322,   323,
+-     324,   325,   326,   329,   330,   331,   332,   334,   335,   337,
+-     338,   339,   340,   341,   342,   344,   345,   347,   349,   350,
+-     352,   353,   354,   355,   356,   358,   359,   360,   361,   363,
+-     364,   365,   366,   367,   368,   369,   370,   371,   372,   373,
++     196,   197,   200,   201,   202,   203,   204,   205,   206,   208,
++     209,   210,   211,   212,   213,   214,   215,   217,   219,   220,
++     221,   222,   223,   224,   225,   227,   229,   231,   233,   234,
++     236,   239,   241,   243,   245,   247,   250,   252,   253,   254,
++     256,   258,   259,   260,   263,   264,   267,   269,   270,   271,
++     273,   274,   276,   277,   278,   279,   280,   281,   282,   283,
++     284,   286,   287,   288,   289,   291,   293,   296,   297,   298,
++     299,   300,   301,   302,   303,   304,   305,   306,   307,   308,
++     310,   311,   312,   313,   315,   316,   318,   319,   321,   322,
++     324,   325,   326,   327,   328,   329,   330,   333,   334,   335,
++     336,   338,   339,   341,   342,   343,   344,   345,   346,   348,
++     349,   351,   353,   354,   356,   357,   358,   359,   360,   362,
++     363,   364,   365,   367,   368,   369,   370,   371,   372,   373,
+      374,   375,   376,   377,   378,   379,   380,   381,   382,   383,
+-     384,   385,   386,   387,   389,   390,   391,   392,   393,   394,
++     384,   385,   386,   387,   388,   389,   390,   391,   393,   394,
+      395,   396,   397,   398,   399,   400,   401,   402,   403,   404,
+      405,   406,   407,   408,   409,   410,   411,   412,   413,   414,
+      415,   416,   417,   418,   419,   420,   421,   422,   423,   424,
+      425,   426,   427,   428,   429,   430,   431,   432,   433,   434,
+      435,   436,   437,   438,   439,   440,   441,   442,   443,   444,
+      445,   446,   447,   448,   449,   450,   451,   452,   453,   454,
+-     455,   457,   458,   459,   460,   462,   463,   464,   465,   466,
+-     467,   468,   469,   470,   472,   473,   474,   475,   477,   478,
+-     479,   480,   481,   483,   484,   485,   487,   488,   490,   491,
+-     492,   493,   494,   495,   497,   498,   499,   500,   501,   503,
+-     504,   505,   506,   507,   508,   510,   511,   513,   514,   515,
+-     517,   518,   519,   521,   522,   523,   526,   527,   529,   530,
+-     531,   533,   535,   536,   537,   538,   540,   541,   542,   544,
+-     545,   546,   547,   548,   550,   551,   553,   554,   556,   557,
+-     560,   561,   562,   564,   565,   566,   568,   569,   570,   571,
++     455,   456,   457,   458,   459,   461,   462,   463,   464,   466,
++     467,   468,   469,   470,   471,   472,   473,   474,   476,   477,
++     478,   479,   481,   482,   483,   484,   485,   487,   488,   489,
++     491,   492,   494,   495,   496,   497,   498,   499,   501,   502,
++     503,   504,   505,   507,   508,   509,   510,   511,   512,   514,
++     515,   517,   518,   519,   521,   522,   523,   525,   526,   527,
++     530,   531,   533,   534,   535,   537,   539,   540,   541,   542,
++     544,   545,   546,   548,   549,   550,   551,   552,   554,   555,
++     557,   558,   560,   561,   564,   565,   566,   568,   569,   570,
+      572,   573,   574,   575,   576,   577,   578,   579,   580,   581,
+-     582,   583,   584
++     582,   583,   584,   585,   586,   587,   588
  };
  #endif
  
-@@ -778,30 +780,31 @@ static const char *const yytname[] =
+@@ -787,30 +789,31 @@ static const char *const yytname[] =
    "IF_KEY", "DEFINE_KEY", "ATTACH_KEY", "MACRO_KEY", "SPACE_KEY",
    "TYPE_KEY", "RAM_KEY", "DEFAULT_KEY", "REGISTER_KEY", "ENDIAN_KEY",
    "WITH_KEY", "ALIGN_KEY", "OP_UNIMPL", "TOKEN_KEY", "SIGNED_KEY",
@@ -534,7 +534,7 @@ index 029218846..b0b0dc32a 100644
  };
  
  static const char *
-@@ -811,12 +814,12 @@ yysymbol_name (yysymbol_kind_t yysymbol)
+@@ -820,12 +823,12 @@ yysymbol_name (yysymbol_kind_t yysymbol)
  }
  #endif
  
@@ -549,7 +549,7 @@ index 029218846..b0b0dc32a 100644
  
  #define yytable_value_is_error(Yyn) \
    ((Yyn) == YYTABLE_NINF)
-@@ -825,78 +828,79 @@ yysymbol_name (yysymbol_kind_t yysymbol)
+@@ -834,78 +837,79 @@ yysymbol_name (yysymbol_kind_t yysymbol)
     STATE-NUM.  */
  static const yytype_int16 yypact[] =
  {
@@ -701,7 +701,7 @@ index 029218846..b0b0dc32a 100644
  };
  
  /* YYDEFACT[STATE-NUM] -- Default reduction number in state STATE-NUM.
-@@ -905,89 +909,90 @@ static const yytype_int16 yypact[] =
+@@ -914,89 +918,90 @@ static const yytype_int16 yypact[] =
  static const yytype_int16 yydefact[] =
  {
         0,     0,     0,     2,     0,     1,     0,     0,     0,     0,
@@ -863,7 +863,7 @@ index 029218846..b0b0dc32a 100644
         8
  };
  
-@@ -996,11 +1001,11 @@ static const yytype_int16 yydefgoto[] =
+@@ -1005,11 +1010,11 @@ static const yytype_int16 yydefgoto[] =
  {
         0,     2,    14,    15,     3,    16,    17,    18,    19,    20,
        75,    79,    21,    22,    23,    24,   116,   117,    25,    26,
@@ -880,7 +880,7 @@ index 029218846..b0b0dc32a 100644
        76
  };
  
-@@ -1009,662 +1014,665 @@ static const yytype_int16 yydefgoto[] =
+@@ -1018,662 +1023,665 @@ static const yytype_int16 yydefgoto[] =
     number is the opposite.  If YYTABLE_NINF, syntax error.  */
  static const yytype_int16 yytable[] =
  {
@@ -1270,16 +1270,16 @@ index 029218846..b0b0dc32a 100644
 +     465,   466,   467,   468,   469,   434,   435,   436,   437,   672,
 +     690,   438,   675,   439,   661,   440,   441,   442,   443,   444,
 +     445,   446,   447,   448,   449,   450,   451,   452,   453,   454,
-+     455,   456,   457,   458,   459,   460,   461,   462,   463,   464,
-+     465,   466,   467,   468,   469,   434,   435,   436,   437,   677,
-+     692,   438,   697,   439,   662,   440,   441,   442,   443,   444,
-+     445,   446,   447,   448,   449,   450,   451,   452,   453,   454,
       455,   456,   457,   458,   459,   460,   461,   462,   463,   464,
 -     465,   503,     0,     0,     0,     0,     0,     0,     0,     0,
 -       0,     0,     0,     0,     0,     0,     0,     0,   504,   505,
 -       0,   506,   507,     0,     0,   508,   509,   106,     0,    58,
 -      59,    60,    61,    62,    63,    64,    65,    66,    67,     0,
 -      68,    69,    70,    71,    72,    73,   109,    74,    58,    59,
++     465,   466,   467,   468,   469,   434,   435,   436,   437,   677,
++     692,   438,   697,   439,   662,   440,   441,   442,   443,   444,
++     445,   446,   447,   448,   449,   450,   451,   452,   453,   454,
++     455,   456,   457,   458,   459,   460,   461,   462,   463,   464,
 +     465,   466,   467,   468,   469,   700,   701,   434,   435,   436,
 +     437,   702,   715,   438,   705,   439,   709,   440,   441,   442,
 +     443,   444,   445,   446,   447,   448,   449,   450,   451,   452,
@@ -1465,14 +1465,6 @@ index 029218846..b0b0dc32a 100644
 -     124,   125,   132,   108,   128,    29,    30,   131,    32,    33,
 -     106,   136,    36,    37,   133,   133,   621,   622,   623,   624,
 -       3,     4,     5,     6,   133,   133,     9,   106,    11,    18,
--      13,    14,    15,    16,    17,    18,    19,    20,    21,    22,
--      23,    24,    25,    26,    27,    28,    29,    30,    31,    32,
--      33,    34,    35,    36,    37,    38,    39,    40,    41,    42,
--       3,     4,     5,     6,    18,   110,     9,   106,    11,   134,
--      13,    14,    15,    16,    17,    18,    19,    20,    21,    22,
--      23,    24,    25,    26,    27,    28,    29,    30,    31,    32,
--      33,    34,    35,    36,    37,    38,    39,    40,    41,    42,
--       3,     4,     5,     6,     8,   131,     9,     8,    11,   131,
 +      92,   208,   146,   146,   206,     9,    33,    99,     8,     8,
 +     146,     8,    29,     6,    33,     8,   133,    64,    11,    99,
 +     227,    80,   139,    69,    11,     6,   110,     8,    20,    77,
@@ -1510,6 +1502,14 @@ index 029218846..b0b0dc32a 100644
        13,    14,    15,    16,    17,    18,    19,    20,    21,    22,
        23,    24,    25,    26,    27,    28,    29,    30,    31,    32,
        33,    34,    35,    36,    37,    38,    39,    40,    41,    42,
+-       3,     4,     5,     6,    18,   110,     9,   106,    11,   134,
+-      13,    14,    15,    16,    17,    18,    19,    20,    21,    22,
+-      23,    24,    25,    26,    27,    28,    29,    30,    31,    32,
+-      33,    34,    35,    36,    37,    38,    39,    40,    41,    42,
+-       3,     4,     5,     6,     8,   131,     9,     8,    11,   131,
+-      13,    14,    15,    16,    17,    18,    19,    20,    21,    22,
+-      23,    24,    25,    26,    27,    28,    29,    30,    31,    32,
+-      33,    34,    35,    36,    37,    38,    39,    40,    41,    42,
 -     131,   131,   130,     3,     4,     5,     6,   131,   106,     9,
 -     131,    11,   135,    13,    14,    15,    16,    17,    18,    19,
 -      20,    21,    22,    23,    24,    25,    26,    27,    28,    29,
@@ -2148,7 +2148,7 @@ index 029218846..b0b0dc32a 100644
  };
  
  /* YYR2[RULE-NUM] -- Number of symbols on the right-hand side of rule RULE-NUM.  */
-@@ -1673,38 +1681,38 @@ static const yytype_int8 yyr2[] =
+@@ -1682,38 +1690,38 @@ static const yytype_int8 yyr2[] =
         0,     2,     1,     2,     2,     2,     1,     1,     1,     1,
         1,     1,     1,     1,     1,     2,     1,     1,     1,     2,
         5,     5,     5,     2,     6,     9,     9,     2,     3,     2,
@@ -2218,7 +2218,7 @@ index 029218846..b0b0dc32a 100644
  };
  
  
-@@ -2233,1203 +2241,1219 @@ yyreduce:
+@@ -2242,1203 +2250,1219 @@ yyreduce:
      break;
  
    case 35: /* fielddef: fielddef HEX_KEY  */
@@ -2246,7 +2246,7 @@ index 029218846..b0b0dc32a 100644
  
 -  case 38: /* contextfielddef: anysymbol '=' '(' INTEGER ',' INTEGER ')'  */
 +  case 40: /* contextfielddef: anysymbol '=' '(' INTEGER ',' INTEGER ')'  */
-                                               { delete (yyvsp[-3].i); delete (yyvsp[-1].i); string errmsg = (yyvsp[-6].anysym)->getName()+": redefined as field"; yyerror(errmsg.c_str()); YYERROR; }
+                                               { delete (yyvsp[-3].i); delete (yyvsp[-1].i); string errmsg = (yyvsp[-6].anysym)->getName()+": redefined as field"; slgh->reportError(errmsg); YYERROR; }
      break;
  
 -  case 39: /* contextfielddef: contextfielddef SIGNED_KEY  */
@@ -2291,7 +2291,7 @@ index 029218846..b0b0dc32a 100644
  
 -  case 45: /* spaceprop: DEFINE_KEY SPACE_KEY anysymbol  */
 +  case 49: /* spaceprop: DEFINE_KEY SPACE_KEY anysymbol  */
-                                         { string errmsg = (yyvsp[0].anysym)->getName()+": redefined as space"; yyerror(errmsg.c_str()); YYERROR; }
+                                         { string errmsg = (yyvsp[0].anysym)->getName()+": redefined as space"; slgh->reportError(errmsg); YYERROR; }
      break;
  
 -  case 46: /* spaceprop: spaceprop TYPE_KEY '=' RAM_KEY  */
@@ -2327,7 +2327,7 @@ index 029218846..b0b0dc32a 100644
  
 -  case 52: /* varnodedef: DEFINE_KEY SPACESYM OFFSET_KEY '=' BADINTEGER  */
 +  case 56: /* varnodedef: DEFINE_KEY SPACESYM OFFSET_KEY '=' BADINTEGER  */
-                                                   { yyerror("Parsed integer is too big (overflow)"); YYERROR; }
+                                                   { slgh->reportError("Parsed integer is too big (overflow)"); YYERROR; }
      break;
  
 -  case 56: /* bitrangesingle: STRING '=' VARSYM '[' INTEGER ',' INTEGER ']'  */
@@ -2443,7 +2443,7 @@ index 029218846..b0b0dc32a 100644
  
 -  case 81: /* constructprint: subtablestart '^'  */
 +  case 85: /* constructprint: subtablestart '^'  */
-                                                 { (yyval.construct) = (yyvsp[-1].construct); if (!slgh->isInRoot((yyvsp[-1].construct))) { yyerror("Unexpected '^' at start of print pieces");  YYERROR; } }
+                                                 { (yyval.construct) = (yyvsp[-1].construct); if (!slgh->isInRoot((yyvsp[-1].construct))) { slgh->reportError("Unexpected '^' at start of print pieces");  YYERROR; } }
      break;
  
 -  case 82: /* constructprint: constructprint '^'  */
@@ -2499,7 +2499,7 @@ index 029218846..b0b0dc32a 100644
 -  case 92: /* pexpression: familysymbol  */
 +  case 96: /* pexpression: familysymbol  */
                                          { if ((actionon==1)&&((yyvsp[0].famsym)->getType() != SleighSymbol::context_symbol))
-                                              { string errmsg="Global symbol "+(yyvsp[0].famsym)->getName(); errmsg += " is not allowed in action expression"; yyerror(errmsg.c_str()); } (yyval.patexp) = (yyvsp[0].famsym)->getPatternValue(); }
+                                              { string errmsg="Global symbol "+(yyvsp[0].famsym)->getName(); errmsg += " is not allowed in action expression"; slgh->reportError(errmsg); } (yyval.patexp) = (yyvsp[0].famsym)->getPatternValue(); }
      break;
  
 -  case 93: /* pexpression: specificsymbol  */
@@ -2631,7 +2631,7 @@ index 029218846..b0b0dc32a 100644
 +  case 126: /* constraint: OPERANDSYM '=' pexpression  */
                                          { (yyval.pateq) = slgh->constrainOperand((yyvsp[-2].operandsym),(yyvsp[0].patexp));
                                            if ((yyval.pateq) == (PatternEquation *)0)
-                                             { string errmsg="Constraining currently undefined operand "+(yyvsp[-2].operandsym)->getName(); yyerror(errmsg.c_str()); } }
+                                             { string errmsg="Constraining currently undefined operand "+(yyvsp[-2].operandsym)->getName(); slgh->reportError(errmsg); } }
      break;
  
 -  case 123: /* constraint: OPERANDSYM  */
@@ -2671,7 +2671,7 @@ index 029218846..b0b0dc32a 100644
  
 -  case 130: /* contextlist: contextlist CONTEXTSYM '=' pexpression ';'  */
 +  case 134: /* contextlist: contextlist CONTEXTSYM '=' pexpression ';'  */
-                                                 { (yyval.contop) = (yyvsp[-4].contop); if (!slgh->contextMod((yyvsp[-4].contop),(yyvsp[-3].contextsym),(yyvsp[-1].patexp))) { string errmsg="Cannot use 'inst_next' or 'inst_next2' to set context variable: "+(yyvsp[-3].contextsym)->getName(); yyerror(errmsg.c_str()); YYERROR; } }
+                                                 { (yyval.contop) = (yyvsp[-4].contop); if (!slgh->contextMod((yyvsp[-4].contop),(yyvsp[-3].contextsym),(yyvsp[-1].patexp))) { string errmsg="Cannot use 'inst_next' or 'inst_next2' to set context variable: "+(yyvsp[-3].contextsym)->getName(); slgh->reportError(errmsg); YYERROR; } }
      break;
  
 -  case 131: /* contextlist: contextlist GLOBALSET_KEY '(' familysymbol ',' CONTEXTSYM ')' ';'  */
@@ -2691,7 +2691,7 @@ index 029218846..b0b0dc32a 100644
  
 -  case 134: /* contextlist: contextlist STRING  */
 +  case 138: /* contextlist: contextlist STRING  */
-                                         { string errmsg="Expecting context symbol, not "+*(yyvsp[0].str); delete (yyvsp[0].str); yyerror(errmsg.c_str()); YYERROR; }
+                                         { string errmsg="Expecting context symbol, not "+*(yyvsp[0].str); delete (yyvsp[0].str); slgh->reportError(errmsg); YYERROR; }
      break;
  
 -  case 135: /* section_def: OP_LEFT STRING OP_RIGHT  */
@@ -2736,12 +2736,12 @@ index 029218846..b0b0dc32a 100644
  
 -  case 143: /* rtl: rtlmid EXPORT_KEY STRING  */
 +  case 147: /* rtl: rtlmid EXPORT_KEY STRING  */
-                                         { string errmsg="Unknown export varnode: "+*(yyvsp[0].str); delete (yyvsp[0].str); yyerror(errmsg.c_str()); YYERROR; }
+                                         { string errmsg="Unknown export varnode: "+*(yyvsp[0].str); delete (yyvsp[0].str); slgh->reportError(errmsg); YYERROR; }
      break;
  
 -  case 144: /* rtl: rtlmid EXPORT_KEY sizedstar STRING  */
 +  case 148: /* rtl: rtlmid EXPORT_KEY sizedstar STRING  */
-                                         { string errmsg="Unknown pointer varnode: "+*(yyvsp[0].str); delete (yyvsp[-1].starqual); delete (yyvsp[0].str); yyerror(errmsg.c_str()); YYERROR; }
+                                         { string errmsg="Unknown pointer varnode: "+*(yyvsp[0].str); delete (yyvsp[-1].starqual); delete (yyvsp[0].str); slgh->reportError(errmsg); YYERROR; }
      break;
  
 -  case 145: /* rtlmid: %empty  */
@@ -2751,7 +2751,7 @@ index 029218846..b0b0dc32a 100644
  
 -  case 146: /* rtlmid: rtlmid statement  */
 +  case 150: /* rtlmid: rtlmid statement  */
-                                         { (yyval.sem) = (yyvsp[-1].sem); if (!(yyval.sem)->addOpList(*(yyvsp[0].stmt))) { delete (yyvsp[0].stmt); yyerror("Multiple delayslot declarations"); YYERROR; } delete (yyvsp[0].stmt); }
+                                         { (yyval.sem) = (yyvsp[-1].sem); if (!(yyval.sem)->addOpList(*(yyvsp[0].stmt))) { delete (yyvsp[0].stmt); slgh->reportError("Multiple delayslot declarations"); YYERROR; } delete (yyvsp[0].stmt); }
      break;
  
 -  case 147: /* rtlmid: rtlmid LOCAL_KEY STRING ';'  */
@@ -2791,7 +2791,7 @@ index 029218846..b0b0dc32a 100644
  
 -  case 154: /* statement: LOCAL_KEY specificsymbol '='  */
 +  case 158: /* statement: LOCAL_KEY specificsymbol '='  */
-                                  { (yyval.stmt) = (vector<OpTpl *> *)0; string errmsg = "Redefinition of symbol: "+(yyvsp[-1].specsym)->getName(); yyerror(errmsg.c_str()); YYERROR; }
+                                  { (yyval.stmt) = (vector<OpTpl *> *)0; string errmsg = "Redefinition of symbol: "+(yyvsp[-1].specsym)->getName(); slgh->reportError(errmsg); YYERROR; }
      break;
  
 -  case 155: /* statement: sizedstar expr '=' expr ';'  */
@@ -2816,12 +2816,12 @@ index 029218846..b0b0dc32a 100644
  
 -  case 159: /* statement: varnode ':' INTEGER '='  */
 +  case 163: /* statement: varnode ':' INTEGER '='  */
-                                         { delete (yyvsp[-3].varnode); delete (yyvsp[-1].i); yyerror("Illegal truncation on left-hand side of assignment"); YYERROR; }
+                                         { delete (yyvsp[-3].varnode); delete (yyvsp[-1].i); slgh->reportError("Illegal truncation on left-hand side of assignment"); YYERROR; }
      break;
  
 -  case 160: /* statement: varnode '(' INTEGER ')'  */
 +  case 164: /* statement: varnode '(' INTEGER ')'  */
-                                         { delete (yyvsp[-3].varnode); delete (yyvsp[-1].i); yyerror("Illegal subpiece on left-hand side of assignment"); YYERROR; }
+                                         { delete (yyvsp[-3].varnode); delete (yyvsp[-1].i); slgh->reportError("Illegal subpiece on left-hand side of assignment"); YYERROR; }
      break;
  
 -  case 161: /* statement: BUILD_KEY OPERANDSYM ';'  */
@@ -2871,7 +2871,7 @@ index 029218846..b0b0dc32a 100644
  
 -  case 170: /* statement: RETURN_KEY ';'  */
 +  case 174: /* statement: RETURN_KEY ';'  */
-                                         { yyerror("Must specify an indirect parameter for return"); YYERROR; }
+                                         { slgh->reportError("Must specify an indirect parameter for return"); YYERROR; }
      break;
  
 -  case 171: /* statement: RETURN_KEY '[' expr ']' ';'  */
@@ -3221,7 +3221,7 @@ index 029218846..b0b0dc32a 100644
  
 -  case 240: /* expr: OP_CPOOLREF '(' paramlist ')'  */
 +  case 244: /* expr: OP_CPOOLREF '(' paramlist ')'  */
-                                    { if ((*(yyvsp[-1].param)).size() < 2) { string errmsg = "Must at least two inputs to cpool"; yyerror(errmsg.c_str()); YYERROR; } (yyval.tree) = slgh->pcode.createVariadic(CPUI_CPOOLREF,(yyvsp[-1].param)); }
+                                    { if ((*(yyvsp[-1].param)).size() < 2) { string errmsg = "Must at least two inputs to cpool"; slgh->reportError(errmsg); YYERROR; } (yyval.tree) = slgh->pcode.createVariadic(CPUI_CPOOLREF,(yyvsp[-1].param)); }
      break;
  
 -  case 241: /* sizedstar: '*' '[' SPACESYM ']' ':' INTEGER  */
@@ -3266,7 +3266,7 @@ index 029218846..b0b0dc32a 100644
  
 -  case 249: /* jumpdest: BADINTEGER  */
 +  case 253: /* jumpdest: BADINTEGER  */
-                                 { (yyval.varnode) = new VarnodeTpl(ConstTpl(ConstTpl::j_curspace),ConstTpl(ConstTpl::real,0),ConstTpl(ConstTpl::j_curspace_size)); yyerror("Parsed integer is too big (overflow)"); }
+                                 { (yyval.varnode) = new VarnodeTpl(ConstTpl(ConstTpl::j_curspace),ConstTpl(ConstTpl::real,0),ConstTpl(ConstTpl::j_curspace_size)); slgh->reportError("Parsed integer is too big (overflow)"); }
      break;
  
 -  case 250: /* jumpdest: OPERANDSYM  */
@@ -3286,7 +3286,7 @@ index 029218846..b0b0dc32a 100644
  
 -  case 253: /* jumpdest: STRING  */
 +  case 257: /* jumpdest: STRING  */
-                                 { string errmsg = "Unknown jump destination: "+*(yyvsp[0].str); delete (yyvsp[0].str); yyerror(errmsg.c_str()); YYERROR; }
+                                 { string errmsg = "Unknown jump destination: "+*(yyvsp[0].str); delete (yyvsp[0].str); slgh->reportError(errmsg); YYERROR; }
      break;
  
 -  case 254: /* varnode: specificsymbol  */
@@ -3301,12 +3301,12 @@ index 029218846..b0b0dc32a 100644
  
 -  case 256: /* varnode: STRING  */
 +  case 260: /* varnode: STRING  */
-                                 { string errmsg = "Unknown varnode parameter: "+*(yyvsp[0].str); delete (yyvsp[0].str); yyerror(errmsg.c_str()); YYERROR; }
+                                 { string errmsg = "Unknown varnode parameter: "+*(yyvsp[0].str); delete (yyvsp[0].str); slgh->reportError(errmsg); YYERROR; }
      break;
  
 -  case 257: /* varnode: SUBTABLESYM  */
 +  case 261: /* varnode: SUBTABLESYM  */
-                                 { string errmsg = "Subtable not attached to operand: "+(yyvsp[0].subtablesym)->getName(); yyerror(errmsg.c_str()); YYERROR; }
+                                 { string errmsg = "Subtable not attached to operand: "+(yyvsp[0].subtablesym)->getName(); slgh->reportError(errmsg); YYERROR; }
      break;
  
 -  case 258: /* integervarnode: INTEGER  */
@@ -3316,7 +3316,7 @@ index 029218846..b0b0dc32a 100644
  
 -  case 259: /* integervarnode: BADINTEGER  */
 +  case 263: /* integervarnode: BADINTEGER  */
-                                 { (yyval.varnode) = new VarnodeTpl(ConstTpl(slgh->getConstantSpace()),ConstTpl(ConstTpl::real,0),ConstTpl(ConstTpl::real,0)); yyerror("Parsed integer is too big (overflow)"); }
+                                 { (yyval.varnode) = new VarnodeTpl(ConstTpl(slgh->getConstantSpace()),ConstTpl(ConstTpl::real,0),ConstTpl(ConstTpl::real,0)); slgh->reportError("Parsed integer is too big (overflow)"); }
      break;
  
 -  case 260: /* integervarnode: INTEGER ':' INTEGER  */
@@ -3341,12 +3341,12 @@ index 029218846..b0b0dc32a 100644
  
 -  case 264: /* lhsvarnode: STRING  */
 +  case 268: /* lhsvarnode: STRING  */
-                                 { string errmsg = "Unknown assignment varnode: "+*(yyvsp[0].str); delete (yyvsp[0].str); yyerror(errmsg.c_str()); YYERROR; }
+                                 { string errmsg = "Unknown assignment varnode: "+*(yyvsp[0].str); delete (yyvsp[0].str); slgh->reportError(errmsg); YYERROR; }
      break;
  
 -  case 265: /* lhsvarnode: SUBTABLESYM  */
 +  case 269: /* lhsvarnode: SUBTABLESYM  */
-                                 { string errmsg = "Subtable not attached to operand: "+(yyvsp[0].subtablesym)->getName(); yyerror(errmsg.c_str()); YYERROR; }
+                                 { string errmsg = "Subtable not attached to operand: "+(yyvsp[0].subtablesym)->getName(); slgh->reportError(errmsg); YYERROR; }
      break;
  
 -  case 266: /* label: '<' LABELSYM '>'  */
@@ -3381,12 +3381,12 @@ index 029218846..b0b0dc32a 100644
  
 -  case 272: /* exportvarnode: STRING  */
 +  case 276: /* exportvarnode: STRING  */
-                                 { string errmsg="Unknown export varnode: "+*(yyvsp[0].str); delete (yyvsp[0].str); yyerror(errmsg.c_str()); YYERROR; }
+                                 { string errmsg="Unknown export varnode: "+*(yyvsp[0].str); delete (yyvsp[0].str); slgh->reportError(errmsg); YYERROR; }
      break;
  
 -  case 273: /* exportvarnode: SUBTABLESYM  */
 +  case 277: /* exportvarnode: SUBTABLESYM  */
-                                 { string errmsg = "Subtable not attached to operand: "+(yyvsp[0].subtablesym)->getName(); yyerror(errmsg.c_str()); YYERROR; }
+                                 { string errmsg = "Subtable not attached to operand: "+(yyvsp[0].subtablesym)->getName(); slgh->reportError(errmsg); YYERROR; }
      break;
  
 -  case 274: /* familysymbol: VALUESYM  */
@@ -3481,7 +3481,7 @@ index 029218846..b0b0dc32a 100644
  
 -  case 292: /* intbpart: STRING  */
 +  case 296: /* intbpart: STRING  */
-                                 { if (*(yyvsp[0].str)!="_") { string errmsg = "Expecting integer but saw: "+*(yyvsp[0].str); delete (yyvsp[0].str); yyerror(errmsg.c_str()); YYERROR; }
+                                 { if (*(yyvsp[0].str)!="_") { string errmsg = "Expecting integer but saw: "+*(yyvsp[0].str); delete (yyvsp[0].str); slgh->reportError(errmsg); YYERROR; }
                                    (yyval.biglist) = new vector<intb>; (yyval.biglist)->push_back((intb)0xBADBEEF); delete (yyvsp[0].str); }
      break;
  
@@ -3497,7 +3497,7 @@ index 029218846..b0b0dc32a 100644
  
 -  case 295: /* intbpart: intbpart STRING  */
 +  case 299: /* intbpart: intbpart STRING  */
-                                 { if (*(yyvsp[0].str)!="_") { string errmsg = "Expecting integer but saw: "+*(yyvsp[0].str); delete (yyvsp[0].str); yyerror(errmsg.c_str()); YYERROR; }
+                                 { if (*(yyvsp[0].str)!="_") { string errmsg = "Expecting integer but saw: "+*(yyvsp[0].str); delete (yyvsp[0].str); slgh->reportError(errmsg); YYERROR; }
                                    (yyval.biglist) = (yyvsp[-1].biglist); (yyval.biglist)->push_back((intb)0xBADBEEF); delete (yyvsp[0].str); }
      break;
  
@@ -3523,7 +3523,7 @@ index 029218846..b0b0dc32a 100644
  
 -  case 300: /* stringpart: stringpart anysymbol  */
 +  case 304: /* stringpart: stringpart anysymbol  */
-                                 { string errmsg = (yyvsp[0].anysym)->getName()+": redefined"; yyerror(errmsg.c_str()); YYERROR; }
+                                 { string errmsg = (yyvsp[0].anysym)->getName()+": redefined"; slgh->reportError(errmsg); YYERROR; }
      break;
  
 -  case 301: /* anystringlist: '[' anystringpart ']'  */
@@ -3588,7 +3588,7 @@ index 029218846..b0b0dc32a 100644
  
 -  case 313: /* valuepart: valuepart STRING  */
 +  case 317: /* valuepart: valuepart STRING  */
-                                 { string errmsg = *(yyvsp[0].str)+": is not a value pattern"; delete (yyvsp[0].str); yyerror(errmsg.c_str()); YYERROR; }
+                                 { string errmsg = *(yyvsp[0].str)+": is not a value pattern"; delete (yyvsp[0].str); slgh->reportError(errmsg); YYERROR; }
      break;
  
 -  case 314: /* varlist: '[' varpart ']'  */
@@ -3608,7 +3608,7 @@ index 029218846..b0b0dc32a 100644
  
 -  case 317: /* varpart: STRING  */
 +  case 321: /* varpart: STRING  */
-                                 { if (*(yyvsp[0].str)!="_") { string errmsg = *(yyvsp[0].str)+": is not a varnode symbol"; delete (yyvsp[0].str); yyerror(errmsg.c_str()); YYERROR; }
+                                 { if (*(yyvsp[0].str)!="_") { string errmsg = *(yyvsp[0].str)+": is not a varnode symbol"; delete (yyvsp[0].str); slgh->reportError(errmsg); YYERROR; }
  				  (yyval.symlist) = new vector<SleighSymbol *>; (yyval.symlist)->push_back((SleighSymbol *)0); delete (yyvsp[0].str); }
      break;
  
@@ -3619,7 +3619,7 @@ index 029218846..b0b0dc32a 100644
  
 -  case 319: /* varpart: varpart STRING  */
 +  case 323: /* varpart: varpart STRING  */
-                                 { if (*(yyvsp[0].str)!="_") { string errmsg = *(yyvsp[0].str)+": is not a varnode symbol"; delete (yyvsp[0].str); yyerror(errmsg.c_str()); YYERROR; }
+                                 { if (*(yyvsp[0].str)!="_") { string errmsg = *(yyvsp[0].str)+": is not a varnode symbol"; delete (yyvsp[0].str); slgh->reportError(errmsg); YYERROR; }
                                    (yyval.symlist) = (yyvsp[-1].symlist); (yyval.symlist)->push_back((SleighSymbol *)0); delete (yyvsp[0].str); }
      break;
  
@@ -3739,10 +3739,10 @@ index 029218846..b0b0dc32a 100644
      break;
  
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/slghparse.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/slghparse.hh
-index 90c8a1f3b..284d403b0 100644
+index 29fccdfbb..229d8a232 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/slghparse.hh
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/slghparse.hh
-@@ -124,49 +124,51 @@ extern int yydebug;
+@@ -132,49 +132,51 @@ extern int sleighdebug;
      NOFLOW_KEY = 325,              /* NOFLOW_KEY  */
      HEX_KEY = 326,                 /* HEX_KEY  */
      DEC_KEY = 327,                 /* DEC_KEY  */
@@ -3835,13 +3835,13 @@ index 90c8a1f3b..284d403b0 100644
 +    LABELSYM = 371,                /* LABELSYM  */
 +    SUBTABLESYM = 372              /* SUBTABLESYM  */
    };
-   typedef enum yytokentype yytoken_kind_t;
+   typedef enum sleightokentype sleightoken_kind_t;
  #endif
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/slghparse.y b/Ghidra/Features/Decompiler/src/decompile/cpp/slghparse.y
-index 51edd8612..eb3d9f2e1 100644
+index 0ee2acf82..31425aeda 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/slghparse.y
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/slghparse.y
-@@ -99,7 +99,7 @@
+@@ -101,7 +101,7 @@ extern int sleigherror(const char *str );
  %token BADINTEGER GOTO_KEY CALL_KEY RETURN_KEY IF_KEY
  %token DEFINE_KEY ATTACH_KEY MACRO_KEY SPACE_KEY TYPE_KEY RAM_KEY DEFAULT_KEY
  %token REGISTER_KEY ENDIAN_KEY WITH_KEY ALIGN_KEY OP_UNIMPL
@@ -3850,9 +3850,9 @@ index 51edd8612..eb3d9f2e1 100644
  %token SIZE_KEY WORDSIZE_KEY OFFSET_KEY NAMES_KEY VALUES_KEY VARIABLES_KEY PCODEOP_KEY IS_KEY LOCAL_KEY
  %token DELAYSLOT_KEY CROSSBUILD_KEY EXPORT_KEY BUILD_KEY CONTEXT_KEY ELLIPSIS_KEY GLOBALSET_KEY BITRANGE_KEY
  
-@@ -198,15 +198,19 @@ contextprop: DEFINE_KEY CONTEXT_KEY VARSYM { $$ = $3; }
+@@ -200,15 +200,19 @@ contextprop: DEFINE_KEY CONTEXT_KEY VARSYM { $$ = $3; }
  fielddef: STRING '=' '(' INTEGER ',' INTEGER ')' { $$ = new FieldQuality($1,$4,$6); }
-   | anysymbol '=' '(' INTEGER ',' INTEGER ')' { delete $4; delete $6; string errmsg = $1->getName()+": redefined as field"; yyerror(errmsg.c_str()); YYERROR; }
+   | anysymbol '=' '(' INTEGER ',' INTEGER ')' { delete $4; delete $6; string errmsg = $1->getName()+": redefined as field"; slgh->reportError(errmsg); YYERROR; }
    | fielddef SIGNED_KEY			{ $$ = $1; $$->signext = true; }
 -  | fielddef HEX_KEY			{ $$ = $1; $$->hex = true; }
 -  | fielddef DEC_KEY			{ $$ = $1; $$->hex = false; }
@@ -3862,7 +3862,7 @@ index 51edd8612..eb3d9f2e1 100644
 +  | fielddef BIN_KEY			{ $$ = $1; $$->base = 2; }
    ;
  contextfielddef: STRING '=' '(' INTEGER ',' INTEGER ')' { $$ = new FieldQuality($1,$4,$6); }
-   | anysymbol '=' '(' INTEGER ',' INTEGER ')' { delete $4; delete $6; string errmsg = $1->getName()+": redefined as field"; yyerror(errmsg.c_str()); YYERROR; }
+   | anysymbol '=' '(' INTEGER ',' INTEGER ')' { delete $4; delete $6; string errmsg = $1->getName()+": redefined as field"; slgh->reportError(errmsg); YYERROR; }
    | contextfielddef SIGNED_KEY			{ $$ = $1; $$->signext = true; }
    | contextfielddef NOFLOW_KEY			{ $$ = $1; $$->flow = false; }
 -  | contextfielddef HEX_KEY			{ $$ = $1; $$->hex = true; }
@@ -3875,10 +3875,10 @@ index 51edd8612..eb3d9f2e1 100644
  spacedef: spaceprop ';'			{ slgh->newSpace($1); }
    ;
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/slghpatexpress.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/slghpatexpress.cc
-index 3b7534f09..f5237e16f 100644
+index 5d6a2b9b4..214cd6417 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/slghpatexpress.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/slghpatexpress.cc
-@@ -556,7 +556,7 @@ static intb getContextBytes(ParserWalker &walker,int4 bytestart,int4 byteend)
+@@ -558,7 +558,7 @@ static intb getContextBytes(ParserWalker &walker,int4 bytestart,int4 byteend)
    return res;
  }
  
@@ -3887,7 +3887,7 @@ index 3b7534f09..f5237e16f 100644
  
  {
    tok = tk;
-@@ -573,6 +573,7 @@ TokenField::TokenField(Token *tk,bool s,int4 bstart,int4 bend)
+@@ -575,6 +575,7 @@ TokenField::TokenField(Token *tk,bool s,int4 bstart,int4 bend)
      byteend = bitend/8;
    }
    shift = bitstart % 8;
@@ -3895,7 +3895,7 @@ index 3b7534f09..f5237e16f 100644
  }
  
  intb TokenField::getValue(ParserWalker &walker) const
-@@ -613,7 +614,8 @@ void TokenField::saveXml(ostream &s) const
+@@ -615,7 +616,8 @@ void TokenField::saveXml(ostream &s) const
    s << " bitend=\"" << bitend << "\"";
    s << " bytestart=\"" << bytestart << "\"";
    s << " byteend=\"" << byteend << "\"";
@@ -3905,7 +3905,7 @@ index 3b7534f09..f5237e16f 100644
  }
  
  void TokenField::restoreXml(const Element *el,Translate *trans)
-@@ -647,9 +649,14 @@ void TokenField::restoreXml(const Element *el,Translate *trans)
+@@ -649,9 +651,14 @@ void TokenField::restoreXml(const Element *el,Translate *trans)
      s.unsetf(ios::dec | ios::hex | ios::oct);
      s >> shift;
    }
@@ -3921,7 +3921,7 @@ index 3b7534f09..f5237e16f 100644
  
  {
    signbit = s;
-@@ -658,6 +665,7 @@ ContextField::ContextField(bool s,int4 sbit,int4 ebit)
+@@ -660,6 +667,7 @@ ContextField::ContextField(bool s,int4 sbit,int4 ebit)
    startbyte = startbit/8;
    endbyte = endbit/8;
    shift = 7 - (endbit%8);
@@ -3929,7 +3929,7 @@ index 3b7534f09..f5237e16f 100644
  }
  
  intb ContextField::getValue(ParserWalker &walker) const
-@@ -691,7 +699,8 @@ void ContextField::saveXml(ostream &s) const
+@@ -693,7 +701,8 @@ void ContextField::saveXml(ostream &s) const
    s << " endbit=\"" << endbit << "\"";
    s << " startbyte=\"" << startbyte << "\"";
    s << " endbyte=\"" << endbyte << "\"";
@@ -3939,7 +3939,7 @@ index 3b7534f09..f5237e16f 100644
  }
  
  void ContextField::restoreXml(const Element *el,Translate *trans)
-@@ -723,6 +732,11 @@ void ContextField::restoreXml(const Element *el,Translate *trans)
+@@ -725,6 +734,11 @@ void ContextField::restoreXml(const Element *el,Translate *trans)
      s.unsetf(ios::dec | ios::hex | ios::oct);
      s >> shift;
    }
@@ -3952,10 +3952,10 @@ index 3b7534f09..f5237e16f 100644
  
  void ConstantValue::saveXml(ostream &s) const
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/slghpatexpress.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/slghpatexpress.hh
-index 8c748c2ce..cc4ff2886 100644
+index c260fde82..e004f341c 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/slghpatexpress.hh
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/slghpatexpress.hh
-@@ -93,9 +93,10 @@ class TokenField : public PatternValue {
+@@ -95,9 +95,10 @@ class TokenField : public PatternValue {
    int4 bitstart,bitend;		// Bits within the token, 0 bit is LEAST significant
    int4 bytestart,byteend;	// Bytes to read to get value
    int4 shift;			// Amount to shift to align value  (bitstart % 8)
@@ -3967,7 +3967,7 @@ index 8c748c2ce..cc4ff2886 100644
    virtual intb getValue(ParserWalker &walker) const;
    virtual TokenPattern genMinPattern(const vector<TokenPattern> &ops) const { return TokenPattern(tok); }
    virtual TokenPattern genPattern(intb val) const;
-@@ -110,12 +111,14 @@ class ContextField : public PatternValue {
+@@ -112,12 +113,14 @@ class ContextField : public PatternValue {
    int4 startbyte,endbyte;
    int4 shift;
    bool signbit;
@@ -3984,10 +3984,10 @@ index 8c748c2ce..cc4ff2886 100644
    virtual TokenPattern genMinPattern(const vector<TokenPattern> &ops) const { return TokenPattern(); }
    virtual TokenPattern genPattern(intb val) const;
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/slghscan.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/slghscan.cc
-index 19d188b86..231f2998c 100644
+index 11011accf..c4d4dfc84 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/slghscan.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/slghscan.cc
-@@ -367,8 +367,8 @@ static void yynoreturn yy_fatal_error ( const char* msg  );
+@@ -626,8 +626,8 @@ static void yynoreturn yy_fatal_error ( const char* msg  );
  		YY_FATAL_ERROR( "token too large, exceeds YYLMAX" ); \
  	yy_flex_strncpy( yytext, (yytext_ptr), yyleng + 1 ); \
  	(yy_c_buf_p) = yy_cp;
@@ -3998,7 +3998,7 @@ index 19d188b86..231f2998c 100644
  /* This struct is not used in this scanner,
     but its presence is necessary. */
  struct yy_trans_info
-@@ -376,67 +376,67 @@ struct yy_trans_info
+@@ -635,67 +635,67 @@ struct yy_trans_info
  	flex_int32_t yy_verify;
  	flex_int32_t yy_nxt;
  	};
@@ -4125,7 +4125,7 @@ index 19d188b86..231f2998c 100644
      } ;
  
  static const YY_CHAR yy_ec[256] =
-@@ -482,139 +482,141 @@ static const YY_CHAR yy_meta[67] =
+@@ -741,139 +741,141 @@ static const YY_CHAR yy_meta[67] =
          5,    5,    3,    3,    3,    3
      } ;
  
@@ -4394,7 +4394,7 @@ index 19d188b86..231f2998c 100644
      {   0,
         16,   17,   18,   17,   16,   16,   19,   20,   16,   16,
         16,   21,   21,   16,   16,   21,   21,   22,   16,   16,
-@@ -660,79 +662,79 @@ static const flex_int16_t yy_nxt[1035] =
+@@ -919,79 +921,79 @@ static const flex_int16_t yy_nxt[1035] =
        105,  122,  105,  123,  124,  125,  105,  105,  105,  105,
        105,  126,   97,  127,  128,  103,  132,  134,  144,  134,
  
@@ -4545,7 +4545,7 @@ index 19d188b86..231f2998c 100644
      {   0,
          1,    1,    1,    1,    1,    1,    1,    1,    1,    1,
          1,    1,    1,    1,    1,    1,    1,    1,    1,    1,
-@@ -778,90 +780,90 @@ static const flex_int16_t yy_chk[1035] =
+@@ -1037,90 +1039,90 @@ static const flex_int16_t yy_chk[1035] =
         11,   11,   11,   11,   11,   11,   11,   11,   11,   11,
         11,   11,   11,   11,   11,   11,   14,   17,   31,   17,
  
@@ -4710,7 +4710,7 @@ index 19d188b86..231f2998c 100644
  
  static yy_state_type yy_last_accepting_state;
  static char *yy_last_accepting_cpos;
-@@ -1616,13 +1618,13 @@ yy_match:
+@@ -1883,13 +1885,13 @@ yy_match:
  			while ( yy_chk[yy_base[yy_current_state] + yy_c] != yy_current_state )
  				{
  				yy_current_state = (int) yy_def[yy_current_state];
@@ -4726,7 +4726,7 @@ index 19d188b86..231f2998c 100644
  
  yy_find_action:
  		yy_act = yy_accept[yy_current_state];
-@@ -1815,63 +1817,63 @@ YY_RULE_SETUP
+@@ -2082,63 +2084,63 @@ YY_RULE_SETUP
  	YY_BREAK
  case 39:
  YY_RULE_SETUP
@@ -4795,37 +4795,37 @@ index 19d188b86..231f2998c 100644
  	YY_BREAK
  case 52:
  YY_RULE_SETUP
--{ return scan_number(yytext,&yylval,false); }
+-{ return scan_number(sleightext,&sleighlval,false); }
 +
  	YY_BREAK
  case 53:
  YY_RULE_SETUP
--{ return scan_number(yytext,&yylval,false); }
+-{ return scan_number(sleightext,&sleighlval,false); }
 +{  return find_symbol();  }
  	YY_BREAK
  case 54:
  YY_RULE_SETUP
-@@ -1879,159 +1881,159 @@ YY_RULE_SETUP
+@@ -2146,159 +2148,159 @@ YY_RULE_SETUP
  	YY_BREAK
  case 55:
  YY_RULE_SETUP
--{ yylval.str = new string(yytext+1,strlen(yytext)-2); return STRING; }
-+{ return scan_number(yytext,&yylval,false); }
+-{ sleighlval.str = new string(sleightext+1,strlen(sleightext)-2); return STRING; }
++{ return scan_number(sleightext,&sleighlval,false); }
  	YY_BREAK
  case 56:
  YY_RULE_SETUP
 -
-+{ return scan_number(yytext,&yylval,false); }
++{ return scan_number(sleightext,&sleighlval,false); }
  	YY_BREAK
  case 57:
 -/* rule 57 can match eol */
  YY_RULE_SETUP
 -{ slgh->nextLine(); }
-+{ yylval.str = new string(yytext+1,strlen(yytext)-2); return STRING; }
++{ sleighlval.str = new string(sleightext+1,strlen(sleightext)-2); return STRING; }
  	YY_BREAK
  case 58:
  YY_RULE_SETUP
--{ return yytext[0]; }
+-{ return sleightext[0]; }
 +
  	YY_BREAK
  case 59:
@@ -4837,49 +4837,49 @@ index 19d188b86..231f2998c 100644
  case 60:
  YY_RULE_SETUP
 -{ preproc_macroexpand(); }
-+{ return yytext[0]; }
++{ return sleightext[0]; }
  	YY_BREAK
  case 61:
 +/* rule 61 can match eol */
  YY_RULE_SETUP
--{ yylval.ch = yytext[0]; return CHAR; }
+-{ sleighlval.ch = sleightext[0]; return CHAR; }
 +{ slgh->nextLine(); BEGIN( preprocess(print,preproc) ); }
  	YY_BREAK
  case 62:
  YY_RULE_SETUP
--{ yylval.ch = '^'; return '^'; }
+-{ sleighlval.ch = '^'; return '^'; }
 +{ preproc_macroexpand(); }
  	YY_BREAK
  case 63:
  YY_RULE_SETUP
 -{ BEGIN(pattern); actionon=0; return IS_KEY; }
-+{ yylval.ch = yytext[0]; return CHAR; }
++{ sleighlval.ch = sleightext[0]; return CHAR; }
  	YY_BREAK
  case 64:
  YY_RULE_SETUP
--{  yylval.str = new string(yytext); return SYMBOLSTRING;  }
-+{ yylval.ch = '^'; return '^'; }
+-{  sleighlval.str = new string(sleightext); return SYMBOLSTRING;  }
++{ sleighlval.ch = '^'; return '^'; }
  	YY_BREAK
  case 65:
  YY_RULE_SETUP
--{ yylval.str = new string(yytext+1,strlen(yytext)-2); return STRING; }
+-{ sleighlval.str = new string(sleightext+1,strlen(sleightext)-2); return STRING; }
 +{ BEGIN(pattern); actionon=0; return IS_KEY; }
  	YY_BREAK
  case 66:
  YY_RULE_SETUP
--{ yylval.ch = ' '; return ' '; }
-+{  yylval.str = new string(yytext); return SYMBOLSTRING;  }
+-{ sleighlval.ch = ' '; return ' '; }
++{  sleighlval.str = new string(sleightext); return SYMBOLSTRING;  }
  	YY_BREAK
  case 67:
 -/* rule 67 can match eol */
  YY_RULE_SETUP
 -{ slgh->nextLine(); return ' '; }
-+{ yylval.str = new string(yytext+1,strlen(yytext)-2); return STRING; }
++{ sleighlval.str = new string(sleightext+1,strlen(sleightext)-2); return STRING; }
  	YY_BREAK
  case 68:
  YY_RULE_SETUP
--{ return yytext[0]; }
-+{ yylval.ch = ' '; return ' '; }
+-{ return sleightext[0]; }
++{ sleighlval.ch = ' '; return ' '; }
  	YY_BREAK
  case 69:
  /* rule 69 can match eol */
@@ -4890,12 +4890,12 @@ index 19d188b86..231f2998c 100644
  case 70:
  YY_RULE_SETUP
 -{ preproc_macroexpand(); }
-+{ return yytext[0]; }
++{ return sleightext[0]; }
  	YY_BREAK
  case 71:
 +/* rule 71 can match eol */
  YY_RULE_SETUP
--{ BEGIN((withsection==1) ? INITIAL:sem); withsection=0; yylval.ch = yytext[0]; return yytext[0]; }
+-{ BEGIN((withsection==1) ? INITIAL:sem); withsection=0; sleighlval.ch = sleightext[0]; return sleightext[0]; }
 +{ slgh->nextLine(); BEGIN( preprocess(pattern,preproc) ); }
  	YY_BREAK
  case 72:
@@ -4906,7 +4906,7 @@ index 19d188b86..231f2998c 100644
  case 73:
  YY_RULE_SETUP
 -{ return GLOBALSET_KEY; }
-+{ BEGIN((withsection==1) ? INITIAL:sem); withsection=0; yylval.ch = yytext[0]; return yytext[0]; }
++{ BEGIN((withsection==1) ? INITIAL:sem); withsection=0; sleighlval.ch = sleightext[0]; return sleightext[0]; }
  	YY_BREAK
  case 74:
  YY_RULE_SETUP
@@ -4955,33 +4955,33 @@ index 19d188b86..231f2998c 100644
  	YY_BREAK
  case 83:
  YY_RULE_SETUP
--{ actionon = 1; yylval.ch = yytext[0]; return yytext[0]; }
+-{ actionon = 1; sleighlval.ch = sleightext[0]; return sleightext[0]; }
 +{ return OP_XOR; }
  	YY_BREAK
  case 84:
  YY_RULE_SETUP
--{ actionon = 0; yylval.ch = yytext[0]; return yytext[0]; }
+-{ actionon = 0; sleighlval.ch = sleightext[0]; return sleightext[0]; }
 +{ return ELLIPSIS_KEY; }
  	YY_BREAK
  case 85:
  YY_RULE_SETUP
--{ yylval.ch = yytext[0];  return (actionon==0) ? yytext[0] : OP_AND; }
-+{ actionon = 1; yylval.ch = yytext[0]; return yytext[0]; }
+-{ sleighlval.ch = sleightext[0];  return (actionon==0) ? sleightext[0] : OP_AND; }
++{ actionon = 1; sleighlval.ch = sleightext[0]; return sleightext[0]; }
  	YY_BREAK
  case 86:
  YY_RULE_SETUP
--{ yylval.ch = yytext[0];  return (actionon==0) ? yytext[0] : OP_OR; }
-+{ actionon = 0; yylval.ch = yytext[0]; return yytext[0]; }
+-{ sleighlval.ch = sleightext[0];  return (actionon==0) ? sleightext[0] : OP_OR; }
++{ actionon = 0; sleighlval.ch = sleightext[0]; return sleightext[0]; }
  	YY_BREAK
  case 87:
  YY_RULE_SETUP
 -{ return OP_XOR; }
-+{ yylval.ch = yytext[0];  return (actionon==0) ? yytext[0] : OP_AND; }
++{ sleighlval.ch = sleightext[0];  return (actionon==0) ? sleightext[0] : OP_AND; }
  	YY_BREAK
  case 88:
  YY_RULE_SETUP
--{ yylval.ch = yytext[0]; return yytext[0]; }
-+{ yylval.ch = yytext[0];  return (actionon==0) ? yytext[0] : OP_OR; }
+-{ sleighlval.ch = sleightext[0]; return sleightext[0]; }
++{ sleighlval.ch = sleightext[0];  return (actionon==0) ? sleightext[0] : OP_OR; }
  	YY_BREAK
  case 89:
  YY_RULE_SETUP
@@ -4991,36 +4991,36 @@ index 19d188b86..231f2998c 100644
  case 90:
  YY_RULE_SETUP
 -{ return find_symbol();   }
-+{ yylval.ch = yytext[0]; return yytext[0]; }
++{ sleighlval.ch = sleightext[0]; return sleightext[0]; }
  	YY_BREAK
  case 91:
  YY_RULE_SETUP
--{ return scan_number(yytext,&yylval,true); }
+-{ return scan_number(sleightext,&sleighlval,true); }
 +
  	YY_BREAK
  case 92:
  YY_RULE_SETUP
--{ return scan_number(yytext,&yylval,true); }
+-{ return scan_number(sleightext,&sleighlval,true); }
 +{ return find_symbol();   }
  	YY_BREAK
  case 93:
  YY_RULE_SETUP
-@@ -2039,265 +2041,265 @@ YY_RULE_SETUP
+@@ -2306,265 +2308,265 @@ YY_RULE_SETUP
  	YY_BREAK
  case 94:
  YY_RULE_SETUP
 -
-+{ return scan_number(yytext,&yylval,true); }
++{ return scan_number(sleightext,&sleighlval,true); }
  	YY_BREAK
  case 95:
 -/* rule 95 can match eol */
  YY_RULE_SETUP
 -{ slgh->nextLine(); }
-+{ return scan_number(yytext,&yylval,true); }
++{ return scan_number(sleightext,&sleighlval,true); }
  	YY_BREAK
  case 96:
  YY_RULE_SETUP
--{ return yytext[0]; }
+-{ return sleightext[0]; }
 +
  	YY_BREAK
  case 97:
@@ -5032,12 +5032,12 @@ index 19d188b86..231f2998c 100644
  case 98:
  YY_RULE_SETUP
 -{ preproc_macroexpand(); }
-+{ return yytext[0]; }
++{ return sleightext[0]; }
  	YY_BREAK
  case 99:
 +/* rule 99 can match eol */
  YY_RULE_SETUP
--{ BEGIN(INITIAL); yylval.ch = yytext[0]; return yytext[0]; }
+-{ BEGIN(INITIAL); sleighlval.ch = sleightext[0]; return sleightext[0]; }
 +{ slgh->nextLine(); BEGIN( preprocess(sem,preproc) ); }
  	YY_BREAK
  case 100:
@@ -5048,7 +5048,7 @@ index 19d188b86..231f2998c 100644
  case 101:
  YY_RULE_SETUP
 -{ return OP_BOOL_AND; }
-+{ BEGIN(INITIAL); yylval.ch = yytext[0]; return yytext[0]; }
++{ BEGIN(INITIAL); sleighlval.ch = sleightext[0]; return sleightext[0]; }
  	YY_BREAK
  case 102:
  YY_RULE_SETUP
@@ -5312,7 +5312,7 @@ index 19d188b86..231f2998c 100644
  	YY_BREAK
  case 154:
  YY_RULE_SETUP
--{ yylval.ch = yytext[0]; return yytext[0]; }
+-{ sleighlval.ch = sleightext[0]; return sleightext[0]; }
 +{ return BUILD_KEY; }
  	YY_BREAK
  case 155:
@@ -5323,36 +5323,36 @@ index 19d188b86..231f2998c 100644
  case 156:
  YY_RULE_SETUP
 -{ return find_symbol();   }
-+{ yylval.ch = yytext[0]; return yytext[0]; }
++{ sleighlval.ch = sleightext[0]; return sleightext[0]; }
  	YY_BREAK
  case 157:
  YY_RULE_SETUP
--{ return scan_number(yytext,&yylval,false); }
+-{ return scan_number(sleightext,&sleighlval,false); }
 +
  	YY_BREAK
  case 158:
  YY_RULE_SETUP
--{ return scan_number(yytext,&yylval,false); }
+-{ return scan_number(sleightext,&sleighlval,false); }
 +{ return find_symbol();   }
  	YY_BREAK
  case 159:
  YY_RULE_SETUP
-@@ -2305,24 +2307,32 @@ YY_RULE_SETUP
+@@ -2572,24 +2574,32 @@ YY_RULE_SETUP
  	YY_BREAK
  case 160:
  YY_RULE_SETUP
 -
-+{ return scan_number(yytext,&yylval,false); }
++{ return scan_number(sleightext,&sleighlval,false); }
  	YY_BREAK
  case 161:
 -/* rule 161 can match eol */
  YY_RULE_SETUP
 -{ slgh->nextLine(); }
-+{ return scan_number(yytext,&yylval,false); }
++{ return scan_number(sleightext,&sleighlval,false); }
  	YY_BREAK
  case 162:
  YY_RULE_SETUP
--{ return yytext[0]; }
+-{ return sleightext[0]; }
 +
  	YY_BREAK
  case 163:
@@ -5364,7 +5364,7 @@ index 19d188b86..231f2998c 100644
  case 164:
 -/* rule 164 can match eol */
 +YY_RULE_SETUP
-+{ return yytext[0]; }
++{ return sleightext[0]; }
 +	YY_BREAK
 +case 165:
 +/* rule 165 can match eol */
@@ -5376,7 +5376,7 @@ index 19d188b86..231f2998c 100644
  YY_RULE_SETUP
  { slgh->nextLine(); }
  	YY_BREAK
-@@ -2344,7 +2354,7 @@ case YY_STATE_EOF(preproc):
+@@ -2611,7 +2621,7 @@ case YY_STATE_EOF(preproc):
            slgh->parseFileFinished();
          }
  	YY_BREAK
@@ -5385,7 +5385,7 @@ index 19d188b86..231f2998c 100644
  YY_RULE_SETUP
  ECHO;
  	YY_BREAK
-@@ -2643,7 +2653,7 @@ static int yy_get_next_buffer (void)
+@@ -2910,7 +2920,7 @@ static int yy_get_next_buffer (void)
  		while ( yy_chk[yy_base[yy_current_state] + yy_c] != yy_current_state )
  			{
  			yy_current_state = (int) yy_def[yy_current_state];
@@ -5394,7 +5394,7 @@ index 19d188b86..231f2998c 100644
  				yy_c = yy_meta[yy_c];
  			}
  		yy_current_state = yy_nxt[yy_base[yy_current_state] + yy_c];
-@@ -2671,11 +2681,11 @@ static int yy_get_next_buffer (void)
+@@ -2938,11 +2948,11 @@ static int yy_get_next_buffer (void)
  	while ( yy_chk[yy_base[yy_current_state] + yy_c] != yy_current_state )
  		{
  		yy_current_state = (int) yy_def[yy_current_state];
@@ -5409,10 +5409,10 @@ index 19d188b86..231f2998c 100644
  		return yy_is_jam ? 0 : yy_current_state;
  }
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/slghscan.l b/Ghidra/Features/Decompiler/src/decompile/cpp/slghscan.l
-index 58e0a1dca..e3ff36974 100644
+index 32c766097..14bd3fd79 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/slghscan.l
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/slghscan.l
-@@ -532,6 +532,8 @@ with   { BEGIN(pattern); withsection = 1; slgh->calcContextLayout(); return WITH
+@@ -541,6 +541,8 @@ with   { BEGIN(pattern); withsection = 1; slgh->calcContextLayout(); return WITH
  <defblock>noflow    { return NOFLOW_KEY; }
  <defblock>hex       { return HEX_KEY; }
  <defblock>dec       { return DEC_KEY; }
