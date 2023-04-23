@@ -51,6 +51,8 @@ Replaced with their version
 Removed unnecessary files
 
 More sized pointer support.
+
+Resolved conflics
 ---
  Ghidra/Features/Base/certification.manifest   |    1 +
  .../Base/data/FunctionNames.properties        | 2308 +++++++++++++++++
@@ -62,7 +64,7 @@ More sized pointer support.
  .../ghidra_scripts/_SetSSRegForAllFuncs.java  |  112 +
  .../function/ApplyFunctionSignatureCmd.java   |    2 +-
  .../SegmentedCallingConventionAnalyzer.java   |   21 +-
- .../actions/CreateLPUnionStructAction.java    |  314 +++
+ .../actions/CreateLPUnionStructAction.java    |  320 +++
  .../function/editor/FunctionEditorModel.java  |    2 +-
  .../app/util/cparser/C/Declaration.java       |   80 +-
  .../app/util/opinion/LibraryExport.java       |   85 +
@@ -81,7 +83,7 @@ More sized pointer support.
  .../program/database/data/DataTypeDB.java     |   11 +
  .../program/database/data/PointerDB.java      |    3 +
  .../program/database/function/FunctionDB.java |    6 +-
- .../program/model/data/AbstractDataType.java  |   17 +-
+ .../program/model/data/AbstractDataType.java  |   18 +-
  .../program/model/data/AddressModel.java      |   71 +
  .../model/data/AddressModelDataType.java      |  120 +
  .../ghidra/program/model/data/DataType.java   |    4 +
@@ -94,13 +96,13 @@ More sized pointer support.
  .../model/lang/ParamListRegisterOut.java      |    2 +-
  .../program/model/lang/ParamListStandard.java |   24 +-
  .../model/lang/ParamListStandardOut.java      |   12 +-
- .../program/model/lang/PrototypeModel.java    |   89 +-
- .../model/listing/FunctionSignature.java      |    5 +
+ .../program/model/lang/PrototypeModel.java    |   90 +-
+ .../model/listing/FunctionSignature.java      |    6 +
  .../program/model/pcode/AttributeId.java      |    2 +
  .../model/TestDoubleFunctionSignature.java    |    5 +
  .../program/model/data/StubDataType.java      |   10 +
  .../x86/data/languages/x86-16.cspec           |  288 +-
- 48 files changed, 6069 insertions(+), 135 deletions(-)
+ 48 files changed, 6079 insertions(+), 134 deletions(-)
  create mode 100644 Ghidra/Features/Base/data/FunctionNames.properties
  create mode 100644 Ghidra/Features/Base/ghidra_scripts/FixPascalCallingConvention.java
  create mode 100644 Ghidra/Features/Base/ghidra_scripts/FixWin16LibraryFunctionNames.java
@@ -120,10 +122,10 @@ More sized pointer support.
  create mode 100644 Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/data/SegmentCodePointerDataType.java
 
 diff --git a/Ghidra/Features/Base/certification.manifest b/Ghidra/Features/Base/certification.manifest
-index 30eb3d35a..ebecd9c7d 100644
+index 681219a5d..3efc0fdb0 100644
 --- a/Ghidra/Features/Base/certification.manifest
 +++ b/Ghidra/Features/Base/certification.manifest
-@@ -52,6 +52,7 @@ data/symbols/win16/toolhelp.exports||GHIDRA||||END|
+@@ -53,6 +53,7 @@ data/symbols/win16/toolhelp.exports||GHIDRA||||END|
  data/symbols/win16/user.exports||GHIDRA||||END|
  data/symbols/win16/ver.exports||GHIDRA||||END|
  data/symbols/win16/win87em.exports||GHIDRA||||END|
@@ -3988,10 +3990,10 @@ index 000000000..16bdf47fb
 +
 +}
 diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/cmd/function/ApplyFunctionSignatureCmd.java b/Ghidra/Features/Base/src/main/java/ghidra/app/cmd/function/ApplyFunctionSignatureCmd.java
-index 2eee3110d..4763bb784 100644
+index 1a87d98c0..a5c3276c9 100644
 --- a/Ghidra/Features/Base/src/main/java/ghidra/app/cmd/function/ApplyFunctionSignatureCmd.java
 +++ b/Ghidra/Features/Base/src/main/java/ghidra/app/cmd/function/ApplyFunctionSignatureCmd.java
-@@ -199,7 +199,7 @@ public class ApplyFunctionSignatureCmd extends BackgroundCommand {
+@@ -200,7 +200,7 @@ public class ApplyFunctionSignatureCmd extends BackgroundCommand {
  			return 0;
  		}
  
@@ -4056,10 +4058,10 @@ index 526a266ae..4f3817e62 100644
  						Msg.error(this, "Unexpected Exception: " + e.getMessage(), e);
 diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/datamgr/actions/CreateLPUnionStructAction.java b/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/datamgr/actions/CreateLPUnionStructAction.java
 new file mode 100644
-index 000000000..036af673b
+index 000000000..56542c84c
 --- /dev/null
 +++ b/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/datamgr/actions/CreateLPUnionStructAction.java
-@@ -0,0 +1,314 @@
+@@ -0,0 +1,320 @@
 +/* ###
 + * IP: GHIDRA
 + *
@@ -4373,12 +4375,18 @@ index 000000000..036af673b
 +		// TODO Auto-generated method stub
 +
 +	}
++
++	@Override
++	public void programArchitectureChanged(DataTypeManager dataTypeManager) {
++		// TODO Auto-generated method stub
++
++	}
 +}
 diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/function/editor/FunctionEditorModel.java b/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/function/editor/FunctionEditorModel.java
-index 001013874..46930f139 100644
+index 45fdd7468..75ff28f9a 100644
 --- a/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/function/editor/FunctionEditorModel.java
 +++ b/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/function/editor/FunctionEditorModel.java
-@@ -873,7 +873,7 @@ public class FunctionEditorModel {
+@@ -882,7 +882,7 @@ public class FunctionEditorModel {
  
  	private void removeExplicitThisParameter() {
  		if (!allowCustomStorage &&
@@ -4769,7 +4777,7 @@ index a0a38f7e5..1e0fa7ef6 100644
  				addr = addr.addWrap(thunkBodySize);
  			}
 diff --git a/Ghidra/Features/Base/src/main/javacc/ghidra/app/util/cparser/C/C.jj b/Ghidra/Features/Base/src/main/javacc/ghidra/app/util/cparser/C/C.jj
-index 33c3c358a..80a36faea 100644
+index 38ae7155f..37a4ed2c6 100644
 --- a/Ghidra/Features/Base/src/main/javacc/ghidra/app/util/cparser/C/C.jj
 +++ b/Ghidra/Features/Base/src/main/javacc/ghidra/app/util/cparser/C/C.jj
 @@ -48,13 +48,16 @@
@@ -4840,7 +4848,7 @@ index 33c3c358a..80a36faea 100644
  
              return comp;
      }
-@@ -632,6 +635,9 @@ public class CParser {
+@@ -633,6 +636,9 @@ public class CParser {
                      case CDECL:
                              funcDT.setGenericCallingConvention(GenericCallingConvention.cdecl);
                              break;
@@ -4850,7 +4858,7 @@ index 33c3c358a..80a36faea 100644
                      case STDCALL:
                              funcDT.setGenericCallingConvention(GenericCallingConvention.stdcall);
                              break;
-@@ -942,25 +948,31 @@ public class CParser {
+@@ -943,25 +949,31 @@ public class CParser {
  
          // Run the parser
      public static void main(String args[]) {
@@ -4888,7 +4896,7 @@ index 33c3c358a..80a36faea 100644
                  return;
              }
  
-@@ -1132,15 +1144,25 @@ TOKEN :
+@@ -1133,15 +1145,25 @@ TOKEN :
      |
      <CDECL : ( [ "_" ] )+ "cdecl"> 
      |
@@ -4916,7 +4924,7 @@ index 33c3c358a..80a36faea 100644
      |
      <NORETURN : "_Noreturn" >
      |
-@@ -1200,9 +1222,11 @@ TOKEN :
+@@ -1201,9 +1223,11 @@ TOKEN :
      |
      <GOTO : "goto"> 
      |
@@ -4930,7 +4938,7 @@ index 33c3c358a..80a36faea 100644
      |
      <FOR : "for"> 
      |
-@@ -1223,7 +1247,7 @@ TOKEN :
+@@ -1224,7 +1248,7 @@ TOKEN :
  
  TOKEN :
  {
@@ -4939,7 +4947,7 @@ index 33c3c358a..80a36faea 100644
      |
      <#LETTER : [ "$", "A"-"Z", "_", "a"-"z" ]> 
      |
-@@ -1431,6 +1455,7 @@ void TranslationUnit() : {}
+@@ -1432,6 +1456,7 @@ void TranslationUnit() : {}
      ( ExternalDeclaration() )+ 
      {
          //jjt         return jjtThis;
@@ -4947,7 +4955,7 @@ index 33c3c358a..80a36faea 100644
      }
  }
  
-@@ -1550,7 +1575,7 @@ Declaration DeclarationSpecifiers(Declaration specDT) : {
+@@ -1551,7 +1576,7 @@ Declaration DeclarationSpecifiers(Declaration specDT) : {
  //            LOOKAHEAD(DeclarationSpecifiers()
  //                     , { (typeDT == null ||
  //                         (!typeDT.getName().equals(getToken(1).image) && !isType(getToken(1).image))) }
@@ -4956,7 +4964,7 @@ index 33c3c358a..80a36faea 100644
              specDT = DeclarationSpecifiers(specDT)
          ]
          |
-@@ -1603,6 +1628,10 @@ Declaration BuiltInTypeSpecifier(Declaration dec) : {
+@@ -1604,6 +1629,10 @@ Declaration BuiltInTypeSpecifier(Declaration dec) : {
  }
  {
      (
@@ -4967,7 +4975,7 @@ index 33c3c358a..80a36faea 100644
          <VOID>                 { dec.setDataType(resolveInternal(VoidDataType.dataType)); }
          |
          <CHAR>                 {   dt = dec.getDataType();
-@@ -1760,8 +1789,12 @@ Declaration TypeQualifier(Declaration dec) : {}
+@@ -1761,8 +1790,12 @@ Declaration TypeQualifier(Declaration dec) : {}
        <CONST>  { dec.addQualifier(CONST); } |
        <VOLATILE> |
        <CDECL> { dec.addQualifier(CDECL); } |
@@ -4982,16 +4990,16 @@ index 33c3c358a..80a36faea 100644
        <STDCALL> { dec.addQualifier(STDCALL); } |
        <FASTCALL> { dec.addQualifier(FASTCALL); } |
        <NORETURN> { dec.addQualifier(NORETURN); } |
-@@ -1772,6 +1805,7 @@ Declaration TypeQualifier(Declaration dec) : {}
+@@ -1773,6 +1806,7 @@ Declaration TypeQualifier(Declaration dec) : {}
        <RESTRICT> |
        <EXTENSION> |
        <STATIC> |
 +      ( BasedSpec() ) |
        <PACKED> |
        <UNALIGNED> |
-       ( DeclSpec() )
-@@ -1823,6 +1857,25 @@ void SubIdent() : { Declaration dt = new Declaration(); }
-     )
+       ( DeclSpec(dec) )
+@@ -1835,6 +1869,25 @@ void SubIdent(Declaration dec) : {
+     }
  }
  
 +void BasedSpec() : {
@@ -5013,10 +5021,10 @@ index 33c3c358a..80a36faea 100644
 +  ( ( <SEGNAMESPEC> ) "(" "\"" <IDENTIFIER> "\"" ")" )
 +}
 +
- void DeclSpec() : {
+ void DeclSpec(Declaration dec) : {
  }
  {
-@@ -1990,11 +2043,11 @@ DataType StructOrUnionSpecifier() : {
+@@ -2003,11 +2056,11 @@ DataType StructOrUnionSpecifier() : {
          sname= <IDENTIFIER> 
      )
      {
@@ -5033,7 +5041,7 @@ index 33c3c358a..80a36faea 100644
          typedefParsingStack.pop();
          return comp;
      }
-@@ -2007,25 +2060,25 @@ Composite StructOrUnion() : {Composite comp;}
+@@ -2023,25 +2076,25 @@ Composite StructOrUnion() : {
          {
              comp =  new StructureDataType(getCurrentCategoryPath(), ANONYMOUS_STRUCT_PREFIX + cnt++, 0, dtMgr);
  
@@ -5055,7 +5063,7 @@ index 33c3c358a..80a36faea 100644
 -        }
 +                                }
          |
-         <UNION>  ( DeclSpec() )* {
+         <UNION>  ( DeclSpec(dec) )* {
              comp = new UnionDataType(getCurrentCategoryPath(), ANONYMOUS_UNION_PREFIX  + cnt++, dtMgr); 
          
 -            // Always set the packing, because by default structures should be aligned
@@ -5072,7 +5080,7 @@ index 33c3c358a..80a36faea 100644
          }
      )
      {
-@@ -2269,7 +2322,7 @@ Declaration DirectDeclarator(Declaration dt, DataType container) : {
+@@ -2287,7 +2340,7 @@ Declaration DirectDeclarator(Declaration dt, DataType container) : {
      [ PragmaSpec() ]
      (
          (
@@ -5081,7 +5089,7 @@ index 33c3c358a..80a36faea 100644
              |
              "(" dec= Declarator(new Declaration(funcDT=newAnonymousFunction(funcDT)), null) ")" 
              {
-@@ -2279,27 +2332,27 @@ Declaration DirectDeclarator(Declaration dt, DataType container) : {
+@@ -2297,27 +2350,27 @@ Declaration DirectDeclarator(Declaration dt, DataType container) : {
          { lastDataType = dec.getDataType(); }
          (
              (
@@ -5125,7 +5133,7 @@ index 33c3c358a..80a36faea 100644
              }
          }
          
-@@ -2351,7 +2404,18 @@ Declaration Pointer(Declaration dec) : {}
+@@ -2369,7 +2422,18 @@ Declaration Pointer(Declaration dec) : {}
      ("*" | "&") [ dec = TypeQualifierList(dec) ] [ dec = Pointer(dec) ] 
      {
          // TODO: is this right?
@@ -5146,10 +5154,10 @@ index 33c3c358a..80a36faea 100644
      }
  }
 diff --git a/Ghidra/Features/Base/src/test.slow/java/ghidra/app/plugin/core/function/EditFunctionSignatureDialogTest.java b/Ghidra/Features/Base/src/test.slow/java/ghidra/app/plugin/core/function/EditFunctionSignatureDialogTest.java
-index 526b1edd8..7b025ef73 100644
+index f9f6fda85..d60b8f3b8 100644
 --- a/Ghidra/Features/Base/src/test.slow/java/ghidra/app/plugin/core/function/EditFunctionSignatureDialogTest.java
 +++ b/Ghidra/Features/Base/src/test.slow/java/ghidra/app/plugin/core/function/EditFunctionSignatureDialogTest.java
-@@ -50,6 +50,39 @@ public class EditFunctionSignatureDialogTest extends AbstractGhidraHeadedIntegra
+@@ -51,6 +51,39 @@ public class EditFunctionSignatureDialogTest extends AbstractGhidraHeadedIntegra
  		env.dispose();
  	}
  
@@ -5444,10 +5452,10 @@ index e3841ed42..975ccdf7c 100644
    ///
    /// Within the conventions of this model, do the two (hi/lo) locations represent
 diff --git a/Ghidra/Framework/SoftwareModeling/data/languages/compiler_spec.rxg b/Ghidra/Framework/SoftwareModeling/data/languages/compiler_spec.rxg
-index ade4ca69e..06a5fe092 100644
+index 7ab59e71a..b6f4115c3 100644
 --- a/Ghidra/Framework/SoftwareModeling/data/languages/compiler_spec.rxg
 +++ b/Ghidra/Framework/SoftwareModeling/data/languages/compiler_spec.rxg
-@@ -362,6 +362,7 @@
+@@ -357,6 +357,7 @@
      
      <optional> <attribute name="hasthis"/> </optional>
      <optional> <attribute name="constructor"/> </optional>
@@ -6061,7 +6069,7 @@ index 000000000..86160b03c
 +
 +}
 diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/data/DataTypeDB.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/data/DataTypeDB.java
-index 930c028bc..a30f4d625 100644
+index 7996a6a22..22a95a79a 100644
 --- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/data/DataTypeDB.java
 +++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/data/DataTypeDB.java
 @@ -47,6 +47,7 @@ abstract class DataTypeDB extends DatabaseObject implements DataType {
@@ -6072,7 +6080,7 @@ index 930c028bc..a30f4d625 100644
  
  	protected DataTypeDB(DataTypeManagerDB dataMgr, DBObjectCache<DataTypeDB> cache,
  			DBRecord record) {
-@@ -571,6 +572,16 @@ abstract class DataTypeDB extends DatabaseObject implements DataType {
+@@ -568,6 +569,16 @@ abstract class DataTypeDB extends DatabaseObject implements DataType {
  			getName().equals(otherDt.getName()) && isEquivalent(otherDt);
  	}
  
@@ -6104,10 +6112,10 @@ index 5ecedcfa4..3c005f36f 100644
  					displayName = dt.getDisplayName() + " *";
  				}
 diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/function/FunctionDB.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/function/FunctionDB.java
-index fa6010054..6c22b6ce8 100644
+index 5cf78369d..267b6c5db 100644
 --- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/function/FunctionDB.java
 +++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/function/FunctionDB.java
-@@ -1382,7 +1382,7 @@ public class FunctionDB extends DatabaseObject implements Function {
+@@ -1378,7 +1378,7 @@ public class FunctionDB extends DatabaseObject implements Function {
  
  				if (updateType == FunctionUpdateType.DYNAMIC_STORAGE_ALL_PARAMS &&
  					!thisParamRemoved &&
@@ -6116,7 +6124,7 @@ index fa6010054..6c22b6ce8 100644
  					newParams.size() != 0) {
  					// Attempt to remove inferred unnamed 'this' parameter
  					// WARNING! This is a bit of a hack - not sure how to account for what may be auto-params
-@@ -2238,7 +2238,7 @@ public class FunctionDB extends DatabaseObject implements Function {
+@@ -2234,7 +2234,7 @@ public class FunctionDB extends DatabaseObject implements Function {
  	 */
  	private static boolean removeExplicitThisParameter(List<? extends Variable> params,
  			String callingConventionName) {
@@ -6125,7 +6133,7 @@ index fa6010054..6c22b6ce8 100644
  			int thisIndex = findExplicitThisParameter(params);
  			if (thisIndex >= 0) {
  				params.remove(thisIndex); // remove explicit 'this' parameter
-@@ -2254,7 +2254,7 @@ public class FunctionDB extends DatabaseObject implements Function {
+@@ -2250,7 +2250,7 @@ public class FunctionDB extends DatabaseObject implements Function {
  	 * @return true if 'this' parameter removed
  	 */
  	private boolean removeExplicitThisParameter() {
@@ -6135,18 +6143,19 @@ index fa6010054..6c22b6ce8 100644
  			if (thisIndex >= 0) {
  				removeParameter(thisIndex); // remove explicit 'this' parameter
 diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/data/AbstractDataType.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/data/AbstractDataType.java
-index 4d09c023f..3d17122fd 100644
+index 2aa7b3476..caf8f3a84 100644
 --- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/data/AbstractDataType.java
 +++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/data/AbstractDataType.java
-@@ -37,6 +37,7 @@ public abstract class AbstractDataType implements DataType {
+@@ -36,6 +36,8 @@ public abstract class AbstractDataType implements DataType {
+ 	protected String name;
  	protected CategoryPath categoryPath;
  	protected final DataTypeManager dataMgr;
- 	private DataOrganization dataOrganization;
++	private DataOrganization dataOrganization;
 +	protected AddressModel addressModel;
  
  	protected AbstractDataType(CategoryPath path, String name, DataTypeManager dataTypeManager) {
  		if (path == null) {
-@@ -100,7 +101,11 @@ public abstract class AbstractDataType implements DataType {
+@@ -91,7 +93,11 @@ public abstract class AbstractDataType implements DataType {
  
  	@Override
  	public String getName() {
@@ -6159,7 +6168,7 @@ index 4d09c023f..3d17122fd 100644
  	}
  
  	@Override
-@@ -276,6 +281,16 @@ public abstract class AbstractDataType implements DataType {
+@@ -267,6 +273,16 @@ public abstract class AbstractDataType implements DataType {
  		return getDefaultLabelPrefix(buf, settings, len, options);
  	}
  
@@ -6413,10 +6422,10 @@ index ca1dfddba..a3c522f80 100644
  			if (name != null) {
  				sb.append(' ');
 diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/data/GenericCallingConvention.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/data/GenericCallingConvention.java
-index cdd9ab024..2a4422d53 100644
+index cecd440ec..42fd14a9f 100644
 --- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/data/GenericCallingConvention.java
 +++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/data/GenericCallingConvention.java
-@@ -55,7 +55,18 @@ public enum GenericCallingConvention {
+@@ -59,7 +59,18 @@ public enum GenericCallingConvention {
  	/**
  	 * Similar to fastcall but extended vector registers are used
  	 */
@@ -6814,7 +6823,7 @@ index 353ab0287..0a2c712ec 100644
  		try {
  			if (store.isValid()) {
 diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/PrototypeModel.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/PrototypeModel.java
-index 52a7dd2c3..3c459e06f 100644
+index b67b21b47..9fcd300b1 100644
 --- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/PrototypeModel.java
 +++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/PrototypeModel.java
 @@ -4,9 +4,9 @@
@@ -6829,15 +6838,15 @@ index 52a7dd2c3..3c459e06f 100644
   * Unless required by applicable law or agreed to in writing, software
   * distributed under the License is distributed on an "AS IS" BASIS,
   * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-@@ -58,6 +58,7 @@ public class PrototypeModel {
- 	private GenericCallingConvention genericCallingConvention;
+@@ -57,6 +57,7 @@ public class PrototypeModel {
+ 	private InputListType inputListType = InputListType.STANDARD;
  	private boolean hasThis;		// Convention has a this (auto-parameter)
  	private boolean isConstruct;		// Convention is used for object construction
 +	private boolean isRightToLeft;	// Parameter stacking convention
  	private boolean hasUponEntry;	// Does this have an uponentry injection
  	private boolean hasUponReturn;	// Does this have an uponreturn injection
  
-@@ -86,8 +87,9 @@ public class PrototypeModel {
+@@ -85,8 +86,9 @@ public class PrototypeModel {
  		compatModel = model;
  		localRange = new AddressSet(model.localRange);
  		paramRange = new AddressSet(model.paramRange);
@@ -6845,18 +6854,18 @@ index 52a7dd2c3..3c459e06f 100644
 +		hasThis = model.hasThis || name.startsWith(CompilerSpec.CALLING_CONVENTION_thiscall);
  		isConstruct = model.isConstruct;
 +		isRightToLeft = model.isRightToLeft;
- 		genericCallingConvention = GenericCallingConvention.getGenericCallingConvention(name);
  		hasUponEntry = model.hasUponEntry;
  		hasUponReturn = model.hasUponReturn;
-@@ -110,6 +112,7 @@ public class PrototypeModel {
- 		genericCallingConvention = GenericCallingConvention.unknown;
+ 	}
+@@ -107,6 +109,7 @@ public class PrototypeModel {
+ 		paramRange = null;
  		hasThis = false;
  		isConstruct = false;
 +		isRightToLeft = true;	// the default
  		hasUponEntry = false;
  		hasUponReturn = false;
  	}
-@@ -187,7 +190,7 @@ public class PrototypeModel {
+@@ -176,7 +179,7 @@ public class PrototypeModel {
  	 * Returns the number of extra bytes popped from the stack when a function that uses
  	 * this model returns to its caller. This is usually just the number of bytes used to
  	 * store the return value, but some conventions may do additional clean up of stack parameters.
@@ -6865,7 +6874,7 @@ index 52a7dd2c3..3c459e06f 100644
  	 * @return the number of extra bytes popped
  	 */
  	public int getExtrapop() {
-@@ -215,6 +218,12 @@ public class PrototypeModel {
+@@ -204,6 +207,12 @@ public class PrototypeModel {
  		return isConstruct;
  	}
  
@@ -6878,7 +6887,7 @@ index 52a7dd2c3..3c459e06f 100644
  	/**
  	 * @return the allocation strategy for this model
  	 */
-@@ -225,7 +234,7 @@ public class PrototypeModel {
+@@ -214,7 +223,7 @@ public class PrototypeModel {
  	/**
  	 * Return true if this model has specific p-code injections associated with it
  	 * (either an "uponentry" or "uponreturn" payload),
@@ -6887,7 +6896,7 @@ index 52a7dd2c3..3c459e06f 100644
  	 * @return true if this model uses p-code injections
  	 */
  	public boolean hasInjection() {
-@@ -248,13 +257,29 @@ public class PrototypeModel {
+@@ -237,13 +246,29 @@ public class PrototypeModel {
  		DataType[] arr = new DataType[1];
  		arr[0] = clone;
  		ArrayList<VariableStorage> res = new ArrayList<>();
@@ -6918,7 +6927,7 @@ index 52a7dd2c3..3c459e06f 100644
  	/**
  	 * Get the preferred parameter location for a new parameter which will appended
  	 * to the end of an existing set of params.  If existing parameters use custom
-@@ -290,7 +315,7 @@ public class PrototypeModel {
+@@ -279,7 +304,7 @@ public class PrototypeModel {
  
  		if (dataType != null) {
  			dataType = dataType.clone(program.getDataTypeManager());
@@ -6927,7 +6936,7 @@ index 52a7dd2c3..3c459e06f 100644
  			// already assigned to parameters - this may not work well if
  			// customized storage has been used
  		}
-@@ -312,19 +337,20 @@ public class PrototypeModel {
+@@ -301,19 +326,20 @@ public class PrototypeModel {
  	}
  
  	/**
@@ -6952,7 +6961,7 @@ index 52a7dd2c3..3c459e06f 100644
  		boolean injectAutoThisParam = false;
  		if (addAutoParams && hasThis) {
  			// explicit support for auto 'this' parameter
-@@ -332,19 +358,40 @@ public class PrototypeModel {
+@@ -321,19 +347,40 @@ public class PrototypeModel {
  			injectAutoThisParam = true;
  			DataType[] ammendedTypes = new DataType[dataTypes.length + 1];
  			ammendedTypes[0] = dataTypes[0];
@@ -6996,7 +7005,7 @@ index 52a7dd2c3..3c459e06f 100644
  		if (injectAutoThisParam) {
  
  			Varnode[] thisVarnodes = finalres[1].getVarnodes();
-@@ -354,7 +401,7 @@ public class PrototypeModel {
+@@ -343,7 +390,7 @@ public class PrototypeModel {
  				if (finalres[1].isAutoStorage()) {
  					if (inputParams.isThisBeforeRetPointer()) {
  						// pointer has been bumped by auto-return-storage
@@ -7005,7 +7014,7 @@ index 52a7dd2c3..3c459e06f 100644
  						finalres[2] = new DynamicVariableStorage(program,
  							finalres[1].getAutoParameterType(), finalres[2].getVarnodes());
  					}
-@@ -449,6 +496,9 @@ public class PrototypeModel {
+@@ -434,6 +481,9 @@ public class PrototypeModel {
  		if (isConstruct) {
  			encoder.writeBool(ATTRIB_CONSTRUCTOR, true);
  		}
@@ -7015,15 +7024,15 @@ index 52a7dd2c3..3c459e06f 100644
  		if (inputListType != InputListType.STANDARD) {
  			encoder.writeString(ATTRIB_STRATEGY, "register");
  		}
-@@ -611,6 +661,7 @@ public class PrototypeModel {
- 		}
+@@ -589,6 +639,7 @@ public class PrototypeModel {
+ 		stackshift = SpecXmlUtils.decodeInt(protoElement.getAttribute("stackshift"));
  		hasThis = false;
  		isConstruct = false;
 +		isRightToLeft = true;
  		String thisString = protoElement.getAttribute("hasthis");
  		if (thisString != null) {
  			hasThis = SpecXmlUtils.decodeBoolean(thisString);
-@@ -622,6 +673,10 @@ public class PrototypeModel {
+@@ -600,6 +651,10 @@ public class PrototypeModel {
  		if (constructString != null) {
  			isConstruct = SpecXmlUtils.decodeBoolean(constructString);
  		}
@@ -7034,7 +7043,7 @@ index 52a7dd2c3..3c459e06f 100644
  
  		buildParamList(protoElement.getAttribute("strategy"));
  		while (parser.peek().isStart()) {
-@@ -719,7 +774,7 @@ public class PrototypeModel {
+@@ -697,7 +752,7 @@ public class PrototypeModel {
  	}
  
  	/**
@@ -7043,20 +7052,29 @@ index 52a7dd2c3..3c459e06f 100644
  	 * @param prog is the current Program
  	 * @return a VariableStorage ojbect for each register
  	 */
-@@ -745,7 +800,7 @@ public class PrototypeModel {
- 		if (genericCallingConvention != obj.genericCallingConvention) {
+@@ -720,6 +775,9 @@ public class PrototypeModel {
+ 		if (extrapop != obj.extrapop || stackshift != obj.stackshift) {
  			return false;
  		}
--		if (hasThis != obj.hasThis || isConstruct != obj.isConstruct) {
-+		if (hasThis != obj.hasThis || isConstruct != obj.isConstruct || isRightToLeft != obj.isRightToLeft) {
++		if (isRightToLeft != obj.isRightToLeft) {
++			return false;
++		}
+ 		if (hasThis != obj.hasThis || isConstruct != obj.isConstruct) {
  			return false;
  		}
- 		if (hasUponEntry != obj.hasUponEntry || hasUponReturn != obj.hasUponReturn) {
 diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/listing/FunctionSignature.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/listing/FunctionSignature.java
-index cef0ffe7c..e90df4f37 100644
+index 8ae21a15d..eb5f52659 100644
 --- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/listing/FunctionSignature.java
 +++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/listing/FunctionSignature.java
-@@ -77,4 +77,9 @@ public interface FunctionSignature {
+@@ -15,6 +15,7 @@
+  */
+ package ghidra.program.model.listing;
+ 
++import ghidra.program.model.data.AddressModel;
+ import ghidra.program.model.data.DataType;
+ import ghidra.program.model.data.ParameterDefinition;
+ import ghidra.program.model.lang.PrototypeModel;
+@@ -110,4 +111,9 @@ public interface FunctionSignature {
  	 * @return true if the if the given signature is equivalent to this signature.
  	 */
  	public boolean isEquivalentSignature(FunctionSignature signature);
@@ -7078,10 +7096,10 @@ index ce2dc5a11..119abef66 100644
 +	public static final AttributeId ATTRIB_ISRIGHTTOLEFT = new AttributeId("isrighttoleft", 145);
  }
 diff --git a/Ghidra/Framework/SoftwareModeling/src/test/java/ghidra/program/model/TestDoubleFunctionSignature.java b/Ghidra/Framework/SoftwareModeling/src/test/java/ghidra/program/model/TestDoubleFunctionSignature.java
-index 165b47a3b..efbaab38a 100644
+index bac52f7e7..5f81219f0 100644
 --- a/Ghidra/Framework/SoftwareModeling/src/test/java/ghidra/program/model/TestDoubleFunctionSignature.java
 +++ b/Ghidra/Framework/SoftwareModeling/src/test/java/ghidra/program/model/TestDoubleFunctionSignature.java
-@@ -83,4 +83,9 @@ public class TestDoubleFunctionSignature implements FunctionSignature {
+@@ -96,4 +96,9 @@ public class TestDoubleFunctionSignature implements FunctionSignature {
  	public boolean isEquivalentSignature(FunctionSignature signature) {
  		throw new UnsupportedOperationException();
  	}
