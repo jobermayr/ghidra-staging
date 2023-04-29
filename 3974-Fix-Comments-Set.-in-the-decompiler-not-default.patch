@@ -5,19 +5,18 @@ Subject: [PATCH] 3974: Fix Comments -> Set... in the decompiler not defaulting
  to editing existing comments
 
 ---
- .../src/decompile/cpp/prettyprint.cc          |  9 +++----
- .../src/decompile/cpp/prettyprint.hh          | 17 +++++++------
- .../src/decompile/cpp/printlanguage.cc        |  7 +++---
- .../app/decompiler/ClangCommentToken.java     |  7 ++++++
- .../DecompilerCommentsActionFactory.java      | 24 ++++++++++++++++---
- .../java/ghidra/program/util/CommentType.java | 15 ++++++++++++
- 6 files changed, 62 insertions(+), 17 deletions(-)
+ .../src/decompile/cpp/prettyprint.cc          |  9 +++---
+ .../src/decompile/cpp/prettyprint.hh          | 31 +++++++++++--------
+ .../src/decompile/cpp/printlanguage.cc        |  9 +++---
+ .../app/decompiler/ClangCommentToken.java     | 24 ++++++++++++++
+ .../DecompilerCommentsActionFactory.java      | 24 ++++++++++++--
+ 5 files changed, 73 insertions(+), 24 deletions(-)
 
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/prettyprint.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/prettyprint.cc
-index 388708030..205f8c22c 100644
+index 3e8d18ade..324b27091 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/prettyprint.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/prettyprint.cc
-@@ -216,7 +216,7 @@ void EmitMarkup::tagField(const string &name,syntax_highlight hl,const Datatype
+@@ -218,7 +218,7 @@ void EmitMarkup::tagField(const string &name,syntax_highlight hl,const Datatype
    encoder->closeElement(ELEM_FIELD);
  }
  
@@ -26,7 +25,7 @@ index 388708030..205f8c22c 100644
  
  {
    encoder->openElement(ELEM_COMMENT);
-@@ -224,6 +224,7 @@ void EmitMarkup::tagComment(const string &name,syntax_highlight hl,const AddrSpa
+@@ -226,6 +226,7 @@ void EmitMarkup::tagComment(const string &name,syntax_highlight hl,const AddrSpa
      encoder->writeUnsignedInteger(ATTRIB_COLOR,hl);
    encoder->writeSpace(ATTRIB_SPACE, spc);
    encoder->writeUnsignedInteger(ATTRIB_OFF, off);
@@ -34,7 +33,7 @@ index 388708030..205f8c22c 100644
    encoder->writeString(ATTRIB_CONTENT,name);
    encoder->closeElement(ELEM_COMMENT);
  }
-@@ -348,7 +349,7 @@ void TokenSplit::print(Emit *emit) const
+@@ -350,7 +351,7 @@ void TokenSplit::print(Emit *emit) const
      emit->tagField(tok,hl,ptr_second.ct,(int4)off,op);
      break;
    case comm_t:	// tagComment
@@ -43,7 +42,7 @@ index 388708030..205f8c22c 100644
      break;
    case label_t:	// tagLabel
      emit->tagLabel(tok,hl,ptr_second.spc,off);
-@@ -989,12 +990,12 @@ void EmitPrettyPrint::tagField(const string &name,syntax_highlight hl,const Data
+@@ -991,12 +992,12 @@ void EmitPrettyPrint::tagField(const string &name,syntax_highlight hl,const Data
    scan();
  }
  
@@ -59,10 +58,10 @@ index 388708030..205f8c22c 100644
  }
  
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/prettyprint.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/prettyprint.hh
-index cc81dad23..fe0d46be6 100644
+index 6e7124ccc..f8070896a 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/prettyprint.hh
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/prettyprint.hh
-@@ -278,7 +278,8 @@ public:
+@@ -280,7 +280,8 @@ public:
    /// \param hl indicates how the comment should be highlighted
    /// \param spc is the address space of the address where the comment is attached
    /// \param off is the offset of the address where the comment is attached
@@ -72,7 +71,7 @@ index cc81dad23..fe0d46be6 100644
  
    /// \brief Emit a code label identifier
    ///
-@@ -469,7 +470,7 @@ public:
+@@ -471,7 +472,7 @@ public:
    virtual void tagFuncName(const string &name,syntax_highlight hl,const Funcdata *fd,const PcodeOp *op);
    virtual void tagType(const string &name,syntax_highlight hl,const Datatype *ct);
    virtual void tagField(const string &name,syntax_highlight hl,const Datatype *ct,int4 off,const PcodeOp *op);
@@ -81,7 +80,7 @@ index cc81dad23..fe0d46be6 100644
    virtual void tagLabel(const string &name,syntax_highlight hl,const AddrSpace *spc,uintb off);
    virtual void print(const string &data,syntax_highlight hl=no_color);
    virtual int4 openParen(const string &paren,int4 id=0);
-@@ -516,7 +517,7 @@ public:
+@@ -518,7 +519,7 @@ public:
      *s << name; }
    virtual void tagField(const string &name,syntax_highlight hl,const Datatype *ct,int4 off,const PcodeOp *op) {
      *s << name; }
@@ -90,23 +89,31 @@ index cc81dad23..fe0d46be6 100644
      *s << name; }
    virtual void tagLabel(const string &name,syntax_highlight hl,const AddrSpace *spc,uintb off) {
      *s << name; }
-@@ -598,13 +599,14 @@ private:
+@@ -600,13 +601,16 @@ private:
    EmitMarkup::syntax_highlight hl;	///< Highlighting for token
    // Additional markup elements for token
    const PcodeOp *op;		///< Pcode-op associated with \b this token
 -  union {
+-    const Varnode *vn;		///< Associated Varnode
+-    const FlowBlock *bl;	///< Associated Control-flow
+-    const Funcdata *fd;		///< Associated Function
+-    const Datatype *ct;		///< Associated Data-type
+-    const AddrSpace *spc;	///< Associated Address
+-    const Symbol *symbol;	///< Associated Symbol being displayed
 +  struct {
-     const Varnode *vn;		///< Associated Varnode
-     const FlowBlock *bl;	///< Associated Control-flow
-     const Funcdata *fd;		///< Associated Function
-     const Datatype *ct;		///< Associated Data-type
-     const AddrSpace *spc;	///< Associated Address
-     const Symbol *symbol;	///< Associated Symbol being displayed
++    union {
++      const Varnode *vn;	///< Associated Varnode
++      const FlowBlock *bl;	///< Associated Control-flow
++      const Funcdata *fd;	///< Associated Function
++      const Datatype *ct;	///< Associated Data-type
++      const AddrSpace *spc;	///< Associated Address
++      const Symbol *symbol;	///< Associated Symbol being displayed
++    };
 +    const char *type;		///< Associated comment type
    } ptr_second;			///< Additional markup associated with the token
    uintb off;			///< Offset associated either with address or field markup
    int4 indentbump;		///< Amount to indent if a line breaks
-@@ -758,8 +760,9 @@ public:
+@@ -760,8 +764,9 @@ public:
    /// \param h indicates how the comment should be highlighted
    /// \param s is the address space of the address where the comment is attached
    /// \param o is the offset of the address where the comment is attached
@@ -118,7 +125,7 @@ index cc81dad23..fe0d46be6 100644
      tagtype=comm_t; delimtype=tokenstring; hl=h; }
  
    /// \brief Create a code label identifier token
-@@ -1015,7 +1018,7 @@ public:
+@@ -1017,7 +1022,7 @@ public:
    virtual void tagFuncName(const string &name,syntax_highlight hl,const Funcdata *fd,const PcodeOp *op);
    virtual void tagType(const string &name,syntax_highlight hl,const Datatype *ct);
    virtual void tagField(const string &name,syntax_highlight hl,const Datatype *ct,int4 off,const PcodeOp *op);
@@ -128,10 +135,10 @@ index cc81dad23..fe0d46be6 100644
    virtual void print(const string &data,syntax_highlight hl=no_color);
    virtual int4 openParen(const string &paren,int4 id=0);
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/printlanguage.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/printlanguage.cc
-index 88235e353..7041c507e 100644
+index 26e5bed82..058604740 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/printlanguage.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/printlanguage.cc
-@@ -604,6 +604,7 @@ void PrintLanguage::emitLineComment(int4 indent,const Comment *comm)
+@@ -606,6 +606,7 @@ void PrintLanguage::emitLineComment(int4 indent,const Comment *comm)
  {
    const string &text( comm->getText() );
    const AddrSpace *spc = comm->getAddr().getSpace();
@@ -139,7 +146,7 @@ index 88235e353..7041c507e 100644
    uintb off = comm->getAddr().getOffset();
    if (line_commentindentalign) {
      emit->tagLine();
-@@ -617,7 +618,7 @@ void PrintLanguage::emitLineComment(int4 indent,const Comment *comm)
+@@ -619,7 +620,7 @@ void PrintLanguage::emitLineComment(int4 indent,const Comment *comm)
    // The comment delimeters should not be printed as
    // comment tags, so that they won't get filled
    emit->tagComment(commentstart,EmitMarkup::comment_color,
@@ -148,7 +155,16 @@ index 88235e353..7041c507e 100644
    int4 pos = 0;
    while(pos < text.size()) {
      char tok = text[pos++];
-@@ -644,11 +645,11 @@ void PrintLanguage::emitLineComment(int4 indent,const Comment *comm)
+@@ -648,7 +649,7 @@ void PrintLanguage::emitLineComment(int4 indent,const Comment *comm)
+       }
+       // Treat annotation as one token
+       string annote = text.substr(pos-count,count);
+-      emit->tagComment(annote,EmitMarkup::comment_color,spc,off);
++      emit->tagComment(annote,EmitMarkup::comment_color,spc,off,type.c_str());
+     }
+     else {
+       int4 count = 1;
+@@ -659,11 +660,11 @@ void PrintLanguage::emitLineComment(int4 indent,const Comment *comm)
  	pos += 1;
        }
        string sub = text.substr(pos-count,count);
@@ -163,10 +179,18 @@ index 88235e353..7041c507e 100644
    comm->setEmitted(true);
  }
 diff --git a/Ghidra/Features/Decompiler/src/main/java/ghidra/app/decompiler/ClangCommentToken.java b/Ghidra/Features/Decompiler/src/main/java/ghidra/app/decompiler/ClangCommentToken.java
-index a930c9b4f..a2f3a3337 100644
+index 7a6a1e2a6..487fc22a0 100644
 --- a/Ghidra/Features/Decompiler/src/main/java/ghidra/app/decompiler/ClangCommentToken.java
 +++ b/Ghidra/Features/Decompiler/src/main/java/ghidra/app/decompiler/ClangCommentToken.java
-@@ -22,6 +22,7 @@ import ghidra.program.model.pcode.*;
+@@ -18,6 +18,7 @@ package ghidra.app.decompiler;
+ import ghidra.program.model.address.Address;
+ import ghidra.program.model.address.AddressSpace;
+ import ghidra.program.model.pcode.*;
++import ghidra.program.model.listing.CodeUnit;
+ 
+ /**
+  * A token in source code representing (part of) a comment.
+@@ -25,6 +26,7 @@ import ghidra.program.model.pcode.*;
  public class ClangCommentToken extends ClangToken {
  
  	private Address srcaddr;	// source address of the comment
@@ -174,7 +198,7 @@ index a930c9b4f..a2f3a3337 100644
  
  	public static ClangCommentToken derive(ClangCommentToken source, String text) {
  
-@@ -32,6 +33,7 @@ public class ClangCommentToken extends ClangToken {
+@@ -35,6 +37,7 @@ public class ClangCommentToken extends ClangToken {
  		newToken.setSyntaxType(source.getSyntaxType());
  		newToken.setHighlight(source.getHighlight());
  		newToken.srcaddr = source.srcaddr;
@@ -182,7 +206,7 @@ index a930c9b4f..a2f3a3337 100644
  		return newToken;
  	}
  
-@@ -55,11 +57,16 @@ public class ClangCommentToken extends ClangToken {
+@@ -58,11 +61,32 @@ public class ClangCommentToken extends ClangToken {
  		return srcaddr;
  	}
  
@@ -190,12 +214,28 @@ index a930c9b4f..a2f3a3337 100644
 +		return commenttype;
 +	}
 +
++	public static int encodeCommentType(String name) {
++		switch (name) {
++		case "user1":
++			return CodeUnit.EOL_COMMENT;
++		case "user2":
++			return CodeUnit.PRE_COMMENT;
++		case "user3":
++			return CodeUnit.POST_COMMENT;
++		case "header":
++			return CodeUnit.PLATE_COMMENT;
++		default:
++			// Hit for "warning" and "warningheader"
++			return CodeUnit.NO_COMMENT;
++		}
++	}
++
  	@Override
  	public void decode(Decoder decoder, PcodeFactory pfactory) throws DecoderException {
  		AddressSpace spc = decoder.readSpace(AttributeId.ATTRIB_SPACE);
  		long offset = decoder.readUnsignedInteger(AttributeId.ATTRIB_OFF);
  		srcaddr = spc.getAddress(offset);
-+		commenttype = (int) decoder.readUnsignedInteger(AttributeId.ATTRIB_TYPE);
++		commenttype = encodeCommentType(decoder.readString(AttributeId.ATTRIB_TYPE));
  		super.decode(decoder, pfactory);
  	}
  
@@ -248,30 +288,6 @@ index b6a0f8008..5f0000eea 100644
          }
      }
  }
-diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/util/CommentType.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/util/CommentType.java
-index da4ab56d3..44fc56bd7 100644
---- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/util/CommentType.java
-+++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/util/CommentType.java
-@@ -73,4 +73,19 @@ public class CommentType {
- 		return true;
- 	}
- 
-+	public static int encodeCommentType(String name) {
-+		switch (name) {
-+		case "user1":
-+			return CodeUnit.EOL_COMMENT;
-+		case "user2":
-+			return CodeUnit.PRE_COMMENT;
-+		case "user3":
-+			return CodeUnit.POST_COMMENT;
-+		case "header":
-+			return CodeUnit.PLATE_COMMENT;
-+		default:
-+			// Hit for "warning" and "warningheader"
-+			return CodeUnit.NO_COMMENT;
-+		}
-+	}
- }
 -- 
-2.38.1
+2.39.1
 
