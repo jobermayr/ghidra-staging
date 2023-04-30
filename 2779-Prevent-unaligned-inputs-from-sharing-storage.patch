@@ -7,14 +7,15 @@ Subject: [PATCH] 2779: Prevent unaligned inputs from sharing storage
  .../Decompiler/src/decompile/cpp/fspec.cc     | 55 ++++++++++++++++---
  .../Decompiler/src/decompile/cpp/fspec.hh     |  3 +-
  .../Decompiler/src/decompile/cpp/translate.hh |  1 +
+ .../ghidra/program/model/lang/ParamEntry.java |  2 +
  .../program/model/lang/ParamListStandard.java | 44 +++++++++++++--
- 4 files changed, 90 insertions(+), 13 deletions(-)
+ 5 files changed, 92 insertions(+), 13 deletions(-)
 
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.cc
-index fea6d6661..2c579562e 100644
+index c7bdba48d..b34b886e1 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.cc
-@@ -164,6 +164,21 @@ bool ParamEntry::subsumesDefinition(const ParamEntry &op2) const
+@@ -166,6 +166,21 @@ bool ParamEntry::subsumesDefinition(const ParamEntry &op2) const
  
  {
    if ((type!=TYPE_UNKNOWN)&&(op2.type != type)) return false;
@@ -36,7 +37,7 @@ index fea6d6661..2c579562e 100644
    if (spaceid != op2.spaceid) return false;
    if (op2.addressbase < addressbase) return false;
    if ((op2.addressbase+op2.size-1) > (addressbase+size-1)) return false;
-@@ -647,9 +662,7 @@ int4 ParamListStandard::characterizeAsParam(const Address &loc,int4 size) const
+@@ -649,9 +664,7 @@ int4 ParamListStandard::characterizeAsParam(const Address &loc,int4 size) const
  Address ParamListStandard::assignAddress(const Datatype *tp,vector<int4> &status) const
  
  {
@@ -47,7 +48,7 @@ index fea6d6661..2c579562e 100644
      int4 grp = curEntry.getGroup();
      if (status[grp]<0) continue;
      if ((curEntry.getType() != TYPE_UNKNOWN) && tp->getMetatype() != curEntry.getType())
-@@ -657,16 +670,42 @@ Address ParamListStandard::assignAddress(const Datatype *tp,vector<int4> &status
+@@ -659,16 +672,42 @@ Address ParamListStandard::assignAddress(const Datatype *tp,vector<int4> &status
  
      Address res = curEntry.getAddrBySlot(status[grp],tp->getSize());
      if (res.isInvalid()) continue; // If -tp- doesn't fit an invalid address is returned
@@ -96,10 +97,10 @@ index fea6d6661..2c579562e 100644
  
  {
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.hh
-index 64ec45e2c..675142059 100644
+index e3841ed42..bf3e3d00b 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.hh
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.hh
-@@ -108,7 +108,7 @@ private:
+@@ -110,7 +110,7 @@ private:
    int4 minsize;			///< Minimum bytes allowed for the logical value
    int4 alignment;		///< How much alignment (0 means only 1 logical value is allowed)
    int4 numslots;		///< (Maximum) number of slots that can store separate parameters
@@ -108,7 +109,7 @@ index 64ec45e2c..675142059 100644
    static const ParamEntry *findEntryByStorage(const list<ParamEntry> &entryList,const VarnodeData &vn);
    void resolveJoin(list<ParamEntry> &curList); 	///< Make adjustments for a \e join ParamEntry
    void resolveOverlap(list<ParamEntry> &curList);	///< Make adjustments for ParamEntry that overlaps others
-@@ -579,6 +579,7 @@ protected:
+@@ -581,6 +581,7 @@ protected:
  		   int4 groupid,bool normalstack,bool autokill,bool splitFloat,bool grouped);
    void parseGroup(Decoder &decoder,vector<EffectRecord> &effectlist,
  		  int4 groupid,bool normalstack,bool autokill,bool splitFloat);
@@ -117,10 +118,10 @@ index 64ec45e2c..675142059 100644
    ParamListStandard(void) {}						///< Construct for use with decode()
    ParamListStandard(const ParamListStandard &op2);			///< Copy constructor
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/translate.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/translate.hh
-index 34a4709a8..e9dd11d64 100644
+index 83b87ee7d..3196be1fe 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/translate.hh
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/translate.hh
-@@ -203,6 +203,7 @@ public:
+@@ -205,6 +205,7 @@ public:
    const VarnodeData &getUnified(void) const { return unified; }		///< Get the Varnode whole
    Address getEquivalentAddress(uintb offset,int4 &pos) const;	///< Given offset in \e join space, get equivalent address of piece
    bool operator<(const JoinRecord &op2) const; ///< Compare records lexigraphically by pieces
@@ -128,11 +129,24 @@ index 34a4709a8..e9dd11d64 100644
  };
  
  /// \brief Comparator for JoinRecord objects
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/ParamEntry.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/ParamEntry.java
+index 5e58ed87b..c775103f3 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/ParamEntry.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/ParamEntry.java
+@@ -136,6 +136,8 @@ public class ParamEntry {
+ 		int first, replace;
+ 		Varnode vn = null;
+ 		Varnode[] res;
++		if (joinrec == null)
++			return null;
+ 		if (isBigEndian()) {
+ 			first = 0;
+ 			while (sz > 0) {
 diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/ParamListStandard.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/ParamListStandard.java
-index fdb0b6e24..9fb4c40ca 100644
+index 48758e854..a3a0f00c4 100644
 --- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/ParamListStandard.java
 +++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/ParamListStandard.java
-@@ -107,10 +107,7 @@ public class ParamListStandard implements ParamList {
+@@ -103,10 +103,7 @@ public class ParamListStandard implements ParamList {
  				continue;	// -tp- does not fit in this entry
  			}
  			if (element.isExclusion()) {
@@ -144,7 +158,7 @@ index fdb0b6e24..9fb4c40ca 100644
  				if (element.isFloatExtended()) {
  					sz = element.getSize();			// Still use the entire container size, when assigning storage
  				}
-@@ -422,4 +419,43 @@ public class ParamListStandard implements ParamList {
+@@ -418,4 +415,43 @@ public class ParamListStandard implements ParamList {
  	public boolean isThisBeforeRetPointer() {
  		return thisbeforeret;
  	}
