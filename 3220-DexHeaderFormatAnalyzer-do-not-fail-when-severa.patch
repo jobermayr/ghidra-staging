@@ -1,0 +1,146 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Nicolas Iooss <nicolas.iooss@ledger.fr>
+Date: Thu, 15 Jul 2021 16:20:07 +0200
+Subject: [PATCH] 3220: DexHeaderFormatAnalyzer: do not fail when several
+ methods refer to the same metadata
+
+Some Android applications use the same class annotations metadata
+structure for several annotations. This makes `processClassAnnotations()`
+create a structure twice at the same location. As `setItem.toDataType()`
+always creates a new structure which is not "compatible" with any
+existing one, `createData()` fails:
+
+    Could not create Data at address 007f35f8
+    java.lang.RuntimeException: Could not create Data at address 007f35f8
+            at ghidra.file.analyzers.FileFormatAnalyzer.createData(FileFormatAnalyzer.java:211)
+            at ghidra.file.formats.android.dex.analyzer.DexHeaderFormatAnalyzer.processClassAnnotations(DexHeaderFormatAnalyzer.java:640)
+            at ghidra.file.formats.android.dex.analyzer.DexHeaderFormatAnalyzer.processClassDefs(DexHeaderFormatAnalyzer.java:373)
+            at ghidra.file.formats.android.dex.analyzer.DexHeaderFormatAnalyzer.analyze(DexHeaderFormatAnalyzer.java:76)
+            at ghidra.file.analyzers.FileFormatAnalyzer.added(FileFormatAnalyzer.java:52)
+            at ghidra.app.plugin.core.analysis.AnalysisScheduler.runAnalyzer(AnalysisScheduler.java:186)
+            at ghidra.app.plugin.core.analysis.AnalysisTask.applyTo(AnalysisTask.java:39)
+            at ghidra.app.plugin.core.analysis.AutoAnalysisManager$AnalysisTaskWrapper.run(AutoAnalysisManager.java:688)
+            at ghidra.app.plugin.core.analysis.AutoAnalysisManager.startAnalysis(AutoAnalysisManager.java:788)
+            at ghidra.app.plugin.core.analysis.AutoAnalysisManager.startAnalysis(AutoAnalysisManager.java:667)
+            at ghidra.app.plugin.core.analysis.AutoAnalysisManager.startAnalysis(AutoAnalysisManager.java:632)
+            at ghidra.app.plugin.core.analysis.AnalysisBackgroundCommand.applyTo(AnalysisBackgroundCommand.java:58)
+            at ghidra.framework.plugintool.mgr.BackgroundCommandTask.run(BackgroundCommandTask.java:102)
+            at ghidra.framework.plugintool.mgr.ToolTaskManager.run(ToolTaskManager.java:315)
+            at java.base/java.lang.Thread.run(Thread.java:829)
+
+Fix this by only creating data if there is no defined data already.
+---
+ .../dex/analyzer/DexHeaderFormatMarkup.java   | 81 +++++++++++--------
+ 1 file changed, 46 insertions(+), 35 deletions(-)
+
+diff --git a/Ghidra/Features/FileFormats/src/main/java/ghidra/file/formats/android/dex/analyzer/DexHeaderFormatMarkup.java b/Ghidra/Features/FileFormats/src/main/java/ghidra/file/formats/android/dex/analyzer/DexHeaderFormatMarkup.java
+index c8ccfac3e..6c04e06d5 100644
+--- a/Ghidra/Features/FileFormats/src/main/java/ghidra/file/formats/android/dex/analyzer/DexHeaderFormatMarkup.java
++++ b/Ghidra/Features/FileFormats/src/main/java/ghidra/file/formats/android/dex/analyzer/DexHeaderFormatMarkup.java
+@@ -675,57 +675,68 @@ public class DexHeaderFormatMarkup {
+ 			if (annotationsDirectoryItem.getClassAnnotationsOffset() > 0) {
+ 				Address classAddress = baseAddress.add(DexUtil.adjustOffset(
+ 					annotationsDirectoryItem.getClassAnnotationsOffset(), header));
+-				AnnotationSetItem setItem = annotationsDirectoryItem.getClassAnnotations();
+-				DataType setItemDataType = setItem.toDataType();
+-				api.createData(classAddress, setItemDataType);
+-				fragmentManager.classAnnotationsAddressSet.add(classAddress,
+-					classAddress.add(setItemDataType.getLength() - 1));
+-				processAnnotationSetItem(setItem, monitor, log);
++				// Only create data if it has not been created already
++				if (api.getDataAt(classAddress) == null) {
++					AnnotationSetItem setItem = annotationsDirectoryItem.getClassAnnotations();
++					DataType setItemDataType = setItem.toDataType();
++					api.createData(classAddress, setItemDataType);
++					fragmentManager.classAnnotationsAddressSet.add(classAddress,
++						classAddress.add(setItemDataType.getLength() - 1));
++					processAnnotationSetItem(setItem, monitor, log);
++				}
+ 			}
+ 			for (FieldAnnotationsItem field : annotationsDirectoryItem.getFieldAnnotations()) {
+ 				monitor.checkCanceled();
+ 				Address fieldAddress =
+ 					baseAddress.add(DexUtil.adjustOffset(field.getAnnotationsOffset(), header));
+-				AnnotationSetItem setItem = field.getAnnotationSetItem();
+-				DataType setItemDataType = setItem.toDataType();
+-				api.createData(fieldAddress, setItemDataType);
+-				fragmentManager.annotationFieldsAddressSet.add(fieldAddress,
+-					fieldAddress.add(setItemDataType.getLength() - 1));
+-				processAnnotationSetItem(setItem, monitor, log);
++				if (api.getDataAt(fieldAddress) == null) {
++					AnnotationSetItem setItem = field.getAnnotationSetItem();
++					DataType setItemDataType = setItem.toDataType();
++					api.createData(fieldAddress, setItemDataType);
++					fragmentManager.annotationFieldsAddressSet.add(fieldAddress,
++						fieldAddress.add(setItemDataType.getLength() - 1));
++					processAnnotationSetItem(setItem, monitor, log);
++				}
+ 			}
+ 			for (MethodAnnotationsItem method : annotationsDirectoryItem.getMethodAnnotations()) {
+ 				monitor.checkCanceled();
+ 				Address methodAddress =
+ 					baseAddress.add(DexUtil.adjustOffset(method.getAnnotationsOffset(), header));
+-				AnnotationSetItem setItem = method.getAnnotationSetItem();
+-				DataType setItemDataType = setItem.toDataType();
+-				api.createData(methodAddress, setItemDataType);
+-				fragmentManager.annotationMethodsAddressSet.add(methodAddress,
+-					methodAddress.add(setItemDataType.getLength() - 1));
+-				processAnnotationSetItem(setItem, monitor, log);
++				if (api.getDataAt(methodAddress) == null) {
++					AnnotationSetItem setItem = method.getAnnotationSetItem();
++					DataType setItemDataType = setItem.toDataType();
++					api.createData(methodAddress, setItemDataType);
++					fragmentManager.annotationMethodsAddressSet.add(methodAddress,
++						methodAddress.add(setItemDataType.getLength() - 1));
++					processAnnotationSetItem(setItem, monitor, log);
++				}
+ 			}
+ 			for (ParameterAnnotationsItem parameter : annotationsDirectoryItem
+ 					.getParameterAnnotations()) {
+ 				monitor.checkCanceled();
+ 				Address parameterAddress =
+ 					baseAddress.add(DexUtil.adjustOffset(parameter.getAnnotationsOffset(), header));
+-				AnnotationSetReferenceList annotationSetReferenceList =
+-					parameter.getAnnotationSetReferenceList();
+-				DataType listDataType = annotationSetReferenceList.toDataType();
+-				api.createData(parameterAddress, listDataType);
+-				fragmentManager.annotationParametersAddressSet.add(parameterAddress,
+-					parameterAddress.add(listDataType.getLength() - 1));
+-
+-				for (AnnotationSetReferenceItem refItem : annotationSetReferenceList.getItems()) {
+-					AnnotationItem annotationItem = refItem.getItem();
+-					if (annotationItem != null) {
+-						int annotationsItemOffset = refItem.getAnnotationsOffset();
+-						Address annotationItemAddress =
+-							baseAddress.add(DexUtil.adjustOffset(annotationsItemOffset, header));
+-						DataType annotationItemDataType = annotationItem.toDataType();
+-						api.createData(annotationItemAddress, annotationItemDataType);
+-						fragmentManager.annotationItemAddressSet.add(annotationItemAddress,
+-							annotationItemAddress.add(annotationItemDataType.getLength() - 1));
++				if (api.getDataAt(parameterAddress) == null) {
++					AnnotationSetReferenceList annotationSetReferenceList =
++						parameter.getAnnotationSetReferenceList();
++					DataType listDataType = annotationSetReferenceList.toDataType();
++					api.createData(parameterAddress, listDataType);
++					fragmentManager.annotationParametersAddressSet.add(parameterAddress,
++						parameterAddress.add(listDataType.getLength() - 1));
++
++					for (AnnotationSetReferenceItem refItem : annotationSetReferenceList.getItems()) {
++						AnnotationItem annotationItem = refItem.getItem();
++						if (annotationItem != null) {
++							int annotationsItemOffset = refItem.getAnnotationsOffset();
++							Address annotationItemAddress =
++								baseAddress.add(DexUtil.adjustOffset(annotationsItemOffset, header));
++							if (api.getDataAt(annotationItemAddress) == null) {
++								DataType annotationItemDataType = annotationItem.toDataType();
++								api.createData(annotationItemAddress, annotationItemDataType);
++								fragmentManager.annotationItemAddressSet.add(annotationItemAddress,
++									annotationItemAddress.add(annotationItemDataType.getLength() - 1));
++							}
++						}
+ 					}
+ 				}
+ 			}
+-- 
+2.39.1
+
