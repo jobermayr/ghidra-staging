@@ -1,41 +1,53 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Alexey Esaulenko <esaulenka@gmail.com>
+Date: Sun, 14 Mar 2021 16:13:22 +0300
+Subject: [PATCH] 2843: PowerPC: multiple VLE-mode fixes
+
+PowerPC: XOR can be used in VLE mode
+
+PowerPC: fix ISELxx with same regs rD and rA
+
+PowerPC: float compare should set `great that` flag, but not `overflow`
+
+PowerPC: e_rlwinm fix `remove unreachable block` warning
+
+PowerPC: additional MPC55xx float-point instructions
+---
+ .../PowerPC/data/languages/Scalar_SPFP.sinc   | 96 ++++++++++++++++++-
+ .../data/languages/ppc_instructions.sinc      |  2 +-
+ .../PowerPC/data/languages/ppc_vle.sinc       | 46 +++++----
+ 3 files changed, 116 insertions(+), 28 deletions(-)
+
 diff --git a/Ghidra/Processors/PowerPC/data/languages/Scalar_SPFP.sinc b/Ghidra/Processors/PowerPC/data/languages/Scalar_SPFP.sinc
-index a0b8aac1924..7a55835cc2d 100644
+index f1c10dec5..8affde55e 100644
 --- a/Ghidra/Processors/PowerPC/data/languages/Scalar_SPFP.sinc
 +++ b/Ghidra/Processors/PowerPC/data/languages/Scalar_SPFP.sinc
-@@ -138,27 +138,24 @@ define pcodeop ConvertFloatingPointFromUnsignedFraction;
+@@ -138,7 +138,6 @@ define pcodeop ConvertFloatingPointFromUnsignedFraction;
  }
  
  # efscmpeq CRFD,rA,rB        010 1100 1110
 -#define pcodeop FloatingPointCompareEqual;
  :efscmpeq CRFD,A,B is OP=4 & CRFD & A & B & XOP_0_10=0x2CE & BITS_21_22=0
  {
--  CRFD = A:4 f== B:4;
-+  CRFD[2,1] = A:4 f== B:4;
- }
- 
- # =================================================================
+   CRFD[2,1] = A:4 f== B:4;
+@@ -148,14 +147,12 @@ define pcodeop ConvertFloatingPointFromUnsignedFraction;
  # Page 415
  
  # efscmpgt CRFD,rA,rB        010 1100 1100
 -#define pcodeop FloatingPointCompareGreaterThan;
  :efscmpgt CRFD,A,B is OP=4 & CRFD & A & B & XOP_0_10=0x2CC & BITS_21_22=0
  {
--  CRFD = A:4 f> B:4;
-+  CRFD[2,1] = A:4 f> B:4;
+   CRFD[2,1] = A:4 f> B:4;
  }
  
  # efscmplt CRFD,rA,rB        010 1100 1101
 -#define pcodeop FloatingPointCompareLessThan;
  :efscmplt CRFD,A,B is OP=4 & CRFD & A & B & XOP_0_10=0x2CD & BITS_21_22=0
  {
--  CRFD = A:4 f< B:4;
-+  CRFD[2,1] = A:4 f< B:4;
- }
- 
- # efsctsf rT,rB        010 1101 0111
-@@ -470,3 +467,97 @@ define pcodeop ConvertFloatingPointFromUnsignedFraction;
+   CRFD[2,1] = A:4 f< B:4;
+@@ -470,3 +467,96 @@ define pcodeop ConvertFloatingPointFromUnsignedFraction;
  {
-   CRFD = A:4 f< B:4;
+   CRFD[2,1] = A:4 f< B:4;
  }
 +
 +
@@ -130,12 +142,11 @@ index a0b8aac1924..7a55835cc2d 100644
 +	local lo:4 = f- ((A:4 f* B:4) f- D:4);
 +	D = (D & 0xFFFFFFFF00000000) | zext(lo);
 +}
-+
 diff --git a/Ghidra/Processors/PowerPC/data/languages/ppc_instructions.sinc b/Ghidra/Processors/PowerPC/data/languages/ppc_instructions.sinc
-index 8930e796da7..82cc4b4cd7b 100644
+index b9ca56c0f..1ee7b1598 100644
 --- a/Ghidra/Processors/PowerPC/data/languages/ppc_instructions.sinc
 +++ b/Ghidra/Processors/PowerPC/data/languages/ppc_instructions.sinc
-@@ -4367,7 +4367,7 @@ define pcodeop TLBSynchronize; # Outputs/affect TBD
+@@ -4509,7 +4509,7 @@ define pcodeop TLBSynchronize; # Outputs/affect TBD
  }
  
  #xor. r0,r0,r0	0x7c 00 02 79
@@ -145,10 +156,10 @@ index 8930e796da7..82cc4b4cd7b 100644
  	A = S ^ B;
  	cr0flags(A);
 diff --git a/Ghidra/Processors/PowerPC/data/languages/ppc_vle.sinc b/Ghidra/Processors/PowerPC/data/languages/ppc_vle.sinc
-index 81e927ee45c..1abf0066264 100644
+index 3b6283470..4ae976f95 100644
 --- a/Ghidra/Processors/PowerPC/data/languages/ppc_vle.sinc
 +++ b/Ghidra/Processors/PowerPC/data/languages/ppc_vle.sinc
-@@ -800,36 +800,34 @@ IMM16B: val						is IMM_0_10_VLE & IMM_16_20_VLE [ val = (IMM_16_20_VLE << 11) |
+@@ -817,36 +817,34 @@ IMM16B: val						is IMM_0_10_VLE & IMM_16_20_VLE [ val = (IMM_16_20_VLE << 11) |
  :e_rlwimi A,S,SHL,MBL,ME			is $(ISVLE) & OP=29 & BIT_0=0 & MBL & ME & A & SHL & S {
  	tmpS:4 = S:4;
  	tmpA:4 = (tmpS << SHL) | (tmpS >> (32 - SHL));
@@ -207,23 +218,6 @@ index 81e927ee45c..1abf0066264 100644
  	A = zext(tmpA & tmpM);		
  }
  
-diff --git a/Ghidra/Processors/PowerPC/data/languages/quicciii.sinc b/Ghidra/Processors/PowerPC/data/languages/quicciii.sinc
-index b6aeca35f82..fddc50ae205 100644
---- a/Ghidra/Processors/PowerPC/data/languages/quicciii.sinc
-+++ b/Ghidra/Processors/PowerPC/data/languages/quicciii.sinc
-@@ -65,10 +65,11 @@ define pcodeop invalidateTLB;
- 
- :isel^CC_X_OPm D,RA_OR_ZERO,B,CC_X_OP  is OP=31 & D & RA_OR_ZERO & B & CC_X_OP & CC_X_OPm & XOP_1_5=15
- {
--		D = B;
--		if (!CC_X_OP) goto inst_next;
--		D = RA_OR_ZERO;
--#        D = (zext(CC_X_OP) * RA_OR_ZERO) + (zext(!CC_X_OP) * B);
-+	local ra = RA_OR_ZERO;
-+	D = B;
-+	if (!CC_X_OP) goto inst_next;
-+	D = ra;
-+#	D = (zext(CC_X_OP) * RA_OR_ZERO) + (zext(!CC_X_OP) * B);
- }
- 
- @ifndef IS_ISA
+-- 
+2.39.1
+
