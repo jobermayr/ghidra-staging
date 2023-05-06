@@ -4,10 +4,15 @@ Date: Tue, 10 Jan 2023 17:10:36 -0500
 Subject: [PATCH] 4887: fix: also decode eieio (mbar 0) for VLE
 
 move mbar from a2 to ppc_embedded, remove duplicate eieio
+
+move around mbar/eieio
 ---
- .../Processors/PowerPC/data/languages/ppc_a2.sinc   |  8 --------
- .../PowerPC/data/languages/ppc_embedded.sinc        | 13 ++++++-------
- 2 files changed, 6 insertions(+), 15 deletions(-)
+ Ghidra/Processors/PowerPC/data/languages/ppc_a2.sinc   |  8 --------
+ .../PowerPC/data/languages/ppc_embedded.sinc           | 10 ++++------
+ .../PowerPC/data/languages/ppc_instructions.sinc       |  7 +++++++
+ Ghidra/Processors/PowerPC/data/languages/ppc_isa.sinc  |  8 --------
+ Ghidra/Processors/PowerPC/data/languages/quicciii.sinc |  9 ---------
+ 5 files changed, 11 insertions(+), 31 deletions(-)
 
 diff --git a/Ghidra/Processors/PowerPC/data/languages/ppc_a2.sinc b/Ghidra/Processors/PowerPC/data/languages/ppc_a2.sinc
 index 4de977393..28296d72d 100644
@@ -29,10 +34,10 @@ index 4de977393..28296d72d 100644
  :mfdcr. D, DCRN		is $(NOTVLE) & OP=31 & D & DCRN & XOP_1_10=323 & BIT_0=1
  {
 diff --git a/Ghidra/Processors/PowerPC/data/languages/ppc_embedded.sinc b/Ghidra/Processors/PowerPC/data/languages/ppc_embedded.sinc
-index b87271d9f..a7ea6f3cd 100644
+index b87271d9f..f826beae3 100644
 --- a/Ghidra/Processors/PowerPC/data/languages/ppc_embedded.sinc
 +++ b/Ghidra/Processors/PowerPC/data/languages/ppc_embedded.sinc
-@@ -49,13 +49,12 @@
+@@ -49,14 +49,12 @@
  	dataCacheBlockClearToZero(ea);
  }
  
@@ -40,18 +45,81 @@ index b87271d9f..a7ea6f3cd 100644
 -# this is equilent to "mbar 0"
 -#eieio 			0x7c 00 06 ac
 -:eieio			is $(NOTVLE) & OP=31 & BITS_21_25=0 & BITS_16_20=0 & BITS_11_15=0 & XOP_1_10=854 & BIT_0=0
--{
++define pcodeop memoryBarrier;
++#mbar 0         7c 00 06 ac
++:mbar MO        is OP=31 & MO & XOP_1_10=854
+ {
 -	enforceInOrderExecutionIO();
--}
-+@ifdef IS_ISA
-+# binutils: 476.d 474:  7c 00 06 ac     mbar
-+# binutils: 476.d 47c:  7c 20 06 ac     mbar    1
-+# "mbar",	X(31,854),	X_MASK, BOOKE|PPCA2|PPC476, PPCNONE,	{MO}
-+define pcodeop mbarOp;
-+:mbar MO is OP=31 & XOP_1_10=854 & MO  { mbarOp(); }
- @endif
++	memoryBarrier(MO:1);
+ }
+-@endif
  
  #icbi r0,r0		0x7c 00 07 ac
+ :icbi RA_OR_ZERO,B		is OP=31 & BITS_21_25=0 & B & XOP_1_10=982 & BIT_0=0 & RA_OR_ZERO
+diff --git a/Ghidra/Processors/PowerPC/data/languages/ppc_instructions.sinc b/Ghidra/Processors/PowerPC/data/languages/ppc_instructions.sinc
+index b9ca56c0f..9ed6c843a 100644
+--- a/Ghidra/Processors/PowerPC/data/languages/ppc_instructions.sinc
++++ b/Ghidra/Processors/PowerPC/data/languages/ppc_instructions.sinc
+@@ -1087,6 +1087,13 @@
+ 	externalControlOut(ea, S);
+ }
+ 
++#===========================================================
++#          EIEIO
++#===========================================================
++# binutils-descr: "eieio",	X(31,854),	0xffffffff,  PPC,   BOOKE|PPCA2|PPC476,	{0}
++# binutils: mytest.d:   20:	7c 00 06 ac 	eieio
++:eieio  is OP=31 & XOP_1_10=854 & BITS_11_25=0 & BIT_0=0   { enforceInOrderExecutionIO(); }
++
+ #===========================================================
+ #          EQVx
+ #===========================================================
+diff --git a/Ghidra/Processors/PowerPC/data/languages/ppc_isa.sinc b/Ghidra/Processors/PowerPC/data/languages/ppc_isa.sinc
+index 3148135f1..523ec943b 100644
+--- a/Ghidra/Processors/PowerPC/data/languages/ppc_isa.sinc
++++ b/Ghidra/Processors/PowerPC/data/languages/ppc_isa.sinc
+@@ -1625,14 +1625,6 @@ define pcodeop lbzcixOp;
+ 	RT = *:1 A;
+ } 
+ 
+-# binutils-descr: "eieio",	X(31,854),	0xffffffff,  PPC,   BOOKE|PPCA2|PPC476,	{0}
+-define pcodeop eieioOp;
+-# ISA-cmt: eieio - Enforce In-order Execution of I/O
+-# ISA-info: eieio - Form "X" Page 698 Category "S"
+-# binutils: mytest.d:   20:	7c 00 06 ac 	eieio
+-:eieio  is $(NOTVLE) & OP=31 & XOP_1_10=854 & BITS_11_25=0 & BIT_0=0   { eieioOp(); } 
+-
+-
+ # binutils-descr: "ldcix",	X(31,885),	X_MASK,      POWER6,	PPCNONE,	{RT, RA0, RB}
+ # ISA-cmt: ldcix - Load Doubleword Caching Inhibited Indexed
+ # ISA-info: ldcix - Form "X" Page 749 Category "S"
+diff --git a/Ghidra/Processors/PowerPC/data/languages/quicciii.sinc b/Ghidra/Processors/PowerPC/data/languages/quicciii.sinc
+index 8b7977bce..c9958477e 100644
+--- a/Ghidra/Processors/PowerPC/data/languages/quicciii.sinc
++++ b/Ghidra/Processors/PowerPC/data/languages/quicciii.sinc
+@@ -8,7 +8,6 @@ define pcodeop debuggerNotifyHalt;
+ define pcodeop instructionCacheBlockClearLock;
+ define pcodeop queryInstructionCacheBlockLock;
+ define pcodeop prefetchInstructionCacheBlockLockSetX;
+-define pcodeop memoryBarrier;
+ define pcodeop moveFromAPIDIndirect;
+ define pcodeop moveFromPerformanceMonitorRegister;
+ define pcodeop moveToPerformanceMonitorRegister;
+@@ -70,14 +69,6 @@ define pcodeop invalidateTLB;
+ #        D = (zext(CC_X_OP) * RA_OR_ZERO) + (zext(!CC_X_OP) * B);
+ }
+ 
+-@ifndef IS_ISA
+-#mbar 0         #FIXME
+-:mbar MO        is OP=31 & MO & XOP_1_10=854
+-{ 
+-	memoryBarrier(MO:1);
+-}
+-@endif
+-
+ #mfapidi r0,r1  #FIXME
+ :mfapidi D,A    is $(NOTVLE) & OP=31 & D & A & XOP_1_10=275
+ { 
 -- 
 2.40.0
 
