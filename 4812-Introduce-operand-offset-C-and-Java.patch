@@ -7,9 +7,11 @@ Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
 Introduce operand_offset
+
 Signed-off-by: Klaus Kämpf <kkaempf@gmail.com>
 
 Add operand_offset to sleigh Java
+
 Signed-off-by: Klaus Kämpf <kkaempf@gmail.com>
 ---
  .../src/decompile/cpp/pcodeparse.cc           |  843 ++++----
@@ -35,13 +37,13 @@ Signed-off-by: Klaus Kämpf <kkaempf@gmail.com>
  .../ghidra/pcodeCPort/semantics/ConstTpl.java |    9 +-
  .../slgh_compile/SleighCompile.java           |    2 +
  .../pcodeCPort/slgh_compile/Yylval.java       |    1 +
- .../OffsetInstructionValue.java               |   62 +
+ .../OffsetInstructionValue.java               |   67 +
  .../slghpatexpress/PatternExpression.java     |    3 +
- .../pcodeCPort/slghsymbol/OffsetSymbol.java   |   95 +
+ .../pcodeCPort/slghsymbol/OffsetSymbol.java   |  109 +
  .../pcodeCPort/slghsymbol/SymbolTable.java    |    3 +
  .../pcodeCPort/slghsymbol/symbol_type.java    |    1 +
  .../program/model/lang/PcodeParser.java       |    1 +
- 29 files changed, 1855 insertions(+), 1375 deletions(-)
+ 29 files changed, 1874 insertions(+), 1375 deletions(-)
  create mode 100644 Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/processors/sleigh/expression/OffsetInstructionValue.java
  create mode 100644 Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/processors/sleigh/symbol/OffsetSymbol.java
  create mode 100644 Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/slghpatexpress/OffsetInstructionValue.java
@@ -3603,7 +3605,7 @@ index 214cd6417..07a101432 100644
      res = new EndInstructionValue();
    else if (nm == "plus_exp")
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/slghpatexpress.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/slghpatexpress.hh
-index e004f341c..6b6549732 100644
+index e004f341c..533945d3d 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/slghpatexpress.hh
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/slghpatexpress.hh
 @@ -156,6 +156,20 @@ public:
@@ -3617,11 +3619,11 @@ index e004f341c..6b6549732 100644
 +  virtual intb getValue(ParserWalker &walker) const {
 +    return (intb)walker.getOffset(-1);
 +  }
-+  virtual TokenPattern genMinPattern(const std::vector<TokenPattern> &ops) const { return TokenPattern(); }
++  virtual TokenPattern genMinPattern(const vector<TokenPattern> &ops) const { return TokenPattern(); }
 +  virtual TokenPattern genPattern(intb val) const { return TokenPattern(); }
 +  virtual intb minValue(void) const { return (intb)0; }
 +  virtual intb maxValue(void) const { return (intb)0; }
-+  virtual void saveXml(std::ostream &s) const { s << "<offset_exp/>"; }
++  virtual void saveXml(ostream &s) const { s << "<offset_exp/>"; }
 +  virtual void restoreXml(const Element *el,Translate *trans) {}
 +};
                                                                                          
@@ -3740,7 +3742,7 @@ index 0b8e4dd05..b962e4c3a 100644
  
  {
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/slghsymbol.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/slghsymbol.hh
-index bfe170154..781373a08 100644
+index bfe170154..3fd0d524d 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/slghsymbol.hh
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/slghsymbol.hh
 @@ -27,7 +27,7 @@ class SleighSymbol {
@@ -3761,15 +3763,15 @@ index bfe170154..781373a08 100644
 +  PatternExpression *patexp;
 +public:
 +  OffsetSymbol(void) { patexp = (PatternExpression *)0; } // For use with restoreXml
-+  OffsetSymbol(const std::string &nm,AddrSpace *cspc);
++  OffsetSymbol(const string &nm,AddrSpace *cspc);
 +  virtual ~OffsetSymbol(void);
 +  virtual VarnodeTpl *getVarnode(void) const;
 +  virtual PatternExpression *getPatternExpression(void) const { return patexp; }
 +  virtual void getFixedHandle(FixedHandle &hand,ParserWalker &walker) const;
-+  virtual void print(std::ostream &s,ParserWalker &walker) const;
++  virtual void print(ostream &s,ParserWalker &walker) const;
 +  virtual symbol_type getType(void) const { return offset_symbol; }
-+  virtual void saveXml(std::ostream &s) const;
-+  virtual void saveXmlHeader(std::ostream &s) const;
++  virtual void saveXml(ostream &s) const;
++  virtual void saveXmlHeader(ostream &s) const;
 +  virtual void restoreXml(const Element *el,SleighBase *trans);
 +};
 +
@@ -4106,10 +4108,10 @@ index f165ca6b8..dc5740001 100644
      SubtableSymbol subtablesym;
 diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/slghpatexpress/OffsetInstructionValue.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/slghpatexpress/OffsetInstructionValue.java
 new file mode 100644
-index 000000000..f1557f39f
+index 000000000..b64f9617a
 --- /dev/null
 +++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/slghpatexpress/OffsetInstructionValue.java
-@@ -0,0 +1,62 @@
+@@ -0,0 +1,67 @@
 +/* ###
 + * IP: GHIDRA
 + * REVIEWED: YES
@@ -4129,6 +4131,7 @@ index 000000000..f1557f39f
 +package ghidra.pcodeCPort.slghpatexpress;
 +
 +import generic.stl.VectorSTL;
++import ghidra.app.plugin.processors.sleigh.ParserWalker;
 +import ghidra.pcodeCPort.translate.Translate;
 +import ghidra.sleigh.grammar.Location;
 +
@@ -4140,6 +4143,10 @@ index 000000000..f1557f39f
 +
 +	public OffsetInstructionValue(Location location) {
 +		super(location);
++	}
++
++	public long getValue(ParserWalker pos) {
++		return pos.getOffset(-1);
 +	}
 +
 +	@Override
@@ -4188,10 +4195,10 @@ index 2842fa83a..315450dd8 100644
  		}
 diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/slghsymbol/OffsetSymbol.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/slghsymbol/OffsetSymbol.java
 new file mode 100644
-index 000000000..b29dc4a55
+index 000000000..545a51132
 --- /dev/null
 +++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/slghsymbol/OffsetSymbol.java
-@@ -0,0 +1,95 @@
+@@ -0,0 +1,109 @@
 +/* ###
 + * IP: GHIDRA
 + * REVIEWED: YES
@@ -4210,7 +4217,8 @@ index 000000000..b29dc4a55
 + */
 +package ghidra.pcodeCPort.slghsymbol;
 +
-+import ghidra.pcodeCPort.context.FixedHandle;
++import ghidra.app.plugin.processors.sleigh.ParserWalker;
++import ghidra.app.plugin.processors.sleigh.FixedHandle;
 +import ghidra.pcodeCPort.semantics.ConstTpl;
 +import ghidra.pcodeCPort.semantics.VarnodeTpl;
 +import ghidra.pcodeCPort.sleighbase.SleighBase;
@@ -4263,6 +4271,19 @@ index 000000000..b29dc4a55
 +		ConstTpl off = new ConstTpl(ConstTpl.const_type.j_offset);
 +		ConstTpl sz_zero = new ConstTpl();
 +		return new VarnodeTpl(location, spc, off, sz_zero);
++	}
++
++	public void getFixedHandle(FixedHandle hand, ParserWalker pos) {
++		hand.space = pos.getCurSpace();
++		hand.offset_space = null;
++		hand.offset_offset = pos.getAddr().getOffset(); // Get starting address of instruction
++		hand.size = hand.space.getPointerSize();
++	}
++
++	public void print(PrintStream s, ParserWalker pos) {
++		long val = pos.getAddr().getOffset();
++		s.append("0x");
++		s.print(Long.toHexString(val));
 +	}
 +
 +	@Override
