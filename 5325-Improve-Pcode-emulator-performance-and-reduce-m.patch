@@ -1,0 +1,271 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Duncan Ogilvie <mr.exodia.tpodt@gmail.com>
+Date: Sat, 13 May 2023 13:39:47 +0200
+Subject: [PATCH] 5325: Improve Pcode emulator performance and reduce memory
+ fragmentation
+
+Before this change I got ~150k instructions/second, after ~380k (2.5x)
+---
+ .../Decompiler/src/decompile/cpp/emulate.cc   | 20 ++++++--------
+ .../Decompiler/src/decompile/cpp/emulate.hh   | 27 +++++++++++++------
+ .../src/decompile/cpp/emulateutil.cc          | 11 +-------
+ .../src/decompile/cpp/emulateutil.hh          |  8 +++---
+ .../Decompiler/src/decompile/cpp/error.hh     |  2 ++
+ .../Decompiler/src/decompile/cpp/pcoderaw.hh  | 10 ++++---
+ 6 files changed, 40 insertions(+), 38 deletions(-)
+
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/emulate.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/emulate.cc
+index 299495c47..0f89ec9f6 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/emulate.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/emulate.cc
+@@ -101,7 +101,7 @@ bool BreakTableCallBack::doAddressBreak(const Address &addr)
+ /// \param vcache is the container for cached VarnodeData
+ /// \param in is the map of OpBehavior
+ /// \param uniqReserve is the starting offset for temporaries in the \e unique space
+-PcodeEmitCache::PcodeEmitCache(vector<PcodeOpRaw *> &ocache,vector<VarnodeData *> &vcache,
++PcodeEmitCache::PcodeEmitCache(vector<PcodeOpRaw> &ocache, vector<VarnodeData> &vcache,
+ 			       const vector<OpBehavior *> &in,uintb uniqReserve)
+   : opcache(ocache), varcache(vcache), inst(in)
+ {
+@@ -114,18 +114,16 @@ PcodeEmitCache::PcodeEmitCache(vector<PcodeOpRaw *> &ocache,vector<VarnodeData *
+ VarnodeData *PcodeEmitCache::createVarnode(const VarnodeData *var)
+ 
+ {
+-  VarnodeData *res = new VarnodeData();
+-  *res = *var;
+-  varcache.push_back(res);
+-  return res;
++  varcache.push_back(*var);
++  return &varcache.back();
+ }
+ 
+ void PcodeEmitCache::dump(const Address &addr,OpCode opc,VarnodeData *outvar,VarnodeData *vars,int4 isize)
+ 
+ {
+-  PcodeOpRaw *op = new PcodeOpRaw();
++  opcache.emplace_back();
++  PcodeOpRaw *op = &opcache.back();
+   op->setSeqNum(addr,uniq);
+-  opcache.push_back(op);
+   op->setBehavior( inst[opc] );
+   uniq += 1;
+   if (outvar != (VarnodeData *)0) {
+@@ -335,16 +333,14 @@ EmulatePcodeCache::EmulatePcodeCache(Translate *t,MemoryState *s,BreakTable *b)
+   OpBehavior::registerInstructions(inst,t);
+   breaktable = b;
+   breaktable->setEmulate(this);
++  opcache.reserve(1000);
++  varcache.reserve(1000);
+ }
+ 
+ /// Free all the VarnodeData and PcodeOpRaw objects and clear the cache
+ void EmulatePcodeCache::clearCache(void)
+ 
+ {
+-  for(auto *op : opcache)
+-    delete op;
+-  for(auto *var : varcache)
+-    delete var;
+   opcache.clear();
+   varcache.clear();
+ }
+@@ -378,7 +374,7 @@ void EmulatePcodeCache::establishOp(void)
+ 
+ {
+   if (current_op < opcache.size()) {
+-    currentOp = opcache[current_op];
++    currentOp = &opcache[current_op];
+     currentBehave = currentOp->getBehavior();
+     return;
+   }
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/emulate.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/emulate.hh
+index 953b04508..46bc7a7be 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/emulate.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/emulate.hh
+@@ -278,13 +278,13 @@ inline MemoryState *EmulateMemory::getMemoryState(void) const
+ ///
+ /// This is used for emulation when full Varnode and PcodeOp objects aren't needed
+ class PcodeEmitCache : public PcodeEmit {
+-  vector<PcodeOpRaw *> &opcache;	///< The cache of current p-code ops
+-  vector<VarnodeData *> &varcache;	///< The cache of current varnodes
++  vector<PcodeOpRaw> &opcache;	///< The cache of current p-code ops
++  vector<VarnodeData> &varcache;	///< The cache of current varnodes
+   const vector<OpBehavior *> &inst;	///< Array of behaviors for translating OpCode
+   uintm uniq;				///< Starting offset for defining temporaries in \e unique space
+   VarnodeData *createVarnode(const VarnodeData *var);	///< Clone and cache a raw VarnodeData
+ public:
+-  PcodeEmitCache(vector<PcodeOpRaw *> &ocache,vector<VarnodeData *> &vcache,
++  PcodeEmitCache(vector<PcodeOpRaw> &ocache, vector<VarnodeData> &vcache,
+ 		 const vector<OpBehavior *> &in,uintb uniqReserve);	///< Constructor
+   virtual void dump(const Address &addr,OpCode opc,VarnodeData *outvar,VarnodeData *vars,int4 isize);
+ };
+@@ -297,8 +297,8 @@ public:
+ /// are additional methods for inspecting the pcode ops in the current instruction as a sequence.
+ class EmulatePcodeCache : public EmulateMemory {
+   Translate *trans;		///< The SLEIGH translator
+-  vector<PcodeOpRaw *> opcache;	///< The cache of current p-code ops
+-  vector<VarnodeData *> varcache;	///< The cache of current varnodes
++  vector<PcodeOpRaw> opcache;	///< The cache of current p-code ops
++  vector<VarnodeData> varcache;	///< The cache of current varnodes
+   vector<OpBehavior *> inst;	///< Map from OpCode to OpBehavior
+   BreakTable *breaktable;	///< The table of breakpoints
+   Address current_address;	///< Address of current instruction being executed
+@@ -318,7 +318,8 @@ public:
+   bool isInstructionStart(void) const; ///< Return \b true if we are at an instruction start
+   int4 numCurrentOps(void) const; ///< Return number of pcode ops in translation of current instruction
+   int4 getCurrentOpIndex(void) const; ///< Get the index of current pcode op within current instruction
+-  PcodeOpRaw *getOpByIndex(int4 i) const; ///< Get pcode op in current instruction translation by index
++  const PcodeOpRaw *getOpByIndex(int4 i) const; ///< Get pcode op in current instruction translation by index
++  PcodeOpRaw* getOpByIndex(int4 i); ///< Get pcode op in current instruction translation by index
+   virtual void setExecuteAddress(const Address &addr); ///< Set current execution address
+   virtual Address getExecuteAddress(void) const; ///< Get current execution address
+   void executeInstruction(void); ///< Execute (the rest of) a single machine instruction
+@@ -356,10 +357,20 @@ inline int4 EmulatePcodeCache::getCurrentOpIndex(void) const
+ /// machine instruction's translation sequence.
+ /// \param i is the desired op index
+ /// \return the pcode op at the indicated index
+-inline PcodeOpRaw *EmulatePcodeCache::getOpByIndex(int4 i) const
++inline const PcodeOpRaw *EmulatePcodeCache::getOpByIndex(int4 i) const
+ 
+ {
+-  return opcache[i];
++  return &opcache[i];
++}
++
++/// This routine can be used to examine ops other than the currently executing op in the
++/// machine instruction's translation sequence.
++/// \param i is the desired op index
++/// \return the pcode op at the indicated index
++inline PcodeOpRaw* EmulatePcodeCache::getOpByIndex(int4 i)
++
++{
++    return &opcache[i];
+ }
+ 
+ /// \return the currently executing machine address
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/emulateutil.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/emulateutil.cc
+index eaf01b119..177562b3a 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/emulateutil.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/emulateutil.cc
+@@ -292,15 +292,6 @@ void EmulateSnippet::fallthruOp(void)
+   setCurrentOp(pos);
+ }
+ 
+-EmulateSnippet::~EmulateSnippet(void)
+-
+-{
+-  for(auto *op : opList)
+-    delete op;
+-  for(auto *var : varList)
+-    delete var;
+-}
+-
+ /// \brief Provide the caller with an emitter for building the p-code snippet
+ ///
+ /// Any p-code produced by the PcodeEmit, when triggered by the caller, becomes
+@@ -328,7 +319,7 @@ bool EmulateSnippet::checkForLegalCode(void) const
+ 
+ {
+   for(int4 i=0;i<opList.size();++i) {
+-    PcodeOpRaw *op = opList[i];
++    const PcodeOpRaw *op = &opList[i];
+     VarnodeData *vn;
+     OpCode opc = op->getOpcode();
+     if (opc == CPUI_BRANCHIND || opc == CPUI_CALL || opc == CPUI_CALLIND || opc == CPUI_CALLOTHER ||
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/emulateutil.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/emulateutil.hh
+index f82fa816c..5afc1fbb9 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/emulateutil.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/emulateutil.hh
+@@ -112,8 +112,8 @@ public:
+ /// class, which can be repeatedly used by calling resetMemory() between executions.
+ class EmulateSnippet : public Emulate {
+   Architecture *glb;			///< The underlying Architecture for the program being emulated
+-  vector<PcodeOpRaw *> opList;		///< Sequence of p-code ops to be executed
+-  vector<VarnodeData *> varList;	///< Varnodes allocated for ops
++  vector<PcodeOpRaw> opList;		///< Sequence of p-code ops to be executed
++  vector<VarnodeData> varList;	///< Varnodes allocated for ops
+   map<uintb,uintb> tempValues;		///< Values stored in temporary registers
+   PcodeOpRaw *currentOp;		///< Current p-code op being executed
+   int4 pos;				///< Index of current p-code op being executed
+@@ -145,7 +145,7 @@ class EmulateSnippet : public Emulate {
+   virtual void fallthruOp(void);
+ public:
+   EmulateSnippet(Architecture *g) { glb = g; pos = 0; currentOp = (PcodeOpRaw *)0; }	///< Constructor
+-  virtual ~EmulateSnippet(void);							///< Destructor
++  virtual ~EmulateSnippet(void) = default;					///< Destructor
+   virtual void setExecuteAddress(const Address &addr) { setCurrentOp(0); }
+   virtual Address getExecuteAddress(void) const { return currentOp->getAddr(); }
+   Architecture *getArch(void) const { return glb; }				///< Get the underlying Architecture
+@@ -162,7 +162,7 @@ public:
+   ///
+   /// The i-th p-code op in the snippet sequence is set as the currently executing op.
+   /// \param i is the index
+-  void setCurrentOp(int4 i) { pos = i; currentOp = opList[i]; currentBehave = currentOp->getBehavior(); }
++  void setCurrentOp(int4 i) { pos = i; currentOp = &opList[i]; currentBehave = currentOp->getBehavior(); }
+ 
+   /// \brief Set a temporary register value in the machine state
+   ///
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/error.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/error.hh
+index 02fbc9964..9d53168a4 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/error.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/error.hh
+@@ -29,6 +29,7 @@
+ #include <set>
+ #include <list>
+ #include <vector>
++#include <array>
+ #include <algorithm>
+ #include <cstring>
+ #include <cctype>
+@@ -40,6 +41,7 @@ using std::map;
+ using std::set;
+ using std::list;
+ using std::vector;
++using std::array;
+ using std::pair;
+ using std::make_pair;
+ using std::ostream;
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/pcoderaw.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/pcoderaw.hh
+index 273c2bac6..03a010389 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/pcoderaw.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/pcoderaw.hh
+@@ -108,7 +108,8 @@ class PcodeOpRaw {
+   OpBehavior *behave;		///< The opcode for this operation
+   SeqNum seq;	                ///< Identifying address and index of this operation
+   VarnodeData *out;		///< Output varnode triple
+-  vector<VarnodeData *> in;	///< Raw varnode inputs to this op
++  array<VarnodeData*, 3> in;	///< Raw varnode inputs to this op (max 3)
++  int4 insz = 0;				///< Number of input varnodes to this op
+ public:
+   void setBehavior(OpBehavior *be); ///< Set the opcode for this op
+   OpBehavior *getBehavior(void) const; ///< Retrieve the behavior for this op
+@@ -207,7 +208,8 @@ inline VarnodeData *PcodeOpRaw::getOutput(void) const
+ inline void PcodeOpRaw::addInput(VarnodeData *i)
+ 
+ {
+-  in.push_back(i);
++  if (insz >= in.size()) throw LowlevelError("Too many inputs for PcodeOpRaw");
++  in[insz++] = i;
+ }
+ 
+ /// If the inputs to a pcode operation need to be changed, this routine clears the existing
+@@ -215,14 +217,14 @@ inline void PcodeOpRaw::addInput(VarnodeData *i)
+ inline void PcodeOpRaw::clearInputs(void)
+ 
+ {
+-  in.clear();
++  insz = 0;
+ }
+ 
+ /// \return the number of inputs
+ inline int4 PcodeOpRaw::numInput(void) const
+ 
+ {
+-  return in.size();
++  return insz;
+ }
+ 
+ /// Input varnodes are indexed starting at 0.  This retrieves the input varnode by index.
+-- 
+2.40.0
+
