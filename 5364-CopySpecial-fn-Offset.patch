@@ -1,0 +1,78 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: sad-dev <55233728+sad-dev@users.noreply.github.com>
+Date: Mon, 22 May 2023 16:02:42 +0800
+Subject: [PATCH] 5364: CopySpecial: fn + Offset
+
+Copy foo+0x1234 Action
+
+Avoid double fetch on the listing
+---
+ .../CodeBrowserClipboardProvider.java         | 31 +++++++++++++++++++
+ 1 file changed, 31 insertions(+)
+
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/clipboard/CodeBrowserClipboardProvider.java b/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/clipboard/CodeBrowserClipboardProvider.java
+index 45a1d2a1b..cbb8669ae 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/clipboard/CodeBrowserClipboardProvider.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/clipboard/CodeBrowserClipboardProvider.java
+@@ -69,6 +69,8 @@ public class CodeBrowserClipboardProvider extends ByteCopier
+ 		new ClipboardType(CodeUnitInfoTransferable.localDataTypeFlavor, "Labels");
+ 	public static final ClipboardType COMMENTS_TYPE =
+ 		new ClipboardType(CodeUnitInfoTransferable.localDataTypeFlavor, "Comments");
++	public static final ClipboardType ADDRESS_SYM_TEXT_TYPE =
++		new ClipboardType(DataFlavor.stringFlavor, "Address SymString");
+ 
+ 	private static final List<ClipboardType> COPY_TYPES = createCopyTypesList();
+ 
+@@ -85,6 +87,7 @@ public class CodeBrowserClipboardProvider extends ByteCopier
+ 		list.add(PYTHON_LIST_TYPE);
+ 		list.add(CPP_BYTE_ARRAY_TYPE);
+ 		list.add(ADDRESS_TEXT_TYPE);
++		list.add(ADDRESS_SYM_TEXT_TYPE);
+ 
+ 		return list;
+ 	}
+@@ -184,6 +187,9 @@ public class CodeBrowserClipboardProvider extends ByteCopier
+ 		if (copyType == ADDRESS_TEXT_TYPE) {
+ 			return copyAddress();
+ 		}
++		else if (copyType == ADDRESS_SYM_TEXT_TYPE) {
++			return copySymbolString();
++		}
+ 		else if (copyType == CODE_TEXT_TYPE) {
+ 			return copyCode(monitor);
+ 		}
+@@ -311,6 +317,31 @@ public class CodeBrowserClipboardProvider extends ByteCopier
+ 		return createStringTransferable(joined);
+ 	}
+ 
++	private Transferable copySymbolString() {
++		Listing listing = currentProgram.getListing();
++		CodeUnitIterator codeUnits =
++			listing.getCodeUnits(getSelectedAddresses(), true);
++		StringBuilder builder = new StringBuilder();
++		while (codeUnits.hasNext()) {
++			// TODO: Can we improve this for the usual case where all the address(es)
++			// are in the same function?
++			CodeUnit cu = codeUnits.next();
++			Address addr = cu.getAddress();
++			Function foo = listing.getFunctionContaining(addr);
++			boolean insideFunction = foo != null;
++			String addrStr;
++			if (insideFunction) {
++				addrStr = String.format("%s + %#x\n", foo, addr.subtract(foo.getEntryPoint()));
++			} else {
++				// TODO: Probably better to have a second version for addresses of instructions
++				addrStr = String.format("%s\n", addr);
++			}
++			builder.append(addrStr);
++		}
++		String joined = builder.toString();
++		return createStringTransferable(joined);
++	}
++
+ 	protected Transferable copyCode(TaskMonitor monitor) {
+ 
+ 		AddressSetView addressSet = getSelectedAddresses();
+-- 
+2.40.1
+
