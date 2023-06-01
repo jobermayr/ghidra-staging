@@ -4,18 +4,17 @@ Date: Sat, 8 Apr 2023 20:43:26 +0200
 Subject: [PATCH] 5208: Simplify _fxsave and _fxsave64 in Decompiler
 
 ---
- Ghidra/Processors/x86/data/languages/ia.sinc | 237 ++-----------------
- 1 file changed, 15 insertions(+), 222 deletions(-)
+ Ghidra/Processors/x86/data/languages/ia.sinc | 235 ++-----------------
+ 1 file changed, 20 insertions(+), 215 deletions(-)
 
 diff --git a/Ghidra/Processors/x86/data/languages/ia.sinc b/Ghidra/Processors/x86/data/languages/ia.sinc
-index 142f6e174..550690b61 100644
+index cca230f57..b91ae6c4f 100644
 --- a/Ghidra/Processors/x86/data/languages/ia.sinc
 +++ b/Ghidra/Processors/x86/data/languages/ia.sinc
-@@ -4450,242 +4450,35 @@ define pcodeop fsin;
+@@ -4441,240 +4441,45 @@ define pcodeop fsin;
  :FXCH freg      is vexMode=0 & byte=0xD9; frow=12 & fpage=1 & freg          { local tmp = ST0; ST0 = freg; freg = tmp; }          
  :FXCH           is vexMode=0 & byte=0xD9; byte=0xC9                 { local tmp = ST0; ST0 = ST1; ST1 = tmp; }                    
  
--@ifndef IA64
 -# this saves the FPU state into 512 bytes of memory similar to the 32-bit mode
 +# fxsave and fxrstor
 +define pcodeop _fxsave;
@@ -26,7 +25,7 @@ index 142f6e174..550690b61 100644
 +@endif
 +
 +# this saves the FPU state into 512 bytes of memory
- :FXSAVE Mem    is vexMode=0 & byte=0x0F; byte=0xAE; ( mod != 0b11 & reg_opcode=0 ) ... & Mem
+ :FXSAVE Mem    is $(LONGMODE_OFF) & vexMode=0 & byte=0x0F; byte=0xAE; ( mod != 0b11 & reg_opcode=0 ) ... & Mem
  {
 -# not saved in the same spacing as the actual processor
 -  *:2  (Mem)      = FPUControlWord;
@@ -59,12 +58,16 @@ index 142f6e174..550690b61 100644
 -  *:16 (Mem + 256) = XMM6;
 -  *:16 (Mem + 272) = XMM7;
 +  _fxsave(Mem);
++}
++
++:FXRSTOR Mem   is $(LONGMODE_OFF) & vexMode=0 & byte=0x0F; byte=0xAE; ( mod != 0b11 & reg_opcode=1 ) ... & Mem
++{
++  _fxrstor(Mem);
  }
  
--@else
--# this saves the FPU state into 512 bytes of memory similar to the 32-bit mode
--:FXSAVE Mem    is vexMode=0 & byte=0x0F; byte=0xAE; ( mod != 0b11 & reg_opcode=0 ) ... & Mem
-+:FXRSTOR Mem   is vexMode=0 & byte=0x0F; byte=0xAE; ( mod != 0b11 & reg_opcode=1 ) ... & Mem
+ @ifdef IA64
+ # this saves the FPU state into 512 bytes of memory similar to the 32-bit mode
+ :FXSAVE Mem    is $(LONGMODE_ON) & vexMode=0 & byte=0x0F; byte=0xAE; ( mod != 0b11 & reg_opcode=0 ) ... & Mem
  {
 -  *:2  (Mem)      = FPUControlWord;
 -  *:2  (Mem +  2) = FPUStatusWord;
@@ -104,12 +107,11 @@ index 142f6e174..550690b61 100644
 -  *:16 (Mem + 368) = XMM13;
 -  *:16 (Mem + 384) = XMM14;
 -  *:16 (Mem + 400) = XMM15;
-+  _fxrstor(Mem);
++  _fxsave(Mem);
  }
  
-+@ifdef IA64
- # this saves the FPU state into 512 bytes of memory similar to the 32-bit mode
- :FXSAVE64 Mem    is vexMode=0 & $(REX_W) & byte=0x0F; byte=0xAE; ( mod != 0b11 & reg_opcode=0 ) ... & Mem
+-# this saves the FPU state into 512 bytes of memory similar to the 32-bit mode
+ :FXSAVE64 Mem    is $(LONGMODE_ON) & vexMode=0 & $(REX_W) & byte=0x0F; byte=0xAE; ( mod != 0b11 & reg_opcode=0 ) ... & Mem
  {
 -  *:2  (Mem)      = FPUControlWord;
 -  *:2  (Mem +  2) = FPUStatusWord;
@@ -151,9 +153,9 @@ index 142f6e174..550690b61 100644
  }
 -@endif
  
--@ifndef IA64
--:FXRSTOR Mem   is vexMode=0 & byte=0x0F; byte=0xAE; ( mod != 0b11 & reg_opcode=1 ) ... & Mem
--{
+-:FXRSTOR Mem   is $(LONGMODE_OFF) & vexMode=0 & byte=0x0F; byte=0xAE; ( mod != 0b11 & reg_opcode=1 ) ... & Mem
++:FXRSTOR Mem   is $(LONGMODE_ON) & vexMode=0 & byte=0x0F; byte=0xAE; ( mod != 0b11 & reg_opcode=1 ) ... & Mem
+ {
 -  FPUControlWord           = *:2  (Mem);
 -  FPUStatusWord            = *:2  (Mem +  2);
 -  FPUTagWord               = *:2  (Mem +  4); #The real implementation saves an 'abridged' tag word, but that is a non-trivial operation
@@ -183,10 +185,11 @@ index 142f6e174..550690b61 100644
 -  XMM5 = *:16 (Mem + 240);
 -  XMM6 = *:16 (Mem + 256);
 -  XMM7 = *:16 (Mem + 272);
--}
--
--@else
- :FXRSTOR64 Mem   is vexMode=0 & $(REX_W) & byte=0x0F; byte=0xAE; ( mod != 0b11 & reg_opcode=1 ) ... & Mem
++  _fxrstor(Mem);
+ }
+ 
+-@ifdef IA64
+ :FXRSTOR64 Mem   is $(LONGMODE_ON) & vexMode=0 & $(REX_W) & byte=0x0F; byte=0xAE; ( mod != 0b11 & reg_opcode=1 ) ... & Mem
  {
 -  FPUControlWord           = *:2  (Mem);
 -  FPUStatusWord            = *:2  (Mem +  2);
@@ -225,7 +228,7 @@ index 142f6e174..550690b61 100644
 -  XMM15 = *:16 (Mem + 400);
 -}
 -
--:FXRSTOR Mem   is vexMode=0 & byte=0x0F; byte=0xAE; ( mod != 0b11 & reg_opcode=1 ) ... & Mem
+-:FXRSTOR Mem   is $(LONGMODE_ON) & vexMode=0 & byte=0x0F; byte=0xAE; ( mod != 0b11 & reg_opcode=1 ) ... & Mem
 -{
 -  FPUControlWord           = *:2  (Mem);
 -  FPUStatusWord            = *:2  (Mem +  2);
