@@ -1,0 +1,165 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: sakiodre <136492105+sakiodre@users.noreply.github.com>
+Date: Fri, 30 Jun 2023 00:41:44 +0700
+Subject: [PATCH] 5511: Fix /SDL error when compiling with MSVC
+
+Fix /SDL error when compiling with MSVC
+
+Revert changes to fopen_s and _fileno
+---
+ .../Decompiler/src/decompile/cpp/blockaction.cc      |  2 +-
+ .../Decompiler/src/decompile/cpp/coreaction.cc       |  2 +-
+ .../Decompiler/src/decompile/cpp/database.cc         |  4 ++--
+ .../Decompiler/src/decompile/cpp/heritage.cc         |  6 ++++--
+ .../Features/Decompiler/src/decompile/cpp/printc.cc  |  4 ++--
+ .../Decompiler/src/decompile/cpp/ruleaction.cc       | 12 ++++++------
+ 6 files changed, 16 insertions(+), 14 deletions(-)
+
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/blockaction.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/blockaction.cc
+index 0afc3cdac..d44d0968f 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/blockaction.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/blockaction.cc
+@@ -243,7 +243,7 @@ void LoopBody::orderTails(void)
+   if (tails.size() <= 1) return;
+   if (exitblock == (FlowBlock *)0) return;
+   int4 prefindex;
+-  FlowBlock *trial;
++  FlowBlock *trial = (FlowBlock *)0;
+   for(prefindex=0;prefindex < tails.size(); ++prefindex) {
+     trial = tails[prefindex];
+     int4 sizeout = trial->sizeOut();
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
+index 408f7a5d3..2b497c9ec 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
+@@ -816,7 +816,7 @@ bool ActionMultiCse::processBlock(Funcdata &data,BlockBasic *bl)
+ {
+   vector<Varnode *> vnlist;
+   PcodeOp *targetop = (PcodeOp *)0;
+-  PcodeOp *pairop;
++  PcodeOp *pairop = (PcodeOp *)0;
+   list<PcodeOp *>::iterator iter = bl->beginOp();
+   list<PcodeOp *>::iterator enditer = bl->endOp();
+   while(iter != enditer) {
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/database.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/database.cc
+index bba4cf427..27fb74025 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/database.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/database.cc
+@@ -586,7 +586,7 @@ void FunctionSymbol::decode(Decoder &decoder)
+     fd = new Funcdata("","",scope,Address(),this);
+     try {
+       symbolId = fd->decode(decoder);
+-    } catch(RecovError &err) {
++    } catch(RecovError&) {
+       // Caused by a duplicate scope name. Preserve the address so we can find the original symbol
+       throw DuplicateFunctionError(fd->getAddress(),fd->getName());
+     }
+@@ -651,7 +651,7 @@ bool EquateSymbol::isValueClose(uintb op2Value,int4 size) const
+   }
+   if (maskValue == (op2Value & mask)) return true;
+   if (maskValue == (~op2Value & mask)) return true;
+-  if (maskValue == (-op2Value & mask)) return true;
++  if (maskValue == ((~op2Value + 1) & mask)) return true;
+   if (maskValue == ((op2Value + 1) & mask)) return true;
+   if (maskValue == ((op2Value -1) & mask)) return true;
+   return false;
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/heritage.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/heritage.cc
+index 8eecd0e15..576b814c2 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/heritage.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/heritage.cc
+@@ -377,8 +377,10 @@ Varnode *Heritage::normalizeWriteSize(Varnode *vn,const Address &addr,int4 size)
+ {
+   int4 overlap;
+   int4 mostsigsize;
+-  PcodeOp *op,*newop;
+-  Varnode *mostvn,*leastvn,*big,*bigout,*midvn;
++  PcodeOp *op, *newop;
++  Varnode *big,*bigout,*midvn;
++  Varnode *mostvn = (Varnode *)0;
++  Varnode *leastvn = (Varnode *)0;
+ 
+   mostvn = (Varnode *)0;
+   op = vn->getDef();
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/printc.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/printc.cc
+index 7cdef888b..59875d111 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/printc.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/printc.cc
+@@ -1770,7 +1770,7 @@ bool PrintC::pushEquate(uintb val,int4 sz,const EquateSymbol *sym,const Varnode
+     pushSymbol(sym,vn,op);
+     return true;
+   }
+-  modval = (-baseval) & mask;
++  modval = (~baseval + 1) & mask;
+   if (modval == val) {		// twos complement
+     pushOp(&unary_minus,(const PcodeOp *)0);
+     pushSymbol(sym,vn,op);
+@@ -2014,7 +2014,7 @@ void PrintC::pushImpliedField(const Varnode *vn,const PcodeOp *op)
+ {
+   bool proceed = false;
+   Datatype *parent = vn->getHigh()->getType();
+-  const TypeField *field;
++  const TypeField *field = (const TypeField *)0;
+   if (parent->needsResolution() && parent->getMetatype() != TYPE_PTR) {
+     const Funcdata *fd = op->getParent()->getFuncdata();
+     int4 slot = op->getSlot(vn);
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc
+index 839306e19..df376039b 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc
+@@ -3681,7 +3681,7 @@ int4 RuleCarryElim::applyOp(PcodeOp *op,Funcdata &data)
+     data.opSetOpcode(op,CPUI_COPY);
+     return 1;
+   }
+-  off = (-off) & calc_mask(vn2->getSize()); // Take twos-complement of constant
++  off = (~off + 1) & calc_mask(vn2->getSize()); // Take twos-complement of constant
+ 
+   data.opSetOpcode(op,CPUI_INT_LESSEQUAL);
+   data.opSetInput(op,vn1,1);	// Move other input to second position
+@@ -5687,7 +5687,7 @@ int4 RuleEqual2Constant::applyOp(PcodeOp *op,Funcdata &data)
+     // The only multiply we transform, is multiply by -1
+     if (otherconst->getOffset() != calc_mask(otherconst->getSize())) return 0;
+     newconst = cvn->getOffset();
+-    newconst = (-newconst) & calc_mask(otherconst->getSize());
++    newconst = (~newconst + 1) & calc_mask(otherconst->getSize());
+   }
+   else if (opc == CPUI_INT_NEGATE) {
+     newconst = cvn->getOffset();
+@@ -6734,7 +6734,7 @@ int4 RuleAddUnsigned::applyOp(PcodeOp *op,Funcdata &data)
+     }
+   }
+   data.opSetOpcode(op,CPUI_INT_SUB);
+-  Varnode *cvn = data.newConstant(constvn->getSize(), (-val) & mask);
++  Varnode *cvn = data.newConstant(constvn->getSize(), (~val + 1) & mask);
+   cvn->copySymbol(constvn);
+   data.opSetInput(op,cvn,1);
+   return 1;
+@@ -8116,7 +8116,7 @@ int4 RuleSignForm2::applyOp(PcodeOp *op,Funcdata &data)
+   PcodeOp *multOp = multOut->getDef();
+   if (multOp->code() != CPUI_INT_MULT) return 0;
+   int4 slot;
+-  PcodeOp *sextOp;
++  PcodeOp *sextOp = (PcodeOp *)0;
+   for(slot=0;slot<2;++slot) {			// Search for the INT_SEXT
+     Varnode *vn = multOp->getIn(slot);
+     if (!vn->isWritten()) continue;
+@@ -8408,7 +8408,7 @@ int4 RuleSignMod2Opt::applyOp(PcodeOp *op,Funcdata &data)
+   PcodeOp *addOp = addOut->getDef();
+   if (addOp->code() != CPUI_INT_ADD) return 0;
+   int4 multSlot;
+-  PcodeOp *multOp;
++  PcodeOp *multOp = (PcodeOp *)0;
+   bool trunc = false;
+   for(multSlot = 0;multSlot < 2;++multSlot) {
+     Varnode *vn = addOp->getIn(multSlot);
+@@ -8557,7 +8557,7 @@ Varnode *RuleSignMod2nOpt2::checkMultiequalForm(PcodeOp *op,uintb npow)
+   if (op->numInput() != 2) return (Varnode *)0;
+   npow -= 1;		// 2^n - 1
+   int4 slot;
+-  Varnode *base;
++  Varnode *base = (Varnode *)0;
+   for(slot=0;slot<op->numInput();++slot) {
+     Varnode *addOut = op->getIn(slot);
+     if (!addOut->isWritten()) continue;
+-- 
+2.41.0
+
