@@ -1,0 +1,150 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Rubens Brandao <git@rubens.io>
+Date: Sun, 23 Jul 2023 14:56:06 -0300
+Subject: [PATCH] 5593: Detect exporting a constant integer that is too big
+
+---
+ .../slgh_compile/ConsistencyChecker.java      | 59 +++++++++++++++++++
+ .../slgh_compile/SleighCompile.java           |  9 +++
+ 2 files changed, 68 insertions(+)
+
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/slgh_compile/ConsistencyChecker.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/slgh_compile/ConsistencyChecker.java
+index 1ebf014e9..0d0a5181d 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/slgh_compile/ConsistencyChecker.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/slgh_compile/ConsistencyChecker.java
+@@ -34,9 +34,11 @@ class ConsistencyChecker {
+ 	private int writenoread;
+ 
+ 	private int largetemp;			// number of constructors using a temporary varnode larger than SleighBase.MAX_UNIQUE_SIZE
++	private int largeint;			// number of constructors that exports constant integers larger then the export size
+ 	private boolean printextwarning;
+ 	private boolean printdeadwarning;
+ 	private boolean printlargetempwarning;	// if true, warning about temporary varnodes larger than SleighBase.MAX_UNIQUE_SIZE 
++	private boolean printlargeintwarning;	// if true, warning about interger larger then the export size
+ 	private SleighCompile compiler;
+ 	private SubtableSymbol root_symbol;
+ 	private VectorSTL<SubtableSymbol> postorder = new VectorSTL<>();
+@@ -1191,6 +1193,32 @@ class ConsistencyChecker {
+ 		}
+ 	}
+ 
++	/**
++	 * Checks {@code ct} to see whether exports a constant integer larger than the export size.
++	 * @param ct constructor to check
++	 * @param ctpl is the specific p-code section
++	 */
++	private void checkLargeIntegers(Constructor ct, ConstructTpl ctpl) {
++		HandleTpl result = ctpl.getResult();
++		if (result != null && result.getSpace().isConstSpace() && result.getSize().getType() == const_type.real && result.getPtrOffset().getType() == const_type.real) {
++			long bytes = result.getSize().getReal();
++			long value = result.getPtrOffset().getReal();
++			long bytes_min;
++			if (value < 0) {
++				bytes_min = (Long.SIZE - Long.numberOfLeadingZeros(~value) + 2 + 7) / 8;
++			} else {
++				bytes_min = (Long.SIZE - Long.numberOfLeadingZeros(value) + 7) / 8;
++			}
++			if (bytes < bytes_min) {
++				largeint++;
++				if (printlargeintwarning) {
++					compiler.reportWarning(ct.location,
++							"Constructor export a constant of " + bytes + " bytes, but it's value require " + bytes_min + " to not be truncated.");
++				}
++			}
++		}
++	}
++
+ 	private void optimize(Constructor ct) {
+ 		OptimizeRecord currec;
+ 		MapSTL<Long, OptimizeRecord> recs = new ComparableMapSTL<>();
+@@ -1219,10 +1247,12 @@ class ConsistencyChecker {
+ 		writenoread = 0;
+ 		//number of constructors which reference a temporary varnode larger than SleighBase.MAX_UNIQUE_SIZE
+ 		largetemp = 0;
++		largeint = 0;
+ 		printextwarning = unnecessary;
+ 		printdeadwarning = warndead;
+ 		//whether to print information about constructors which reference large temporary varnodes
+ 		printlargetempwarning = warnlargetemp;
++		printlargeintwarning = true;
+ 	}
+ 
+ 	// Main entry point for size consistency check
+@@ -1271,6 +1301,31 @@ class ConsistencyChecker {
+ 		return testresult;
+ 	}
+ 
++	public void testLargeIntegers() {
++		for (int i = 0; i < postorder.size(); ++i) {
++			SubtableSymbol sym = postorder.get(i);
++			int numconstruct = sym.getNumConstructors();
++			Constructor ct;
++			for (int j = 0; j < numconstruct; ++j) {
++				ct = sym.getConstructor(j);
++				int numsections = ct.getNumSections();
++				for (int k = -1; k < numsections; ++k) {
++					ConstructTpl tpl;
++					if (k < 0) {
++						tpl = ct.getTempl();
++					}
++					else {
++						tpl = ct.getNamedTempl(k);
++					}
++					if (tpl == null) {
++						continue;
++					}
++					checkLargeIntegers(ct, tpl);
++				}
++			}
++		}
++	}
++
+ 	public void testLargeTemporary() {
+ 		for (int i = 0; i < postorder.size(); ++i) {
+ 			SubtableSymbol sym = postorder.get(i);
+@@ -1329,4 +1384,8 @@ class ConsistencyChecker {
+ 	public int getNumLargeTemporaries() {
+ 		return largetemp;
+ 	}
++
++	public int getNumLargeIntegers() {
++		return largeint;
++	}
+ }
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/slgh_compile/SleighCompile.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/slgh_compile/SleighCompile.java
+index b2078d632..ca8a36ed7 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/slgh_compile/SleighCompile.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/slgh_compile/SleighCompile.java
+@@ -252,6 +252,7 @@ public class SleighCompile extends SleighBase {
+ 	private boolean warnunusedfields;   // True if fields are defined but not used
+ 	private boolean lenientconflicterrors; // True if we ignore most pattern conflict errors
+ 	private boolean largetemporarywarning; // True if we warn about temporaries larger than SleighBase.MAX_UNIQUE_SIZE
++	private boolean largeintegerwarning; // True if we warn about integers larger than it's size
+ 	private boolean warnalllocalcollisions;	// True if local export collisions generate individual warnings
+ 	private boolean warnallnops;		// True if pcode NOPs generate individual warnings
+ 	private boolean failinsensitivedups;	// True if case insensitive register duplicates cause error
+@@ -546,6 +547,13 @@ public class SleighCompile extends SleighBase {
+ 			}
+ 			reportWarning(null, "Use -o switch to list each individually.");
+ 		}
++		checker.testLargeIntegers();
++		if ((!largeintegerwarning) && checker.getNumLargeIntegers() > 0) {
++			reportWarning(null,
++				checker.getNumLargeIntegers() +
++					" constructors export constant integers larger then the export size.");
++			reportWarning(null, "Use -o switch to list each individually.");
++		}
+ 	}
+ 
+ 	private static int findCollision(Map<Long, Integer> local2Operand, ArrayList<Long> locals,
+@@ -710,6 +718,7 @@ public class SleighCompile extends SleighBase {
+ 		warnunnecessarypcode = false;
+ 		lenientconflicterrors = true;
+ 		largetemporarywarning = false;
++		largeintegerwarning = true;
+ 		warnallnops = false;
+ 		failinsensitivedups = true;
+ 		root = null;
+-- 
+2.41.0
+
