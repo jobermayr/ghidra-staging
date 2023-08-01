@@ -1,0 +1,190 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: dan-hexarcana <dan@hexarcana.ch>
+Date: Tue, 1 Aug 2023 13:45:40 +0100
+Subject: [PATCH] 5622: Introduce -ignoreSymbolicLinks to analyzeHeadless
+
+- This allows for -recusive to be used in cases where infinite loops are created with symbolic links
+- For example /bin/X11
+- Note: this doesn't affect the intial folder or file if that happens to be a symbolic link
+---
+ .../topics/HeadlessAnalyzer/HeadlessAnalyzer.htm   |  1 +
+ .../ghidra/app/util/headless/AnalyzeHeadless.java  |  4 ++++
+ .../ghidra/app/util/headless/HeadlessAnalyzer.java |  9 +++++++--
+ .../ghidra/app/util/headless/HeadlessOptions.java  | 14 ++++++++++++++
+ .../Common/support/analyzeHeadlessREADME.html      | 10 ++++++++++
+ .../GhidraClass/Intermediate/HeadlessAnalyzer.html | 14 +++++++++++++-
+ 6 files changed, 49 insertions(+), 3 deletions(-)
+
+diff --git a/Ghidra/Features/Base/src/main/help/help/topics/HeadlessAnalyzer/HeadlessAnalyzer.htm b/Ghidra/Features/Base/src/main/help/help/topics/HeadlessAnalyzer/HeadlessAnalyzer.htm
+index a85bf40cf..26dbc90dd 100644
+--- a/Ghidra/Features/Base/src/main/help/help/topics/HeadlessAnalyzer/HeadlessAnalyzer.htm
++++ b/Ghidra/Features/Base/src/main/help/help/topics/HeadlessAnalyzer/HeadlessAnalyzer.htm
+@@ -51,6 +51,7 @@ The Headless Analyzer can be useful when performing repetitive tasks on a projec
+ 	<BR>&nbsp;&nbsp;&nbsp;&nbsp;[-log &lt;path to log file&gt;]
+ 	<BR>&nbsp;&nbsp;&nbsp;&nbsp;[-overwrite]
+ 	<BR>&nbsp;&nbsp;&nbsp;&nbsp;[-recursive]
++	<BR>&nbsp;&nbsp;&nbsp;&nbsp;[-ignoreSymbolicLinks]
+ 	<BR>&nbsp;&nbsp;&nbsp;&nbsp;[-readOnly]
+ 	<BR>&nbsp;&nbsp;&nbsp;&nbsp;[-deleteProject]
+ 	<BR>&nbsp;&nbsp;&nbsp;&nbsp;[-noanalysis]
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/headless/AnalyzeHeadless.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/headless/AnalyzeHeadless.java
+index 5b44ba640..ca81fc6a3 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/headless/AnalyzeHeadless.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/headless/AnalyzeHeadless.java
+@@ -300,6 +300,9 @@ public class AnalyzeHeadless implements GhidraLaunchable {
+ 			else if ("-recursive".equals(args[argi])) {
+ 				options.enableRecursiveProcessing(true);
+ 			}
++			else if ("-ignoreSymbolicLinks".equals(args[argi])) {
++				options.enableIgnoringSymbolicLinks(true);
++			}
+ 			else if ("-readOnly".equalsIgnoreCase(args[argi])) {
+ 				options.enableReadOnlyProcessing(true);
+ 			}
+@@ -422,6 +425,7 @@ public class AnalyzeHeadless implements GhidraLaunchable {
+ 		System.out.println("           [-log <path to log file>]");
+ 		System.out.println("           [-overwrite]");
+ 		System.out.println("           [-recursive]");
++		System.out.println("           [-ignoreSymbolicLinks]");
+ 		System.out.println("           [-readOnly]");
+ 		System.out.println("           [-deleteProject]");
+ 		System.out.println("           [-noanalysis]");
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/headless/HeadlessAnalyzer.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/headless/HeadlessAnalyzer.java
+index 11cc40186..b0c46816d 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/headless/HeadlessAnalyzer.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/headless/HeadlessAnalyzer.java
+@@ -17,6 +17,7 @@ package ghidra.app.util.headless;
+ 
+ import java.io.*;
+ import java.net.*;
++import java.nio.file.*;
+ import java.util.*;
+ import java.util.regex.Pattern;
+ 
+@@ -1655,11 +1656,14 @@ public class HeadlessAnalyzer {
+ 	private void processWithImport(File file, String folderPath, boolean isFirstTime)
+ 			throws IOException {
+ 
+-		boolean importSucceeded;
++		if (!isFirstTime && options.ignoreSymbolicLinks && Files.isSymbolicLink(file.toPath())) {
++			Msg.warn(this, "Ignoring directory symbolic link '" + file.getAbsolutePath() + "'." );
++			return;
++		}
+ 
+ 		if (file.isFile()) {
+ 
+-			importSucceeded = processFileWithImport(file, folderPath);
++			boolean importSucceeded = processFileWithImport(file, folderPath);
+ 
+ 			// Check to see if there are transient programs lying around due
+ 			// to programs not being released during Importing
+@@ -1700,6 +1704,7 @@ public class HeadlessAnalyzer {
+ 						Msg.warn(this, "Ignoring file '" + name + "'.");
+ 						continue;
+ 					}
++
+ 					file = new File(dirFile, name);
+ 
+ 					// Even a directory name has to have valid characters --
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/headless/HeadlessOptions.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/headless/HeadlessOptions.java
+index 2526ba033..384dd4eaf 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/headless/HeadlessOptions.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/headless/HeadlessOptions.java
+@@ -63,6 +63,9 @@ public class HeadlessOptions {
+ 	// -recursive
+ 	boolean recursive;
+ 
++	// -ignoreSymbolicLinks
++	boolean ignoreSymbolicLinks;
++
+ 	// -readOnly
+ 	boolean readOnly;
+ 
+@@ -128,6 +131,7 @@ public class HeadlessOptions {
+ 		propertiesFilePaths = new ArrayList<>();
+ 		overwrite = false;
+ 		recursive = false;
++		ignoreSymbolicLinks = false;
+ 		readOnly = false;
+ 		deleteProject = false;
+ 		analyze = true;
+@@ -329,6 +333,16 @@ public class HeadlessOptions {
+ 		this.recursive = enabled;
+ 	}
+ 
++	/**
++	 * This method can be used to enable ignoring of symbolic links during
++	 * <code>-import</code> or <code>-process</code> modes.
++	 *
++	 * @param enabled  if true, enables ignoring of symbolic links
++	 */
++	public void enableIgnoringSymbolicLinks(boolean enabled) {
++		this.ignoreSymbolicLinks = enabled;
++	}
++
+ 	/**
+ 	 * When readOnly processing is enabled, any changes made by script or analyzers
+ 	 * are discarded when the Headless Analyzer exits.  When used with import mode,
+diff --git a/Ghidra/RuntimeScripts/Common/support/analyzeHeadlessREADME.html b/Ghidra/RuntimeScripts/Common/support/analyzeHeadlessREADME.html
+index e26de5388..cddde1501 100644
+--- a/Ghidra/RuntimeScripts/Common/support/analyzeHeadlessREADME.html
++++ b/Ghidra/RuntimeScripts/Common/support/analyzeHeadlessREADME.html
+@@ -118,6 +118,7 @@ The Headless Analyzer uses the command-line parameters discussed below. See <a h
+         [<a href="#log">-log &lt;path to log file&gt;</a>]
+         [<a href="#overwrite">-overwrite</a>]
+         [<a href="#recursive">-recursive</a>]
++        [<a href="#ignoreSymbolicLinks">-ignoreSymbolicLinks</a>]
+         [<a href="#readOnly">-readOnly</a>]
+         [<a href="#deleteProject">-deleteProject</a>]
+         [<a href="#noanalysis">-noanalysis</a>]
+@@ -403,6 +404,15 @@ The Headless Analyzer uses the command-line parameters discussed below. See <a h
+ 
+     <br><br>
+ 
++    <LI>
++      <a name="ignoreSymbolicLinks"><typewriter>-ignoreSymbolicLinks</typewriter></a><br>
++      If present, prevents descent into directories and project sub-folders when a directory/
++      folder is a symbolic link. This helps avoid infinite recursion e.g <typewriter>/bin/X11/X11</typewriter>.
++      Does not affect recursion if the initial directory is a symbolic link.
++    </LI>
++
++    <br><br>
++
+     <LI>
+     <a name="readOnly"><typewriter>-readOnly</typewriter></a><br>
+     If present in <typewriter>-import</typewriter> mode, imported files will NOT be saved to the 
+diff --git a/GhidraDocs/GhidraClass/Intermediate/HeadlessAnalyzer.html b/GhidraDocs/GhidraClass/Intermediate/HeadlessAnalyzer.html
+index 0c7eee8d3..d7273a27c 100644
+--- a/GhidraDocs/GhidraClass/Intermediate/HeadlessAnalyzer.html
++++ b/GhidraDocs/GhidraClass/Intermediate/HeadlessAnalyzer.html
+@@ -34,7 +34,7 @@
+        [-scriptPath &quot;&lt;path1&gt;[;&lt;path2&gt;...]&quot;]
+        [-propertiesPath &quot;&lt;path1&gt;[;&lt;path2&gt;...]&quot;]
+        [-log &lt;path to log file&gt;] [-scriptlog &lt;path to script log file&gt;]
+-       [-overwrite] [-recursive] [-readOnly] [-deleteProject]
++       [-overwrite] [-recursive] [-ignoreSymbolicLinks] [-readOnly] [-deleteProject]
+        [-noanalysis]
+        [-processor &lt;languageID&gt;] [-cspec &lt;compilerSpecID&gt;]
+        [-analysisTimeoutPerFile &lt;timeout in seconds&gt;]
+@@ -274,6 +274,18 @@
+ </div>
+ </section>
+ 
++<section>
++  <header><span style="color:#FFD700">-ignoreSymbolicLinks</span></header>
++  <br><br>
++  <ul>
++    <li>If present, prevents descent into directories and project sub-folders when a directory/folder is a symbolic link.</li>
++    <li>This helps avoid infinite recursion e.g /bin/X11/X11.</li>
++  </ul>
++  <div role="note">
++    <p>Does not affect recursion if the initial directory is a symbolic link.</p>
++  </div>
++</section>
++
+ <section>
+ <header><span style="color:#FFD700">-readOnly</span></header>
+ <br><br>
+-- 
+2.41.0
+
