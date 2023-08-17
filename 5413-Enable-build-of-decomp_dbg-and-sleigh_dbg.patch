@@ -7,18 +7,26 @@ Building decomp_dbg and sleigh_dbg can now easily enabled via 'gradle -Pdebug' s
 
 Fixes: #5296
 ---
- .../Features/Decompiler/buildNatives.gradle   | 377 ++++++++++--------
- 1 file changed, 214 insertions(+), 163 deletions(-)
+ .../Features/Decompiler/buildNatives.gradle   | 356 ++++++++++--------
+ 1 file changed, 205 insertions(+), 151 deletions(-)
 
 diff --git a/Ghidra/Features/Decompiler/buildNatives.gradle b/Ghidra/Features/Decompiler/buildNatives.gradle
-index ce4424ece..0fc6103c4 100644
+index ce4424ece..2c3ddc871 100644
 --- a/Ghidra/Features/Decompiler/buildNatives.gradle
 +++ b/Ghidra/Features/Decompiler/buildNatives.gradle
-@@ -22,21 +22,127 @@ if (findProject(':Generic') == null) {
+@@ -22,21 +22,126 @@ if (findProject(':Generic') == null) {
  	apply from: "../../../GPL/nativeBuildProperties.gradle"
  }
  
-+def common_files = [
++// Define the source files that are compiled and linked to become the decompiler.
++// The decompiler source is a bit weird in that all the cpp and headers all live in
++// the same directory with other files that are not used by the decompiler.
++// That is why we have to list every cpp file that makes up the decomplier.
++// NOTE: The bison/flex generated files are assumed to be up-to-date.
++//       The task `generateParsers` should be executed if needed.
++// builtBy lexSleigh
++
++def core_files = [
 +	"address.cc",
 +	"float.cc",
 +	"globalcontext.cc",
@@ -127,17 +135,13 @@ index ce4424ece..0fc6103c4 100644
   */
 -model {
  
+-	// Define the source files that are compiled and linked to become the decompiler.
+-	// The decompiler source is a bit weird in that all the cpp and headers all live in
+-	// the same directory with other files that are not used by the decompiler.
+-	// That is why we have to list every cpp file that makes up the decomplier.
 +model {
- 	// Define the source files that are compiled and linked to become the decompiler.
- 	// The decompiler source is a bit weird in that all the cpp and headers all live in
- 	// the same directory with other files that are not used by the decompiler.
- 	// That is why we have to list every cpp file that makes up the decomplier.
-+	// NOTE: The bison/flex generated files are assumed to be up-to-date.
-+	//       The task `generateParsers` should be executed if needed.
-+	// builtBy lexSleigh
-+
  	components {
- 
+-
  		decompile(NativeExecutableSpec) {
 -
  			baseName "decompile"
@@ -145,7 +149,7 @@ index ce4424ece..0fc6103c4 100644
  			// these tell gradle for which platforms to build a decompiler executable.
  			targetPlatform "win_x86_64"
  			targetPlatform "linux_x86_64"
-@@ -45,98 +151,21 @@ model {
+@@ -45,98 +150,21 @@ model {
  			targetPlatform "mac_arm_64"
  			sources {
  				cpp {
@@ -238,7 +242,7 @@ index ce4424ece..0fc6103c4 100644
 -		            }
 +					source {
 +						srcDir "src/decompile/cpp"
-+						include common_files
++						include core_files
 +						include decompiler_files
 +					}
  					exportedHeaders {
@@ -256,7 +260,7 @@ index ce4424ece..0fc6103c4 100644
  		} // end decompile
  
  		sleigh(NativeExecutableSpec) {
-@@ -147,91 +176,113 @@ model {
+@@ -147,69 +175,106 @@ model {
  			targetPlatform "mac_arm_64"
  			sources {
  				cpp {
@@ -291,7 +295,7 @@ index ce4424ece..0fc6103c4 100644
 -						include "pcodeparse.cc"
 -						include "slghparse.cc"
 -						include "slghscan.cc"
-+						include common_files
++						include core_files
 +						include sleigh_files
  					}
  					exportedHeaders {
@@ -321,7 +325,7 @@ index ce4424ece..0fc6103c4 100644
 +					cpp {
 +						source {
 +							srcDir "src/decompile/cpp"
-+							include common_files
++							include core_files
 +							include decompiler_files
 +							include debug_files
 +						}
@@ -339,21 +343,10 @@ index ce4424ece..0fc6103c4 100644
 +						b.cppCompiler.args "/FS"
 +						b.linker.args "/DEBUG"
 +					}
++					b.cppCompiler.define "CPUI_DEBUG"
 +				}
 +			} // end decomp_dbg
- 
--	binaries {
--		all{ b ->
--			if (b.toolChain in Gcc) {
--				b.cppCompiler.args "-std=c++11"
--				b.cppCompiler.args "-Wall"
--				b.cppCompiler.args "-O2"			// for DEBUG, comment this line out
--				// b.cppCompiler.args "-g"			// for DEBUG, uncomment	this line
--				b.cppCompiler.args "-Wno-sign-compare"
--				if (b.targetPlatform.operatingSystem.linux) {
--//					b.linker.args "-static"
--					b.cppCompiler.define "LINUX"
--					b.cppCompiler.define "_LINUX"
++
 +			sleigh_dbg(NativeExecutableSpec) {
 +				targetPlatform "win_x86_64"
 +				targetPlatform "linux_x86_64"
@@ -364,31 +357,14 @@ index ce4424ece..0fc6103c4 100644
 +					cpp {
 +						source {
 +							srcDir "src/decompile/cpp"
-+							include common_files
++							include core_files
 +							include sleigh_files
 +						}
 +						exportedHeaders {
 +							srcDir "src/decompile/cpp"
 +						}
 +					}
- 				}
--			}
--		 	else if (b.toolChain in VisualCpp) {
--				b.cppCompiler.args "/EHsc"
--				b.cppCompiler.define "_SECURE_SCL=0"
--				b.cppCompiler.define "_HAS_ITERATOR_DEBUGGING=0"
--				b.cppCompiler.define "_HAS_STD_BYTE=0"  // msvc has a byte typedef that conflicts with c++17 std::byte
--				// b.cppCompiler.args "/Zi"		// for DEBUG, uncomment this line
--				// b.cppCompiler.args "/FS"		// for DEBUG, uncomment this line
--				// b.linker.args "/DEBUG"		// for DEBUG, uncomment this line
--				if (b.targetPlatform.operatingSystem.windows) {
--					b.cppCompiler.define "WINDOWS"
--					b.cppCompiler.define "_WINDOWS"
--					b.cppCompiler.define "WIN32"
--					b.cppCompiler.define "_WIN32"
--					if (b.targetPlatform.name == "win_x86_64") {
--						b.cppCompiler.define "WIN64"
--						b.cppCompiler.define "_WIN64"
++				}
 +				binaries.all { b ->
 +					if (b.toolChain in Gcc || b.toolChain in Clang) {
 +						b.cppCompiler.args "-g"
@@ -397,20 +373,44 @@ index ce4424ece..0fc6103c4 100644
 +						b.cppCompiler.args "/Zi"
 +						b.cppCompiler.args "/FS"
 +						b.linker.args "/DEBUG"
- 					}
- 				}
++					}
++					b.cppCompiler.define "YYDEBUG"
++				}
 +			} // end sleigh_dbg
 +		} // end debug
 +	} // end components
-+
-+	binaries { all { b ->
-+		if (b.toolChain in Gcc || b.toolChain in Clang) {
-+			b.cppCompiler.args "-std=c++11"
-+			b.cppCompiler.args "-Wall"
-+			b.cppCompiler.args "-Wno-sign-compare"
-+			if (b.targetPlatform.operatingSystem.linux) {
-+				b.cppCompiler.define "LINUX"
-+				b.cppCompiler.define "_LINUX"
+ 
+ 	binaries {
+-		all{ b ->
+-			if (b.toolChain in Gcc) {
++		all { b ->
++			if (b.toolChain in Gcc || b.toolChain in Clang) {
+ 				b.cppCompiler.args "-std=c++11"
+ 				b.cppCompiler.args "-Wall"
+-				b.cppCompiler.args "-O2"			// for DEBUG, comment this line out
+-				// b.cppCompiler.args "-g"			// for DEBUG, uncomment	this line
+ 				b.cppCompiler.args "-Wno-sign-compare"
+ 				if (b.targetPlatform.operatingSystem.linux) {
+-//					b.linker.args "-static"
+ 					b.cppCompiler.define "LINUX"
+ 					b.cppCompiler.define "_LINUX"
+ 				}
+ 			}
+-		 	else if (b.toolChain in VisualCpp) {
++			else if (b.toolChain in VisualCpp) {
+ 				b.cppCompiler.args "/EHsc"
+ 				b.cppCompiler.define "_SECURE_SCL=0"
+ 				b.cppCompiler.define "_HAS_ITERATOR_DEBUGGING=0"
+ 				b.cppCompiler.define "_HAS_STD_BYTE=0"  // msvc has a byte typedef that conflicts with c++17 std::byte
+-				// b.cppCompiler.args "/Zi"		// for DEBUG, uncomment this line
+-				// b.cppCompiler.args "/FS"		// for DEBUG, uncomment this line
+-				// b.linker.args "/DEBUG"		// for DEBUG, uncomment this line
+ 				if (b.targetPlatform.operatingSystem.windows) {
+ 					b.cppCompiler.define "WINDOWS"
+ 					b.cppCompiler.define "_WINDOWS"
+@@ -221,17 +286,6 @@ model {
+ 					}
+ 				}
  			}
 -			else if (b.toolChain in Clang) {
 -				b.cppCompiler.args "-std=c++11"
@@ -421,25 +421,12 @@ index ce4424ece..0fc6103c4 100644
 -				b.cppCompiler.args "-w"
 -				if (b.targetPlatform.operatingSystem.linux) {
 -//					b.linker.args "-static"
-+		}
-+		else if (b.toolChain in VisualCpp) {
-+			b.cppCompiler.args "/EHsc"
-+			b.cppCompiler.define "_SECURE_SCL=0"
-+			b.cppCompiler.define "_HAS_ITERATOR_DEBUGGING=0"
-+			b.cppCompiler.define "_HAS_STD_BYTE=0"  // msvc has a byte typedef that conflicts with c++17 std::byte
-+			if (b.targetPlatform.operatingSystem.windows) {
-+				b.cppCompiler.define "WINDOWS"
-+				b.cppCompiler.define "_WINDOWS"
-+				b.cppCompiler.define "WIN32"
-+				b.cppCompiler.define "_WIN32"
-+				if (b.targetPlatform.name == "win_x86_64") {
-+					b.cppCompiler.define "WIN64"
-+					b.cppCompiler.define "_WIN64"
- 				}
- 			}
- 		}
+-				}
+-			}
+-		}
 -	}
-+	} } // end binaries { all
++		} // end all
++	} // end binaries
  } // end model
 -- 
 2.41.0
