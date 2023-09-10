@@ -18,14 +18,16 @@ Subject: [PATCH] 1409: Implement decimal format modifier in Sleigh files.
  .../ghidra/sleigh/grammar/SleighCompiler.g    |    6 +-
  .../antlr/ghidra/sleigh/grammar/SleighEcho.g  |    2 +
  .../ghidra/sleigh/grammar/SleighParser.g      |   20 +-
+ .../sleigh/expression/ContextField.java       |    6 +
  .../sleigh/expression/TokenField.java         |   12 +
  .../sleigh/symbol/OperandSymbol.java          |   13 +-
  .../pcodeCPort/sleighbase/SleighBase.java     |    2 +-
  .../pcodeCPort/slgh_compile/FieldQuality.java |    6 +-
- .../slgh_compile/SleighCompile.java           |    2 +-
+ .../slgh_compile/SleighCompile.java           |    4 +-
+ .../slghpatexpress/ContextField.java          |   13 +-
  .../pcodeCPort/slghpatexpress/TokenField.java |    7 +-
  GhidraDocs/languages/html/sleigh_tokens.html  |   15 +-
- 21 files changed, 1921 insertions(+), 1821 deletions(-)
+ 23 files changed, 1939 insertions(+), 1824 deletions(-)
 
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/sleighbase.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/sleighbase.cc
 index 080de2b0b..791fc59c1 100644
@@ -5559,6 +5561,37 @@ index 6beda0844..e2fc25d47 100644
  	|	lc=KEY_UNIMPL		-> ^(OP_IDENTIFIER[$lc, "KEY_UNIMPL"] KEY_UNIMPL)
  	|	lc=KEY_VALUES		-> ^(OP_IDENTIFIER[$lc, "KEY_VALUES"] KEY_VALUES)
  	|	lc=KEY_VARIABLES	-> ^(OP_IDENTIFIER[$lc, "KEY_VARIABLES"] KEY_VARIABLES)
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/processors/sleigh/expression/ContextField.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/processors/sleigh/expression/ContextField.java
+index 3b34aa8ea..f86abdded 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/processors/sleigh/expression/ContextField.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/processors/sleigh/expression/ContextField.java
+@@ -38,6 +38,7 @@ public class ContextField extends PatternValue {
+ 	private int startbyte, endbyte;
+ 	private int shift;
+ 	private boolean signbit;
++	private int base;
+ 
+ 	@Override
+ 	public int hashCode() {
+@@ -81,6 +82,10 @@ public class ContextField extends PatternValue {
+ 		return signbit;
+ 	}
+ 
++	public int getBase() {
++		return base;
++	}
++
+ 	/* (non-Javadoc)
+ 	 * @see ghidra.app.plugin.processors.sleigh.expression.PatternValue#minValue()
+ 	 */
+@@ -126,6 +131,7 @@ public class ContextField extends PatternValue {
+ 		startbyte = SpecXmlUtils.decodeInt(el.getAttribute("startbyte"));
+ 		endbyte = SpecXmlUtils.decodeInt(el.getAttribute("endbyte"));
+ 		shift = SpecXmlUtils.decodeInt(el.getAttribute("shift"));
++		base = SpecXmlUtils.decodeInt(el.getAttribute("base"));
+ 		parser.end(el);
+ 	}
+ 
 diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/processors/sleigh/expression/TokenField.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/processors/sleigh/expression/TokenField.java
 index ecd259e13..043a68460 100644
 --- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/processors/sleigh/expression/TokenField.java
@@ -5688,9 +5721,18 @@ index 17a81ed18..8ceafdfa1 100644
      }
  }
 diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/slgh_compile/SleighCompile.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/slgh_compile/SleighCompile.java
-index 4a8e710b3..0803acc54 100644
+index 4a8e710b3..323f2b269 100644
 --- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/slgh_compile/SleighCompile.java
 +++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/slgh_compile/SleighCompile.java
+@@ -438,7 +438,7 @@ public class SleighCompile extends SleighBase {
+ 				qual = contexttable.get(i + start).qual;
+ 				int l = qual.low - min + low;
+ 				int h = numbits - 1 - (max - qual.high);
+-				ContextField field = new ContextField(qual.location, qual.signext, l, h);
++				ContextField field = new ContextField(qual.location, qual.signext, l, h, qual.base);
+ 				int id = addSymbol(new ContextSymbol(qual.location, qual.name, field, sym, qual.low,
+ 					qual.high, qual.flow));
+ 				if (firstContextField == null) {
 @@ -933,7 +933,7 @@ public class SleighCompile extends SleighBase {
  			reportError(location, "Field '" + qual.name + "' high must be less than token size");
  		}
@@ -5700,6 +5742,70 @@ index 4a8e710b3..0803acc54 100644
  		addSymbol(new ValueSymbol(location, qual.name, field));
  	}
  
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/slghpatexpress/ContextField.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/slghpatexpress/ContextField.java
+index 6f9f77b45..b00024f8a 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/slghpatexpress/ContextField.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/slghpatexpress/ContextField.java
+@@ -31,6 +31,7 @@ public class ContextField extends PatternValue {
+ 	private int startbyte, endbyte;
+ 	private int shift;
+ 	private boolean signbit;
++	private int base;
+ 
+ 	public ContextField(Location location) {
+ 		super(location);
+@@ -48,6 +49,10 @@ public class ContextField extends PatternValue {
+ 		return signbit;
+ 	}
+ 
++	public int getBase() {
++		return base;
++	}
++
+ 	@Override
+ 	public TokenPattern genMinPattern(VectorSTL<TokenPattern> ops) {
+ 		return new TokenPattern(location);
+@@ -66,7 +71,7 @@ public class ContextField extends PatternValue {
+ 		return res;
+ 	}
+ 
+-	public ContextField(Location location, boolean s, int sbit, int ebit)
++	public ContextField(Location location, boolean s, int sbit, int ebit, int fbase)
+ 
+ 	{
+ 		super(location);
+@@ -76,12 +81,13 @@ public class ContextField extends PatternValue {
+ 		startbyte = startbit / 8;
+ 		endbyte = endbit / 8;
+ 		shift = 7 - (endbit % 8);
++		base = fbase;
+ 	}
+ 
+ 	@Override
+ 	public String toString() {
+ 		return "cf:{" + startbit + "," + endbit + "," + startbyte + "," + endbyte + "," + shift +
+-			"," + signbit + "}";
++			"," + signbit + "," + base + "}";
+ 	}
+ 
+ 	@Override
+@@ -110,6 +116,8 @@ public class ContextField extends PatternValue {
+ 		s.append(" endbyte=\"").print(endbyte);
+ 		s.append("\"");
+ 		s.append(" shift=\"").print(shift);
++		s.append("\"");
++		s.append(" base=\"").print(base);
+ 		s.append("\"/>\n");
+ 	}
+ 
+@@ -121,6 +129,7 @@ public class ContextField extends PatternValue {
+ 		startbyte = XmlUtils.decodeUnknownInt(el.getAttributeValue("startbyte"));
+ 		endbyte = XmlUtils.decodeUnknownInt(el.getAttributeValue("endbyte"));
+ 		shift = XmlUtils.decodeUnknownInt(el.getAttributeValue("shift"));
++		base = XmlUtils.decodeUnknownInt(el.getAttributeValue("base"));
+ 	}
+ 
+ }
 diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/slghpatexpress/TokenField.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/slghpatexpress/TokenField.java
 index ac3f1ab79..ef93d334a 100644
 --- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/slghpatexpress/TokenField.java
