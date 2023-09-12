@@ -3,6 +3,21 @@ From: Colin Bourassa <colin.bourassa@gmail.com>
 Date: Fri, 17 Feb 2023 11:48:14 -0500
 Subject: [PATCH] 5004: Feature: UNIX A.out Loader
 
+Bugfixes for UNIX A.out Loader (#1)
+* fix package declarations
+
+* don't special-case defined symbols with zero value
+
+a.out object files can define symbols at the very start of a section.
+
+* mark undefined symbols with non-zero value as bss candidates
+
+* use FSRL to get filename
+
+This is required when invoking loaders on subsets of files, such as
+bulk-importing object files from static archives.
+
+* don't use filename in memory block names
 ---
  .../bin/format/unixaout/UnixAoutHeader.java   | 525 +++++++++++++
  .../format/unixaout/UnixAoutMachineType.java  |  79 ++
@@ -18,7 +33,7 @@ Subject: [PATCH] 5004: Feature: UNIX A.out Loader
 
 diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/unixaout/UnixAoutHeader.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/unixaout/UnixAoutHeader.java
 new file mode 100644
-index 000000000..7a5e0a887
+index 000000000..46e5412b8
 --- /dev/null
 +++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/unixaout/UnixAoutHeader.java
 @@ -0,0 +1,525 @@
@@ -38,7 +53,7 @@ index 000000000..7a5e0a887
 + * limitations under the License.
 + */
 +
-+package ghidra.app.util.bin.format.aout;
++package ghidra.app.util.bin.format.unixaout;
 +
 +import java.io.IOException;
 +
@@ -47,7 +62,7 @@ index 000000000..7a5e0a887
 +
 +public class UnixAoutHeader {
 +
-+    enum ExecutableType {
++    public enum ExecutableType {
 +        OMAGIC, NMAGIC, ZMAGIC, QMAGIC, CMAGIC, UNKNOWN
 +    }
 +
@@ -549,7 +564,7 @@ index 000000000..7a5e0a887
 +}
 diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/unixaout/UnixAoutMachineType.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/unixaout/UnixAoutMachineType.java
 new file mode 100644
-index 000000000..389ed6195
+index 000000000..5de54d7ea
 --- /dev/null
 +++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/unixaout/UnixAoutMachineType.java
 @@ -0,0 +1,79 @@
@@ -569,7 +584,7 @@ index 000000000..389ed6195
 + * limitations under the License.
 + */
 +
-+package ghidra.app.util.bin.format.aout;
++package ghidra.app.util.bin.format.unixaout;
 +
 +public class UnixAoutMachineType {
 +
@@ -634,7 +649,7 @@ index 000000000..389ed6195
 +}
 diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/unixaout/UnixAoutRelocationTableEntry.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/unixaout/UnixAoutRelocationTableEntry.java
 new file mode 100644
-index 000000000..44ffd538e
+index 000000000..5df9b6eb9
 --- /dev/null
 +++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/unixaout/UnixAoutRelocationTableEntry.java
 @@ -0,0 +1,64 @@
@@ -654,7 +669,7 @@ index 000000000..44ffd538e
 + * limitations under the License.
 + */
 +
-+package ghidra.app.util.bin.format.aout;
++package ghidra.app.util.bin.format.unixaout;
 +
 +/**
 + * Represents the content of a single entry in the relocation table format used
@@ -704,7 +719,7 @@ index 000000000..44ffd538e
 +}
 diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/unixaout/UnixAoutSymbolTableEntry.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/unixaout/UnixAoutSymbolTableEntry.java
 new file mode 100644
-index 000000000..856ee1455
+index 000000000..587a853ee
 --- /dev/null
 +++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/unixaout/UnixAoutSymbolTableEntry.java
 @@ -0,0 +1,63 @@
@@ -724,7 +739,7 @@ index 000000000..856ee1455
 + * limitations under the License.
 + */
 +
-+package ghidra.app.util.bin.format.aout;
++package ghidra.app.util.bin.format.unixaout;
 +
 +/**
 + * Represents the content of a single entry in the symbol table format used by
@@ -732,7 +747,7 @@ index 000000000..856ee1455
 + */
 +public class UnixAoutSymbolTableEntry {
 +
-+    enum SymbolType { N_UNDF, N_ABS, N_TEXT, N_DATA, N_BSS, N_FN, N_EXT, UNKNOWN }
++    public enum SymbolType { N_UNDF, N_ABS, N_TEXT, N_DATA, N_BSS, N_FN, N_EXT, UNKNOWN }
 +
 +    public long nameStringOffset;
 +    public String name;
@@ -773,7 +788,7 @@ index 000000000..856ee1455
 +}
 diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/opinion/UnixAoutLoader.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/opinion/UnixAoutLoader.java
 new file mode 100644
-index 000000000..6f2d1340c
+index 000000000..cdfd7cc01
 --- /dev/null
 +++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/opinion/UnixAoutLoader.java
 @@ -0,0 +1,699 @@
@@ -792,7 +807,7 @@ index 000000000..6f2d1340c
 + * See the License for the specific language governing permissions and
 + * limitations under the License.
 + */
-+package ghidra.app.util.bin.format.aout;
++package ghidra.app.util.opinion;
 +
 +import java.io.IOException;
 +import java.io.InputStream;
@@ -802,13 +817,13 @@ index 000000000..6f2d1340c
 +import ghidra.app.util.OptionException;
 +import ghidra.app.util.bin.BinaryReader;
 +import ghidra.app.util.bin.ByteProvider;
-+import ghidra.app.util.bin.format.aout.UnixAoutHeader.ExecutableType;
++import ghidra.app.util.bin.format.unixaout.UnixAoutHeader;
++import ghidra.app.util.bin.format.unixaout.UnixAoutHeader.ExecutableType;
++import ghidra.app.util.bin.format.unixaout.UnixAoutRelocationTableEntry;
++import ghidra.app.util.bin.format.unixaout.UnixAoutSymbolTableEntry;
 +import ghidra.app.util.importer.MessageLog;
-+import ghidra.app.util.opinion.AbstractProgramWrapperLoader;
-+import ghidra.app.util.opinion.Loader;
-+import ghidra.app.util.opinion.LoadSpec;
-+import ghidra.framework.store.LockException;
 +import ghidra.framework.model.DomainObject;
++import ghidra.framework.store.LockException;
 +import ghidra.program.flatapi.FlatProgramAPI;
 +import ghidra.program.model.address.Address;
 +import ghidra.program.model.address.AddressFactory;
@@ -993,7 +1008,7 @@ index 000000000..6f2d1340c
 +            try {
 +                InputStream stream = provider.getInputStream(fileOffset);
 +                this.textBlock = this.program.getMemory().createInitializedBlock(
-+					this.filename + ".text", address, stream, size, monitor, this.isOverlay);
++                        ".text", address, stream, size, monitor, this.isOverlay);
 +                this.textBlock.setRead(true);
 +                this.textBlock.setWrite(false);
 +                this.textBlock.setExecute(true);
@@ -1022,7 +1037,7 @@ index 000000000..6f2d1340c
 +            try {
 +                InputStream stream = provider.getInputStream(fileOffset);
 +                this.dataBlock = program.getMemory().createInitializedBlock(
-+                                     this.filename + ".data", address, stream, size, monitor, this.isOverlay);
++                        ".data", address, stream, size, monitor, this.isOverlay);
 +                this.dataBlock.setRead(true);
 +                this.dataBlock.setWrite(true);
 +                this.dataBlock.setExecute(false);
@@ -1070,7 +1085,7 @@ index 000000000..6f2d1340c
 +                this.program.getAddressFactory().getDefaultAddressSpace().getAddress(bssAddrVal);
 +            try {
 +                this.bssBlock = this.program.getMemory().createUninitializedBlock(
-+                    this.filename + ".bss", bssAddr, totalBssSize, this.isOverlay);
++                        ".bss", bssAddr, totalBssSize, this.isOverlay);
 +                this.bssAddrSpace = bssBlock.getStart().getAddressSpace();
 +                this.bssBlock.setRead(true);
 +                this.bssBlock.setWrite(true);
@@ -1122,30 +1137,30 @@ index 000000000..6f2d1340c
 +        for (Integer i = 0; i < this.symTab.size(); i++) {
 +            UnixAoutSymbolTableEntry symTabEntry = this.symTab.elementAt(i);
 +            try {
-+                if (symTabEntry.value != 0) {
-+                    if (symTabEntry.type == UnixAoutSymbolTableEntry.SymbolType.N_TEXT) {
-+                        if (symTabEntry.isExt) {
-+                            // Save the entry point to this function in a list. Disassembly should
-+							// wait until after we've processed the relocation tables.
-+                            Address funcAddr = this.textAddrSpace.getAddress(symTabEntry.value);
-+                            this.localFunctions.put(funcAddr, symTabEntry.name);
-+                        }
-+                    } else if (symTabEntry.type == UnixAoutSymbolTableEntry.SymbolType.N_DATA) {
-+                        this.api.createLabel(this.dataAddrSpace.getAddress(symTabEntry.value),
-+							symTabEntry.name, this.namespace, true, SourceType.IMPORTED);
++                if (symTabEntry.type == UnixAoutSymbolTableEntry.SymbolType.N_TEXT) {
++                    if (symTabEntry.isExt) {
++                        // Save the entry point to this function in a list. Disassembly should
++                        // wait until after we've processed the relocation tables.
++                        Address funcAddr = this.textAddrSpace.getAddress(symTabEntry.value);
++                        this.localFunctions.put(funcAddr, symTabEntry.name);
++                    }
++                } else if (symTabEntry.type == UnixAoutSymbolTableEntry.SymbolType.N_DATA) {
++                    this.api.createLabel(this.dataAddrSpace.getAddress(symTabEntry.value),
++                        symTabEntry.name, this.namespace, true, SourceType.IMPORTED);
 +
-+                    } else if (symTabEntry.type == UnixAoutSymbolTableEntry.SymbolType.N_BSS) {
-+                        // Save the symbols that are explicitly identified as being in .bss
-+                        // to a list so that they can be labeled later (after we actually
-+                        // create the .bss block, which must wait until after we total all
-+                        // the space used by N_UNDF symbols; see below.)
-+                        this.bssSymbols.put(symTabEntry.name, symTabEntry.value);
++                } else if (symTabEntry.type == UnixAoutSymbolTableEntry.SymbolType.N_BSS) {
++                    // Save the symbols that are explicitly identified as being in .bss
++                    // to a list so that they can be labeled later (after we actually
++                    // create the .bss block, which must wait until after we total all
++                    // the space used by N_UNDF symbols; see below.)
++                    this.bssSymbols.put(symTabEntry.name, symTabEntry.value);
 +
-+                    } else if (symTabEntry.type == UnixAoutSymbolTableEntry.SymbolType.N_UNDF) {
-+                        // This is a special case given by the A.out spec: if the linker cannot find
-+                        // this symbol in any of the other binary files, then the fact that it is
-+                        // marked as N_UNDF but has a non-zero value means that its value should be
-+                        // interpreted as a size, and the linker should reserve space in .bss for it.
++                } else if (symTabEntry.type == UnixAoutSymbolTableEntry.SymbolType.N_UNDF) {
++                    // This is a special case given by the A.out spec: if the linker cannot find
++                    // this symbol in any of the other binary files, then the fact that it is
++                    // marked as N_UNDF but has a non-zero value means that its value should be
++                    // interpreted as a size, and the linker should reserve space in .bss for it.
++                    if (symTabEntry.value > 0) {
 +                        this.possibleBssSymbols.put(symTabEntry.name, symTabEntry.value);
 +                    }
 +                }
@@ -1333,7 +1348,7 @@ index 000000000..6f2d1340c
 +        this.log = log;
 +        this.api = new FlatProgramAPI(program, monitor);
 +        this.header = new UnixAoutHeader(provider, !this.bigEndian);
-+        this.filename = provider.getFile().getName();
++        this.filename = provider.getFSRL().getName();
 +        this.isOverlay = (header.getExecutableType() == ExecutableType.OMAGIC);
 +
 +        try {
