@@ -5,11 +5,11 @@ Subject: [PATCH] 5788: Simplify {CMPXCHG,DEC,INC,XADD}.LOCK in Decompiler
 
 ---
  Ghidra/Processors/x86/data/languages/ia.sinc  |   4 +
- .../x86/data/languages/lockable.sinc          | 226 +++++-------------
- 2 files changed, 59 insertions(+), 171 deletions(-)
+ .../x86/data/languages/lockable.sinc          | 233 +++++-------------
+ 2 files changed, 59 insertions(+), 178 deletions(-)
 
 diff --git a/Ghidra/Processors/x86/data/languages/ia.sinc b/Ghidra/Processors/x86/data/languages/ia.sinc
-index c1a0856e1..b56b22dc0 100644
+index 14a96c742..78a6941a7 100644
 --- a/Ghidra/Processors/x86/data/languages/ia.sinc
 +++ b/Ghidra/Processors/x86/data/languages/ia.sinc
 @@ -1103,10 +1103,14 @@ alwaysLock:        	    is epsilon { LOCK(); }
@@ -28,7 +28,7 @@ index c1a0856e1..b56b22dc0 100644
  # Some macros
  
 diff --git a/Ghidra/Processors/x86/data/languages/lockable.sinc b/Ghidra/Processors/x86/data/languages/lockable.sinc
-index 929c087d9..9ceba3170 100644
+index 33e0d2e0a..8e1b7e367 100644
 --- a/Ghidra/Processors/x86/data/languages/lockable.sinc
 +++ b/Ghidra/Processors/x86/data/languages/lockable.sinc
 @@ -109,6 +109,7 @@
@@ -101,7 +101,7 @@ index 929c087d9..9ceba3170 100644
  }
  @endif
  
-@@ -572,71 +554,33 @@
+@@ -572,78 +554,33 @@
  }
  @endif
  
@@ -112,14 +112,17 @@ index 929c087d9..9ceba3170 100644
 +:CMPXCHG^lockx_ Mem,Reg8  is vexMode=0 & lockx_ & unlock_ & byte=0xf; byte=0xb0; Mem & Reg8 ...
  {
 -    build lockx;
--    build m8;
--    subflags(AL,m8);
--    local tmp=AL-m8;
--    resultflags(tmp);
--    local diff = m8^Reg8;
--    m8 = m8 ^ (ZF*diff);
--    diff = AL ^ m8; AL = AL ^ ((ZF==0)*diff);
--    build unlock; 
+-    local dest = m8;
+-    subflags(AL,dest); 
+-    local diff = AL-dest; 
+-    resultflags(diff);
+-    if (ZF) goto <equal>;
+-    AL = dest;
+-    goto <inst_end>;
+-<equal>
+-    m8 = Reg8;
+-<inst_end>
+-    build unlock;
 +    AL = InterlockedCompareExchange8(Mem, Reg8, AL);
  }
  
@@ -127,14 +130,16 @@ index 929c087d9..9ceba3170 100644
 +:CMPXCHG^lockx_ Mem,Reg16    is vexMode=0 & lockx_ & unlock_ & opsize=0 & byte=0xf; byte=0xb1; Mem & Reg16 ...
  {
 -    build lockx;
--    build m16;
--    subflags(AX,m16);
--    local tmp=AX-m16;
--    resultflags(tmp);
--    local diff = m16^Reg16;
--    m16 = m16 ^ (zext(ZF) * diff);
--    diff = AX ^ m16;
--    AX = AX ^ (zext(ZF==0) * diff);
+-    local dest = m16;
+-    subflags(AX,dest); 
+-    local diff = AX-dest; 
+-    resultflags(diff);
+-    if (ZF) goto <equal>;
+-    AX = dest;
+-    goto <inst_end>;
+-<equal>
+-    m16 = Reg16;
+-<inst_end>
 -    build unlock; 
 +    AX = InterlockedCompareExchange16(Mem, Reg16, AX);
  }
@@ -143,16 +148,16 @@ index 929c087d9..9ceba3170 100644
 +:CMPXCHG^lockx_ Mem,Reg32    is vexMode=0 & lockx_ & unlock_ & opsize=1 & byte=0xf; byte=0xb1; Mem & Reg32 ...
  {
 -    build lockx;
--    build m32;
--	#this instruction writes to either EAX or m32
--	#in 64-bit mode, a 32-bit register that is written to
--	#(and only the register that is written to)
+-    #this instruction writes to either EAX or Rmr32
+-	#in 64-bit mode, a 32-bit register that is written to 
+-	#(and only the register that is written to) 
 -	#must be zero-extended to 64 bits
--	subflags(EAX,m32);
--	local tmp=EAX-m32;
--	resultflags(tmp);
--    if (ZF==1) goto <equal>;
--    EAX = m32;
+-    local dest = m32;
+-    subflags(EAX,dest); 
+-    local diff = EAX-dest; 
+-    resultflags(diff);
+-    if (ZF) goto <equal>;
+-    EAX = dest;
 -    build check_EAX_dest;
 -    goto <inst_end>;
 -<equal>
@@ -168,15 +173,17 @@ index 929c087d9..9ceba3170 100644
 +:CMPXCHG^lockx_ Mem,Reg64    is $(LONGMODE_ON) & vexMode=0 & lockx_ & unlock_ & opsize=2 & byte=0xf; byte=0xb1; Mem & Reg64 ...
  {
 -    build lockx;
--    build m64;
--    subflags(RAX,m64);
--    local tmp=RAX-m64;
--    resultflags(tmp);
--    local diff = m64^Reg64;
--    m64 = m64 ^ (zext(ZF) * diff);
--    diff = RAX ^ m64;
--    RAX = RAX ^ (zext(ZF==0) * diff);
--    build unlock; 
+-    local dest = m64;
+-    subflags(RAX,dest); 
+-    local diff = RAX-dest; 
+-    resultflags(diff);
+-    if (ZF) goto <equal>;
+-    RAX = dest;
+-    goto <inst_end>;
+-<equal>
+-    m64 = Reg64;
+-<inst_end>
+-    build unlock;
 +    RAX = InterlockedCompareExchange64(Mem, Reg64, RAX);
  }
  @endif
@@ -185,8 +192,8 @@ index 929c087d9..9ceba3170 100644
 +:CMPXCHG8B^lockx  m64        is vexMode=0 & lockx & unlock & byte=0xf; byte=0xc7; ( mod != 0b11 & reg_opcode=1 ) ... & m64
  {
      build lockx;
-     build m64;
-@@ -667,87 +611,53 @@
+     local dest = m64;
+@@ -674,87 +611,53 @@
  }
  @endif
  
@@ -296,7 +303,7 @@ index 929c087d9..9ceba3170 100644
  }
  @endif
  
-@@ -1165,53 +1075,27 @@
+@@ -1172,53 +1075,27 @@
  }
  @endif
  
