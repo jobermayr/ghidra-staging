@@ -67,7 +67,7 @@ Added new override of getAlignedLength to class AddressModelDB
  .../function/ApplyFunctionSignatureCmd.java   |    2 +-
  .../SegmentedCallingConventionAnalyzer.java   |   21 +-
  .../actions/CreateLPUnionStructAction.java    |  320 +++
- .../function/editor/FunctionEditorModel.java  |    4 +-
+ .../function/editor/FunctionEditorModel.java  |    2 +-
  .../app/util/cparser/C/Declaration.java       |   80 +-
  .../app/util/opinion/LibraryExport.java       |   85 +
  .../app/util/opinion/LibraryLookupTable.java  |   16 +-
@@ -75,8 +75,10 @@ Added new override of getAlignedLength to class AddressModelDB
  .../ghidra/app/util/opinion/NeLoader.java     |    9 +-
  .../javacc/ghidra/app/util/cparser/C/C.jj     |  180 +-
  .../EditFunctionSignatureDialogTest.java      |   33 +
- .../Decompiler/src/decompile/cpp/fspec.cc     |   82 +-
- .../Decompiler/src/decompile/cpp/fspec.hh     |   22 +-
+ .../Decompiler/src/decompile/cpp/fspec.cc     |   85 +-
+ .../Decompiler/src/decompile/cpp/fspec.hh     |   10 +-
+ .../Decompiler/src/decompile/cpp/marshal.cc   |    2 +-
+ .../src/decompile/cpp/modelrules.cc           |    2 +-
  .../data/languages/compiler_spec.rxg          |    1 +
  .../program/database/data/AddressModelDB.java |  217 ++
  .../database/data/AddressModelDBAdapter.java  |  189 ++
@@ -94,17 +96,17 @@ Added new override of getAlignedLength to class AddressModelDB
  .../model/data/OffsetCodePointerDataType.java |  100 +
  .../program/model/data/PointerDataType.java   |    6 +-
  .../data/SegmentCodePointerDataType.java      |  101 +
- .../ghidra/program/model/lang/ParamList.java  |    4 +-
- .../model/lang/ParamListRegisterOut.java      |    2 +-
- .../program/model/lang/ParamListStandard.java |   24 +-
- .../model/lang/ParamListStandardOut.java      |   12 +-
- .../program/model/lang/PrototypeModel.java    |   90 +-
+ .../program/model/lang/ParamListStandard.java |   39 +-
+ .../model/lang/ParamListStandardOut.java      |   10 +-
+ .../program/model/lang/ParameterPieces.java   |    2 +-
+ .../program/model/lang/PrototypeModel.java    |   88 +-
+ .../lang/protorules/ConvertToPointer.java     |    3 +-
  .../model/listing/FunctionSignature.java      |    6 +
- .../program/model/pcode/AttributeId.java      |    2 +
- .../model/TestDoubleFunctionSignature.java    |    6 +
+ .../program/model/pcode/AttributeId.java      |    4 +-
+ .../model/TestDoubleFunctionSignature.java    |    5 +
  .../program/model/data/StubDataType.java      |   10 +
  .../x86/data/languages/x86-16.cspec           |  288 +-
- 48 files changed, 6089 insertions(+), 136 deletions(-)
+ 50 files changed, 6111 insertions(+), 118 deletions(-)
  create mode 100644 Ghidra/Features/Base/data/FunctionNames.properties
  create mode 100644 Ghidra/Features/Base/ghidra_scripts/FixPascalCallingConvention.java
  create mode 100644 Ghidra/Features/Base/ghidra_scripts/FixWin16LibraryFunctionNames.java
@@ -124,10 +126,10 @@ Added new override of getAlignedLength to class AddressModelDB
  create mode 100644 Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/data/SegmentCodePointerDataType.java
 
 diff --git a/Ghidra/Features/Base/certification.manifest b/Ghidra/Features/Base/certification.manifest
-index d68c8e704..0317656c1 100644
+index 44d947eed..c3f195c8b 100644
 --- a/Ghidra/Features/Base/certification.manifest
 +++ b/Ghidra/Features/Base/certification.manifest
-@@ -54,6 +54,7 @@ data/symbols/win16/toolhelp.exports||GHIDRA||||END|
+@@ -55,6 +55,7 @@ data/symbols/win16/toolhelp.exports||GHIDRA||||END|
  data/symbols/win16/user.exports||GHIDRA||||END|
  data/symbols/win16/ver.exports||GHIDRA||||END|
  data/symbols/win16/win87em.exports||GHIDRA||||END|
@@ -4385,16 +4387,14 @@ index 000000000..56542c84c
 +	}
 +}
 diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/function/editor/FunctionEditorModel.java b/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/function/editor/FunctionEditorModel.java
-index a5e078bc9..764cf8550 100644
+index a5e078bc9..5dd416d33 100644
 --- a/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/function/editor/FunctionEditorModel.java
 +++ b/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/function/editor/FunctionEditorModel.java
-@@ -880,8 +880,8 @@ public class FunctionEditorModel {
- 	}
+@@ -881,7 +881,7 @@ public class FunctionEditorModel {
  
  	private void removeExplicitThisParameter() {
--		if (!allowCustomStorage &&
+ 		if (!allowCustomStorage &&
 -			CompilerSpec.CALLING_CONVENTION_thiscall.equals(callingConventionName)) {
-+		if (!allowCustomStorage && callingConventionName != null &&
 +			callingConventionName.startsWith(CompilerSpec.CALLING_CONVENTION_thiscall)) {
  			int thisIndex = findExplicitThisParameter();
  			if (thisIndex >= 0) {
@@ -5203,94 +5203,76 @@ index f9f6fda85..d60b8f3b8 100644
  	public void testParseSignature_Good() throws Exception {
  
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.cc
-index 393e7de7a..c2e03ab90 100644
+index 2fd470389..738223ea3 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.cc
 @@ -34,6 +34,7 @@ AttributeId ATTRIB_STACKSHIFT = AttributeId("stackshift",126);
  AttributeId ATTRIB_STRATEGY = AttributeId("strategy",127);
  AttributeId ATTRIB_THISBEFORERETPOINTER = AttributeId("thisbeforeretpointer",128);
  AttributeId ATTRIB_VOIDLOCK = AttributeId("voidlock",129);
-+AttributeId ATTRIB_ISRIGHTTOLEFT = AttributeId("isrighttoleft",145);
++AttributeId ATTRIB_ISRIGHTTOLEFT = AttributeId("isrighttoleft",150);
  
  ElementId ELEM_GROUP = ElementId("group",160);
  ElementId ELEM_INTERNALLIST = ElementId("internallist",161);
-@@ -711,24 +712,28 @@ void ParamListStandard::consumeGroups(vector<int4> &status,const ParamEntry &ele
-   }
- }
- 
--void ParamListStandard::assignMap(const vector<Datatype *> &proto,TypeFactory &typefactory,vector<ParameterPieces> &res) const
-+void ParamListStandard::assignMap(const vector<Datatype *> &proto,TypeFactory &typefactory,vector<ParameterPieces> &res,
-+  int4 pointersize, bool isrighttoleft) const
- 
+@@ -752,17 +753,21 @@ void ParamListStandard::assignMap(const PrototypePieces &proto,TypeFactory &type
  {
    vector<int4> status(numgroup,0);
  
 -  if (res.size() == 2) {	// Check for hidden parameters defined by the output list
+-    Datatype *dt = res.back().type;
 +  bool hiddenparam = res.size() == 2;
++  ParameterPieces* hiddenpiece = hiddenparam ? &res.back() : (ParameterPieces*)0;
 +
-+  if (hiddenparam && isrighttoleft) {	// Check for hidden parameters defined by the output list
-     res.back().addr = assignAddress(res.back().type,status);	// Reserve first param for hidden ret value
-     res.back().flags |= ParameterPieces::hiddenretparm;
-     if (res.back().addr.isInvalid())
-       throw ParamUnassignedError("Cannot assign parameter address for " + res.back().type->getName());
++  if (hiddenparam && proto.model->getRightToLeft()) {	// Check for hidden parameters defined by the output list
++//  if (res.size() == 2) {	// Check for hidden parameters defined by the output list
++    Datatype* dt = hiddenpiece->type;
+     type_class store;
+-    if ((res.back().flags & ParameterPieces::hiddenretparm) != 0)
++    if ((hiddenpiece->flags & ParameterPieces::hiddenretparm) != 0)
+       store = TYPECLASS_HIDDENRET;
+     else
+       store = metatype2typeclass(dt->getMetatype());
+     // Reserve first param for hidden return pointer
+-    if (assignAddressFallback(store,dt,false,status,res.back()) == AssignAction::fail)
+-      throw ParamUnassignedError("Cannot assign parameter address for " + res.back().type->getName());
+-    res.back().flags |= ParameterPieces::hiddenretparm;
++    if (assignAddressFallback(store,dt,false,status,*hiddenpiece) == AssignAction::fail)
++      throw ParamUnassignedError("Cannot assign parameter address for " + hiddenpiece->type->getName());
++    hiddenpiece->flags |= ParameterPieces::hiddenretparm;
    }
-+
-   for(int4 i=1;i<proto.size();++i) {
+   for(int4 i=0;i<proto.intypes.size();++i) {
      res.emplace_back();
-     if ((pointermax != 0) && (proto[i]->getSize() > pointermax)) { // Datatype is too big
-       // Assume datatype is stored elsewhere and only the pointer is passed
--      AddrSpace *spc = spacebase;
-+      AddrSpace* spc = spacebase;
-       if (spc == (AddrSpace*)0) spc = typefactory.getArch()->getDefaultDataSpace();
--      int4 pointersize = spc->getAddrSize();
-+//      int4 pointersize = spc->getAddrSize();
-       int4 wordsize = spc->getWordSize();
-       Datatype *pointertp = typefactory.getTypePointer(pointersize,proto[i],wordsize);
-       res.back().addr = assignAddress(pointertp,status);
-@@ -743,6 +748,13 @@ void ParamListStandard::assignMap(const vector<Datatype *> &proto,TypeFactory &t
-     if (res.back().addr.isInvalid())
-       throw ParamUnassignedError("Cannot assign parameter address for " + proto[i]->getName());
+@@ -770,6 +775,19 @@ void ParamListStandard::assignMap(const PrototypePieces &proto,TypeFactory &type
+     if (assignAddress(dt,proto,i,typefactory,status,res.back()) == AssignAction::fail)
+       throw ParamUnassignedError("Cannot assign parameter address for " + dt->getName());
    }
 +
-+  if (hiddenparam && !isrighttoleft) {	// Check for hidden parameters defined by the output list
-+    res.back().addr = assignAddress(res.back().type, status);	// Reserve first param for hidden ret value
-+    res.back().flags |= ParameterPieces::hiddenretparm;
-+    if (res.back().addr.isInvalid())
-+      throw ParamUnassignedError("Cannot assign parameter address for " + res.back().type->getName());
++  if (hiddenparam && !proto.model->getRightToLeft()) {	// Check for hidden parameters defined by the output list
++    Datatype* dt = hiddenpiece->type;
++    type_class store;
++    if ((hiddenpiece->flags & ParameterPieces::hiddenretparm) != 0)
++      store = TYPECLASS_HIDDENRET;
++    else
++      store = metatype2typeclass(dt->getMetatype());
++    // Reserve first param for hidden return pointer
++    if (assignAddressFallback(store, dt, false, status, *hiddenpiece) == AssignAction::fail)
++      throw ParamUnassignedError("Cannot assign parameter address for " + hiddenpiece->type->getName());
++    hiddenpiece->flags |= ParameterPieces::hiddenretparm;
 +  }
  }
  
  /// From among the ParamEntrys matching the given \e group, return the one that best matches
-@@ -1431,7 +1443,8 @@ ParamList *ParamListStandard::clone(void) const
-   return res;
- }
- 
--void ParamListRegisterOut::assignMap(const vector<Datatype *> &proto,TypeFactory &typefactory,vector<ParameterPieces> &res) const
-+void ParamListRegisterOut::assignMap(const vector<Datatype *> &proto,TypeFactory &typefactory,vector<ParameterPieces> &res,
-+    int4 pointersize, bool isrighttoleft) const
- 
- {
-   vector<int4> status(numgroup,0);
-@@ -1571,7 +1584,8 @@ ParamList *ParamListRegister::clone(void) const
-   return res;
- }
- 
--void ParamListStandardOut::assignMap(const vector<Datatype *> &proto,TypeFactory &typefactory,vector<ParameterPieces> &res) const
-+void ParamListStandardOut::assignMap(const vector<Datatype *> &proto,TypeFactory &typefactory,vector<ParameterPieces> &res,
-+    int4 pointersize, bool isrighttoleft) const
- 
- {
-   vector<int4> status(numgroup,0);
-@@ -1587,7 +1601,7 @@ void ParamListStandardOut::assignMap(const vector<Datatype *> &proto,TypeFactory
+@@ -1543,7 +1561,8 @@ void ParamListStandardOut::assignMap(const PrototypePieces &proto,TypeFactory &t
      AddrSpace *spc = spacebase;
      if (spc == (AddrSpace *)0)
        spc = typefactory.getArch()->getDefaultDataSpace();
 -    int4 pointersize = spc->getAddrSize();
-+//    int4 pointersize = spc->getAddrSize();
++    //int4 pointersize = spc->getAddrSize();
++    int4 pointersize = proto.model->getPointerSize(spc);
      int4 wordsize = spc->getWordSize();
-     Datatype *pointertp = typefactory.getTypePointer(pointersize, proto[0], wordsize);
-     res.back().addr = assignAddress(pointertp,status);
-@@ -2196,6 +2210,7 @@ ProtoModel::ProtoModel(const string &nm,const ProtoModel &op2)
+     Datatype *pointertp = typefactory.getTypePointer(pointersize, proto.outtype, wordsize);
+     if (responseCode == AssignAction::hiddenret_specialreg_void) {
+@@ -2245,6 +2264,7 @@ ProtoModel::ProtoModel(const string &nm,const ProtoModel &op2)
    if (name == "__thiscall")
      hasThis = true;
    compatModel = &op2;
@@ -5298,51 +5280,41 @@ index 393e7de7a..c2e03ab90 100644
  }
  
  ProtoModel::~ProtoModel(void)
-@@ -2235,12 +2250,23 @@ bool ProtoModel::isCompatible(const ProtoModel *op2) const
- /// \param typelist is the list of data-types from the function prototype
- /// \param res will hold the storage locations for each parameter
- /// \param ignoreOutputError is \b true if problems assigning the output parameter are ignored
--void ProtoModel::assignParameterStorage(const vector<Datatype *> &typelist,vector<ParameterPieces> &res,bool ignoreOutputError)
-+void ProtoModel::assignParameterStorage(const vector<Datatype *> &typelistConst,vector<ParameterPieces> &res,bool ignoreOutputError)
- 
- {
-+  vector<Datatype *> typelist = typelistConst;
+@@ -2300,8 +2320,30 @@ void ProtoModel::assignParameterStorage(const PrototypePieces &proto,vector<Para
+   else {
+     output->assignMap(proto,*glb->types,res);
+   }
++
++  vector<Datatype*> typelist = proto.intypes;
 +
 +  // Deal with left-to-right (PASCAL convention) parameter ordering
 +  if (!isRightToLeft) {
 +    // swap around the datatypes to map variable storage high-to-low
-+    for (int i = 1; i <= (typelist.size() - 1) / 2; i++) {
-+      std::swap(typelist[typelist.size() - i], typelist[i]);
++    for (int i = 0; i < typelist.size() / 2; i++) {
++      std::swap(typelist[typelist.size() - 1 - i], typelist[i]);
 +    }
 +  }
 +
-+  int4 pointersize = getPointerSize();
-   if (ignoreOutputError) {
-     try {
--      output->assignMap(typelist,*glb->types,res);
-+      output->assignMap(typelist,*glb->types,res,pointersize,isRightToLeft);
-     }
-     catch(ParamUnassignedError &err) {
-       res.clear();
-@@ -2251,9 +2277,39 @@ void ProtoModel::assignParameterStorage(const vector<Datatype *> &typelist,vecto
-     }
-   }
-   else {
--    output->assignMap(typelist,*glb->types,res);
-+    output->assignMap(typelist,*glb->types,res,pointersize,isRightToLeft);
-   }
--  input->assignMap(typelist,*glb->types,res);
-+  input->assignMap(typelist,*glb->types,res,pointersize,isRightToLeft);
-+
+   input->assignMap(proto,*glb->types,res);
+ 
 +  // Deal with left-to-right (PASCAL convention) parameter ordering
 +  if (!isRightToLeft) {
-+    // swap back the resulting storage to be ordered correctly
-+    for (int i = 1; i <= (res.size() - 1) / 2; i++) {
-+      std::swap(res[res.size() - i], res[i]);
++    int inputOffset = (res.size() - typelist.size());
++    for (int i = 0; i < typelist.size() / 2; i++) {
++      // swap back the datatype order
++      std::swap(typelist[typelist.size() - 1 - i], typelist[i]);
++      // swap back the resulting storage to be ordered correctly
++      std::swap(res[res.size()-1 - i], res[inputOffset+i]);
 +    }
 +  }
-+}
 +
+   if (hasThis && res.size() > 1) {
+     int4 thisIndex = 1;
+     if ((res[1].flags & ParameterPieces::hiddenretparm) != 0 && res.size() > 2) {
+@@ -2317,6 +2359,31 @@ void ProtoModel::assignParameterStorage(const PrototypePieces &proto,vector<Para
+   }
+ }
+ 
 +/// \brief Does \param str end with \param end
 +template<typename TString>
 +inline bool ends_with(const TString& str, const TString& end) {
@@ -5350,23 +5322,28 @@ index 393e7de7a..c2e03ab90 100644
 +  return std::equal(end.rbegin(), end.rend(), str.rbegin());
 +}
 +
-+///  \brief Get pointer size for this proto
-+int4 ProtoModel::getPointerSize() const
++/// \brief Used to return the size of a pointer for this model prototype.
++/// @param space is the default AddrSpace
++/// @return size of pointer
++int ProtoModel::getPointerSize(const AddrSpace* space) const
 +
 +{
-+  AddrSpace *spc = glb->getDefaultDataSpace();
-+  int4 pointersize = spc->getAddrSize();
-+  if (ends_with<string>(name,"16near")) {
-+    pointersize = 2;
++//  if (space == (const AddrSpace*)0)
++  //  return -1;
++  int4 pointerSize = (space == (const AddrSpace*)0) ? -1 : space->getAddrSize();
++  if (ends_with<string>(name, "16near")) {
++    pointerSize = 2;
 +  }
-+  else if (ends_with<string>(name,"16far")) {
-+    pointersize = 4;
++  else if (ends_with<string>(name, "16far")) {
++    pointerSize = 4;
 +  }
-+  return pointersize;
- }
- 
++  return pointerSize;
++}
++
  /// \brief Look up an effect from the given EffectRecord list
-@@ -2357,6 +2413,7 @@ void ProtoModel::decode(Decoder &decoder)
+ ///
+ /// If a given memory range matches an EffectRecord, return the effect type.
+@@ -2418,6 +2485,7 @@ void ProtoModel::decode(Decoder &decoder)
    extrapop = -300;
    hasThis = false;
    isConstruct = false;
@@ -5374,7 +5351,7 @@ index 393e7de7a..c2e03ab90 100644
    isPrinted = true;
    effectlist.clear();
    injectUponEntry = -1;
-@@ -2383,6 +2440,9 @@ void ProtoModel::decode(Decoder &decoder)
+@@ -2444,6 +2512,9 @@ void ProtoModel::decode(Decoder &decoder)
      else if (attribId == ATTRIB_CONSTRUCTOR) {
        isConstruct = decoder.readBool();
      }
@@ -5385,10 +5362,10 @@ index 393e7de7a..c2e03ab90 100644
        throw LowlevelError("Unknown prototype attribute");
    }
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.hh
-index 97767c96d..92cb71879 100644
+index e48bbf338..f290c9c3f 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.hh
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.hh
-@@ -42,6 +42,7 @@ extern AttributeId ATTRIB_STACKSHIFT;	///< Marshaling attribute "stackshift"
+@@ -43,6 +43,7 @@ extern AttributeId ATTRIB_STACKSHIFT;	///< Marshaling attribute "stackshift"
  extern AttributeId ATTRIB_STRATEGY;	///< Marshaling attribute "strategy"
  extern AttributeId ATTRIB_THISBEFORERETPOINTER;	///< Marshaling attribute "thisbeforeretpointer"
  extern AttributeId ATTRIB_VOIDLOCK;	///< Marshaling attribute "voidlock"
@@ -5396,59 +5373,16 @@ index 97767c96d..92cb71879 100644
  
  extern ElementId ELEM_GROUP;		///< Marshaling element \<group>
  extern ElementId ELEM_INTERNALLIST;	///< Marshaling element \<internallist>
-@@ -421,7 +422,10 @@ public:
+@@ -433,7 +434,7 @@ public:
    /// \param proto is the ordered list of data-types
    /// \param typefactory is the TypeFactory (for constructing pointers)
    /// \param res will contain the storage locations corresponding to the datatypes
--  virtual void assignMap(const vector<Datatype *> &proto,TypeFactory &typefactory,vector<ParameterPieces> &res) const=0;
-+  /// \param pointersize size of current pointer (for 'near' / 'far' sizes)
-+  /// \param is_right_to_left order of parameter stacking
-+  virtual void assignMap(const vector<Datatype*>& proto, TypeFactory& typefactory, vector<ParameterPieces>& res,
-+      int4 pointersize, bool isrighttoleft) const = 0;
+-  virtual void assignMap(const PrototypePieces &proto,TypeFactory &typefactory,vector<ParameterPieces> &res) const=0;
++  virtual void assignMap(const PrototypePieces &proto, TypeFactory &typefactory, vector<ParameterPieces> &res) const = 0;
  
    /// \brief Given an unordered list of storage locations, calculate a function prototype
    ///
-@@ -588,7 +592,8 @@ public:
-   virtual ~ParamListStandard(void);
-   const list<ParamEntry> &getEntry(void) const { return entry; }	///< Get the list of parameter entries
-   virtual uint4 getType(void) const { return p_standard; }
--  virtual void assignMap(const vector<Datatype *> &proto,TypeFactory &typefactory,vector<ParameterPieces> &res) const;
-+  virtual void assignMap(const vector<Datatype *> &proto,TypeFactory &typefactory,vector<ParameterPieces> &res,
-+      int4 pointersize, bool isrighttoleft) const;
-   virtual void fillinMap(ParamActive *active) const;
-   virtual bool checkJoin(const Address &hiaddr,int4 hisize,const Address &loaddr,int4 losize) const;
-   virtual bool checkSplit(const Address &loc,int4 size,int4 splitpoint) const;
-@@ -617,7 +622,8 @@ public:
-   ParamListRegisterOut(void) : ParamListStandard() {}		///< Constructor
-   ParamListRegisterOut(const ParamListRegisterOut &op2) : ParamListStandard(op2) {}	///< Copy constructor
-   virtual uint4 getType(void) const { return p_register_out; }
--  virtual void assignMap(const vector<Datatype *> &proto,TypeFactory &typefactory,vector<ParameterPieces> &res) const;
-+  virtual void assignMap(const vector<Datatype *> &proto,TypeFactory &typefactory,vector<ParameterPieces> &res,
-+      int4 pointersize, bool isrighttoleft) const;
-   virtual void fillinMap(ParamActive *active) const;
-   virtual bool possibleParam(const Address &loc,int4 size) const;
-   virtual ParamList *clone(void) const;
-@@ -652,7 +658,8 @@ public:
-   ParamListStandardOut(void) : ParamListRegisterOut() {}	///< Constructor for use with decode()
-   ParamListStandardOut(const ParamListStandardOut &op2) : ParamListRegisterOut(op2) {}	///< Copy constructor
-   virtual uint4 getType(void) const { return p_standard_out; }
--  virtual void assignMap(const vector<Datatype *> &proto,TypeFactory &typefactory,vector<ParameterPieces> &res) const;
-+  virtual void assignMap(const vector<Datatype *> &proto,TypeFactory &typefactory,vector<ParameterPieces> &res,
-+      int4 pointersize, bool isrighttoleft) const;
-   virtual void decode(Decoder &decoder,vector<EffectRecord> &effectlist,bool normalstack);
-   virtual ParamList *clone(void) const;
- };
-@@ -672,7 +679,8 @@ public:
-   void foldIn(const ParamListStandard &op2);				///< Add another model to the union
-   void finalize(void) { populateResolver(); }				///< Fold-ins are finished, finalize \b this
-   virtual uint4 getType(void) const { return p_merged; }
--  virtual void assignMap(const vector<Datatype *> &proto,TypeFactory &typefactory,vector<ParameterPieces> &res) const {
-+  virtual void assignMap(const vector<Datatype *> &proto,TypeFactory &typefactory,vector<ParameterPieces> &res,
-+    int4 pointersize, bool isrighttoleft) const {
-     throw LowlevelError("Cannot assign prototype before model has been resolved"); }
-   virtual void fillinMap(ParamActive *active) const {
-     throw LowlevelError("Cannot determine prototype before model has been resolved"); }
-@@ -718,6 +726,7 @@ class ProtoModel {
+@@ -741,6 +742,7 @@ class ProtoModel {
    bool stackgrowsnegative;	///< True if stack parameters have (normal) low address to high address ordering
    bool hasThis;			///< True if this model has a \b this parameter (auto-parameter)
    bool isConstruct;		///< True if this model is a constructor for a particular object
@@ -5456,21 +5390,57 @@ index 97767c96d..92cb71879 100644
    bool isPrinted;		///< True if this model should be printed as part of function declarations
    void defaultLocalRange(void);	///< Set the default stack range used for local variables
    void defaultParamRange(void);	///< Set the default stack range used for input parameters
-@@ -755,6 +764,9 @@ public:
+@@ -761,6 +763,7 @@ public:
+   int4 getInjectUponEntry(void) const { return injectUponEntry; }	///< Get the inject \e uponentry id
+   int4 getInjectUponReturn(void) const { return injectUponReturn; }	///< Get the inject \e uponreturn id
+   bool isCompatible(const ProtoModel *op2) const;	///< Return \b true if other given model can be substituted for \b this
++  bool getRightToLeft(void) const { return isRightToLeft; }  ///< Return \b true if model uses right-to-left stacking of parameters
  
-   void assignParameterStorage(const vector<Datatype *> &typelist,vector<ParameterPieces> &res,bool ignoreOutputError);
+   /// \brief Given a list of input \e trials, derive the most likely input prototype
+   ///
+@@ -778,6 +781,11 @@ public:
+ 
+   void assignParameterStorage(const PrototypePieces &proto,vector<ParameterPieces> &res,bool ignoreOutputError);
  
 +  /// \brief Get pointer size based upon current address model or proto model name
-+  int4 getPointerSize() const;
++  /// \param space is the AddrSpace to get the default pointer (aka address) size
++  /// \return \b pointersize (or -1 if null \e space or no specific) for \b this model
++  int getPointerSize(const AddrSpace *space) const;
 +
    /// \brief Check if the given two input storage locations can represent a single logical parameter
    ///
    /// Within the conventions of this model, do the two (hi/lo) locations represent
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/marshal.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/marshal.cc
+index 7e7ef1b19..7e5d38892 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/marshal.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/marshal.cc
+@@ -1148,7 +1148,7 @@ AttributeId ATTRIB_VALUE = AttributeId("value",25);
+ AttributeId ATTRIB_WORDSIZE = AttributeId("wordsize",26);
+ AttributeId ATTRIB_STORAGE = AttributeId("storage",149);
+ 
+-AttributeId ATTRIB_UNKNOWN = AttributeId("XMLunknown",150); // Number serves as next open index
++AttributeId ATTRIB_UNKNOWN = AttributeId("XMLunknown",151); // Number serves as next open index
+ 
+ ElementId ELEM_DATA = ElementId("data",1);
+ ElementId ELEM_INPUT = ElementId("input",2);
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/modelrules.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/modelrules.cc
+index 11012d519..39102fcfb 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/modelrules.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/modelrules.cc
+@@ -456,7 +456,7 @@ uint4 ConvertToPointer::assignAddress(Datatype *dt,const PrototypePieces &proto,
+   AddrSpace *spc = space;
+   if (spc == (AddrSpace*)0)
+     spc = tlist.getArch()->getDefaultDataSpace();
+-  int4 pointersize = spc->getAddrSize();
++  int4 pointersize = proto.model->getPointerSize(spc);
+   int4 wordsize = spc->getWordSize();
+   // Convert the data-type to a pointer
+   Datatype *pointertp = tlist.getTypePointer(pointersize,dt,wordsize);
 diff --git a/Ghidra/Framework/SoftwareModeling/data/languages/compiler_spec.rxg b/Ghidra/Framework/SoftwareModeling/data/languages/compiler_spec.rxg
-index 7ab59e71a..b6f4115c3 100644
+index 7d1553705..d72099dcc 100644
 --- a/Ghidra/Framework/SoftwareModeling/data/languages/compiler_spec.rxg
 +++ b/Ghidra/Framework/SoftwareModeling/data/languages/compiler_spec.rxg
-@@ -357,6 +357,7 @@
+@@ -433,6 +433,7 @@
      
      <optional> <attribute name="hasthis"/> </optional>
      <optional> <attribute name="constructor"/> </optional>
@@ -6703,38 +6673,8 @@ index 000000000..1754b028d
 +	}
 +
 +}
-diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/ParamList.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/ParamList.java
-index bb81ea127..94624dad5 100644
---- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/ParamList.java
-+++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/ParamList.java
-@@ -42,9 +42,11 @@ public interface ParamList {
- 	 * @param proto is the list of datatypes
- 	 * @param res is the vector for holding the VariableStorage corresponding to datatypes
- 	 * @param addAutoParams if true add/process auto-parameters
-+	 * @param size is the new pointers size
-+	 * @param isRightToLeft adds the hidden-auto-param to the correct end of the returned list
- 	 */
- 	public void assignMap(Program prog, DataType[] proto, ArrayList<VariableStorage> res,
--			boolean addAutoParams);
-+			boolean addAutoParams, int size, boolean isRightToLeft);
- 
- 	public void encode(Encoder encoder, boolean isInput) throws IOException;
- 
-diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/ParamListRegisterOut.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/ParamListRegisterOut.java
-index f6c1f788c..f910b64f1 100644
---- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/ParamListRegisterOut.java
-+++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/ParamListRegisterOut.java
-@@ -32,7 +32,7 @@ public class ParamListRegisterOut extends ParamListStandard {
- 
- 	@Override
- 	public void assignMap(Program prog, DataType[] proto, ArrayList<VariableStorage> res,
--			boolean addAutoParams) {
-+			boolean addAutoParams, int size, boolean isRightToLeft) {
- 		int[] status = new int[numgroup];
- 		for (int i = 0; i < numgroup; ++i) {
- 			status[i] = 0;
 diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/ParamListStandard.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/ParamListStandard.java
-index cd5bf4c3c..239b74ef1 100644
+index e996182c2..55a4d880e 100644
 --- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/ParamListStandard.java
 +++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/ParamListStandard.java
 @@ -4,9 +4,9 @@
@@ -6749,53 +6689,61 @@ index cd5bf4c3c..239b74ef1 100644
   * Unless required by applicable law or agreed to in writing, software
   * distributed under the License is distributed on an "AS IS" BASIS,
   * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-@@ -148,24 +148,25 @@ public class ParamListStandard implements ParamList {
- 
- 	@Override
- 	public void assignMap(Program prog, DataType[] proto, ArrayList<VariableStorage> res,
--			boolean addAutoParams) {
-+			boolean addAutoParams, int size, boolean isRightToLeft) {
- 		int[] status = new int[numgroup];
- 		for (int i = 0; i < numgroup; ++i) {
+@@ -160,11 +160,29 @@ public class ParamListStandard implements ParamList {
  			status[i] = 0;
  		}
  
 -		if (addAutoParams && res.size() == 2) {	// Check for hidden parameters defined by the output list
--			DataTypeManager dtm = prog.getDataTypeManager();
--			Pointer pointer = dtm.getPointer(proto[0]);
--			VariableStorage store = assignAddress(prog, pointer, status, true, false);
++		boolean hiddenParam = (addAutoParams && res.size() == 2);
++/*<<<<<<< HEAD
 +		DataTypeManager dtm = prog.getDataTypeManager();
 +		Pointer returnPtr = dtm.getPointer(proto[0], size);
-+		boolean hiddenParam = (addAutoParams && res.size() == 2);
 +
 +		if (hiddenParam && isRightToLeft) {	// Check for hidden parameters defined by the output list
 +			VariableStorage store = assignAddress(prog, returnPtr, status, true, false);
- 			res.set(1, store);
- 		}
- 		for (int i = 1; i < proto.length; ++i) {
- 			VariableStorage store;
- 			if ((pointermax != 0) && (proto[i] != null) && (proto[i].getLength() > pointermax)) {	// DataType is too big
- 				// Assume datatype is stored elsewhere and only the pointer is passed
--				DataTypeManager dtm = prog.getDataTypeManager();
--				Pointer pointer = dtm.getPointer(proto[i]);
++			res.set(1, store);
++		}
++		for (int i = 1; i < proto.length; ++i) {
++			VariableStorage store;
++			if ((pointermax != 0) && (proto[i] != null) && (proto[i].getLength() > pointermax)) {	// DataType is too big
++				// Assume datatype is stored elsewhere and only the pointer is passed
 +				Pointer pointer = dtm.getPointer(proto[i], size);
- 				store = assignAddress(prog, pointer, status, false, true);
++				store = assignAddress(prog, pointer, status, false, true);
++=======*/
++		if (hiddenParam && proto.model.isRightToLeft()) {	// Check for hidden parameters defined by the output list
++//		if (addAutoParams && res.size() == 2) {	// Check for hidden parameters defined by the output list
+ 			ParameterPieces last = res.get(res.size() - 1);
+ 			StorageClass store;
+ 			if (last.hiddenReturnPtr) {
+ 				store = StorageClass.HIDDENRET;
++//>>>>>>> nsa/master
  			}
  			else {
-@@ -173,6 +174,11 @@ public class ParamListStandard implements ParamList {
- 			}
+ 				store = ParamEntry.getBasicTypeClass(last.type);
+@@ -177,6 +195,21 @@ public class ParamListStandard implements ParamList {
+ 			assignAddress(proto.intypes.get(i), proto, i, dtManager, status, store);
  			res.add(store);
  		}
-+		if (hiddenParam && !isRightToLeft) {	// Check for hidden parameters defined by the output list
-+			VariableStorage store = assignAddress(prog, returnPtr, status, true, false);
-+			res.remove(1);	// res[1] already exists!
-+			res.add(store);
++		if (hiddenParam && !proto.model.isRightToLeft()) {	// Check for hidden parameters defined by the output list
++//			VariableStorage store = assignAddress(prog, returnPtr, status, true, false);
++//			res.remove(1);	// res[1] already exists!
++//			res.add(store);
++			ParameterPieces last = res.get(1);
++			StorageClass store;
++			if (last.hiddenReturnPtr) {
++				store = StorageClass.HIDDENRET;
++			}
++			else {
++				store = ParamEntry.getBasicTypeClass(last.type);
++			}
++			assignAddressFallback(store, last.type, false, status, last);
++			last.hiddenReturnPtr = true;
 +		}
  	}
  
  	@Override
 diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/ParamListStandardOut.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/ParamListStandardOut.java
-index 353ab0287..0a2c712ec 100644
+index 7fd5eb4f3..1b4293603 100644
 --- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/ParamListStandardOut.java
 +++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/ParamListStandardOut.java
 @@ -4,9 +4,9 @@
@@ -6810,7 +6758,7 @@ index 353ab0287..0a2c712ec 100644
   * Unless required by applicable law or agreed to in writing, software
   * distributed under the License is distributed on an "AS IS" BASIS,
   * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-@@ -27,20 +27,20 @@ import ghidra.xml.XmlPullParser;
+@@ -23,13 +23,13 @@ import ghidra.program.model.lang.protorules.AssignAction;
  /**
   * A list of resources describing possible storage locations for a function's return value,
   * and a strategy for selecting a storage location based on data-types in a function signature.
@@ -6825,26 +6773,31 @@ index 353ab0287..0a2c712ec 100644
 + *
   * The resource list is checked to ensure entries are distinguishable.
   */
- public class ParamListStandardOut extends ParamListRegisterOut {
- 
- 	@Override
- 	public void assignMap(Program prog, DataType[] proto, ArrayList<VariableStorage> res,
--			boolean addAutoParams) {
-+			boolean addAutoParams, int size, boolean isRightToLeft) {
- 
- 		int[] status = new int[numgroup];
- 		for (int i = 0; i < numgroup; ++i) {
-@@ -53,7 +53,7 @@ public class ParamListStandardOut extends ParamListRegisterOut {
- 			return;
- 		}
- 		// If the storage is not assigned (because the datatype is too big) create a hidden input parameter
--		DataType pointer = prog.getDataTypeManager().getPointer(proto[0]);
-+		DataType pointer = prog.getDataTypeManager().getPointer(proto[0], size);
- 		store = assignAddress(prog, pointer, status, false, false);
+ public class ParamListStandardOut extends ParamListStandard {
+@@ -52,7 +52,7 @@ public class ParamListStandardOut extends ParamListStandard {
+ 		int responseCode = assignAddress(proto.outtype, proto, -1, dtManager, status, store);
+ 		if (responseCode != AssignAction.SUCCESS) {
+ 			// If the storage is not assigned (because the datatype is too big) create a hidden input parameter
+-			int sz = (spacebase == null) ? -1 : spacebase.getPointerSize();
++			int sz = proto.model.getPointerSize(spacebase);
+ 			DataType pointerType = dtManager.getPointer(proto.outtype, sz);
+ 			if (responseCode == AssignAction.HIDDENRET_SPECIALREG_VOID) {
+ 				store.type = VoidDataType.dataType;
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/ParameterPieces.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/ParameterPieces.java
+index db9ea882c..7ca8ecf4b 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/ParameterPieces.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/ParameterPieces.java
+@@ -89,7 +89,7 @@ public class ParameterPieces {
+ 		VariableStorage store;
  		try {
- 			if (store.isValid()) {
+ 			if (joinPieces != null) {
+-				store = new DynamicVariableStorage(program, false, joinPieces);
++				store = new DynamicVariableStorage(program, isIndirect, joinPieces);
+ 			}
+ 			else {
+ 				if (hiddenReturnPtr) {
 diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/PrototypeModel.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/PrototypeModel.java
-index b67b21b47..9fcd300b1 100644
+index dcec0d9b5..06e0e2698 100644
 --- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/PrototypeModel.java
 +++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/PrototypeModel.java
 @@ -4,9 +4,9 @@
@@ -6859,7 +6812,7 @@ index b67b21b47..9fcd300b1 100644
   * Unless required by applicable law or agreed to in writing, software
   * distributed under the License is distributed on an "AS IS" BASIS,
   * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-@@ -57,6 +57,7 @@ public class PrototypeModel {
+@@ -56,6 +56,7 @@ public class PrototypeModel {
  	private InputListType inputListType = InputListType.STANDARD;
  	private boolean hasThis;		// Convention has a this (auto-parameter)
  	private boolean isConstruct;		// Convention is used for object construction
@@ -6867,7 +6820,7 @@ index b67b21b47..9fcd300b1 100644
  	private boolean hasUponEntry;	// Does this have an uponentry injection
  	private boolean hasUponReturn;	// Does this have an uponreturn injection
  
-@@ -85,8 +86,9 @@ public class PrototypeModel {
+@@ -84,8 +85,9 @@ public class PrototypeModel {
  		compatModel = model;
  		localRange = new AddressSet(model.localRange);
  		paramRange = new AddressSet(model.paramRange);
@@ -6878,7 +6831,7 @@ index b67b21b47..9fcd300b1 100644
  		hasUponEntry = model.hasUponEntry;
  		hasUponReturn = model.hasUponReturn;
  	}
-@@ -107,6 +109,7 @@ public class PrototypeModel {
+@@ -106,6 +108,7 @@ public class PrototypeModel {
  		paramRange = null;
  		hasThis = false;
  		isConstruct = false;
@@ -6886,7 +6839,7 @@ index b67b21b47..9fcd300b1 100644
  		hasUponEntry = false;
  		hasUponReturn = false;
  	}
-@@ -176,7 +179,7 @@ public class PrototypeModel {
+@@ -175,7 +178,7 @@ public class PrototypeModel {
  	 * Returns the number of extra bytes popped from the stack when a function that uses
  	 * this model returns to its caller. This is usually just the number of bytes used to
  	 * store the return value, but some conventions may do additional clean up of stack parameters.
@@ -6895,7 +6848,7 @@ index b67b21b47..9fcd300b1 100644
  	 * @return the number of extra bytes popped
  	 */
  	public int getExtrapop() {
-@@ -204,6 +207,12 @@ public class PrototypeModel {
+@@ -203,6 +206,12 @@ public class PrototypeModel {
  		return isConstruct;
  	}
  
@@ -6908,7 +6861,7 @@ index b67b21b47..9fcd300b1 100644
  	/**
  	 * @return the allocation strategy for this model
  	 */
-@@ -214,7 +223,7 @@ public class PrototypeModel {
+@@ -213,7 +222,7 @@ public class PrototypeModel {
  	/**
  	 * Return true if this model has specific p-code injections associated with it
  	 * (either an "uponentry" or "uponreturn" payload),
@@ -6917,38 +6870,30 @@ index b67b21b47..9fcd300b1 100644
  	 * @return true if this model uses p-code injections
  	 */
  	public boolean hasInjection() {
-@@ -237,13 +246,29 @@ public class PrototypeModel {
- 		DataType[] arr = new DataType[1];
- 		arr[0] = clone;
- 		ArrayList<VariableStorage> res = new ArrayList<>();
--		outputParams.assignMap(program, arr, res, false);
-+		outputParams.assignMap(program, arr, res, false, getPointerSize(program), isRightToLeft);
- 		if (res.size() > 0) {
- 			return res.get(0);
- 		}
+@@ -242,6 +251,22 @@ public class PrototypeModel {
  		return null;
  	}
  
 +	/**
 +	 * Used to return the size of a pointer for this model prototype.
-+	 * @param program is the Program (to obtain the default)
++	 * @param space is the default AddressSpace
 +	 * @return size of pointer
 +	 */
-+	public int getPointerSize(Program program) {
-+		int size = program.getDefaultPointerSize();
++	public int getPointerSize(AddressSpace space) {
++		int pointerSize = (space == null) ? -1 : space.getPointerSize();
 +		if (name.endsWith("16near")) {
-+			size = 2;
++			pointerSize = 2;
 +		}
 +		else if (name.endsWith("16far")) {
-+			size = 4;
++			pointerSize = 4;
 +		}
-+		return size;
++		return pointerSize;
 +	}
 +
  	/**
  	 * Get the preferred parameter location for a new parameter which will appended
  	 * to the end of an existing set of params.  If existing parameters use custom
-@@ -279,7 +304,7 @@ public class PrototypeModel {
+@@ -277,7 +302,7 @@ public class PrototypeModel {
  
  		if (dataType != null) {
  			dataType = dataType.clone(program.getDataTypeManager());
@@ -6957,18 +6902,51 @@ index b67b21b47..9fcd300b1 100644
  			// already assigned to parameters - this may not work well if
  			// customized storage has been used
  		}
-@@ -301,19 +326,20 @@ public class PrototypeModel {
- 	}
+@@ -315,9 +340,36 @@ public class PrototypeModel {
+ 	 */
+ 	public void assignParameterStorage(PrototypePieces proto, DataTypeManager dtManager,
+ 			ArrayList<ParameterPieces> res, boolean addAutoParams) {
++
+ 		outputParams.assignMap(proto, dtManager, res, addAutoParams);
++
++		// Deal with left-to-right (PASCAL convention) parameter ordering
++		if (!isRightToLeft) {
++			// swap around the datatypes to map variable storage high-to-low
++			for (int i = 0; i < proto.intypes.size() / 2; i++) {
++				DataType tmp = proto.intypes.get(proto.intypes.size()-1 - i);
++				proto.intypes.set(proto.intypes.size()-1 - i, proto.intypes.get(i));
++				proto.intypes.set(i, tmp);
++			}
++		}
++
+ 		inputParams.assignMap(proto, dtManager, res, addAutoParams);
  
- 	/**
--	 * Compute the variable storage for a given function and set of return/parameter datatypes 
-+	 * Compute the variable storage for a given function and set of return/parameter datatypes
- 	 * defined by an array of data types.
++		// Deal with left-to-right (PASCAL convention) parameter ordering
++		if (!isRightToLeft) {
++			int inputOffset = (res.size() - proto.intypes.size());
++			for (int i = 0; i < proto.intypes.size() / 2; i++) {
++				// swap back the input datatypes
++				DataType tmpDt = proto.intypes.get(proto.intypes.size()-1 - i);
++				proto.intypes.set(proto.intypes.size()-1 - i, proto.intypes.get(i));
++				proto.intypes.set(i, tmpDt);
++				// swap back the resulting input only storage to be ordered correctly
++				ParameterPieces tmpPiece = res.get(res.size()-1 - i);
++				res.set(res.size()-1 - i, res.get(inputOffset+i));
++				res.set(inputOffset+i, tmpPiece);
++			}
++		}
++
+ 		if (hasThis && addAutoParams && res.size() > 1) {
+ 			int thisIndex = 1;
+ 			if (res.get(1).hiddenReturnPtr && res.size() > 2) {
+@@ -341,21 +393,23 @@ public class PrototypeModel {
+ 	 * these parameters.  If addAutoParams is false, the dataTypes array is assumed to already contain explicit
+ 	 * entries for any of these parameters.
  	 * @param program is the Program
 -	 * @param dataTypes return/parameter datatypes (first element is always the return datatype, 
 +	 * @param dataTypes return/parameter datatypes (first element is always the return datatype,
  	 * i.e., minimum array length is 1)
- 	 * @param addAutoParams TODO
+ 	 * @param addAutoParams true if auto-parameter storage locations can be generated
  	 * @return dynamic storage locations orders by ordinal where first element corresponds to
 -	 * return storage. The returned array may also include additional auto-parameter storage 
 -	 * locations. 
@@ -6978,64 +6956,26 @@ index b67b21b47..9fcd300b1 100644
  	public VariableStorage[] getStorageLocations(Program program, DataType[] dataTypes,
  			boolean addAutoParams) {
  
-+		int pointerSize = getPointerSize(program);
- 		boolean injectAutoThisParam = false;
++		int pointerSize = getPointerSize(program.getAddressFactory().getDefaultAddressSpace());
++
+ 		DataType injectedThis = null;
  		if (addAutoParams && hasThis) {
  			// explicit support for auto 'this' parameter
-@@ -321,19 +347,40 @@ public class PrototypeModel {
- 			injectAutoThisParam = true;
- 			DataType[] ammendedTypes = new DataType[dataTypes.length + 1];
- 			ammendedTypes[0] = dataTypes[0];
--			ammendedTypes[1] = new PointerDataType(program.getDataTypeManager());
-+			ammendedTypes[1] = new PointerDataType(null, pointerSize, program.getDataTypeManager());
- 			if (dataTypes.length > 1) {
- 				System.arraycopy(dataTypes, 1, ammendedTypes, 2, dataTypes.length - 1);
- 			}
- 			dataTypes = ammendedTypes;
+ 			// must inject pointer arg to obtain storage assignment
+-			injectedThis = new PointerDataType(program.getDataTypeManager());
++			injectedThis = new PointerDataType(null, pointerSize, program.getDataTypeManager());
  		}
+ 		PrototypePieces proto = new PrototypePieces(this, dataTypes, injectedThis);
  
-+		// Deal with left-to-right (PASCAL convention) parameter ordering
-+		if (!isRightToLeft) {
-+			// swap around the datatypes to map variable storage high-to-low
-+			for (int i = 1; i <= (dataTypes.length-1) / 2; i++) {
-+				DataType tmp = dataTypes[dataTypes.length - i];
-+				dataTypes[dataTypes.length - i] = dataTypes[i];
-+				dataTypes[i] = tmp;
-+			}
-+		}
+@@ -366,6 +420,7 @@ public class PrototypeModel {
+ 		for (int i = 0; i < finalres.length; ++i) {
+ 			finalres[i] = res.get(i).getVariableStorage(program);
+ 		}
 +
-+		// Assign storage
- 		ArrayList<VariableStorage> res = new ArrayList<>();
--		outputParams.assignMap(program, dataTypes, res, addAutoParams);
--		inputParams.assignMap(program, dataTypes, res, addAutoParams);
-+		outputParams.assignMap(program, dataTypes, res, addAutoParams, pointerSize, isRightToLeft);
-+		inputParams.assignMap(program, dataTypes, res, addAutoParams, pointerSize, isRightToLeft);
- 		VariableStorage[] finalres = new VariableStorage[res.size()];
- 		res.toArray(finalres);
+ 		return finalres;
+ 	}
  
-+		// Deal with left-to-right (PASCAL convention) parameter ordering
-+		if (!isRightToLeft) {
-+			// swap back the resulting storage to be ordered correctly
-+			for (int i = 1; i <= (finalres.length-1) / 2; i++) {
-+				VariableStorage tmp = finalres[finalres.length - i];
-+				finalres[finalres.length - i] = finalres[i];
-+				finalres[i] = tmp;
-+			}
-+		}
-+
- 		if (injectAutoThisParam) {
- 
- 			Varnode[] thisVarnodes = finalres[1].getVarnodes();
-@@ -343,7 +390,7 @@ public class PrototypeModel {
- 				if (finalres[1].isAutoStorage()) {
- 					if (inputParams.isThisBeforeRetPointer()) {
- 						// pointer has been bumped by auto-return-storage
--						// must swap storage and position for slots 1 and 2 
-+						// must swap storage and position for slots 1 and 2
- 						finalres[2] = new DynamicVariableStorage(program,
- 							finalres[1].getAutoParameterType(), finalres[2].getVarnodes());
- 					}
-@@ -434,6 +481,9 @@ public class PrototypeModel {
+@@ -431,6 +486,9 @@ public class PrototypeModel {
  		if (isConstruct) {
  			encoder.writeBool(ATTRIB_CONSTRUCTOR, true);
  		}
@@ -7045,7 +6985,7 @@ index b67b21b47..9fcd300b1 100644
  		if (inputListType != InputListType.STANDARD) {
  			encoder.writeString(ATTRIB_STRATEGY, "register");
  		}
-@@ -589,6 +639,7 @@ public class PrototypeModel {
+@@ -586,6 +644,7 @@ public class PrototypeModel {
  		stackshift = SpecXmlUtils.decodeInt(protoElement.getAttribute("stackshift"));
  		hasThis = false;
  		isConstruct = false;
@@ -7053,7 +6993,7 @@ index b67b21b47..9fcd300b1 100644
  		String thisString = protoElement.getAttribute("hasthis");
  		if (thisString != null) {
  			hasThis = SpecXmlUtils.decodeBoolean(thisString);
-@@ -600,6 +651,10 @@ public class PrototypeModel {
+@@ -597,6 +656,10 @@ public class PrototypeModel {
  		if (constructString != null) {
  			isConstruct = SpecXmlUtils.decodeBoolean(constructString);
  		}
@@ -7064,7 +7004,7 @@ index b67b21b47..9fcd300b1 100644
  
  		buildParamList(protoElement.getAttribute("strategy"));
  		while (parser.peek().isStart()) {
-@@ -697,7 +752,7 @@ public class PrototypeModel {
+@@ -694,7 +757,7 @@ public class PrototypeModel {
  	}
  
  	/**
@@ -7073,7 +7013,7 @@ index b67b21b47..9fcd300b1 100644
  	 * @param prog is the current Program
  	 * @return a VariableStorage ojbect for each register
  	 */
-@@ -720,6 +775,9 @@ public class PrototypeModel {
+@@ -717,6 +780,9 @@ public class PrototypeModel {
  		if (extrapop != obj.extrapop || stackshift != obj.stackshift) {
  			return false;
  		}
@@ -7083,6 +7023,20 @@ index b67b21b47..9fcd300b1 100644
  		if (hasThis != obj.hasThis || isConstruct != obj.isConstruct) {
  			return false;
  		}
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/protorules/ConvertToPointer.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/protorules/ConvertToPointer.java
+index 0a19239da..b8afcb056 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/protorules/ConvertToPointer.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/protorules/ConvertToPointer.java
+@@ -67,7 +67,8 @@ public class ConvertToPointer extends AssignAction {
+ 	public int assignAddress(DataType dt, PrototypePieces proto, int pos, DataTypeManager dtManager,
+ 			int[] status, ParameterPieces res) {
+ 
+-		int pointersize = (space != null) ? space.getPointerSize() : -1;
++		int pointersize = proto.model.getPointerSize(space);
++
+ 		// Convert the data-type to a pointer
+ 		DataType pointertp = dtManager.getPointer(dt, pointersize);
+ 		// (Recursively) assign storage
 diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/listing/FunctionSignature.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/listing/FunctionSignature.java
 index 8ae21a15d..eb5f52659 100644
 --- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/listing/FunctionSignature.java
@@ -7106,29 +7060,23 @@ index 8ae21a15d..eb5f52659 100644
 +	public AddressModel getAddressModel();
  }
 diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/AttributeId.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/AttributeId.java
-index ce2dc5a11..119abef66 100644
+index 281df9f5b..24c545110 100644
 --- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/AttributeId.java
 +++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/AttributeId.java
-@@ -237,4 +237,6 @@ public record AttributeId(String name, int id) {
- 
+@@ -238,5 +238,7 @@ public record AttributeId(String name, int id) {
  // public static final AttributeId ATTRIB_ADDRESS = new AttributeId("address", 148);
- 	public static final AttributeId ATTRIB_UNKNOWN = new AttributeId("XMLunknown", 149);
+ 	public static final AttributeId ATTRIB_STORAGE = new AttributeId("storage", 149);
+ 
+-	public static final AttributeId ATTRIB_UNKNOWN = new AttributeId("XMLunknown", 150);
++	public static final AttributeId ATTRIB_ISRIGHTTOLEFT = new AttributeId("isrighttoleft", 150);
 +
-+	public static final AttributeId ATTRIB_ISRIGHTTOLEFT = new AttributeId("isrighttoleft", 145);
++	public static final AttributeId ATTRIB_UNKNOWN = new AttributeId("XMLunknown", 151);
  }
 diff --git a/Ghidra/Framework/SoftwareModeling/src/test/java/ghidra/program/model/TestDoubleFunctionSignature.java b/Ghidra/Framework/SoftwareModeling/src/test/java/ghidra/program/model/TestDoubleFunctionSignature.java
-index bac52f7e7..2551eca6f 100644
+index bac52f7e7..5f81219f0 100644
 --- a/Ghidra/Framework/SoftwareModeling/src/test/java/ghidra/program/model/TestDoubleFunctionSignature.java
 +++ b/Ghidra/Framework/SoftwareModeling/src/test/java/ghidra/program/model/TestDoubleFunctionSignature.java
-@@ -15,6 +15,7 @@
-  */
- package ghidra.program.model;
- 
-+import ghidra.program.model.data.AddressModel;
- import ghidra.program.model.data.DataType;
- import ghidra.program.model.data.ParameterDefinition;
- import ghidra.program.model.lang.PrototypeModel;
-@@ -96,4 +97,9 @@ public class TestDoubleFunctionSignature implements FunctionSignature {
+@@ -96,4 +96,9 @@ public class TestDoubleFunctionSignature implements FunctionSignature {
  	public boolean isEquivalentSignature(FunctionSignature signature) {
  		throw new UnsupportedOperationException();
  	}
@@ -7504,5 +7452,5 @@ index 9b7c3a602..00ebb0f2b 100644
        <register name="DF"/>
      </unaffected>
 -- 
-2.41.0
+2.43.0
 

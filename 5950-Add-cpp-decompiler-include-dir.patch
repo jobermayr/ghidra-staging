@@ -1,0 +1,4373 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Eric Kilmer <eric.d.kilmer@gmail.com>
+Date: Fri, 10 Nov 2023 19:28:30 -0500
+Subject: [PATCH] 5950: Add cpp decompiler include dir
+
+Prepare supporting build system and generator files
+
+This commit is to make the review process easier and only show changes
+made manually. The following script is easily repeatable with a Python
+script and a couple shell commands.
+
+Create 'include/ghidra' directory for C++ decompiler headers
+
+This change aims to improve the usage experience for external projects
+that include the C++ headers by using a descriptive path prefix that
+makes discerning the origin of these headers more obvious.
+
+Instead of an external project using
+
+```cpp
+include <op.hh>
+```
+
+which has zero indication of what project the `op.hh` header originates,
+they may now write
+
+```cpp
+include <ghidra/op.hh>
+```
+
+which makes the project origin of the header obvious.
+
+This is a breaking change that will cause issues for all external code
+until that code is updated to add the `ghidra/` path prefix to the
+inclusion path.
+
+The `ghidra` directory prefix was chosen because it matches the name of
+the C++ namespace.
+
+To repeat the changes made to source files, the following Python script
+can be run from the `Ghidra/Features/Decompiler/src/decompile`
+directory:
+
+```python
+from pathlib import Path
+
+header_exts = {".hh", ".h"}
+headers = list(filter(lambda p: p.suffix in header_exts, Path(".").glob("*/**/*")))
+
+source_exts = {".hh", ".cc", ".y", ".l"}
+sources = list(filter(lambda p: p.suffix in source_exts, Path(".").glob("*/**/*")))
+
+for header in headers:
+    header_name = header.name
+    print(header_name)
+    find_str = f'include "{header_name}"'
+    new_str = f'include "ghidra/{header_name}"'
+    for source in sources:
+        with source.open('r+') as f:
+            text = f.read()
+            text = text.replace(find_str, new_str)
+            f.seek(0)
+            f.write(text)
+```
+
+This Python script can be run before or after moving the header files
+into the new directory:
+
+```sh
+cd Ghidra/Features/Decompiler/src/decompile/cpp
+mkdir -p include/ghidra
+git mv *.{h,hh} include/ghidra
+```
+
+Furthermore, the following commands were run to test these changes:
+
+```sh
+gradle -I gradle/support/fetchDependencies.gradle init
+gradle prepdev
+gradle buildNatives sleighCompile
+cd Ghidra/Features/Decompiler/src/decompile/cpp
+make ghi_opt/depend com_opt/depend sla_opt/depend ghidra_opt ghidra_test_dbg libsla.a libdecomp.a sleigh_opt decomp_opt
+make test_dbg/depend test
+make doc
+make sleighexamp_dir
+cd sleigh-2.1.0
+make sleighexample
+./sleighexample disassemble
+./sleighexample pcode
+./sleighexample emulate
+```
+
+Lastly, the following commands were run to verify generated header files
+are placed in the correct location. These commands will likely produce
+differences, due to different versions of code generator tools, however
+the check was made to ensure the headers were only regenerated in the
+headers directory:
+
+```sh
+gradle generateParsers
+gradle buildNatives sleighCompile
+cd Ghidra/Features/Decompiler/src/decompile/cpp
+make -B grammar.cc xml.cc pcodeparse.cc include/ghidra/slghparse.hh slghscan.cc
+make ghi_opt/depend com_opt/depend sla_opt/depend ghidra_opt ghidra_test_dbg libsla.a libdecomp.a sleigh_opt decomp_opt
+make test_dbg/depend test
+cd ../../../../../../
+gradle buildNatives sleighCompile
+```
+---
+ Ghidra/Features/Decompiler/build.gradle       |  2 +-
+ .../Features/Decompiler/buildNatives.gradle   |  4 +-
+ .../Decompiler/src/decompile/cpp/Doxyfile     |  4 +-
+ .../Decompiler/src/decompile/cpp/Makefile     | 71 +++++++++---------
+ .../Decompiler/src/decompile/cpp/action.cc    |  6 +-
+ .../Decompiler/src/decompile/cpp/address.cc   |  4 +-
+ .../src/decompile/cpp/architecture.cc         |  6 +-
+ .../Decompiler/src/decompile/cpp/bfd_arch.cc  |  2 +-
+ .../Decompiler/src/decompile/cpp/block.cc     |  4 +-
+ .../src/decompile/cpp/blockaction.cc          |  4 +-
+ .../Decompiler/src/decompile/cpp/callgraph.cc |  4 +-
+ .../src/decompile/cpp/capability.cc           |  2 +-
+ .../Decompiler/src/decompile/cpp/cast.cc      |  4 +-
+ .../Decompiler/src/decompile/cpp/codedata.cc  |  4 +-
+ .../Decompiler/src/decompile/cpp/comment.cc   |  4 +-
+ .../src/decompile/cpp/comment_ghidra.cc       |  2 +-
+ .../Decompiler/src/decompile/cpp/condexe.cc   |  2 +-
+ .../src/decompile/cpp/consolemain.cc          |  2 +-
+ .../Decompiler/src/decompile/cpp/context.cc   |  6 +-
+ .../src/decompile/cpp/coreaction.cc           |  8 +-
+ .../Decompiler/src/decompile/cpp/cover.cc     |  4 +-
+ .../Decompiler/src/decompile/cpp/cpool.cc     |  2 +-
+ .../src/decompile/cpp/cpool_ghidra.cc         |  2 +-
+ .../Decompiler/src/decompile/cpp/crc32.cc     |  2 +-
+ .../Decompiler/src/decompile/cpp/database.cc  |  6 +-
+ .../src/decompile/cpp/database_ghidra.cc      |  4 +-
+ .../Decompiler/src/decompile/cpp/double.cc    |  2 +-
+ .../Decompiler/src/decompile/cpp/dynamic.cc   |  6 +-
+ .../Decompiler/src/decompile/cpp/emulate.cc   |  2 +-
+ .../src/decompile/cpp/emulateutil.cc          |  4 +-
+ .../src/decompile/cpp/filemanage.cc           |  2 +-
+ .../Decompiler/src/decompile/cpp/float.cc     |  4 +-
+ .../Decompiler/src/decompile/cpp/flow.cc      |  2 +-
+ .../Decompiler/src/decompile/cpp/fspec.cc     |  4 +-
+ .../Decompiler/src/decompile/cpp/funcdata.cc  |  2 +-
+ .../src/decompile/cpp/funcdata_block.cc       |  4 +-
+ .../src/decompile/cpp/funcdata_op.cc          |  4 +-
+ .../src/decompile/cpp/funcdata_varnode.cc     |  2 +-
+ .../src/decompile/cpp/ghidra_arch.cc          | 18 ++---
+ .../src/decompile/cpp/ghidra_context.cc       |  2 +-
+ .../src/decompile/cpp/ghidra_process.cc       |  8 +-
+ .../src/decompile/cpp/ghidra_translate.cc     |  4 +-
+ .../src/decompile/cpp/globalcontext.cc        |  2 +-
+ .../Decompiler/src/decompile/cpp/grammar.cc   |  2 +-
+ .../Decompiler/src/decompile/cpp/grammar.y    |  2 +-
+ .../Decompiler/src/decompile/cpp/graph.cc     |  2 +-
+ .../Decompiler/src/decompile/cpp/heritage.cc  |  6 +-
+ .../src/decompile/cpp/ifacedecomp.cc          |  6 +-
+ .../Decompiler/src/decompile/cpp/ifaceterm.cc |  2 +-
+ .../cpp/{ => include/ghidra}/action.hh        |  2 +-
+ .../cpp/{ => include/ghidra}/address.hh       |  2 +-
+ .../cpp/{ => include/ghidra}/architecture.hh  | 30 ++++----
+ .../cpp/{ => include/ghidra}/bfd_arch.hh      |  4 +-
+ .../cpp/{ => include/ghidra}/block.hh         |  2 +-
+ .../cpp/{ => include/ghidra}/blockaction.hh   |  2 +-
+ .../cpp/{ => include/ghidra}/callgraph.hh     |  2 +-
+ .../cpp/{ => include/ghidra}/capability.hh    |  2 +-
+ .../cpp/{ => include/ghidra}/cast.hh          |  2 +-
+ .../cpp/{ => include/ghidra}/codedata.hh      |  2 +-
+ .../cpp/{ => include/ghidra}/comment.hh       |  2 +-
+ .../{ => include/ghidra}/comment_ghidra.hh    |  4 +-
+ .../cpp/{ => include/ghidra}/condexe.hh       |  2 +-
+ .../cpp/{ => include/ghidra}/context.hh       |  4 +-
+ .../cpp/{ => include/ghidra}/coreaction.hh    |  6 +-
+ .../cpp/{ => include/ghidra}/cover.hh         |  2 +-
+ .../cpp/{ => include/ghidra}/cpool.hh         |  2 +-
+ .../cpp/{ => include/ghidra}/cpool_ghidra.hh  |  2 +-
+ .../cpp/{ => include/ghidra}/crc32.hh         |  2 +-
+ .../cpp/{ => include/ghidra}/database.hh      |  6 +-
+ .../{ => include/ghidra}/database_ghidra.hh   |  4 +-
+ .../cpp/{ => include/ghidra}/doccore.hh       |  0
+ .../cpp/{ => include/ghidra}/docmain.hh       |  0
+ .../cpp/{ => include/ghidra}/double.hh        |  4 +-
+ .../cpp/{ => include/ghidra}/dynamic.hh       |  2 +-
+ .../cpp/{ => include/ghidra}/emulate.hh       |  4 +-
+ .../cpp/{ => include/ghidra}/emulateutil.hh   |  4 +-
+ .../cpp/{ => include/ghidra}/error.hh         |  2 +-
+ .../cpp/{ => include/ghidra}/filemanage.hh    |  0
+ .../cpp/{ => include/ghidra}/float.hh         |  2 +-
+ .../cpp/{ => include/ghidra}/flow.hh          |  2 +-
+ .../cpp/{ => include/ghidra}/fspec.hh         |  4 +-
+ .../cpp/{ => include/ghidra}/funcdata.hh      | 12 +--
+ .../cpp/{ => include/ghidra}/ghidra_arch.hh   |  2 +-
+ .../{ => include/ghidra}/ghidra_context.hh    |  4 +-
+ .../{ => include/ghidra}/ghidra_process.hh    | 10 +--
+ .../{ => include/ghidra}/ghidra_translate.hh  |  4 +-
+ .../cpp/{ => include/ghidra}/globalcontext.hh |  4 +-
+ .../cpp/{ => include/ghidra}/grammar.hh       |  2 +-
+ .../cpp/{ => include/ghidra}/graph.hh         |  2 +-
+ .../cpp/{ => include/ghidra}/heritage.hh      |  2 +-
+ .../cpp/{ => include/ghidra}/ifacedecomp.hh   | 12 +--
+ .../cpp/{ => include/ghidra}/ifaceterm.hh     |  2 +-
+ .../cpp/{ => include/ghidra}/inject_ghidra.hh |  4 +-
+ .../cpp/{ => include/ghidra}/inject_sleigh.hh |  4 +-
+ .../cpp/{ => include/ghidra}/interface.hh     |  2 +-
+ .../cpp/{ => include/ghidra}/jumptable.hh     |  4 +-
+ .../cpp/{ => include/ghidra}/libdecomp.hh     |  6 +-
+ .../cpp/{ => include/ghidra}/loadimage.hh     |  2 +-
+ .../cpp/{ => include/ghidra}/loadimage_bfd.hh |  2 +-
+ .../{ => include/ghidra}/loadimage_ghidra.hh  |  4 +-
+ .../cpp/{ => include/ghidra}/loadimage_xml.hh |  2 +-
+ .../cpp/{ => include/ghidra}/marshal.hh       |  2 +-
+ .../cpp/{ => include/ghidra}/memstate.hh      |  4 +-
+ .../cpp/{ => include/ghidra}/merge.hh         |  2 +-
+ .../cpp/{ => include/ghidra}/modelrules.hh    |  2 +-
+ .../decompile/cpp/{ => include/ghidra}/op.hh  |  2 +-
+ .../cpp/{ => include/ghidra}/opbehavior.hh    |  4 +-
+ .../cpp/{ => include/ghidra}/opcodes.hh       |  0
+ .../cpp/{ => include/ghidra}/options.hh       |  4 +-
+ .../cpp/{ => include/ghidra}/override.hh      |  2 +-
+ .../cpp/{ => include/ghidra}/paramid.hh       |  2 +-
+ .../cpp/{ => include/ghidra}/partmap.hh       |  0
+ .../cpp/{ => include/ghidra}/pcodecompile.hh  |  2 +-
+ .../cpp/{ => include/ghidra}/pcodeinject.hh   |  2 +-
+ .../cpp/{ => include/ghidra}/pcodeparse.hh    |  4 +-
+ .../cpp/{ => include/ghidra}/pcoderaw.hh      |  4 +-
+ .../cpp/{ => include/ghidra}/prefersplit.hh   |  2 +-
+ .../cpp/{ => include/ghidra}/prettyprint.hh   |  2 +-
+ .../cpp/{ => include/ghidra}/printc.hh        |  4 +-
+ .../cpp/{ => include/ghidra}/printjava.hh     |  2 +-
+ .../cpp/{ => include/ghidra}/printlanguage.hh |  6 +-
+ .../cpp/{ => include/ghidra}/rangemap.hh      |  0
+ .../cpp/{ => include/ghidra}/rangeutil.hh     |  2 +-
+ .../cpp/{ => include/ghidra}/raw_arch.hh      |  4 +-
+ .../cpp/{ => include/ghidra}/ruleaction.hh    |  2 +-
+ .../cpp/{ => include/ghidra}/rulecompile.hh   |  2 +-
+ .../cpp/{ => include/ghidra}/semantics.hh     |  2 +-
+ .../cpp/{ => include/ghidra}/sleigh.hh        |  2 +-
+ .../cpp/{ => include/ghidra}/sleigh_arch.hh   |  6 +-
+ .../cpp/{ => include/ghidra}/sleighbase.hh    |  4 +-
+ .../cpp/{ => include/ghidra}/slgh_compile.hh  |  6 +-
+ .../cpp/{ => include/ghidra}/slghparse.hh     |  6 +-
+ .../{ => include/ghidra}/slghpatexpress.hh    |  2 +-
+ .../cpp/{ => include/ghidra}/slghpattern.hh   |  2 +-
+ .../cpp/{ => include/ghidra}/slghsymbol.hh    |  4 +-
+ .../cpp/{ => include/ghidra}/space.hh         |  4 +-
+ .../cpp/{ => include/ghidra}/string_ghidra.hh |  2 +-
+ .../cpp/{ => include/ghidra}/stringmanage.hh  |  2 +-
+ .../cpp/{ => include/ghidra}/subflow.hh       |  2 +-
+ .../cpp/{ => include/ghidra}/test.hh          |  4 +-
+ .../cpp/{ => include/ghidra}/testfunction.hh  |  6 +-
+ .../cpp/{ => include/ghidra}/transform.hh     |  2 +-
+ .../cpp/{ => include/ghidra}/translate.hh     |  4 +-
+ .../cpp/{ => include/ghidra}/type.hh          |  2 +-
+ .../{ => include/ghidra}/typegrp_ghidra.hh    |  4 +-
+ .../cpp/{ => include/ghidra}/typeop.hh        |  8 +-
+ .../cpp/{ => include/ghidra}/types.h          |  0
+ .../cpp/{ => include/ghidra}/unify.hh         |  2 +-
+ .../cpp/{ => include/ghidra}/unionresolve.hh  |  2 +-
+ .../cpp/{ => include/ghidra}/userop.hh        |  2 +-
+ .../cpp/{ => include/ghidra}/variable.hh      |  2 +-
+ .../cpp/{ => include/ghidra}/varmap.hh        |  2 +-
+ .../cpp/{ => include/ghidra}/varnode.hh       |  4 +-
+ .../decompile/cpp/{ => include/ghidra}/xml.hh |  2 +-
+ .../cpp/{ => include/ghidra}/xml_arch.hh      |  4 +-
+ .../src/decompile/cpp/inject_ghidra.cc        |  2 +-
+ .../src/decompile/cpp/inject_sleigh.cc        |  6 +-
+ .../Decompiler/src/decompile/cpp/interface.cc |  2 +-
+ .../Decompiler/src/decompile/cpp/jumptable.cc |  6 +-
+ .../Decompiler/src/decompile/cpp/libdecomp.cc |  2 +-
+ .../Decompiler/src/decompile/cpp/loadimage.cc |  2 +-
+ .../src/decompile/cpp/loadimage_bfd.cc        |  2 +-
+ .../src/decompile/cpp/loadimage_ghidra.cc     |  2 +-
+ .../src/decompile/cpp/loadimage_xml.cc        |  4 +-
+ .../Decompiler/src/decompile/cpp/makeBison.sh |  2 +-
+ .../Decompiler/src/decompile/cpp/marshal.cc   |  4 +-
+ .../Decompiler/src/decompile/cpp/memstate.cc  |  4 +-
+ .../Decompiler/src/decompile/cpp/merge.cc     |  4 +-
+ .../src/decompile/cpp/modelrules.cc           |  4 +-
+ .../Decompiler/src/decompile/cpp/op.cc        |  4 +-
+ .../src/decompile/cpp/opbehavior.cc           |  4 +-
+ .../Decompiler/src/decompile/cpp/opcodes.cc   |  4 +-
+ .../Decompiler/src/decompile/cpp/options.cc   |  8 +-
+ .../Decompiler/src/decompile/cpp/override.cc  |  4 +-
+ .../Decompiler/src/decompile/cpp/paramid.cc   |  2 +-
+ .../src/decompile/cpp/pcodecompile.cc         |  2 +-
+ .../src/decompile/cpp/pcodeinject.cc          |  4 +-
+ .../src/decompile/cpp/pcodeparse.cc           |  2 +-
+ .../Decompiler/src/decompile/cpp/pcodeparse.y |  2 +-
+ .../Decompiler/src/decompile/cpp/pcoderaw.cc  |  4 +-
+ .../src/decompile/cpp/prefersplit.cc          |  4 +-
+ .../src/decompile/cpp/prettyprint.cc          |  4 +-
+ .../Decompiler/src/decompile/cpp/printc.cc    |  4 +-
+ .../Decompiler/src/decompile/cpp/printjava.cc |  4 +-
+ .../src/decompile/cpp/printlanguage.cc        |  4 +-
+ .../Decompiler/src/decompile/cpp/rangeutil.cc |  4 +-
+ .../Decompiler/src/decompile/cpp/raw_arch.cc  |  2 +-
+ .../src/decompile/cpp/ruleaction.cc           |  8 +-
+ .../src/decompile/cpp/rulecompile.cc          |  4 +-
+ .../Decompiler/src/decompile/cpp/ruleparse.y  |  2 +-
+ .../Decompiler/src/decompile/cpp/semantics.cc |  4 +-
+ .../Decompiler/src/decompile/cpp/sleigh.cc    |  4 +-
+ .../src/decompile/cpp/sleigh_arch.cc          |  4 +-
+ .../src/decompile/cpp/sleighbase.cc           |  2 +-
+ .../src/decompile/cpp/sleighexample.cc        |  8 +-
+ .../src/decompile/cpp/slgh_compile.cc         |  4 +-
+ .../Decompiler/src/decompile/cpp/slghparse.cc | 74 +++++++++----------
+ .../Decompiler/src/decompile/cpp/slghparse.y  |  3 +-
+ .../src/decompile/cpp/slghpatexpress.cc       |  4 +-
+ .../src/decompile/cpp/slghpattern.cc          |  2 +-
+ .../Decompiler/src/decompile/cpp/slghscan.cc  |  4 +-
+ .../Decompiler/src/decompile/cpp/slghscan.l   |  4 +-
+ .../src/decompile/cpp/slghsymbol.cc           |  4 +-
+ .../Decompiler/src/decompile/cpp/space.cc     |  4 +-
+ .../src/decompile/cpp/string_ghidra.cc        |  2 +-
+ .../src/decompile/cpp/stringmanage.cc         |  4 +-
+ .../Decompiler/src/decompile/cpp/subflow.cc   |  2 +-
+ .../Decompiler/src/decompile/cpp/test.cc      |  4 +-
+ .../src/decompile/cpp/testfunction.cc         |  2 +-
+ .../Decompiler/src/decompile/cpp/transform.cc |  4 +-
+ .../Decompiler/src/decompile/cpp/translate.cc |  2 +-
+ .../Decompiler/src/decompile/cpp/type.cc      |  4 +-
+ .../src/decompile/cpp/typegrp_ghidra.cc       |  2 +-
+ .../Decompiler/src/decompile/cpp/typeop.cc    |  4 +-
+ .../Decompiler/src/decompile/cpp/unify.cc     |  2 +-
+ .../src/decompile/cpp/unionresolve.cc         |  4 +-
+ .../Decompiler/src/decompile/cpp/userop.cc    |  4 +-
+ .../Decompiler/src/decompile/cpp/variable.cc  |  6 +-
+ .../Decompiler/src/decompile/cpp/varmap.cc    |  4 +-
+ .../Decompiler/src/decompile/cpp/varnode.cc   |  4 +-
+ .../Decompiler/src/decompile/cpp/xml.cc       | 18 ++---
+ .../Decompiler/src/decompile/cpp/xml.y        |  2 +-
+ .../Decompiler/src/decompile/cpp/xml_arch.cc  |  2 +-
+ .../decompile/unittests/testcirclerange.cc    |  4 +-
+ .../src/decompile/unittests/testfloatemu.cc   |  6 +-
+ .../src/decompile/unittests/testfuncproto.cc  |  6 +-
+ .../src/decompile/unittests/testmarshal.cc    |  4 +-
+ .../src/decompile/unittests/testparamstore.cc |  6 +-
+ .../src/decompile/unittests/testtypes.cc      |  6 +-
+ 229 files changed, 485 insertions(+), 483 deletions(-)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/action.hh (99%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/address.hh (99%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/architecture.hh (98%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/bfd_arch.hh (97%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/block.hh (99%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/blockaction.hh (99%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/callgraph.hh (99%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/capability.hh (98%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/cast.hh (99%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/codedata.hh (99%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/comment.hh (99%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/comment_ghidra.hh (97%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/condexe.hh (99%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/context.hh (99%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/coreaction.hh (99%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/cover.hh (99%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/cpool.hh (99%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/cpool_ghidra.hh (98%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/crc32.hh (97%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/database.hh (99%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/database_ghidra.hh (99%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/doccore.hh (100%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/docmain.hh (100%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/double.hh (99%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/dynamic.hh (99%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/emulate.hh (99%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/emulateutil.hh (99%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/error.hh (99%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/filemanage.hh (100%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/float.hh (99%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/flow.hh (99%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/fspec.hh (99%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/funcdata.hh (99%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/ghidra_arch.hh (99%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/ghidra_context.hh (98%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/ghidra_process.hh (98%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/ghidra_translate.hh (97%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/globalcontext.hh (99%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/grammar.hh (99%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/graph.hh (96%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/heritage.hh (99%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/ifacedecomp.hh (98%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/ifaceterm.hh (98%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/inject_ghidra.hh (98%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/inject_sleigh.hh (98%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/interface.hh (99%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/jumptable.hh (99%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/libdecomp.hh (93%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/loadimage.hh (99%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/loadimage_bfd.hh (98%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/loadimage_ghidra.hh (96%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/loadimage_xml.hh (98%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/marshal.hh (99%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/memstate.hh (99%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/merge.hh (99%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/modelrules.hh (99%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/op.hh (99%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/opbehavior.hh (99%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/opcodes.hh (100%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/options.hh (99%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/override.hh (99%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/paramid.hh (98%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/partmap.hh (100%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/pcodecompile.hh (99%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/pcodeinject.hh (99%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/pcodeparse.hh (98%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/pcoderaw.hh (99%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/prefersplit.hh (99%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/prettyprint.hh (99%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/printc.hh (99%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/printjava.hh (99%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/printlanguage.hh (99%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/rangemap.hh (100%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/rangeutil.hh (99%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/raw_arch.hh (97%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/ruleaction.hh (99%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/rulecompile.hh (99%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/semantics.hh (99%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/sleigh.hh (99%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/sleigh_arch.hh (98%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/sleighbase.hh (98%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/slgh_compile.hh (99%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/slghparse.hh (98%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/slghpatexpress.hh (99%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/slghpattern.hh (99%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/slghsymbol.hh (99%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/space.hh (99%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/string_ghidra.hh (97%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/stringmanage.hh (99%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/subflow.hh (99%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/test.hh (98%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/testfunction.hh (98%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/transform.hh (99%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/translate.hh (99%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/type.hh (99%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/typegrp_ghidra.hh (95%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/typeop.hh (99%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/types.h (100%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/unify.hh (99%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/unionresolve.hh (99%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/userop.hh (99%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/variable.hh (99%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/varmap.hh (99%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/varnode.hh (99%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/xml.hh (99%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/xml_arch.hh (97%)
+
+diff --git a/Ghidra/Features/Decompiler/build.gradle b/Ghidra/Features/Decompiler/build.gradle
+index f3544674a..aeb95037b 100644
+--- a/Ghidra/Features/Decompiler/build.gradle
++++ b/Ghidra/Features/Decompiler/build.gradle
+@@ -456,7 +456,7 @@ Task createBisonTask(String filename, String binaryName, boolean generateHeader)
+ 
+ 	def yaccFile = "${filename}.y"
+ 	def ccFile = "${filename}.cc"
+-	def headerFile = "${filename}.hh"
++	def headerFile = "include/ghidra/${filename}.hh"
+ 
+ 	return task("bison_${binaryName}_$filename", type: Exec) {
+ 
+diff --git a/Ghidra/Features/Decompiler/buildNatives.gradle b/Ghidra/Features/Decompiler/buildNatives.gradle
+index f0c92499d..f8277ce43 100644
+--- a/Ghidra/Features/Decompiler/buildNatives.gradle
++++ b/Ghidra/Features/Decompiler/buildNatives.gradle
+@@ -206,7 +206,7 @@ model {
+ 						include decompiler_opt_files
+ 					}
+ 					exportedHeaders {
+-						srcDir "src/decompile/cpp"
++						srcDir "src/decompile/cpp/include"
+ 					}
+ 				}
+ 			}
+@@ -232,7 +232,7 @@ model {
+ 						include sleigh_files
+ 					}
+ 					exportedHeaders {
+-						srcDir "src/decompile/cpp"
++						srcDir "src/decompile/cpp/include"
+ 					}
+ 				}
+ 			}
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/Doxyfile b/Ghidra/Features/Decompiler/src/decompile/cpp/Doxyfile
+index 6b2dce549..361e7198e 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/Doxyfile
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/Doxyfile
+@@ -436,7 +436,7 @@ WARN_LOGFILE           =
+ # directories like "/usr/src/myproject". Separate the files or directories 
+ # with spaces.
+ 
+-INPUT                  = .
++INPUT                  = . ./include/ghidra
+ 
+ # If the value of the INPUT tag contains directories, you can use the 
+ # FILE_PATTERNS tag to specify one or more wildcard pattern (like *.cpp 
+@@ -457,7 +457,7 @@ RECURSIVE              = NO
+ # excluded from the INPUT source files. This way you can easily exclude a 
+ # subdirectory from a directory tree whose root is specified with the INPUT tag.
+ 
+-EXCLUDE                = unify.hh unify.cc rulecompile.hh rulecompile.cc slghparse.cc slghparse.hh slghscan.cc slghpattern.hh slghpattern.cc slghpatexpress.hh slghpatexpress.cc slghsymbol.hh slghsymbol.cc codedata.hh codedata.cc semantics.hh semantics.cc grammar.hh grammar.cc callgraph.hh callgraph.cc filemanage.hh filemanage.cc graph.hh graph.cc loadimage_bfd.hh loadimage_bfd.cc pcodecompile.cc pcodecompile.hh pcodeparse.hh pcodeparse.cc inject_sleigh.hh inject_sleigh.cc context.hh context.cc consolemain.cc sleighexample.cc xml.cc double.hh double.cc paramid.hh paramid.cc prefersplit.hh prefersplit.cc
++EXCLUDE                = include/ghidra/unify.hh unify.cc include/ghidra/rulecompile.hh rulecompile.cc slghparse.cc include/ghidra/slghparse.hh slghscan.cc include/ghidra/slghpattern.hh slghpattern.cc include/ghidra/slghpatexpress.hh slghpatexpress.cc include/ghidra/slghsymbol.hh slghsymbol.cc include/ghidra/codedata.hh codedata.cc include/ghidra/semantics.hh semantics.cc include/ghidra/grammar.hh grammar.cc include/ghidra/callgraph.hh callgraph.cc include/ghidra/filemanage.hh filemanage.cc include/ghidra/graph.hh graph.cc include/ghidra/loadimage_bfd.hh loadimage_bfd.cc pcodecompile.cc include/ghidra/pcodecompile.hh include/ghidra/pcodeparse.hh pcodeparse.cc include/ghidra/inject_sleigh.hh inject_sleigh.cc include/ghidra/context.hh context.cc consolemain.cc sleighexample.cc xml.cc include/ghidra/double.hh double.cc include/ghidra/paramid.hh paramid.cc include/ghidra/prefersplit.hh prefersplit.cc
+ 
+ # The EXCLUDE_SYMLINKS tag can be used select whether or not files or 
+ # directories that are symbolic links (a Unix filesystem feature) are excluded 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/Makefile b/Ghidra/Features/Decompiler/src/decompile/cpp/Makefile
+index 64f3894d9..c15db47a6 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/Makefile
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/Makefile
+@@ -46,10 +46,11 @@ DBG_CXXFLAGS=-g -Wall -Wno-sign-compare
+ OPT_CXXFLAGS=-O2 -Wall -Wno-sign-compare
+ 
+ YACC=bison
++LEX=flex
+ 
+ # libraries
+-#INCLUDES=-I$(BFDHOME)/include
+-INCLUDES=
++INCLUDES=-Iinclude
++#INCLUDES=-Iinclude -I$(BFDHOME)/include
+ BFDLIB=-lbfd -lz
+ 
+ LNK=
+@@ -147,9 +148,9 @@ SLEIGH_DBG_OBJS=$(SLEIGH_NAMES:%=sla_dbg/%.o)
+ SLEIGH_OPT_OBJS=$(SLEIGH_NAMES:%=sla_opt/%.o)
+ LIBSLA_DBG_OBJS=$(LIBSLA_NAMES:%=com_dbg/%.o)
+ LIBSLA_OPT_OBJS=$(LIBSLA_NAMES:%=com_opt/%.o)
+-LIBSLA_SOURCE=$(LIBSLA_NAMES:%=%.cc) $(LIBSLA_NAMES:%=%.hh) \
+-	$(SLACOMP:%=%.cc) slgh_compile.hh slghparse.hh types.h \
+-	partmap.hh error.hh slghparse.y pcodeparse.y xml.y slghscan.l loadimage_bfd.hh loadimage_bfd.cc
++LIBSLA_SOURCE=$(LIBSLA_NAMES:%=%.cc) $(LIBSLA_NAMES:%=include/ghidra/%.hh) \
++	$(SLACOMP:%=%.cc) include/ghidra/slgh_compile.hh include/ghidra/slghparse.hh include/ghidra/types.h \
++	include/ghidra/partmap.hh include/ghidra/error.hh slghparse.y pcodeparse.y xml.y slghscan.l include/ghidra/loadimage_bfd.hh loadimage_bfd.cc
+ LIBDECOMP_DBG_OBJS=$(LIBDECOMP_NAMES:%=com_dbg/%.o)
+ LIBDECOMP_OPT_OBJS=$(LIBDECOMP_NAMES:%=com_opt/%.o)
+ 
+@@ -214,21 +215,21 @@ ifeq ($(MAKECMDGOALS),link_extensions_hard)
+ endif
+ 
+ com_dbg/%.o:	%.cc
+-	$(CXX) $(ARCH_TYPE) -c $(DBG_CXXFLAGS) $(ADDITIONAL_FLAGS) $(COMMANDLINE_DEBUG) $< -o $@
++	$(CXX) $(ARCH_TYPE) -c $(DBG_CXXFLAGS) $(INCLUDES) $(ADDITIONAL_FLAGS) $(COMMANDLINE_DEBUG) $< -o $@
+ com_opt/%.o:	%.cc
+-	$(CXX) $(ARCH_TYPE) -c $(OPT_CXXFLAGS) $(ADDITIONAL_FLAGS) $(COMMANDLINE_OPT)   $< -o $@
++	$(CXX) $(ARCH_TYPE) -c $(OPT_CXXFLAGS) $(INCLUDES) $(ADDITIONAL_FLAGS) $(COMMANDLINE_OPT)   $< -o $@
+ test_dbg/%.o:	%.cc
+-	$(CXX) $(ARCH_TYPE) -c $(DBG_CXXFLAGS) $(ADDITIONAL_FLAGS) $(TEST_DEBUG)        $< -o $@
++	$(CXX) $(ARCH_TYPE) -c $(DBG_CXXFLAGS) $(INCLUDES) $(ADDITIONAL_FLAGS) $(TEST_DEBUG)        $< -o $@
+ test_dbg/%.o:	../unittests/%.cc
+-	$(CXX) -I. $(ARCH_TYPE) -c $(DBG_CXXFLAGS) $(ADDITIONAL_FLAGS) $(TEST_DEBUG)        $< -o $@
++	$(CXX) -I. $(ARCH_TYPE) -c $(DBG_CXXFLAGS) $(INCLUDES) $(ADDITIONAL_FLAGS) $(TEST_DEBUG)        $< -o $@
+ ghi_dbg/%.o:	%.cc
+-	$(CXX) $(ARCH_TYPE) -c $(DBG_CXXFLAGS) $(ADDITIONAL_FLAGS) $(GHIDRA_DEBUG)      $< -o $@
++	$(CXX) $(ARCH_TYPE) -c $(DBG_CXXFLAGS) $(INCLUDES) $(ADDITIONAL_FLAGS) $(GHIDRA_DEBUG)      $< -o $@
+ ghi_opt/%.o:	%.cc
+-	$(CXX) $(ARCH_TYPE) -c $(OPT_CXXFLAGS) $(ADDITIONAL_FLAGS) $(GHIDRA_OPT)        $< -o $@
++	$(CXX) $(ARCH_TYPE) -c $(OPT_CXXFLAGS) $(INCLUDES) $(ADDITIONAL_FLAGS) $(GHIDRA_OPT)        $< -o $@
+ sla_dbg/%.o:	%.cc
+-	$(CXX) $(ARCH_TYPE) -c $(DBG_CXXFLAGS) $(ADDITIONAL_FLAGS) $(SLEIGH_DEBUG)      $< -o $@
++	$(CXX) $(ARCH_TYPE) -c $(DBG_CXXFLAGS) $(INCLUDES) $(ADDITIONAL_FLAGS) $(SLEIGH_DEBUG)      $< -o $@
+ sla_opt/%.o:	%.cc
+-	$(CXX) $(ARCH_TYPE) -c $(OPT_CXXFLAGS) $(ADDITIONAL_FLAGS) $(SLEIGH_OPT)        $< -o $@
++	$(CXX) $(ARCH_TYPE) -c $(OPT_CXXFLAGS) $(INCLUDES) $(ADDITIONAL_FLAGS) $(SLEIGH_OPT)        $< -o $@
+ 
+ grammar.cc:	grammar.y
+ 	$(YACC) -l -o $@ $<
+@@ -237,15 +238,15 @@ xml.cc:	xml.y
+ pcodeparse.cc:	pcodeparse.y
+ 	$(YACC) -l -o $@ $<
+ slghparse.cc:	slghparse.y
+-	$(YACC) -l -d -o $@ $<
++	$(YACC) -l -d -o $@ --defines=include/ghidra/slghparse.hh $<
+ slghscan.cc:	slghscan.l
+ 	$(LEX) -L -o$@ $<
+ ruleparse.cc:	ruleparse.y
+ 	$(YACC) -p ruleparse -d -o $@ $<
+ 
+-slghparse.hh:	slghparse.y slghparse.cc
+-slghscan.cc:	slghparse.hh slgh_compile.hh
+-ruleparse.hh:	ruleparse.y ruleparse.cc
++include/ghidra/slghparse.hh:	slghparse.y slghparse.cc
++slghscan.cc:	include/ghidra/slghparse.hh include/ghidra/slgh_compile.hh
++include/ghidra/ruleparse.hh:	ruleparse.y ruleparse.cc
+ 
+ decomp_dbg:	$(COMMANDLINE_DBG_OBJS)
+ 	$(CXX) $(DBG_CXXFLAGS) $(ARCH_TYPE) -o decomp_dbg $(COMMANDLINE_DBG_OBJS) $(BFDLIB) $(LNK)
+@@ -305,92 +306,92 @@ sleighexamp_dir: slghscan.cc
+ 	  ../../../../../Processors/x86/data/languages/x86.slaspec \
+ 	  ../../../../../Processors/x86/data/languages/ia.sinc \
+ 		 $(SLEIGHVERSION)/specfiles
+-	cp $(LIBSLA_SOURCE) Makefile Doxyfile $(SLEIGHVERSION)/src
++	cp --parents $(LIBSLA_SOURCE) Makefile Doxyfile $(SLEIGHVERSION)/src
+ 	cp sleighexample.cc $(SLEIGHVERSION)
+ 	grep ^-- sleighexample.cc | sed -e s/--// > $(SLEIGHVERSION)/Makefile
+ 	grep ^-a- sleighexample.cc | sed -e s/-a-// > $(SLEIGHVERSION)/README
+-	sed -e s/page\ sleigh\ /mainpage\ / < $(SLEIGHVERSION)/src/sleigh.hh > $(SLEIGHVERSION)/spam
+-	mv $(SLEIGHVERSION)/spam $(SLEIGHVERSION)/src/sleigh.hh
++	sed -e s/page\ sleigh\ /mainpage\ / < $(SLEIGHVERSION)/src/include/ghidra/sleigh.hh > $(SLEIGHVERSION)/spam
++	mv $(SLEIGHVERSION)/spam $(SLEIGHVERSION)/src/include/ghidra/sleigh.hh
+ 	cd $(SLEIGHVERSION)/src; doxygen Doxyfile
+ 
+ link_extensions:
+-	rm -rf coreext_*.cc coreext_*.hh ghidraext_*.cc ghidraext_*.hh consoleext_*.cc consoleext_*.hh
++	rm -rf coreext_*.cc include/ghidra/coreext_*.hh ghidraext_*.cc include/ghidra/ghidraext_*.hh consoleext_*.cc include/ghidra/consoleext_*.hh
+ 	for i in $(EXTERNAL_COREEXT_NAMES) $(EXTERNAL_GHIDRAEXT_NAMES) $(EXTERNAL_CONSOLEEXT_NAMES); do \
+ 		ln -s $(EXTENSION_POINT)/$$i.cc $$i.cc; \
+-		ln -s $(EXTENSION_POINT)/$$i.hh $$i.hh; \
++		ln -s $(EXTENSION_POINT)/include/ghidra/$$i.hh include/ghidra/$$i.hh; \
+ 	done
+ 
+ link_extensions_hard:
+-	rm -rf coreext_*.cc coreext_*.hh ghidraext_*.cc ghidraext_*.hh consoleext_*.cc consoleext_*.hh
++	rm -rf coreext_*.cc include/ghidra/coreext_*.hh ghidraext_*.cc include/ghidra/ghidraext_*.hh consoleext_*.cc include/ghidra/consoleext_*.hh
+ 	for i in $(EXTERNAL_COREEXT_NAMES) $(EXTERNAL_GHIDRAEXT_NAMES) $(EXTERNAL_CONSOLEEXT_NAMES); do \
+ 		ln $(EXTENSION_POINT)/$$i.cc $$i.cc; \
+-		ln $(EXTENSION_POINT)/$$i.hh $$i.hh; \
++		ln $(EXTENSION_POINT)/include/ghidra/$$i.hh include/ghidra/$$i.hh; \
+ 	done
+ 
+ tags:
+-	etags *.c *.h *.cc *.hh
++	etags *.c include/ghidra/*.h *.cc include/ghidra/*.hh
+ 
+ # Rules to build the different dependency files
+ com_dbg/depend:	$(COMMANDLINE_NAMES:%=%.cc)
+ 	mkdir -p com_dbg 
+ 	@set -e; rm -f $@; \
+-	$(CXX) -MM $(COMMANDLINE_DEBUG) $^ > $@.$$$$; \
++	$(CXX) $(INCLUDES) -MM $(COMMANDLINE_DEBUG) $^ > $@.$$$$; \
+ 	sed 's,\(.*\)\.o[ :]*,com_dbg/\1.o $@ : ,g' < $@.$$$$ > $@; \
+ 	rm -f $@.$$$$
+ 
+ com_opt/depend:	$(COMMANDLINE_NAMES:%=%.cc)
+ 	mkdir -p com_opt
+ 	@set -e; rm -f $@; \
+-	$(CXX) -MM $(COMMANDLINE_OPT) $^ > $@.$$$$; \
++	$(CXX) $(INCLUDES) -MM $(COMMANDLINE_OPT) $^ > $@.$$$$; \
+ 	sed 's,\(.*\)\.o[ :]*,com_opt/\1.o $@ : ,g' < $@.$$$$ > $@; \
+ 	rm -f $@.$$$$
+ 
+ test_dbg/depend:	$(TEST_NAMES:%=%.cc) $(UNITTEST_NAMES:%=%.cc)
+ 	mkdir -p test_dbg
+ 	@set -e; rm -f $@; \
+-	$(CXX) -I. -MM $(TEST_DEBUG) $^ > $@.$$$$; \
++	$(CXX) $(INCLUDES) -MM $(TEST_DEBUG) $^ > $@.$$$$; \
+ 	sed 's,\(.*\)\.o[ :]*,test_dbg/\1.o $@ : ,g' < $@.$$$$ > $@; \
+ 	rm -f $@.$$$$
+ 
+ ghi_dbg/depend:	$(GHIDRA_NAMES_DBG:%=%.cc)
+ 	mkdir -p ghi_dbg
+ 	@set -e; rm -f $@; \
+-	$(CXX) -MM $(GHIDRA_DEBUG) $^ > $@.$$$$; \
++	$(CXX) $(INCLUDES) -MM $(GHIDRA_DEBUG) $^ > $@.$$$$; \
+ 	sed 's,\(.*\)\.o[ :]*,ghi_dbg/\1.o $@ : ,g' < $@.$$$$ > $@; \
+ 	rm -f $@.$$$$
+ 
+ ghi_opt/depend:	$(GHIDRA_NAMES:%=%.cc)
+ 	mkdir -p ghi_opt 
+ 	@set -e; rm -f $@; \
+-	$(CXX) -MM $(GHIDRA_OPT) $^ > $@.$$$$; \
++	$(CXX) $(INCLUDES) -MM $(GHIDRA_OPT) $^ > $@.$$$$; \
+ 	sed 's,\(.*\)\.o[ :]*,ghi_opt/\1.o $@ : ,g' < $@.$$$$ > $@; \
+ 	rm -f $@.$$$$
+ 
+ sla_dbg/depend:	$(SLEIGH_NAMES:%=%.cc)
+ 	mkdir -p sla_dbg
+ 	@set -e; rm -f $@; \
+-	$(CXX) -MM $(SLEIGH_DEBUG) $^ > $@.$$$$; \
++	$(CXX) $(INCLUDES) -MM $(SLEIGH_DEBUG) $^ > $@.$$$$; \
+ 	sed 's,\(.*\)\.o[ :]*,sla_dbg/\1.o $@ : ,g' < $@.$$$$ > $@; \
+ 	rm -f $@.$$$$
+ 
+ sla_opt/depend:	$(SLEIGH_NAMES:%=%.cc)
+ 	mkdir -p sla_opt
+ 	@set -e; rm -f $@; \
+-	$(CXX) -MM $(SLEIGH_OPT) $^ > $@.$$$$; \
++	$(CXX) $(INCLUDES) -MM $(SLEIGH_OPT) $^ > $@.$$$$; \
+ 	sed 's,\(.*\)\.o[ :]*,sla_opt/\1.o $@ : ,g' < $@.$$$$ > $@; \
+ 	rm -f $@.$$$$
+ 
+ com_opt/depend.lib_sla:	$(LIBSLA_NAMES:%=%.cc)
+ 	mkdir -p com_opt
+ 	@set -e; rm -f $@; \
+-	$(CXX) -MM $(COMMANDLINE_OPT) $^ > $@.$$$$; \
++	$(CXX) $(INCLUDES) -MM $(COMMANDLINE_OPT) $^ > $@.$$$$; \
+ 	sed 's,\(.*\)\.o[ :]*,com_opt/\1.o $@ : ,g' < $@.$$$$ > $@; \
+ 	rm -f $@.$$$$
+ 
+ com_dbg/depend.lib_sla:	$(LIBSLA_NAMES:%=%.cc)
+ 	mkdir -p com_dbg
+ 	@set -e; rm -f $@; \
+-	$(CXX) -MM $(COMMANDLINE_DEBUG) $^ > $@.$$$$; \
++	$(CXX) $(INCLUDES) -MM $(COMMANDLINE_DEBUG) $^ > $@.$$$$; \
+ 	sed 's,\(.*\)\.o[ :]*,com_dbg/\1.o $@ : ,g' < $@.$$$$ > $@; \
+ 	rm -f $@.$$$$
+ 
+@@ -407,7 +408,7 @@ resetgcov:
+ 	rm -f *.gcov com_dbg/*.gcda
+ 
+ reallyclean:	clean	
+-	rm -rf coreext_*.cc coreext_*.hh ghidraext_*.cc ghidraext_*.hh consoleext_*.cc consoleext_*.hh
++	rm -rf coreext_*.cc include/ghidra/coreext_*.hh ghidraext_*.cc include/ghidra/ghidraext_*.hh consoleext_*.cc include/ghidra/consoleext_*.hh
+ 	rm -rf com_dbg com_opt test_dbg ghi_dbg ghi_opt sla_dbg sla_opt
+ 	rm -f $(EXECS) TAGS *~
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/action.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/action.cc
+index 4031b6c87..0953798e9 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/action.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/action.cc
+@@ -13,10 +13,10 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "action.hh"
+-#include "funcdata.hh"
++#include "ghidra/action.hh"
++#include "ghidra/funcdata.hh"
+ 
+-#include "coreaction.hh"
++#include "ghidra/coreaction.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/address.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/address.cc
+index c5d1cbe5c..12d14ca7b 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/address.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/address.cc
+@@ -13,8 +13,8 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "address.hh"
+-#include "translate.hh"
++#include "ghidra/address.hh"
++#include "ghidra/translate.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/architecture.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/architecture.cc
+index fe49a1d3f..3e2203d76 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/architecture.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/architecture.cc
+@@ -15,10 +15,10 @@
+  */
+ // Set up decompiler for specific architectures
+ 
+-#include "coreaction.hh"
+-#include "flow.hh"
++#include "ghidra/coreaction.hh"
++#include "ghidra/flow.hh"
+ #ifdef CPUI_RULECOMPILE
+-#include "rulecompile.hh"
++#include "ghidra/rulecompile.hh"
+ #endif
+ #ifdef CPUI_STATISTICS
+ #include <cmath>
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/bfd_arch.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/bfd_arch.cc
+index 3987da1f2..e05c2fed1 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/bfd_arch.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/bfd_arch.cc
+@@ -14,7 +14,7 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "bfd_arch.hh"
++#include "ghidra/bfd_arch.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/block.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/block.cc
+index b633c4b07..d0c27ced7 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/block.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/block.cc
+@@ -14,8 +14,8 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "block.hh"
+-#include "funcdata.hh"
++#include "ghidra/block.hh"
++#include "ghidra/funcdata.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/blockaction.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/blockaction.cc
+index 03704fc0c..6bbc44981 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/blockaction.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/blockaction.cc
+@@ -13,8 +13,8 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "blockaction.hh"
+-#include "funcdata.hh"
++#include "ghidra/blockaction.hh"
++#include "ghidra/funcdata.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/callgraph.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/callgraph.cc
+index fcb0eece9..5b648d1ad 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/callgraph.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/callgraph.cc
+@@ -13,8 +13,8 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "callgraph.hh"
+-#include "funcdata.hh"
++#include "ghidra/callgraph.hh"
++#include "ghidra/funcdata.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/capability.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/capability.cc
+index eaecfcda3..5b5529511 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/capability.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/capability.cc
+@@ -13,7 +13,7 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "capability.hh"
++#include "ghidra/capability.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/cast.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/cast.cc
+index 14d63871f..f9d657e84 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/cast.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/cast.cc
+@@ -13,8 +13,8 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "cast.hh"
+-#include "op.hh"
++#include "ghidra/cast.hh"
++#include "ghidra/op.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/codedata.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/codedata.cc
+index 4a4235ca8..c581fb32d 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/codedata.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/codedata.cc
+@@ -14,8 +14,8 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "codedata.hh"
+-#include "loadimage_bfd.hh"
++#include "ghidra/codedata.hh"
++#include "ghidra/loadimage_bfd.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/comment.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/comment.cc
+index c381aa27a..33b712ec6 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/comment.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/comment.cc
+@@ -13,8 +13,8 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "comment.hh"
+-#include "funcdata.hh"
++#include "ghidra/comment.hh"
++#include "ghidra/funcdata.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/comment_ghidra.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/comment_ghidra.cc
+index 6dfcde1fd..0f895f82a 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/comment_ghidra.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/comment_ghidra.cc
+@@ -13,7 +13,7 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "comment_ghidra.hh"
++#include "ghidra/comment_ghidra.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/condexe.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/condexe.cc
+index 163aa10b7..b2df5d281 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/condexe.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/condexe.cc
+@@ -13,7 +13,7 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "condexe.hh"
++#include "ghidra/condexe.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/consolemain.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/consolemain.cc
+index d31e28758..f5f12d799 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/consolemain.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/consolemain.cc
+@@ -15,7 +15,7 @@
+  */
+ #include <iostream>
+ #include <cstdlib>
+-#include "libdecomp.hh"
++#include "ghidra/libdecomp.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/context.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/context.cc
+index 1a0a35f3e..da282920e 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/context.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/context.cc
+@@ -13,9 +13,9 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "context.hh"
+-#include "slghsymbol.hh"
+-#include "translate.hh"
++#include "ghidra/context.hh"
++#include "ghidra/slghsymbol.hh"
++#include "ghidra/translate.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
+index 9def5580c..257b760e6 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
+@@ -13,10 +13,10 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "coreaction.hh"
+-#include "condexe.hh"
+-#include "double.hh"
+-#include "subflow.hh"
++#include "ghidra/coreaction.hh"
++#include "ghidra/condexe.hh"
++#include "ghidra/double.hh"
++#include "ghidra/subflow.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/cover.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/cover.cc
+index 4ebca11ba..fd31bb4ba 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/cover.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/cover.cc
+@@ -13,8 +13,8 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "cover.hh"
+-#include "block.hh"
++#include "ghidra/cover.hh"
++#include "ghidra/block.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/cpool.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/cpool.cc
+index e73485a86..8c7a64215 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/cpool.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/cpool.cc
+@@ -13,7 +13,7 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "cpool.hh"
++#include "ghidra/cpool.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/cpool_ghidra.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/cpool_ghidra.cc
+index 3fcb044b2..f5bba88d1 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/cpool_ghidra.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/cpool_ghidra.cc
+@@ -13,7 +13,7 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "cpool_ghidra.hh"
++#include "ghidra/cpool_ghidra.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/crc32.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/crc32.cc
+index 8e8f129b7..ec6fb880b 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/crc32.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/crc32.cc
+@@ -13,7 +13,7 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "crc32.hh"
++#include "ghidra/crc32.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/database.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/database.cc
+index cc0d3f442..7fbef033b 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/database.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/database.cc
+@@ -13,9 +13,9 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "database.hh"
+-#include "funcdata.hh"
+-#include "crc32.hh"
++#include "ghidra/database.hh"
++#include "ghidra/funcdata.hh"
++#include "ghidra/crc32.hh"
+ #include <ctype.h>
+ 
+ namespace ghidra {
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/database_ghidra.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/database_ghidra.cc
+index 7e7e59c5f..c77336d06 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/database_ghidra.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/database_ghidra.cc
+@@ -13,8 +13,8 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "database_ghidra.hh"
+-#include "funcdata.hh"
++#include "ghidra/database_ghidra.hh"
++#include "ghidra/funcdata.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/double.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/double.cc
+index 840ed3836..1eba40c46 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/double.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/double.cc
+@@ -13,7 +13,7 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "double.hh"
++#include "ghidra/double.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/dynamic.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/dynamic.cc
+index 05658e854..e3235a2b2 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/dynamic.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/dynamic.cc
+@@ -13,9 +13,9 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "dynamic.hh"
+-#include "funcdata.hh"
+-#include "crc32.hh"
++#include "ghidra/dynamic.hh"
++#include "ghidra/funcdata.hh"
++#include "ghidra/crc32.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/emulate.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/emulate.cc
+index 0f89ec9f6..edfd87c54 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/emulate.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/emulate.cc
+@@ -13,7 +13,7 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "emulate.hh"
++#include "ghidra/emulate.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/emulateutil.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/emulateutil.cc
+index 177562b3a..15ab1f021 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/emulateutil.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/emulateutil.cc
+@@ -13,8 +13,8 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "architecture.hh"
+-#include "emulateutil.hh"
++#include "ghidra/architecture.hh"
++#include "ghidra/emulateutil.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/filemanage.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/filemanage.cc
+index c0d54bade..e94b2f8a8 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/filemanage.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/filemanage.cc
+@@ -14,7 +14,7 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "filemanage.hh"
++#include "ghidra/filemanage.hh"
+ 
+ #ifdef _WINDOWS
+ #include <windows.h>
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/float.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/float.cc
+index 2e8a4c6b2..d92ce6fea 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/float.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/float.cc
+@@ -14,8 +14,8 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "float.hh"
+-#include "address.hh"
++#include "ghidra/float.hh"
++#include "ghidra/address.hh"
+ 
+ #include <cmath>
+ #include <limits>
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/flow.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/flow.cc
+index 7cfb2bc0d..b2f5d6d52 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/flow.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/flow.cc
+@@ -13,7 +13,7 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "flow.hh"
++#include "ghidra/flow.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.cc
+index 876b63638..3afdb0846 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.cc
+@@ -13,8 +13,8 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "fspec.hh"
+-#include "funcdata.hh"
++#include "ghidra/fspec.hh"
++#include "ghidra/funcdata.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/funcdata.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/funcdata.cc
+index b2d7633d0..b4151d08a 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/funcdata.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/funcdata.cc
+@@ -13,7 +13,7 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "funcdata.hh"
++#include "ghidra/funcdata.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/funcdata_block.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/funcdata_block.cc
+index 5b90c1d97..3546a15b7 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/funcdata_block.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/funcdata_block.cc
+@@ -13,8 +13,8 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "funcdata.hh"
+-#include "flow.hh"
++#include "ghidra/funcdata.hh"
++#include "ghidra/flow.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/funcdata_op.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/funcdata_op.cc
+index 99376cedf..cf893a94a 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/funcdata_op.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/funcdata_op.cc
+@@ -13,8 +13,8 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "funcdata.hh"
+-#include "flow.hh"
++#include "ghidra/funcdata.hh"
++#include "ghidra/flow.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/funcdata_varnode.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/funcdata_varnode.cc
+index 856307309..65d16ccac 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/funcdata_varnode.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/funcdata_varnode.cc
+@@ -13,7 +13,7 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "funcdata.hh"
++#include "ghidra/funcdata.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/ghidra_arch.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/ghidra_arch.cc
+index 5a6cf32fd..4623a20d5 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/ghidra_arch.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/ghidra_arch.cc
+@@ -13,15 +13,15 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "ghidra_context.hh"
+-#include "loadimage_ghidra.hh"
+-#include "database_ghidra.hh"
+-#include "ghidra_translate.hh"
+-#include "typegrp_ghidra.hh"
+-#include "comment_ghidra.hh"
+-#include "string_ghidra.hh"
+-#include "cpool_ghidra.hh"
+-#include "inject_ghidra.hh"
++#include "ghidra/ghidra_context.hh"
++#include "ghidra/loadimage_ghidra.hh"
++#include "ghidra/database_ghidra.hh"
++#include "ghidra/ghidra_translate.hh"
++#include "ghidra/typegrp_ghidra.hh"
++#include "ghidra/comment_ghidra.hh"
++#include "ghidra/string_ghidra.hh"
++#include "ghidra/cpool_ghidra.hh"
++#include "ghidra/inject_ghidra.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/ghidra_context.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/ghidra_context.cc
+index f1ffc604e..11ceb1b8e 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/ghidra_context.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/ghidra_context.cc
+@@ -13,7 +13,7 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "ghidra_context.hh"
++#include "ghidra/ghidra_context.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/ghidra_process.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/ghidra_process.cc
+index c282c25f1..3637acfa6 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/ghidra_process.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/ghidra_process.cc
+@@ -13,9 +13,9 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "ghidra_process.hh"
+-#include "flow.hh"
+-#include "blockaction.hh"
++#include "ghidra/ghidra_process.hh"
++#include "ghidra/flow.hh"
++#include "ghidra/blockaction.hh"
+ 
+ #ifdef _WINDOWS
+ #include <fcntl.h>
+@@ -23,7 +23,7 @@
+ #endif
+ 
+ #ifdef __REMOTE_SOCKET__
+-#include "ifacedecomp.hh"
++#include "ghidra/ifacedecomp.hh"
+ #endif
+ 
+ namespace ghidra {
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/ghidra_translate.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/ghidra_translate.cc
+index 437012be8..8c09f7ecb 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/ghidra_translate.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/ghidra_translate.cc
+@@ -13,8 +13,8 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "ghidra_translate.hh"
+-#include "funcdata.hh"
++#include "ghidra/ghidra_translate.hh"
++#include "ghidra/funcdata.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/globalcontext.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/globalcontext.cc
+index ef2d8800c..353fd334d 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/globalcontext.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/globalcontext.cc
+@@ -13,7 +13,7 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "globalcontext.hh"
++#include "ghidra/globalcontext.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/grammar.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/grammar.cc
+index 269e6766d..9b4bc4e78 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/grammar.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/grammar.cc
+@@ -76,7 +76,7 @@
+ 
+ /* First part of user prologue.  */
+ 
+-#include "grammar.hh"
++#include "ghidra/grammar.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/grammar.y b/Ghidra/Features/Decompiler/src/decompile/cpp/grammar.y
+index ed43da358..2dc5b8e4f 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/grammar.y
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/grammar.y
+@@ -15,7 +15,7 @@
+  */
+ %define api.prefix {grammar}
+ %{
+-#include "grammar.hh"
++#include "ghidra/grammar.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/graph.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/graph.cc
+index af787c472..be438014d 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/graph.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/graph.cc
+@@ -14,7 +14,7 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "graph.hh"
++#include "ghidra/graph.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/heritage.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/heritage.cc
+index 880c3a0a1..053dbe9a7 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/heritage.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/heritage.cc
+@@ -13,9 +13,9 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "heritage.hh"
+-#include "funcdata.hh"
+-#include "prefersplit.hh"
++#include "ghidra/heritage.hh"
++#include "ghidra/funcdata.hh"
++#include "ghidra/prefersplit.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/ifacedecomp.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/ifacedecomp.cc
+index 09072cf77..c6643aad4 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/ifacedecomp.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/ifacedecomp.cc
+@@ -13,12 +13,12 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "ifacedecomp.hh"
++#include "ghidra/ifacedecomp.hh"
+ extern "C" {
+ #include <time.h>
+ }
+-#include "pcodeparse.hh"
+-#include "blockaction.hh"
++#include "ghidra/pcodeparse.hh"
++#include "ghidra/blockaction.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/ifaceterm.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/ifaceterm.cc
+index 20ca9f663..c14d673cf 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/ifaceterm.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/ifaceterm.cc
+@@ -13,7 +13,7 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "ifaceterm.hh"
++#include "ghidra/ifaceterm.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/action.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/action.hh
+similarity index 99%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/action.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/action.hh
+index 6cd69a302..8a78079d7 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/action.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/action.hh
+@@ -18,7 +18,7 @@
+ #ifndef __ACTION_HH__
+ #define __ACTION_HH__
+ 
+-#include "block.hh"
++#include "ghidra/block.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/address.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/address.hh
+similarity index 99%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/address.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/address.hh
+index a14ea46a6..8bc986ee5 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/address.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/address.hh
+@@ -26,7 +26,7 @@
+ #ifndef __ADDRESS_HH__
+ #define __ADDRESS_HH__
+ 
+-#include "space.hh"
++#include "ghidra/space.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/architecture.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/architecture.hh
+similarity index 98%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/architecture.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/architecture.hh
+index 2fe3aed26..dcc2f9a44 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/architecture.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/architecture.hh
+@@ -18,21 +18,21 @@
+ #ifndef __ARCHITECTURE_HH__
+ #define __ARCHITECTURE_HH__
+ 
+-#include "capability.hh"
+-#include "varmap.hh"
+-#include "action.hh"
+-#include "database.hh"
+-#include "pcodeinject.hh"
+-#include "fspec.hh"
+-#include "translate.hh"
+-#include "loadimage.hh"
+-#include "globalcontext.hh"
+-#include "comment.hh"
+-#include "stringmanage.hh"
+-#include "userop.hh"
+-#include "options.hh"
+-#include "transform.hh"
+-#include "prefersplit.hh"
++#include "ghidra/capability.hh"
++#include "ghidra/varmap.hh"
++#include "ghidra/action.hh"
++#include "ghidra/database.hh"
++#include "ghidra/pcodeinject.hh"
++#include "ghidra/fspec.hh"
++#include "ghidra/translate.hh"
++#include "ghidra/loadimage.hh"
++#include "ghidra/globalcontext.hh"
++#include "ghidra/comment.hh"
++#include "ghidra/stringmanage.hh"
++#include "ghidra/userop.hh"
++#include "ghidra/options.hh"
++#include "ghidra/transform.hh"
++#include "ghidra/prefersplit.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/bfd_arch.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/bfd_arch.hh
+similarity index 97%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/bfd_arch.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/bfd_arch.hh
+index 69ab22e14..8713cee48 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/bfd_arch.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/bfd_arch.hh
+@@ -19,8 +19,8 @@
+ #ifndef __BFD_ARCH_HH__
+ #define __BFD_ARCH_HH__
+ 
+-#include "sleigh_arch.hh"
+-#include "loadimage_bfd.hh"
++#include "ghidra/sleigh_arch.hh"
++#include "ghidra/loadimage_bfd.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/block.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/block.hh
+similarity index 99%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/block.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/block.hh
+index fc3fdf584..d4b625992 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/block.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/block.hh
+@@ -19,7 +19,7 @@
+ #ifndef __BLOCK_HH__
+ #define __BLOCK_HH__
+ 
+-#include "jumptable.hh"
++#include "ghidra/jumptable.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/blockaction.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/blockaction.hh
+similarity index 99%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/blockaction.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/blockaction.hh
+index 1250fa355..80d505752 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/blockaction.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/blockaction.hh
+@@ -19,7 +19,7 @@
+ /// \file blockaction.hh
+ /// \brief Actions and classes associated with transforming and structuring the control-flow graph
+ 
+-#include "action.hh"
++#include "ghidra/action.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/callgraph.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/callgraph.hh
+similarity index 99%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/callgraph.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/callgraph.hh
+index 67be2bdba..6ed64b35f 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/callgraph.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/callgraph.hh
+@@ -16,7 +16,7 @@
+ #ifndef __CALLGRAPH_HH__
+ #define __CALLGRAPH_HH__
+ 
+-#include "address.hh"
++#include "ghidra/address.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/capability.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/capability.hh
+similarity index 98%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/capability.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/capability.hh
+index 2c0701d12..4c9677beb 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/capability.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/capability.hh
+@@ -18,7 +18,7 @@
+ #ifndef __CAPABILITY_HH__
+ #define __CAPABILITY_HH__
+ 
+-#include "types.h"
++#include "ghidra/types.h"
+ #include <vector>
+ #include <string>
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/cast.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/cast.hh
+similarity index 99%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/cast.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/cast.hh
+index 6d8dadff5..b51d5e9ec 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/cast.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/cast.hh
+@@ -19,7 +19,7 @@
+ #ifndef __CAST_HH__
+ #define __CAST_HH__
+ 
+-#include "type.hh"
++#include "ghidra/type.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/codedata.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/codedata.hh
+similarity index 99%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/codedata.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/codedata.hh
+index 29e676d7e..1958bd86a 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/codedata.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/codedata.hh
+@@ -16,7 +16,7 @@
+ #ifndef __CODEDATA_HH__
+ #define __CODEDATA_HH__
+ 
+-#include "ifacedecomp.hh"
++#include "ghidra/ifacedecomp.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/comment.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/comment.hh
+similarity index 99%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/comment.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/comment.hh
+index 5c1dfe9da..cc46606c8 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/comment.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/comment.hh
+@@ -19,7 +19,7 @@
+ #ifndef __COMMENT_HH__
+ #define __COMMENT_HH__
+ 
+-#include "address.hh"
++#include "ghidra/address.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/comment_ghidra.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/comment_ghidra.hh
+similarity index 97%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/comment_ghidra.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/comment_ghidra.hh
+index cf3f9f893..d219f2494 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/comment_ghidra.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/comment_ghidra.hh
+@@ -18,8 +18,8 @@
+ #ifndef __COMMENT_GHIDRA_HH__
+ #define __COMMENT_GHIDRA_HH__
+ 
+-#include "comment.hh"
+-#include "ghidra_arch.hh"
++#include "ghidra/comment.hh"
++#include "ghidra/ghidra_arch.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/condexe.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/condexe.hh
+similarity index 99%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/condexe.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/condexe.hh
+index a800756e7..ca1f8b92d 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/condexe.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/condexe.hh
+@@ -18,7 +18,7 @@
+ #ifndef __CONDEXE_HH__
+ #define __CONDEXE_HH__
+ 
+-#include "funcdata.hh"
++#include "ghidra/funcdata.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/context.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/context.hh
+similarity index 99%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/context.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/context.hh
+index 531643349..580596e05 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/context.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/context.hh
+@@ -16,8 +16,8 @@
+ #ifndef __CONTEXT_HH__
+ #define __CONTEXT_HH__
+ 
+-#include "globalcontext.hh"
+-#include "opcodes.hh"
++#include "ghidra/globalcontext.hh"
++#include "ghidra/opcodes.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/coreaction.hh
+similarity index 99%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/coreaction.hh
+index eefa3a817..ff8204f05 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/coreaction.hh
+@@ -24,9 +24,9 @@
+ #ifndef __COREACTION_HH__
+ #define __COREACTION_HH__
+ 
+-#include "ruleaction.hh"
+-#include "blockaction.hh"
+-#include "funcdata.hh"
++#include "ghidra/ruleaction.hh"
++#include "ghidra/blockaction.hh"
++#include "ghidra/funcdata.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/cover.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/cover.hh
+similarity index 99%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/cover.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/cover.hh
+index 7fd46e625..d0f5d02ee 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/cover.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/cover.hh
+@@ -18,7 +18,7 @@
+ #ifndef __COVER_HH__
+ #define __COVER_HH__
+ 
+-#include "type.hh"
++#include "ghidra/type.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/cpool.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/cpool.hh
+similarity index 99%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/cpool.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/cpool.hh
+index 4afb6aa5e..d99c84c28 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/cpool.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/cpool.hh
+@@ -19,7 +19,7 @@
+ #ifndef __CPOOL_HH__
+ #define __CPOOL_HH__
+ 
+-#include "type.hh"
++#include "ghidra/type.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/cpool_ghidra.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/cpool_ghidra.hh
+similarity index 98%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/cpool_ghidra.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/cpool_ghidra.hh
+index fad868ecb..8c8d9c2af 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/cpool_ghidra.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/cpool_ghidra.hh
+@@ -19,7 +19,7 @@
+ #ifndef __CPOOL_GHIDRA_HH__
+ #define __CPOOL_GHIDRA_HH__
+ 
+-#include "ghidra_arch.hh"
++#include "ghidra/ghidra_arch.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/crc32.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/crc32.hh
+similarity index 97%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/crc32.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/crc32.hh
+index 87c61ae86..7349fb566 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/crc32.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/crc32.hh
+@@ -19,7 +19,7 @@
+ #ifndef __CRC32_HH__
+ #define __CRC32_HH__
+ 
+-#include "types.h"
++#include "ghidra/types.h"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/database.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/database.hh
+similarity index 99%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/database.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/database.hh
+index 603532ea4..5465bf2f8 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/database.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/database.hh
+@@ -23,9 +23,9 @@
+ #ifndef __DATABASE_HH__
+ #define __DATABASE_HH__
+ 
+-#include "variable.hh"
+-#include "partmap.hh"
+-#include "rangemap.hh"
++#include "ghidra/variable.hh"
++#include "ghidra/partmap.hh"
++#include "ghidra/rangemap.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/database_ghidra.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/database_ghidra.hh
+similarity index 99%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/database_ghidra.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/database_ghidra.hh
+index 7b8c5f8e4..d94170862 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/database_ghidra.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/database_ghidra.hh
+@@ -19,8 +19,8 @@
+ #ifndef __DATABASE_GHIDRA_HH__
+ #define __DATABASE_GHIDRA_HH__
+ 
+-#include "database.hh"
+-#include "ghidra_arch.hh"
++#include "ghidra/database.hh"
++#include "ghidra/ghidra_arch.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/doccore.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/doccore.hh
+similarity index 100%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/doccore.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/doccore.hh
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/docmain.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/docmain.hh
+similarity index 100%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/docmain.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/docmain.hh
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/double.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/double.hh
+similarity index 99%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/double.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/double.hh
+index 175f6024a..8576c157c 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/double.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/double.hh
+@@ -16,8 +16,8 @@
+ #ifndef __DOUBLE_HH__
+ #define __DOUBLE_HH__
+ 
+-#include "ruleaction.hh"
+-#include "funcdata.hh"
++#include "ghidra/ruleaction.hh"
++#include "ghidra/funcdata.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/dynamic.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/dynamic.hh
+similarity index 99%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/dynamic.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/dynamic.hh
+index ca150ff5e..9da65bcbc 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/dynamic.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/dynamic.hh
+@@ -20,7 +20,7 @@
+ #ifndef __DYNAMIC_HH__
+ #define __DYNAMIC_HH__
+ 
+-#include "varnode.hh"
++#include "ghidra/varnode.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/emulate.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/emulate.hh
+similarity index 99%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/emulate.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/emulate.hh
+index 46bc7a7be..52fa8f3f9 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/emulate.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/emulate.hh
+@@ -19,8 +19,8 @@
+ #ifndef __EMULATE_HH__
+ #define __EMULATE_HH__
+ 
+-#include "memstate.hh"
+-#include "translate.hh"
++#include "ghidra/memstate.hh"
++#include "ghidra/translate.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/emulateutil.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/emulateutil.hh
+similarity index 99%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/emulateutil.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/emulateutil.hh
+index 5afc1fbb9..5b7cbec0b 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/emulateutil.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/emulateutil.hh
+@@ -19,8 +19,8 @@
+ #ifndef __EMULATEUTIL_HH__
+ #define __EMULATEUTIL_HH__
+ 
+-#include "emulate.hh"
+-#include "op.hh"
++#include "ghidra/emulate.hh"
++#include "ghidra/op.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/error.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/error.hh
+similarity index 99%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/error.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/error.hh
+index 9d53168a4..eae980f6a 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/error.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/error.hh
+@@ -21,7 +21,7 @@
+ #ifndef __ERROR_HH__
+ #define __ERROR_HH__
+ 
+-#include "types.h"
++#include "ghidra/types.h"
+ #include <sstream>
+ #include <fstream>
+ #include <iomanip>
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/filemanage.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/filemanage.hh
+similarity index 100%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/filemanage.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/filemanage.hh
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/float.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/float.hh
+similarity index 99%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/float.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/float.hh
+index 74577083f..f5ef4c006 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/float.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/float.hh
+@@ -19,7 +19,7 @@
+ #ifndef __FLOAT_HH__
+ #define __FLOAT_HH__
+ 
+-#include "xml.hh"
++#include "ghidra/xml.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/flow.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/flow.hh
+similarity index 99%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/flow.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/flow.hh
+index 5682730c8..825d6dbf4 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/flow.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/flow.hh
+@@ -19,7 +19,7 @@
+ #ifndef __FLOW_HH__
+ #define __FLOW_HH__
+ 
+-#include "funcdata.hh"
++#include "ghidra/funcdata.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/fspec.hh
+similarity index 99%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/fspec.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/fspec.hh
+index f290c9c3f..93f01dfa9 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/fspec.hh
+@@ -19,8 +19,8 @@
+ #ifndef __FSPEC_HH__
+ #define __FSPEC_HH__
+ 
+-#include "modelrules.hh"
+-#include "rangemap.hh"
++#include "ghidra/modelrules.hh"
++#include "ghidra/rangemap.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/funcdata.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/funcdata.hh
+similarity index 99%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/funcdata.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/funcdata.hh
+index 51b38acc0..3bfb5790b 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/funcdata.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/funcdata.hh
+@@ -19,12 +19,12 @@
+ /// \file funcdata.hh
+ /// \brief Utilities for processing data structures associated with a single function
+ 
+-#include "architecture.hh"
+-#include "override.hh"
+-#include "heritage.hh"
+-#include "merge.hh"
+-#include "dynamic.hh"
+-#include "unionresolve.hh"
++#include "ghidra/architecture.hh"
++#include "ghidra/override.hh"
++#include "ghidra/heritage.hh"
++#include "ghidra/merge.hh"
++#include "ghidra/dynamic.hh"
++#include "ghidra/unionresolve.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/ghidra_arch.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/ghidra_arch.hh
+similarity index 99%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/ghidra_arch.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/ghidra_arch.hh
+index 27ee6cada..338bd2b42 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/ghidra_arch.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/ghidra_arch.hh
+@@ -19,7 +19,7 @@
+ #ifndef __GHIDRA_ARCH_HH__
+ #define __GHIDRA_ARCH_HH__
+ 
+-#include "architecture.hh"
++#include "ghidra/architecture.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/ghidra_context.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/ghidra_context.hh
+similarity index 98%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/ghidra_context.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/ghidra_context.hh
+index b6ca66ac4..2c6aedabf 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/ghidra_context.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/ghidra_context.hh
+@@ -19,8 +19,8 @@
+ /// \file ghidra_context.hh
+ /// \brief Obtaining context information from a Ghidra client
+ 
+-#include "globalcontext.hh"
+-#include "ghidra_arch.hh"
++#include "ghidra/globalcontext.hh"
++#include "ghidra/ghidra_arch.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/ghidra_process.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/ghidra_process.hh
+similarity index 98%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/ghidra_process.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/ghidra_process.hh
+index db72be59b..3bbe5f460 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/ghidra_process.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/ghidra_process.hh
+@@ -19,11 +19,11 @@
+ #ifndef __GHIDRA_PROCESS_HH__
+ #define __GHIDRA_PROCESS_HH__
+ 
+-#include "capability.hh"
+-#include "ghidra_arch.hh"
+-#include "typegrp_ghidra.hh"
+-#include "grammar.hh"
+-#include "paramid.hh"
++#include "ghidra/capability.hh"
++#include "ghidra/ghidra_arch.hh"
++#include "ghidra/typegrp_ghidra.hh"
++#include "ghidra/grammar.hh"
++#include "ghidra/paramid.hh"
+ #include <iostream>
+ #include <csignal>
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/ghidra_translate.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/ghidra_translate.hh
+similarity index 97%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/ghidra_translate.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/ghidra_translate.hh
+index b01f5f2fe..75c20e39e 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/ghidra_translate.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/ghidra_translate.hh
+@@ -19,8 +19,8 @@
+ #ifndef __GHIDRA_TRANSLATE_HH__
+ #define __GHIDRA_TRANSLATE_HH__
+ 
+-#include "translate.hh"
+-#include "ghidra_arch.hh"
++#include "ghidra/translate.hh"
++#include "ghidra/ghidra_arch.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/globalcontext.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/globalcontext.hh
+similarity index 99%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/globalcontext.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/globalcontext.hh
+index 2a9abad54..b3c3a51c0 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/globalcontext.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/globalcontext.hh
+@@ -19,8 +19,8 @@
+ /// \file globalcontext.hh
+ /// \brief Utilities for getting address-based context to the disassembler and decompiler
+ 
+-#include "pcoderaw.hh"
+-#include "partmap.hh"
++#include "ghidra/pcoderaw.hh"
++#include "ghidra/partmap.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/grammar.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/grammar.hh
+similarity index 99%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/grammar.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/grammar.hh
+index 7bbdc0aaf..09990a31b 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/grammar.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/grammar.hh
+@@ -16,7 +16,7 @@
+ #ifndef __GRAMMAR_HH__
+ #define __GRAMMAR_HH__
+ 
+-#include "funcdata.hh"
++#include "ghidra/funcdata.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/graph.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/graph.hh
+similarity index 96%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/graph.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/graph.hh
+index ef65d6e88..82f7dbbda 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/graph.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/graph.hh
+@@ -16,7 +16,7 @@
+ #ifndef __GRAPH_HH__
+ #define __GRAPH_HH__
+ 
+-#include "funcdata.hh"
++#include "ghidra/funcdata.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/heritage.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/heritage.hh
+similarity index 99%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/heritage.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/heritage.hh
+index b488a2523..b502da411 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/heritage.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/heritage.hh
+@@ -20,7 +20,7 @@
+ #ifndef __HERITAGE_HH__
+ #define __HERITAGE_HH__
+ 
+-#include "block.hh"
++#include "ghidra/block.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/ifacedecomp.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/ifacedecomp.hh
+similarity index 98%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/ifacedecomp.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/ifacedecomp.hh
+index 2c305158e..89e1e8cd2 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/ifacedecomp.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/ifacedecomp.hh
+@@ -19,13 +19,13 @@
+ #ifndef __IFACEDECOMP_HH__
+ #define __IFACEDECOMP_HH__
+ 
+-#include "graph.hh"
+-#include "grammar.hh"
+-#include "callgraph.hh"
+-#include "paramid.hh"
+-#include "testfunction.hh"
++#include "ghidra/graph.hh"
++#include "ghidra/grammar.hh"
++#include "ghidra/callgraph.hh"
++#include "ghidra/paramid.hh"
++#include "ghidra/testfunction.hh"
+ #ifdef CPUI_RULECOMPILE
+-#include "rulecompile.hh"
++#include "ghidra/rulecompile.hh"
+ #endif
+ 
+ namespace ghidra {
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/ifaceterm.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/ifaceterm.hh
+similarity index 98%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/ifaceterm.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/ifaceterm.hh
+index 82786532e..def9bf15e 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/ifaceterm.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/ifaceterm.hh
+@@ -19,7 +19,7 @@
+ #ifndef __IFACETERM_HH__
+ #define __IFACETERM_HH__
+ 
+-#include "interface.hh"
++#include "ghidra/interface.hh"
+ 
+ #ifdef __TERMINAL__
+ extern "C" {
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/inject_ghidra.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/inject_ghidra.hh
+similarity index 98%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/inject_ghidra.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/inject_ghidra.hh
+index 578abf66b..5dc0a7672 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/inject_ghidra.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/inject_ghidra.hh
+@@ -19,8 +19,8 @@
+ #ifndef __INJECT_GHIDRA_HH__
+ #define __INJECT_GHIDRA_HH__
+ 
+-#include "pcodeinject.hh"
+-#include "ghidra_arch.hh"
++#include "ghidra/pcodeinject.hh"
++#include "ghidra/ghidra_arch.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/inject_sleigh.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/inject_sleigh.hh
+similarity index 98%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/inject_sleigh.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/inject_sleigh.hh
+index 2de9eaae6..ecb2c8b17 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/inject_sleigh.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/inject_sleigh.hh
+@@ -16,8 +16,8 @@
+ #ifndef __INJECT_SLEIGH_HH__
+ #define __INJECT_SLEIGH_HH__
+ 
+-#include "pcodeinject.hh"
+-#include "sleigh.hh"
++#include "ghidra/pcodeinject.hh"
++#include "ghidra/sleigh.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/interface.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/interface.hh
+similarity index 99%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/interface.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/interface.hh
+index d862fa2c3..d516c15a9 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/interface.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/interface.hh
+@@ -19,7 +19,7 @@
+ #ifndef __INTERFACE_HH__
+ #define __INTERFACE_HH__
+ 
+-#include "capability.hh"
++#include "ghidra/capability.hh"
+ #include <map>
+ #include <algorithm>
+ #include <fstream>
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/jumptable.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/jumptable.hh
+similarity index 99%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/jumptable.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/jumptable.hh
+index fbe018c84..7c225db4e 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/jumptable.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/jumptable.hh
+@@ -19,8 +19,8 @@
+ #ifndef __JUMPTABLE_HH__
+ #define __JUMPTABLE_HH__
+ 
+-#include "emulateutil.hh"
+-#include "rangeutil.hh"
++#include "ghidra/emulateutil.hh"
++#include "ghidra/rangeutil.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/libdecomp.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/libdecomp.hh
+similarity index 93%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/libdecomp.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/libdecomp.hh
+index 1c1dcdd82..c217b9b8e 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/libdecomp.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/libdecomp.hh
+@@ -20,9 +20,9 @@
+ #ifndef __LIBDECOMP_HH__
+ #define __LIBDECOMP_HH__
+ 
+-#include "architecture.hh"
+-#include "sleigh_arch.hh"
+-#include "ifacedecomp.hh"
++#include "ghidra/architecture.hh"
++#include "ghidra/sleigh_arch.hh"
++#include "ghidra/ifacedecomp.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/loadimage.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/loadimage.hh
+similarity index 99%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/loadimage.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/loadimage.hh
+index 76dce9bad..29b97498a 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/loadimage.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/loadimage.hh
+@@ -19,7 +19,7 @@
+ #ifndef __LOADIMAGE_HH__
+ #define __LOADIMAGE_HH__
+ 
+-#include "address.hh"
++#include "ghidra/address.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/loadimage_bfd.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/loadimage_bfd.hh
+similarity index 98%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/loadimage_bfd.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/loadimage_bfd.hh
+index 2e9929db0..2c7ab3301 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/loadimage_bfd.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/loadimage_bfd.hh
+@@ -19,7 +19,7 @@
+ #ifndef __LOADIMAGE_BFD_HH__
+ #define __LOADIMAGE_BFD_HH__
+ 
+-#include "loadimage.hh"
++#include "ghidra/loadimage.hh"
+ 
+ // bfd.h requires PACKAGE/PACKAGE_VERSION to be defined
+ // https://sourceware.org/bugzilla/show_bug.cgi?id=14243
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/loadimage_ghidra.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/loadimage_ghidra.hh
+similarity index 96%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/loadimage_ghidra.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/loadimage_ghidra.hh
+index a615a2af9..156e45989 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/loadimage_ghidra.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/loadimage_ghidra.hh
+@@ -18,8 +18,8 @@
+ #ifndef __LOADIMAGE_GHIDRA_HH__
+ #define __LOADIMAGE_GHIDRA_HH__
+ 
+-#include "loadimage.hh"
+-#include "ghidra_arch.hh"
++#include "ghidra/loadimage.hh"
++#include "ghidra/ghidra_arch.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/loadimage_xml.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/loadimage_xml.hh
+similarity index 98%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/loadimage_xml.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/loadimage_xml.hh
+index 350ccfba1..add45d455 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/loadimage_xml.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/loadimage_xml.hh
+@@ -19,7 +19,7 @@
+ #ifndef __LOADIMAGE_XML_HH__
+ #define __LOADIMAGE_XML_HH__
+ 
+-#include "loadimage.hh"
++#include "ghidra/loadimage.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/marshal.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/marshal.hh
+similarity index 99%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/marshal.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/marshal.hh
+index b7af5bd6a..ca66f3a61 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/marshal.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/marshal.hh
+@@ -16,7 +16,7 @@
+ #ifndef __MARSHAL_HH__
+ #define __MARSHAL_HH__
+ 
+-#include "xml.hh"
++#include "ghidra/xml.hh"
+ #include <list>
+ #include <unordered_map>
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/memstate.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/memstate.hh
+similarity index 99%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/memstate.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/memstate.hh
+index 7f1ccfe49..9777aedc3 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/memstate.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/memstate.hh
+@@ -19,8 +19,8 @@
+ #ifndef __MEMSTATE_HH__
+ #define __MEMSTATE_HH__
+ 
+-#include "pcoderaw.hh"
+-#include "loadimage.hh"
++#include "ghidra/pcoderaw.hh"
++#include "ghidra/loadimage.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/merge.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/merge.hh
+similarity index 99%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/merge.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/merge.hh
+index 9e115edd3..af3254d18 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/merge.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/merge.hh
+@@ -19,7 +19,7 @@
+ /// \file merge.hh
+ /// \brief Utilities for merging low-level Varnodes into high-level variables
+ 
+-#include "op.hh"
++#include "ghidra/op.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/modelrules.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/modelrules.hh
+similarity index 99%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/modelrules.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/modelrules.hh
+index 3614b91bf..9ff851634 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/modelrules.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/modelrules.hh
+@@ -19,7 +19,7 @@
+ #ifndef __MODELRULES_HH__
+ #define __MODELRULES_HH__
+ 
+-#include "op.hh"
++#include "ghidra/op.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/op.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/op.hh
+similarity index 99%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/op.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/op.hh
+index 6989055f2..ce0c6380f 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/op.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/op.hh
+@@ -18,7 +18,7 @@
+ #ifndef __OP_HH__
+ #define __OP_HH__
+ 
+-#include "typeop.hh"
++#include "ghidra/typeop.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/opbehavior.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/opbehavior.hh
+similarity index 99%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/opbehavior.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/opbehavior.hh
+index 2eb9752ba..f546888e1 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/opbehavior.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/opbehavior.hh
+@@ -18,8 +18,8 @@
+ #ifndef __OPBEHAVIOR_HH__
+ #define __OPBEHAVIOR_HH__
+ 
+-#include "error.hh"
+-#include "opcodes.hh"
++#include "ghidra/error.hh"
++#include "ghidra/opcodes.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/opcodes.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/opcodes.hh
+similarity index 100%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/opcodes.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/opcodes.hh
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/options.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/options.hh
+similarity index 99%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/options.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/options.hh
+index af3304504..41fa9595f 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/options.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/options.hh
+@@ -19,8 +19,8 @@
+ #ifndef __OPTIONS_HH__
+ #define __OPTIONS_HH__
+ 
+-#include "error.hh"
+-#include "marshal.hh"
++#include "ghidra/error.hh"
++#include "ghidra/marshal.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/override.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/override.hh
+similarity index 99%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/override.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/override.hh
+index 693c2e62b..c200a155f 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/override.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/override.hh
+@@ -19,7 +19,7 @@
+ #ifndef __OVERRIDE_HH__
+ #define __OVERRIDE_HH__
+ 
+-#include "database.hh"
++#include "ghidra/database.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/paramid.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/paramid.hh
+similarity index 98%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/paramid.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/paramid.hh
+index e2b184783..b8ed0032a 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/paramid.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/paramid.hh
+@@ -16,7 +16,7 @@
+ #ifndef __PARAMID_HH__
+ #define __PARAMID_HH__
+ 
+-#include "funcdata.hh"
++#include "ghidra/funcdata.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/partmap.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/partmap.hh
+similarity index 100%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/partmap.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/partmap.hh
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/pcodecompile.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/pcodecompile.hh
+similarity index 99%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/pcodecompile.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/pcodecompile.hh
+index 3caa57c69..f3f85638b 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/pcodecompile.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/pcodecompile.hh
+@@ -16,7 +16,7 @@
+ #ifndef __PCODECOMPILE_HH__
+ #define __PCODECOMPILE_HH__
+ 
+-#include "slghsymbol.hh"
++#include "ghidra/slghsymbol.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/pcodeinject.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/pcodeinject.hh
+similarity index 99%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/pcodeinject.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/pcodeinject.hh
+index fd0c0b9ae..eaaa28cab 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/pcodeinject.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/pcodeinject.hh
+@@ -19,7 +19,7 @@
+ #ifndef __PCODEINJECT_HH__
+ #define __PCODEINJECT_HH__
+ 
+-#include "emulateutil.hh"
++#include "ghidra/emulateutil.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/pcodeparse.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/pcodeparse.hh
+similarity index 98%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/pcodeparse.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/pcodeparse.hh
+index 8be318575..1828bbcf4 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/pcodeparse.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/pcodeparse.hh
+@@ -16,8 +16,8 @@
+ #ifndef __PCODEPARSE_HH__
+ #define __PCODEPARSE_HH__
+ 
+-#include "pcodecompile.hh"
+-#include "sleighbase.hh"
++#include "ghidra/pcodecompile.hh"
++#include "ghidra/sleighbase.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/pcoderaw.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/pcoderaw.hh
+similarity index 99%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/pcoderaw.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/pcoderaw.hh
+index 03a010389..2f11dab27 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/pcoderaw.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/pcoderaw.hh
+@@ -18,8 +18,8 @@
+ #ifndef __PCODERAW_HH__
+ #define __PCODERAW_HH__
+ 
+-#include "address.hh"
+-#include "opbehavior.hh"
++#include "ghidra/address.hh"
++#include "ghidra/opbehavior.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/prefersplit.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/prefersplit.hh
+similarity index 99%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/prefersplit.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/prefersplit.hh
+index 4f8d33a2d..722a055bc 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/prefersplit.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/prefersplit.hh
+@@ -16,7 +16,7 @@
+ #ifndef __PREFERSPLIT_HH__
+ #define __PREFERSPLIT_HH__
+ 
+-#include "varnode.hh"
++#include "ghidra/varnode.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/prettyprint.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/prettyprint.hh
+similarity index 99%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/prettyprint.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/prettyprint.hh
+index e60e12c95..20e0a5a54 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/prettyprint.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/prettyprint.hh
+@@ -19,7 +19,7 @@
+ #ifndef __PRETTYPRINT_HH__
+ #define __PRETTYPRINT_HH__
+ 
+-#include "type.hh"
++#include "ghidra/type.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/printc.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/printc.hh
+similarity index 99%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/printc.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/printc.hh
+index 030067854..2186b86f5 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/printc.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/printc.hh
+@@ -19,8 +19,8 @@
+ #ifndef __PRINTC_HH__
+ #define __PRINTC_HH__
+ 
+-#include "printlanguage.hh"
+-#include "comment.hh"
++#include "ghidra/printlanguage.hh"
++#include "ghidra/comment.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/printjava.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/printjava.hh
+similarity index 99%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/printjava.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/printjava.hh
+index 1c610063e..99a919c44 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/printjava.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/printjava.hh
+@@ -19,7 +19,7 @@
+ #ifndef __PRINTJAVA_HH__
+ #define __PRINTJAVA_HH__
+ 
+-#include "printc.hh"
++#include "ghidra/printc.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/printlanguage.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/printlanguage.hh
+similarity index 99%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/printlanguage.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/printlanguage.hh
+index d800f3989..02ec87c59 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/printlanguage.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/printlanguage.hh
+@@ -19,9 +19,9 @@
+ #ifndef __PRINTLANGUAGE_HH__
+ #define __PRINTLANGUAGE_HH__
+ 
+-#include "capability.hh"
+-#include "cast.hh"
+-#include "prettyprint.hh"
++#include "ghidra/capability.hh"
++#include "ghidra/cast.hh"
++#include "ghidra/prettyprint.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/rangemap.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/rangemap.hh
+similarity index 100%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/rangemap.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/rangemap.hh
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/rangeutil.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/rangeutil.hh
+similarity index 99%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/rangeutil.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/rangeutil.hh
+index 6c7cc0585..6059fb310 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/rangeutil.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/rangeutil.hh
+@@ -18,7 +18,7 @@
+ #ifndef __RANGEUTIL_HH__
+ #define __RANGEUTIL_HH__
+ 
+-#include "op.hh"
++#include "ghidra/op.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/raw_arch.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/raw_arch.hh
+similarity index 97%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/raw_arch.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/raw_arch.hh
+index 8952c5817..132d040a1 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/raw_arch.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/raw_arch.hh
+@@ -18,8 +18,8 @@
+ #ifndef __RAW_ARCH_HH__
+ #define __RAW_ARCH_HH__
+ 
+-#include "sleigh_arch.hh"
+-#include "loadimage.hh"
++#include "ghidra/sleigh_arch.hh"
++#include "ghidra/loadimage.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/ruleaction.hh
+similarity index 99%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/ruleaction.hh
+index d30e60425..7a4194995 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/ruleaction.hh
+@@ -25,7 +25,7 @@
+ #ifndef __RULEACTION_HH__
+ #define __RULEACTION_HH__
+ 
+-#include "action.hh"
++#include "ghidra/action.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/rulecompile.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/rulecompile.hh
+similarity index 99%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/rulecompile.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/rulecompile.hh
+index e3babe0ce..559c1932c 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/rulecompile.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/rulecompile.hh
+@@ -16,7 +16,7 @@
+ #ifndef __RULECOMPILE_HH__
+ #define __RULECOMPILE_HH__
+ 
+-#include "unify.hh"
++#include "ghidra/unify.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/semantics.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/semantics.hh
+similarity index 99%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/semantics.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/semantics.hh
+index 7f19abb4b..dc1c493eb 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/semantics.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/semantics.hh
+@@ -16,7 +16,7 @@
+ #ifndef __SEMANTICS_HH__
+ #define __SEMANTICS_HH__
+ 
+-#include "context.hh"
++#include "ghidra/context.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/sleigh.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/sleigh.hh
+similarity index 99%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/sleigh.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/sleigh.hh
+index 32ef8565e..96aa81f31 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/sleigh.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/sleigh.hh
+@@ -19,7 +19,7 @@
+ #ifndef __SLEIGH_HH__
+ #define __SLEIGH_HH__
+ 
+-#include "sleighbase.hh"
++#include "ghidra/sleighbase.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/sleigh_arch.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/sleigh_arch.hh
+similarity index 98%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/sleigh_arch.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/sleigh_arch.hh
+index fa1eab966..2ce9d277a 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/sleigh_arch.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/sleigh_arch.hh
+@@ -19,9 +19,9 @@
+ #ifndef __SLEIGH_ARCH_HH__
+ #define __SLEIGH_ARCH_HH__
+ 
+-#include "filemanage.hh"
+-#include "architecture.hh"
+-#include "sleigh.hh"
++#include "ghidra/filemanage.hh"
++#include "ghidra/architecture.hh"
++#include "ghidra/sleigh.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/sleighbase.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/sleighbase.hh
+similarity index 98%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/sleighbase.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/sleighbase.hh
+index 21c9f995a..9b78abc85 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/sleighbase.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/sleighbase.hh
+@@ -18,8 +18,8 @@
+ #ifndef __SLEIGHBASE_HH__
+ #define __SLEIGHBASE_HH__
+ 
+-#include "translate.hh"
+-#include "slghsymbol.hh"
++#include "ghidra/translate.hh"
++#include "ghidra/slghsymbol.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/slgh_compile.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/slgh_compile.hh
+similarity index 99%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/slgh_compile.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/slgh_compile.hh
+index 46b4369c4..dfe6bb8f1 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/slgh_compile.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/slgh_compile.hh
+@@ -18,9 +18,9 @@
+ #ifndef __SLGH_COMPILE_HH__
+ #define __SLGH_COMPILE_HH__
+ 
+-#include "sleighbase.hh"
+-#include "pcodecompile.hh"
+-#include "filemanage.hh"
++#include "ghidra/sleighbase.hh"
++#include "ghidra/pcodecompile.hh"
++#include "ghidra/filemanage.hh"
+ #include <iostream>
+ #include <sstream>
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/slghparse.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/slghparse.hh
+similarity index 98%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/slghparse.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/slghparse.hh
+index 48b8dbf2a..b68a0eb85 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/slghparse.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/slghparse.hh
+@@ -35,8 +35,8 @@
+    especially those whose name start with YY_ or yy_.  They are
+    private implementation details that can be changed or removed.  */
+ 
+-#ifndef YY_SLEIGH_SLGHPARSE_HH_INCLUDED
+-# define YY_SLEIGH_SLGHPARSE_HH_INCLUDED
++#ifndef YY_SLEIGH_INCLUDE_GHIDRA_SLGHPARSE_HH_INCLUDED
++# define YY_SLEIGH_INCLUDE_GHIDRA_SLGHPARSE_HH_INCLUDED
+ /* Debug traces.  */
+ #ifndef SLEIGHDEBUG
+ # if defined YYDEBUG
+@@ -245,4 +245,4 @@ extern SLEIGHSTYPE sleighlval;
+ int sleighparse (void);
+ 
+ 
+-#endif /* !YY_SLEIGH_SLGHPARSE_HH_INCLUDED  */
++#endif /* !YY_SLEIGH_INCLUDE_GHIDRA_SLGHPARSE_HH_INCLUDED  */
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/slghpatexpress.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/slghpatexpress.hh
+similarity index 99%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/slghpatexpress.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/slghpatexpress.hh
+index 024f25b67..226d69a12 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/slghpatexpress.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/slghpatexpress.hh
+@@ -16,7 +16,7 @@
+ #ifndef __SLGHPATEXPRESS_HH__
+ #define __SLGHPATEXPRESS_HH__
+ 
+-#include "slghpattern.hh"
++#include "ghidra/slghpattern.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/slghpattern.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/slghpattern.hh
+similarity index 99%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/slghpattern.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/slghpattern.hh
+index 071781854..e8bdd28c8 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/slghpattern.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/slghpattern.hh
+@@ -16,7 +16,7 @@
+ #ifndef __SLGHPATTERN_HH__
+ #define __SLGHPATTERN_HH__
+ 
+-#include "context.hh"
++#include "ghidra/context.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/slghsymbol.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/slghsymbol.hh
+similarity index 99%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/slghsymbol.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/slghsymbol.hh
+index 3fd0d524d..8f6e4df76 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/slghsymbol.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/slghsymbol.hh
+@@ -16,8 +16,8 @@
+ #ifndef __SLGHSYMBOL_HH__
+ #define __SLGHSYMBOL_HH__
+ 
+-#include "semantics.hh"
+-#include "slghpatexpress.hh"
++#include "ghidra/semantics.hh"
++#include "ghidra/slghpatexpress.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/space.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/space.hh
+similarity index 99%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/space.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/space.hh
+index 4a8791cfd..d70b12578 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/space.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/space.hh
+@@ -19,8 +19,8 @@
+ #ifndef __SPACE_HH__
+ #define __SPACE_HH__
+ 
+-#include "error.hh"
+-#include "marshal.hh"
++#include "ghidra/error.hh"
++#include "ghidra/marshal.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/string_ghidra.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/string_ghidra.hh
+similarity index 97%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/string_ghidra.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/string_ghidra.hh
+index ec28b363d..101b4bdd3 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/string_ghidra.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/string_ghidra.hh
+@@ -19,7 +19,7 @@
+ #ifndef __STRING_GHIDRA_HH__
+ #define __STRING_GHIDRA_HH__
+ 
+-#include "ghidra_arch.hh"
++#include "ghidra/ghidra_arch.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/stringmanage.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/stringmanage.hh
+similarity index 99%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/stringmanage.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/stringmanage.hh
+index 92cd16061..05d37f711 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/stringmanage.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/stringmanage.hh
+@@ -19,7 +19,7 @@
+ #ifndef __STRINGMANAGE_HH__
+ #define __STRINGMANAGE_HH__
+ 
+-#include "type.hh"
++#include "ghidra/type.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/subflow.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/subflow.hh
+similarity index 99%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/subflow.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/subflow.hh
+index 17353af49..6debf7957 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/subflow.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/subflow.hh
+@@ -18,7 +18,7 @@
+ #ifndef __SUBFLOW_HH__
+ #define __SUBFLOW_HH__
+ 
+-#include "funcdata.hh"
++#include "ghidra/funcdata.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/test.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/test.hh
+similarity index 98%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/test.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/test.hh
+index 78d7886a3..a7cb67695 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/test.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/test.hh
+@@ -19,8 +19,8 @@
+ /// Include this file and any additional headers. Use TEST(testname) as
+ /// prototype in test function definitions.  E.g.
+ ///     test.cc:
+-///         \#include "float.hh"
+-///         \#include "test.hh"
++///         \#include "ghidra/float.hh"
++///         \#include "ghidra/test.hh"
+ ///
+ ///         TEST(zero_is_less_than_one) {
+ ///             ASSERT(0.0 < 1.0);
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/testfunction.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/testfunction.hh
+similarity index 98%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/testfunction.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/testfunction.hh
+index 2b7cc6b3d..9581a95fa 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/testfunction.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/testfunction.hh
+@@ -18,9 +18,9 @@
+ #ifndef __TESTFUNCTION_HH__
+ #define __TESTFUNCTION_HH__
+ 
+-#include "ifaceterm.hh"
+-#include "error.hh"
+-#include "xml.hh"
++#include "ghidra/ifaceterm.hh"
++#include "ghidra/error.hh"
++#include "ghidra/xml.hh"
+ #include <regex>
+ 
+ namespace ghidra {
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/transform.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/transform.hh
+similarity index 99%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/transform.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/transform.hh
+index e8cf9877a..a01cf5db5 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/transform.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/transform.hh
+@@ -18,7 +18,7 @@
+ #ifndef __TRANSFORM_HH__
+ #define __TRANSFORM_HH__
+ 
+-#include "varnode.hh"
++#include "ghidra/varnode.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/translate.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/translate.hh
+similarity index 99%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/translate.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/translate.hh
+index 575cd2752..4523054f6 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/translate.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/translate.hh
+@@ -21,8 +21,8 @@
+ #ifndef __TRANSLATE_HH__
+ #define __TRANSLATE_HH__
+ 
+-#include "pcoderaw.hh"
+-#include "float.hh"
++#include "ghidra/pcoderaw.hh"
++#include "ghidra/float.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/type.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/type.hh
+similarity index 99%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/type.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/type.hh
+index 2589f41a2..c88807f97 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/type.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/type.hh
+@@ -19,7 +19,7 @@
+ #ifndef __TYPE_HH__
+ #define __TYPE_HH__
+ 
+-#include "address.hh"
++#include "ghidra/address.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/typegrp_ghidra.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/typegrp_ghidra.hh
+similarity index 95%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/typegrp_ghidra.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/typegrp_ghidra.hh
+index f29b88d1b..421500767 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/typegrp_ghidra.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/typegrp_ghidra.hh
+@@ -19,8 +19,8 @@
+ #ifndef __TYPEGRP_GHIDRA_HH__
+ #define __TYPEGRP_GHIDRA_HH__
+ 
+-#include "type.hh"
+-#include "ghidra_arch.hh"
++#include "ghidra/type.hh"
++#include "ghidra/ghidra_arch.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/typeop.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/typeop.hh
+similarity index 99%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/typeop.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/typeop.hh
+index dd1d9612e..2a0b6ad11 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/typeop.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/typeop.hh
+@@ -19,10 +19,10 @@
+ #ifndef __TYPEOP_HH__
+ #define __TYPEOP_HH__
+ 
+-#include "cpool.hh"
+-#include "variable.hh"
+-#include "opbehavior.hh"
+-#include "printlanguage.hh"
++#include "ghidra/cpool.hh"
++#include "ghidra/variable.hh"
++#include "ghidra/opbehavior.hh"
++#include "ghidra/printlanguage.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/types.h b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/types.h
+similarity index 100%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/types.h
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/types.h
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/unify.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/unify.hh
+similarity index 99%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/unify.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/unify.hh
+index 267af627b..01e89aad6 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/unify.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/unify.hh
+@@ -16,7 +16,7 @@
+ #ifndef __UNIFY_HH__
+ #define __UNIFY_HH__
+ 
+-#include "funcdata.hh"
++#include "ghidra/funcdata.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/unionresolve.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/unionresolve.hh
+similarity index 99%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/unionresolve.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/unionresolve.hh
+index 8ceca302b..f3f3a97e9 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/unionresolve.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/unionresolve.hh
+@@ -16,7 +16,7 @@
+ #ifndef __UNIONRESOLVE_HH__
+ #define __UNIONRESOLVE_HH__
+ 
+-#include "op.hh"
++#include "ghidra/op.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/userop.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/userop.hh
+similarity index 99%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/userop.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/userop.hh
+index f182c3d38..68293fe6e 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/userop.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/userop.hh
+@@ -19,7 +19,7 @@
+ #ifndef __USEROP_HH__
+ #define __USEROP_HH__
+ 
+-#include "typeop.hh"
++#include "ghidra/typeop.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/variable.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/variable.hh
+similarity index 99%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/variable.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/variable.hh
+index aa7ec4ea1..448af85da 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/variable.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/variable.hh
+@@ -19,7 +19,7 @@
+ #ifndef __VARIABLE_HH__
+ #define __VARIABLE_HH__
+ 
+-#include "varnode.hh"
++#include "ghidra/varnode.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/varmap.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/varmap.hh
+similarity index 99%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/varmap.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/varmap.hh
+index bab0b5d0e..f94fa3b96 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/varmap.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/varmap.hh
+@@ -19,7 +19,7 @@
+ #ifndef __VARMAP_HH__
+ #define __VARMAP_HH__
+ 
+-#include "database.hh"
++#include "ghidra/database.hh"
+ #include <unordered_map>
+ 
+ namespace ghidra {
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/varnode.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/varnode.hh
+similarity index 99%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/varnode.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/varnode.hh
+index 2fb160392..ff797b8c4 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/varnode.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/varnode.hh
+@@ -18,8 +18,8 @@
+ #ifndef __VARNODE_HH__
+ #define __VARNODE_HH__
+ 
+-#include "pcoderaw.hh"
+-#include "cover.hh"
++#include "ghidra/pcoderaw.hh"
++#include "ghidra/cover.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/xml.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/xml.hh
+similarity index 99%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/xml.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/xml.hh
+index 72533012a..ba66a3366 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/xml.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/xml.hh
+@@ -18,7 +18,7 @@
+ #ifndef __XML_HH__
+ #define __XML_HH__
+ 
+-#include "types.h"
++#include "ghidra/types.h"
+ #include <fstream>
+ #include <iomanip>
+ #include <string>
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/xml_arch.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/xml_arch.hh
+similarity index 97%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/xml_arch.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/xml_arch.hh
+index 92a72b8ae..37ce95374 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/xml_arch.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/xml_arch.hh
+@@ -18,8 +18,8 @@
+ #ifndef __XML_ARCH_HH__
+ #define __XML_ARCH_HH__
+ 
+-#include "sleigh_arch.hh"
+-#include "loadimage_xml.hh"
++#include "ghidra/sleigh_arch.hh"
++#include "ghidra/loadimage_xml.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/inject_ghidra.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/inject_ghidra.cc
+index 37181d168..70dfffdb0 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/inject_ghidra.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/inject_ghidra.cc
+@@ -13,7 +13,7 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "inject_ghidra.hh"
++#include "ghidra/inject_ghidra.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/inject_sleigh.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/inject_sleigh.cc
+index 639bae38d..efe188747 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/inject_sleigh.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/inject_sleigh.cc
+@@ -13,9 +13,9 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "inject_sleigh.hh"
+-#include "pcodeparse.hh"
+-#include "architecture.hh"
++#include "ghidra/inject_sleigh.hh"
++#include "ghidra/pcodeparse.hh"
++#include "ghidra/architecture.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/interface.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/interface.cc
+index d0764370c..8a2eb9c78 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/interface.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/interface.cc
+@@ -13,7 +13,7 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "interface.hh"
++#include "ghidra/interface.hh"
+ #ifdef __REMOTE_SOCKET__
+ #include "sys/socket.h"
+ #include "sys/un.h"
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/jumptable.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/jumptable.cc
+index 60c8a17c4..79c2ba1d8 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/jumptable.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/jumptable.cc
+@@ -13,9 +13,9 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "jumptable.hh"
+-#include "emulate.hh"
+-#include "flow.hh"
++#include "ghidra/jumptable.hh"
++#include "ghidra/emulate.hh"
++#include "ghidra/flow.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/libdecomp.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/libdecomp.cc
+index 869c131f5..c5df00724 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/libdecomp.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/libdecomp.cc
+@@ -13,7 +13,7 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "libdecomp.hh"
++#include "ghidra/libdecomp.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/loadimage.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/loadimage.cc
+index d17dc5729..90684ce77 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/loadimage.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/loadimage.cc
+@@ -13,7 +13,7 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "loadimage.hh"
++#include "ghidra/loadimage.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/loadimage_bfd.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/loadimage_bfd.cc
+index 085c9089e..01a6ae8d4 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/loadimage_bfd.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/loadimage_bfd.cc
+@@ -14,7 +14,7 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "loadimage_bfd.hh"
++#include "ghidra/loadimage_bfd.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/loadimage_ghidra.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/loadimage_ghidra.cc
+index df50952bb..823a4244e 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/loadimage_ghidra.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/loadimage_ghidra.cc
+@@ -13,7 +13,7 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "loadimage_ghidra.hh"
++#include "ghidra/loadimage_ghidra.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/loadimage_xml.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/loadimage_xml.cc
+index 043d96eca..2ecec9e73 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/loadimage_xml.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/loadimage_xml.cc
+@@ -13,8 +13,8 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "loadimage_xml.hh"
+-#include "translate.hh"
++#include "ghidra/loadimage_xml.hh"
++#include "ghidra/translate.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/makeBison.sh b/Ghidra/Features/Decompiler/src/decompile/cpp/makeBison.sh
+index 4537bee5a..46cb8ef4f 100755
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/makeBison.sh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/makeBison.sh
+@@ -1,5 +1,5 @@
+ bison -l -o grammar.cc grammar.y
+ bison -l -o pcodeparse.cc pcodeparse.y
+-bison -l -H -o slghparse.cc slghparse.y
++bison -l -H -o slghparse.cc --defines=include/ghidra/slghparse.hh slghparse.y
+ lex -L -o slghscan.cc slghscan.l
+ bison -l -o xml.cc xml.y
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/marshal.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/marshal.cc
+index 7e5d38892..a11e18ba0 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/marshal.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/marshal.cc
+@@ -13,8 +13,8 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "marshal.hh"
+-#include "translate.hh"
++#include "ghidra/marshal.hh"
++#include "ghidra/translate.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/memstate.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/memstate.cc
+index 03f4c6d16..b3a809e19 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/memstate.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/memstate.cc
+@@ -13,8 +13,8 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "memstate.hh"
+-#include "translate.hh"
++#include "ghidra/memstate.hh"
++#include "ghidra/translate.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/merge.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/merge.cc
+index e5b9d9f6a..0225ed51d 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/merge.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/merge.cc
+@@ -13,8 +13,8 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "merge.hh"
+-#include "funcdata.hh"
++#include "ghidra/merge.hh"
++#include "ghidra/funcdata.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/modelrules.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/modelrules.cc
+index 39102fcfb..cef12ceba 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/modelrules.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/modelrules.cc
+@@ -13,8 +13,8 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "modelrules.hh"
+-#include "funcdata.hh"
++#include "ghidra/modelrules.hh"
++#include "ghidra/funcdata.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/op.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/op.cc
+index 852819e2b..9ead3fd84 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/op.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/op.cc
+@@ -13,8 +13,8 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "op.hh"
+-#include "funcdata.hh"
++#include "ghidra/op.hh"
++#include "ghidra/funcdata.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/opbehavior.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/opbehavior.cc
+index cf079f20e..10a40cdd7 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/opbehavior.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/opbehavior.cc
+@@ -13,8 +13,8 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "opbehavior.hh"
+-#include "translate.hh"
++#include "ghidra/opbehavior.hh"
++#include "ghidra/translate.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/opcodes.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/opcodes.cc
+index cdde06fa7..bdd6f3858 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/opcodes.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/opcodes.cc
+@@ -13,8 +13,8 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "opcodes.hh"
+-#include "types.h"
++#include "ghidra/opcodes.hh"
++#include "ghidra/types.h"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/options.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/options.cc
+index 6eaf553e9..874c5163f 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/options.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/options.cc
+@@ -13,10 +13,10 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "options.hh"
+-#include "funcdata.hh"
+-#include "flow.hh"
+-#include "printc.hh"
++#include "ghidra/options.hh"
++#include "ghidra/funcdata.hh"
++#include "ghidra/flow.hh"
++#include "ghidra/printc.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/override.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/override.cc
+index 453f5fa14..52b80d76e 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/override.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/override.cc
+@@ -13,8 +13,8 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "override.hh"
+-#include "funcdata.hh"
++#include "ghidra/override.hh"
++#include "ghidra/funcdata.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/paramid.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/paramid.cc
+index 66c239e66..bcd80d0c3 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/paramid.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/paramid.cc
+@@ -13,7 +13,7 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "paramid.hh"
++#include "ghidra/paramid.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/pcodecompile.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/pcodecompile.cc
+index b2ae18b75..f3092cdd5 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/pcodecompile.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/pcodecompile.cc
+@@ -13,7 +13,7 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "pcodecompile.hh"
++#include "ghidra/pcodecompile.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/pcodeinject.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/pcodeinject.cc
+index bdb4bca19..7f673e2ee 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/pcodeinject.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/pcodeinject.cc
+@@ -13,8 +13,8 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "pcodeinject.hh"
+-#include "architecture.hh"
++#include "ghidra/pcodeinject.hh"
++#include "ghidra/architecture.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/pcodeparse.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/pcodeparse.cc
+index e9eaa6d71..ad59e4837 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/pcodeparse.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/pcodeparse.cc
+@@ -85,7 +85,7 @@
+ #define yylval          pcodelval
+ #define yychar          pcodechar
+ 
+-#include "pcodeparse.hh"
++#include "ghidra/pcodeparse.hh"
+ 
+ //#define YYERROR_VERBOSE
+ namespace ghidra {
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/pcodeparse.y b/Ghidra/Features/Decompiler/src/decompile/cpp/pcodeparse.y
+index 1eee53d8f..762923c4e 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/pcodeparse.y
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/pcodeparse.y
+@@ -24,7 +24,7 @@
+ #define yylval          pcodelval
+ #define yychar          pcodechar
+ 
+-#include "pcodeparse.hh"
++#include "ghidra/pcodeparse.hh"
+ 
+ //#define YYERROR_VERBOSE
+ namespace ghidra {
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/pcoderaw.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/pcoderaw.cc
+index 3a052d536..de5a19b7f 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/pcoderaw.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/pcoderaw.cc
+@@ -13,8 +13,8 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "pcoderaw.hh"
+-#include "translate.hh"
++#include "ghidra/pcoderaw.hh"
++#include "ghidra/translate.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/prefersplit.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/prefersplit.cc
+index 5c12fa94f..4c54cb714 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/prefersplit.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/prefersplit.cc
+@@ -13,8 +13,8 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "prefersplit.hh"
+-#include "funcdata.hh"
++#include "ghidra/prefersplit.hh"
++#include "ghidra/funcdata.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/prettyprint.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/prettyprint.cc
+index 271b7dd62..309aa8f61 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/prettyprint.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/prettyprint.cc
+@@ -13,8 +13,8 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "prettyprint.hh"
+-#include "funcdata.hh"
++#include "ghidra/prettyprint.hh"
++#include "ghidra/funcdata.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/printc.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/printc.cc
+index 58283b970..ee79071c3 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/printc.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/printc.cc
+@@ -13,8 +13,8 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "printc.hh"
+-#include "funcdata.hh"
++#include "ghidra/printc.hh"
++#include "ghidra/funcdata.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/printjava.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/printjava.cc
+index 770852f7a..f2d219d2f 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/printjava.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/printjava.cc
+@@ -13,8 +13,8 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "printjava.hh"
+-#include "funcdata.hh"
++#include "ghidra/printjava.hh"
++#include "ghidra/funcdata.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/printlanguage.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/printlanguage.cc
+index 5ffd62d6d..44238b8e7 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/printlanguage.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/printlanguage.cc
+@@ -14,8 +14,8 @@
+  * limitations under the License.
+  */
+ #include <ctype.h>
+-#include "printlanguage.hh"
+-#include "funcdata.hh"
++#include "ghidra/printlanguage.hh"
++#include "ghidra/funcdata.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/rangeutil.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/rangeutil.cc
+index 893e81b00..5ccd24e7a 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/rangeutil.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/rangeutil.cc
+@@ -13,8 +13,8 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "rangeutil.hh"
+-#include "block.hh"
++#include "ghidra/rangeutil.hh"
++#include "ghidra/block.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/raw_arch.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/raw_arch.cc
+index db9f3e0cc..b28603742 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/raw_arch.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/raw_arch.cc
+@@ -13,7 +13,7 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "raw_arch.hh"
++#include "ghidra/raw_arch.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc
+index f80300834..822535d22 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc
+@@ -13,10 +13,10 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "ruleaction.hh"
+-#include "coreaction.hh"
+-#include "subflow.hh"
+-#include "rangeutil.hh"
++#include "ghidra/ruleaction.hh"
++#include "ghidra/coreaction.hh"
++#include "ghidra/subflow.hh"
++#include "ghidra/rangeutil.hh"
+ #include <climits>
+ 
+ namespace ghidra {
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/rulecompile.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/rulecompile.cc
+index aac52605a..897c3c507 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/rulecompile.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/rulecompile.cc
+@@ -14,7 +14,7 @@
+  * limitations under the License.
+  */
+ #ifdef CPUI_RULECOMPILE
+-#include "rulecompile.hh"
++#include "ghidra/rulecompile.hh"
+ #include "ruleparse.hh"
+ 
+ namespace ghidra {
+@@ -887,7 +887,7 @@ RuleGeneric *RuleGeneric::build(const string &nm,const string &gp,const string &
+ Here is the original flex parser
+ 
+ %{
+-#include "rulecompile.hh"
++#include "ghidra/rulecompile.hh"
+ #include "ruleparse.hh"
+ #define ruleparsewrap() 1
+ #define YY_SKIP_YYWRAP
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/ruleparse.y b/Ghidra/Features/Decompiler/src/decompile/cpp/ruleparse.y
+index 3d3ced687..e732f7b54 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/ruleparse.y
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/ruleparse.y
+@@ -15,7 +15,7 @@
+  */
+ %{
+ #ifdef CPUI_RULECOMPILE
+-#include "rulecompile.hh"
++#include "ghidra/rulecompile.hh"
+ 
+ #define YYERROR_VERBOSE
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/semantics.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/semantics.cc
+index c4da597d2..9f9ed2d91 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/semantics.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/semantics.cc
+@@ -13,8 +13,8 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "semantics.hh"
+-#include "translate.hh"
++#include "ghidra/semantics.hh"
++#include "ghidra/translate.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/sleigh.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/sleigh.cc
+index 4a4edff77..80f4556c6 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/sleigh.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/sleigh.cc
+@@ -13,8 +13,8 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "sleigh.hh"
+-#include "loadimage.hh"
++#include "ghidra/sleigh.hh"
++#include "ghidra/loadimage.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/sleigh_arch.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/sleigh_arch.cc
+index 093b6970b..6ba44b072 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/sleigh_arch.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/sleigh_arch.cc
+@@ -13,8 +13,8 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "sleigh_arch.hh"
+-#include "inject_sleigh.hh"
++#include "ghidra/sleigh_arch.hh"
++#include "ghidra/inject_sleigh.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/sleighbase.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/sleighbase.cc
+index 791fc59c1..3309e56cf 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/sleighbase.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/sleighbase.cc
+@@ -13,7 +13,7 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "sleighbase.hh"
++#include "ghidra/sleighbase.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/sleighexample.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/sleighexample.cc
+index f356825c9..98a25c8ca 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/sleighexample.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/sleighexample.cc
+@@ -17,9 +17,9 @@
+ // Dump the raw pcode instructions
+ 
+ // Root include for parsing using SLEIGH
+-#include "loadimage.hh"
+-#include "sleigh.hh"
+-#include "emulate.hh"
++#include "ghidra/loadimage.hh"
++#include "ghidra/sleigh.hh"
++#include "ghidra/emulate.hh"
+ #include <iostream>
+ 
+ using std::cerr;
+@@ -354,7 +354,7 @@ int main(int argc,char **argv)
+ --OPT_CXXFLAGS=-O2 -Wall -Wno-sign-compare
+ --
+ --# libraries
+---INCLUDES=-I./src
++--INCLUDES=-I./src/include
+ --
+ --LNK=src/libsla.a
+ --
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/slgh_compile.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/slgh_compile.cc
+index 60744b71c..896c5ded2 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/slgh_compile.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/slgh_compile.cc
+@@ -13,8 +13,8 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "slgh_compile.hh"
+-#include "filemanage.hh"
++#include "ghidra/slgh_compile.hh"
++#include "ghidra/filemanage.hh"
+ #include <csignal>
+ 
+ extern FILE *sleighin;		// Global pointer to file for lexer
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/slghparse.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/slghparse.cc
+index 75ab98733..ab04bd57d 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/slghparse.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/slghparse.cc
+@@ -76,7 +76,7 @@
+ 
+ /* First part of user prologue.  */
+ 
+-#include "slgh_compile.hh"
++#include "ghidra/slgh_compile.hh"
+ 
+ extern FILE *sleighin;
+ extern int sleighlex(void);
+@@ -110,7 +110,7 @@ extern int sleigherror(const char *str );
+ #  endif
+ # endif
+ 
+-#include "slghparse.hh"
++#include "ghidra/slghparse.hh"
+ /* Symbol kind.  */
+ enum yysymbol_kind_t
+ {
+@@ -725,41 +725,41 @@ static const yytype_uint8 yytranslate[] =
+ /* YYRLINE[YYN] -- Source line where rule number YYN was defined.  */
+ static const yytype_int16 yyrline[] =
+ {
+-       0,   162,   162,   163,   164,   165,   167,   168,   169,   170,
+-     171,   172,   173,   174,   175,   176,   178,   179,   180,   181,
+-     183,   184,   186,   188,   190,   191,   192,   193,   194,   196,
+-     198,   199,   202,   203,   204,   205,   206,   207,   208,   210,
+-     211,   212,   213,   214,   215,   216,   217,   219,   221,   222,
+-     223,   224,   225,   226,   227,   229,   231,   233,   235,   236,
+-     238,   241,   243,   245,   247,   249,   252,   254,   255,   256,
+-     258,   260,   261,   262,   265,   266,   269,   271,   272,   273,
+-     275,   276,   278,   279,   280,   281,   282,   283,   284,   285,
+-     286,   288,   289,   290,   291,   293,   295,   298,   299,   300,
+-     301,   302,   303,   304,   305,   306,   307,   308,   309,   310,
+-     312,   313,   314,   315,   317,   318,   320,   321,   323,   324,
+-     326,   327,   328,   329,   330,   331,   332,   335,   336,   337,
+-     338,   340,   341,   343,   344,   345,   346,   347,   348,   350,
+-     351,   353,   355,   356,   358,   359,   360,   361,   362,   364,
+-     365,   366,   367,   369,   370,   371,   372,   373,   374,   375,
+-     376,   377,   378,   379,   380,   381,   382,   383,   384,   385,
+-     386,   387,   388,   389,   390,   391,   392,   393,   395,   396,
+-     397,   398,   399,   400,   401,   402,   403,   404,   405,   406,
+-     407,   408,   409,   410,   411,   412,   413,   414,   415,   416,
+-     417,   418,   419,   420,   421,   422,   423,   424,   425,   426,
+-     427,   428,   429,   430,   431,   432,   433,   434,   435,   436,
+-     437,   438,   439,   440,   441,   442,   443,   444,   445,   446,
+-     447,   448,   449,   450,   451,   452,   453,   454,   455,   456,
+-     457,   458,   459,   460,   461,   463,   464,   465,   466,   468,
+-     469,   470,   471,   472,   473,   474,   475,   476,   478,   479,
+-     480,   481,   483,   484,   485,   486,   487,   489,   490,   491,
+-     493,   494,   496,   497,   498,   499,   500,   501,   503,   504,
+-     505,   506,   507,   509,   510,   511,   512,   513,   514,   515,
+-     517,   518,   520,   521,   522,   524,   525,   526,   528,   529,
+-     530,   533,   534,   536,   537,   538,   540,   542,   543,   544,
+-     545,   547,   548,   549,   551,   552,   553,   554,   555,   557,
+-     558,   560,   561,   563,   564,   567,   568,   569,   571,   572,
+-     573,   575,   576,   577,   578,   579,   580,   581,   582,   583,
+-     584,   585,   586,   587,   588,   589,   590,   591,   592
++       0,   163,   163,   164,   165,   166,   168,   169,   170,   171,
++     172,   173,   174,   175,   176,   177,   179,   180,   181,   182,
++     184,   185,   187,   189,   191,   192,   193,   194,   195,   197,
++     199,   200,   203,   204,   205,   206,   207,   208,   209,   211,
++     212,   213,   214,   215,   216,   217,   218,   220,   222,   223,
++     224,   225,   226,   227,   228,   230,   232,   234,   236,   237,
++     239,   242,   244,   246,   248,   250,   253,   255,   256,   257,
++     259,   261,   262,   263,   266,   267,   270,   272,   273,   274,
++     276,   277,   279,   280,   281,   282,   283,   284,   285,   286,
++     287,   289,   290,   291,   292,   294,   296,   299,   300,   301,
++     302,   303,   304,   305,   306,   307,   308,   309,   310,   311,
++     313,   314,   315,   316,   318,   319,   321,   322,   324,   325,
++     327,   328,   329,   330,   331,   332,   333,   336,   337,   338,
++     339,   341,   342,   344,   345,   346,   347,   348,   349,   351,
++     352,   354,   356,   357,   359,   360,   361,   362,   363,   365,
++     366,   367,   368,   370,   371,   372,   373,   374,   375,   376,
++     377,   378,   379,   380,   381,   382,   383,   384,   385,   386,
++     387,   388,   389,   390,   391,   392,   393,   394,   396,   397,
++     398,   399,   400,   401,   402,   403,   404,   405,   406,   407,
++     408,   409,   410,   411,   412,   413,   414,   415,   416,   417,
++     418,   419,   420,   421,   422,   423,   424,   425,   426,   427,
++     428,   429,   430,   431,   432,   433,   434,   435,   436,   437,
++     438,   439,   440,   441,   442,   443,   444,   445,   446,   447,
++     448,   449,   450,   451,   452,   453,   454,   455,   456,   457,
++     458,   459,   460,   461,   462,   464,   465,   466,   467,   469,
++     470,   471,   472,   473,   474,   475,   476,   477,   479,   480,
++     481,   482,   484,   485,   486,   487,   488,   490,   491,   492,
++     494,   495,   497,   498,   499,   500,   501,   502,   504,   505,
++     506,   507,   508,   510,   511,   512,   513,   514,   515,   516,
++     518,   519,   521,   522,   523,   525,   526,   527,   529,   530,
++     531,   534,   535,   537,   538,   539,   541,   543,   544,   545,
++     546,   548,   549,   550,   552,   553,   554,   555,   556,   558,
++     559,   561,   562,   564,   565,   568,   569,   570,   572,   573,
++     574,   576,   577,   578,   579,   580,   581,   582,   583,   584,
++     585,   586,   587,   588,   589,   590,   591,   592,   593
+ };
+ #endif
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/slghparse.y b/Ghidra/Features/Decompiler/src/decompile/cpp/slghparse.y
+index fef12c4bd..bb14eddf3 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/slghparse.y
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/slghparse.y
+@@ -14,8 +14,9 @@
+  * limitations under the License.
+  */
+ %define api.prefix {sleigh}
++%define api.header.include {"ghidra/slghparse.hh"}
+ %{
+-#include "slgh_compile.hh"
++#include "ghidra/slgh_compile.hh"
+ 
+ extern FILE *sleighin;
+ extern int sleighlex(void);
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/slghpatexpress.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/slghpatexpress.cc
+index a62d74ea0..3c8bfd317 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/slghpatexpress.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/slghpatexpress.cc
+@@ -13,8 +13,8 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "slghpatexpress.hh"
+-#include "sleighbase.hh"
++#include "ghidra/slghpatexpress.hh"
++#include "ghidra/sleighbase.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/slghpattern.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/slghpattern.cc
+index 7388f6103..cf425f30c 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/slghpattern.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/slghpattern.cc
+@@ -13,7 +13,7 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "slghpattern.hh"
++#include "ghidra/slghpattern.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/slghscan.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/slghscan.cc
+index 050c7e9a1..58693cb6f 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/slghscan.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/slghscan.cc
+@@ -1169,11 +1169,11 @@ char *yytext_ptr;
+ static int isatty (int fildes) { return 0; }
+ #endif
+ 
+-#include "slgh_compile.hh"
++#include "ghidra/slgh_compile.hh"
+ 
+ namespace ghidra {
+ 
+-#include "slghparse.hh"
++#include "ghidra/slghparse.hh"
+ 
+ struct FileStreamState {
+   YY_BUFFER_STATE lastbuffer;	// Last lex buffer corresponding to the stream
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/slghscan.l b/Ghidra/Features/Decompiler/src/decompile/cpp/slghscan.l
+index f433a25e5..1ee95238a 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/slghscan.l
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/slghscan.l
+@@ -26,11 +26,11 @@
+ static int isatty (int fildes) { return 0; }
+ #endif
+ 
+-#include "slgh_compile.hh"
++#include "ghidra/slgh_compile.hh"
+ 
+ namespace ghidra {
+ 
+-#include "slghparse.hh"
++#include "ghidra/slghparse.hh"
+ 
+ struct FileStreamState {
+   YY_BUFFER_STATE lastbuffer;	// Last lex buffer corresponding to the stream
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/slghsymbol.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/slghsymbol.cc
+index 7632ddfe6..0866516ad 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/slghsymbol.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/slghsymbol.cc
+@@ -13,8 +13,8 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "slghsymbol.hh"
+-#include "sleighbase.hh"
++#include "ghidra/slghsymbol.hh"
++#include "ghidra/sleighbase.hh"
+ #include <cmath>
+ 
+ namespace ghidra {
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/space.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/space.cc
+index d6cb618cf..b4b44c6f2 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/space.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/space.cc
+@@ -13,8 +13,8 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "space.hh"
+-#include "translate.hh"
++#include "ghidra/space.hh"
++#include "ghidra/translate.hh"
+ #include <climits>
+ 
+ namespace ghidra {
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/string_ghidra.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/string_ghidra.cc
+index a13260cd6..b486ec3f0 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/string_ghidra.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/string_ghidra.cc
+@@ -13,7 +13,7 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "string_ghidra.hh"
++#include "ghidra/string_ghidra.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/stringmanage.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/stringmanage.cc
+index 4bef2ef69..3788e3c37 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/stringmanage.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/stringmanage.cc
+@@ -13,8 +13,8 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "stringmanage.hh"
+-#include "architecture.hh"
++#include "ghidra/stringmanage.hh"
++#include "ghidra/architecture.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/subflow.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/subflow.cc
+index bde73ee84..658e6e561 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/subflow.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/subflow.cc
+@@ -13,7 +13,7 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "subflow.hh"
++#include "ghidra/subflow.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/test.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/test.cc
+index 603aaa5bb..4bc49af3f 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/test.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/test.cc
+@@ -13,8 +13,8 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "test.hh"
+-#include "libdecomp.hh"
++#include "ghidra/test.hh"
++#include "ghidra/libdecomp.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/testfunction.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/testfunction.cc
+index a0fba842c..f6505aa4b 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/testfunction.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/testfunction.cc
+@@ -13,7 +13,7 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "ifacedecomp.hh"
++#include "ghidra/ifacedecomp.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/transform.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/transform.cc
+index 41e4f16ad..695a1dc76 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/transform.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/transform.cc
+@@ -13,8 +13,8 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "transform.hh"
+-#include "funcdata.hh"
++#include "ghidra/transform.hh"
++#include "ghidra/funcdata.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/translate.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/translate.cc
+index e3d69ed60..c026dbe74 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/translate.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/translate.cc
+@@ -13,7 +13,7 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "translate.hh"
++#include "ghidra/translate.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/type.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/type.cc
+index 456f40704..c7a4835f1 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/type.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/type.cc
+@@ -13,8 +13,8 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "type.hh"
+-#include "funcdata.hh"
++#include "ghidra/type.hh"
++#include "ghidra/funcdata.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/typegrp_ghidra.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/typegrp_ghidra.cc
+index 173890e1b..f6db44309 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/typegrp_ghidra.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/typegrp_ghidra.cc
+@@ -13,7 +13,7 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "typegrp_ghidra.hh"
++#include "ghidra/typegrp_ghidra.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/typeop.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/typeop.cc
+index 52ada09f9..aec5d3960 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/typeop.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/typeop.cc
+@@ -13,8 +13,8 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "typeop.hh"
+-#include "funcdata.hh"
++#include "ghidra/typeop.hh"
++#include "ghidra/funcdata.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/unify.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/unify.cc
+index da8849fef..9a62cff68 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/unify.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/unify.cc
+@@ -14,7 +14,7 @@
+  * limitations under the License.
+  */
+ #ifdef CPUI_RULECOMPILE
+-#include "unify.hh"
++#include "ghidra/unify.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/unionresolve.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/unionresolve.cc
+index 3076dce7a..568eec452 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/unionresolve.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/unionresolve.cc
+@@ -13,8 +13,8 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "unionresolve.hh"
+-#include "funcdata.hh"
++#include "ghidra/unionresolve.hh"
++#include "ghidra/funcdata.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/userop.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/userop.cc
+index 92d233e3b..81c0d9f42 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/userop.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/userop.cc
+@@ -13,8 +13,8 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "userop.hh"
+-#include "funcdata.hh"
++#include "ghidra/userop.hh"
++#include "ghidra/funcdata.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/variable.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/variable.cc
+index db684d92b..f156fa939 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/variable.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/variable.cc
+@@ -13,9 +13,9 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "variable.hh"
+-#include "op.hh"
+-#include "database.hh"
++#include "ghidra/variable.hh"
++#include "ghidra/op.hh"
++#include "ghidra/database.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/varmap.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/varmap.cc
+index c724852f6..5b9826115 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/varmap.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/varmap.cc
+@@ -13,8 +13,8 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "varmap.hh"
+-#include "funcdata.hh"
++#include "ghidra/varmap.hh"
++#include "ghidra/funcdata.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/varnode.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/varnode.cc
+index 8d0f4a53b..de275643b 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/varnode.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/varnode.cc
+@@ -13,8 +13,8 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "varnode.hh"
+-#include "funcdata.hh"
++#include "ghidra/varnode.hh"
++#include "ghidra/funcdata.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/xml.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/xml.cc
+index 34e8e051a..18bfc72bf 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/xml.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/xml.cc
+@@ -85,7 +85,7 @@
+ #define yylval          xmllval
+ #define yychar          xmlchar
+ 
+-#include "xml.hh"
++#include "ghidra/xml.hh"
+ // CharData mode   look for '<' '&' or "]]>"
+ // Name mode       look for non-name char
+ // CData mode      looking for "]]>"
+@@ -754,14 +754,14 @@ static const yytype_int8 yytranslate[] =
+ /* YYRLINE[YYN] -- Source line where rule number YYN was defined.  */
+ static const yytype_uint8 yyrline[] =
+ {
+-       0,   150,   150,   151,   152,   153,   154,   155,   156,   157,
+-     159,   160,   161,   162,   163,   164,   165,   166,   167,   168,
+-     169,   170,   171,   172,   173,   175,   176,   177,   178,   179,
+-     180,   181,   183,   184,   185,   186,   187,   188,   189,   191,
+-     192,   193,   194,   195,   196,   197,   199,   200,   202,   203,
+-     204,   205,   207,   208,   209,   210,   211,   212,   214,   215,
+-     216,   217,   218,   219,   220,   222,   223,   225,   226,   227,
+-     228
++       0,   153,   153,   154,   155,   156,   157,   158,   159,   160,
++     162,   163,   164,   165,   166,   167,   168,   169,   170,   171,
++     172,   173,   174,   175,   176,   178,   179,   180,   181,   182,
++     183,   184,   186,   187,   188,   189,   190,   191,   192,   194,
++     195,   196,   197,   198,   199,   200,   202,   203,   205,   206,
++     207,   208,   210,   211,   212,   213,   214,   215,   217,   218,
++     219,   220,   221,   222,   223,   225,   226,   228,   229,   230,
++     231
+ };
+ #endif
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/xml.y b/Ghidra/Features/Decompiler/src/decompile/cpp/xml.y
+index 8e03e495d..ac9ea25b0 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/xml.y
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/xml.y
+@@ -24,7 +24,7 @@
+ #define yylval          xmllval
+ #define yychar          xmlchar
+ 
+-#include "xml.hh"
++#include "ghidra/xml.hh"
+ // CharData mode   look for '<' '&' or "]]>"
+ // Name mode       look for non-name char
+ // CData mode      looking for "]]>"
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/xml_arch.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/xml_arch.cc
+index 8af9fa03e..501cf8708 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/xml_arch.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/xml_arch.cc
+@@ -13,7 +13,7 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "xml_arch.hh"
++#include "ghidra/xml_arch.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/unittests/testcirclerange.cc b/Ghidra/Features/Decompiler/src/decompile/unittests/testcirclerange.cc
+index e8a19937a..c4190d696 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/unittests/testcirclerange.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/unittests/testcirclerange.cc
+@@ -13,8 +13,8 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "architecture.hh"
+-#include "test.hh"
++#include "ghidra/architecture.hh"
++#include "ghidra/test.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/unittests/testfloatemu.cc b/Ghidra/Features/Decompiler/src/decompile/unittests/testfloatemu.cc
+index 061e53677..3b6ce26f8 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/unittests/testfloatemu.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/unittests/testfloatemu.cc
+@@ -16,9 +16,9 @@
+ /// \file test.cc
+ /// \brief Unit tests for Ghidra C++ components.
+ 
+-#include "float.hh"
+-#include "opbehavior.hh"
+-#include "test.hh"
++#include "ghidra/float.hh"
++#include "ghidra/opbehavior.hh"
++#include "ghidra/test.hh"
+ 
+ #include <cmath>
+ #include <cstdint>
+diff --git a/Ghidra/Features/Decompiler/src/decompile/unittests/testfuncproto.cc b/Ghidra/Features/Decompiler/src/decompile/unittests/testfuncproto.cc
+index a25315dc2..7bae31397 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/unittests/testfuncproto.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/unittests/testfuncproto.cc
+@@ -13,9 +13,9 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "architecture.hh"
+-#include "grammar.hh"
+-#include "test.hh"
++#include "ghidra/architecture.hh"
++#include "ghidra/grammar.hh"
++#include "ghidra/test.hh"
+ #include <iostream>
+ 
+ namespace ghidra {
+diff --git a/Ghidra/Features/Decompiler/src/decompile/unittests/testmarshal.cc b/Ghidra/Features/Decompiler/src/decompile/unittests/testmarshal.cc
+index 44a31cc16..b8257f715 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/unittests/testmarshal.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/unittests/testmarshal.cc
+@@ -13,8 +13,8 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "translate.hh"
+-#include "test.hh"
++#include "ghidra/translate.hh"
++#include "ghidra/test.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/unittests/testparamstore.cc b/Ghidra/Features/Decompiler/src/decompile/unittests/testparamstore.cc
+index d48d97bb8..5cfa7a4ea 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/unittests/testparamstore.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/unittests/testparamstore.cc
+@@ -13,9 +13,9 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "architecture.hh"
+-#include "grammar.hh"
+-#include "test.hh"
++#include "ghidra/architecture.hh"
++#include "ghidra/grammar.hh"
++#include "ghidra/test.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/unittests/testtypes.cc b/Ghidra/Features/Decompiler/src/decompile/unittests/testtypes.cc
+index a25b36c7a..5276e1ec4 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/unittests/testtypes.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/unittests/testtypes.cc
+@@ -13,9 +13,9 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "architecture.hh"
+-#include "grammar.hh"
+-#include "test.hh"
++#include "ghidra/architecture.hh"
++#include "ghidra/grammar.hh"
++#include "ghidra/test.hh"
+ #include <iostream>
+ 
+ namespace ghidra {
+-- 
+2.43.0
+

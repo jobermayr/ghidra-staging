@@ -186,7 +186,7 @@ WebAssembly: minor updates to sync to master
  .../emulation/WasmEmulationHelper.java        |  135 ++
  .../src/main/java/wasm/WasmLoader.java        |  699 ++++++
  .../wasm/analysis/ValidationException.java    |   32 +
- .../main/java/wasm/analysis/WasmAnalysis.java |  154 ++
+ .../main/java/wasm/analysis/WasmAnalysis.java |  152 ++
  .../java/wasm/analysis/WasmDWARFAnalyzer.java |   36 +
  .../java/wasm/analysis/WasmFuncSignature.java |   80 +
  .../wasm/analysis/WasmFunctionAnalysis.java   | 1513 +++++++++++++
@@ -243,7 +243,7 @@ WebAssembly: minor updates to sync to master
  .../WebAssembly_O3_EmulatorTest.java          |   38 +
  .../WebAssembly_SIMD_O0_EmulatorTest.java     |   38 +
  .../WebAssembly_SIMD_O3_EmulatorTest.java     |   38 +
- 93 files changed, 14565 insertions(+), 4 deletions(-)
+ 93 files changed, 14563 insertions(+), 4 deletions(-)
  create mode 100644 Ghidra/Processors/WebAssembly/Module.manifest
  create mode 100644 Ghidra/Processors/WebAssembly/build.gradle
  create mode 100644 Ghidra/Processors/WebAssembly/certification.manifest
@@ -378,10 +378,10 @@ index e31d9fccd..a011ddaba 100644
  {
  	MainInfo.numpass = 0;
 diff --git a/Ghidra/Extensions/SleighDevTools/pcodetest/pcode_defs.py b/Ghidra/Extensions/SleighDevTools/pcodetest/pcode_defs.py
-index 29bf00101..e5740bc2c 100644
+index 0d80c72c0..64a0d4211 100644
 --- a/Ghidra/Extensions/SleighDevTools/pcodetest/pcode_defs.py
 +++ b/Ghidra/Extensions/SleighDevTools/pcodetest/pcode_defs.py
-@@ -753,3 +753,21 @@ PCodeTest({
+@@ -789,3 +789,21 @@ PCodeTest({
      'language_id': 'ARCompact:LE:32:default',
      'ccflags': '-mcpu=arc700 -lgcc',
  })
@@ -404,7 +404,7 @@ index 29bf00101..e5740bc2c 100644
 +    'language_id': 'Wasm:LE:32:default',
 +})
 diff --git a/Ghidra/Extensions/SleighDevTools/pcodetest/pcodetest.py b/Ghidra/Extensions/SleighDevTools/pcodetest/pcodetest.py
-index c464ad6ce..8b55b53dc 100644
+index ab1a87a7c..31523a10e 100644
 --- a/Ghidra/Extensions/SleighDevTools/pcodetest/pcodetest.py
 +++ b/Ghidra/Extensions/SleighDevTools/pcodetest/pcodetest.py
 @@ -78,6 +78,8 @@ class PCodeTestBuild(BuildUtil):
@@ -486,7 +486,7 @@ index c796388b5..96a202ab1 100644
          #for l in main_lines:
          #    self.c_write(l)
 diff --git a/Ghidra/Features/Base/src/main/java/ghidra/test/processors/support/ProcessorEmulatorTestAdapter.java b/Ghidra/Features/Base/src/main/java/ghidra/test/processors/support/ProcessorEmulatorTestAdapter.java
-index 24b0d6d38..a62f7df8e 100644
+index 12b440a9b..32a4fa91c 100644
 --- a/Ghidra/Features/Base/src/main/java/ghidra/test/processors/support/ProcessorEmulatorTestAdapter.java
 +++ b/Ghidra/Features/Base/src/main/java/ghidra/test/processors/support/ProcessorEmulatorTestAdapter.java
 @@ -209,8 +209,8 @@ public abstract class ProcessorEmulatorTestAdapter extends TestCase implements E
@@ -8889,10 +8889,10 @@ index 000000000..61c7a50f4
 +}
 diff --git a/Ghidra/Processors/WebAssembly/src/main/java/wasm/analysis/WasmAnalysis.java b/Ghidra/Processors/WebAssembly/src/main/java/wasm/analysis/WasmAnalysis.java
 new file mode 100644
-index 000000000..aff1141fc
+index 000000000..807905255
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/src/main/java/wasm/analysis/WasmAnalysis.java
-@@ -0,0 +1,154 @@
+@@ -0,0 +1,152 @@
 +/* ###
 + * IP: GHIDRA
 + *
@@ -8917,8 +8917,9 @@ index 000000000..aff1141fc
 +import java.util.List;
 +import java.util.Map;
 +
-+import ghidra.app.plugin.core.analysis.AnalysisState;
-+import ghidra.app.plugin.core.analysis.AnalysisStateInfo;
++import ghidra.app.plugin.core.analysis.TransientProgramProperties;
++import ghidra.app.plugin.core.analysis.TransientProgramProperties.PropertyValueSupplier;
++import ghidra.app.plugin.core.analysis.TransientProgramProperties.SCOPE;
 +import ghidra.app.util.bin.BinaryReader;
 +import ghidra.app.util.bin.ByteArrayProvider;
 +import ghidra.app.util.bin.ByteProvider;
@@ -8933,7 +8934,7 @@ index 000000000..aff1141fc
 +import wasm.format.sections.structures.WasmCodeEntry;
 +import wasm.format.sections.structures.WasmFuncType;
 +
-+public class WasmAnalysis implements AnalysisState {
++public class WasmAnalysis {
 +	/**
 +	 * Return persistent <code>ClassFileAnalysisState</code> which corresponds to
 +	 * the specified program instance.
@@ -8942,23 +8943,20 @@ index 000000000..aff1141fc
 +	 * @return <code>ClassFileAnalysisState</code> for specified program instance
 +	 */
 +	public static synchronized WasmAnalysis getState(Program program) {
-+		WasmAnalysis analysisState = AnalysisStateInfo.getAnalysisState(program, WasmAnalysis.class);
-+		if (analysisState == null) {
-+			Memory mem = program.getMemory();
-+			Address moduleStart = WasmLoader.getModuleAddress(program.getAddressFactory());
-+			ByteProvider memByteProvider = new MemoryByteProvider(mem, moduleStart);
-+			BinaryReader memBinaryReader = new BinaryReader(memByteProvider, true);
-+			WasmModule module;
-+			try {
-+				module = new WasmModule(memBinaryReader);
-+			} catch (IOException e) {
-+				throw new RuntimeException(e);
-+			}
-+
-+			analysisState = new WasmAnalysis(program.getAddressFactory(), module);
-+			AnalysisStateInfo.putAnalysisState(program, analysisState);
-+		}
-+		return analysisState;
++		return TransientProgramProperties.getProperty(program, WasmAnalysis.class,
++			SCOPE.PROGRAM, WasmAnalysis.class, () -> {
++				Memory mem = program.getMemory();
++				Address moduleStart = WasmLoader.getModuleAddress(program.getAddressFactory());
++				ByteProvider memByteProvider = new MemoryByteProvider(mem, moduleStart);
++				BinaryReader memBinaryReader = new BinaryReader(memByteProvider, true);
++				WasmModule module;
++				try {
++					module = new WasmModule(memBinaryReader);
++				} catch (IOException e) {
++					throw new RuntimeException(e);
++				}
++				return new WasmAnalysis(program.getAddressFactory(), module);
++			});
 +	}
 +
 +	private WasmModule module = null;
@@ -15502,5 +15500,5 @@ index 000000000..8226b3594
 +	}
 +}
 -- 
-2.41.0
+2.43.0
 
