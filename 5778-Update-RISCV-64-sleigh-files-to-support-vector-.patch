@@ -21,6 +21,8 @@ Cherrypick 32 bit corrections and thead semantics provided by @madushan1000
 Add placeholder pcodeops to riscv vector instructions
 
 Update support for bit manipulation and compressed instructions; add a Readme concerning ISA extensions
+
+make vector store pcodeop less confusing
 ---
  .../Processors/RISCV/certification.manifest   |   14 +
  .../data/languages/Readme_isa_extensions.md   |  119 +
@@ -36,7 +38,7 @@ Update support for bit manipulation and compressed instructions; add a Readme co
  .../RISCV/data/languages/riscv.rv32p.sinc     |   44 +-
  .../RISCV/data/languages/riscv.rv64b.sinc     |   12 +-
  .../RISCV/data/languages/riscv.rv64k.sinc     |    2 +
- .../RISCV/data/languages/riscv.rvv.sinc       | 3967 ++++++++++++++---
+ .../RISCV/data/languages/riscv.rvv.sinc       | 3966 ++++++++++++++---
  .../RISCV/data/languages/riscv.table.sinc     |   26 +-
  .../RISCV/data/languages/riscv.xthead.sinc    |  712 +++
  .../RISCV/data/languages/riscv.zcb.sinc       |   71 +
@@ -48,7 +50,7 @@ Update support for bit manipulation and compressed instructions; add a Readme co
  .../RISCV/data/languages/riscv.zvbb.sinc      |   64 +
  .../RISCV/data/languages/riscv.zvkng.sinc     |   35 +
  .../RISCV/data/languages/riscv.zvksg.sinc     |   14 +
- 26 files changed, 4800 insertions(+), 766 deletions(-)
+ 26 files changed, 4799 insertions(+), 766 deletions(-)
  create mode 100644 Ghidra/Processors/RISCV/data/languages/Readme_isa_extensions.md
  create mode 100644 Ghidra/Processors/RISCV/data/languages/riscv.ilp32d_thead.slaspec
  create mode 100644 Ghidra/Processors/RISCV/data/languages/riscv.lp64d_thead.slaspec
@@ -1077,7 +1079,7 @@ index fc79f408c..1f5b6af44 100644
  :saes64.decs   rd, rs1, rs2  is rd & rs1 & rs2 & op0006=0x5b & op1214=0x2 & op2531=0x0a  unimpl
  
 diff --git a/Ghidra/Processors/RISCV/data/languages/riscv.rvv.sinc b/Ghidra/Processors/RISCV/data/languages/riscv.rvv.sinc
-index f21ed223f..a8c55cf57 100644
+index f21ed223f..d9b96b1dc 100644
 --- a/Ghidra/Processors/RISCV/data/languages/riscv.rvv.sinc
 +++ b/Ghidra/Processors/RISCV/data/languages/riscv.rvv.sinc
 @@ -1,4 +1,5 @@
@@ -1096,7 +1098,7 @@ index f21ed223f..a8c55cf57 100644
  # lumop=0  unit-stride
  # lumop=8  unit-stride,whole registers
  # lumop=16 unit-stride fault-only-first
-@@ -38,1918 +39,4602 @@
+@@ -38,1918 +39,4601 @@
  # sumop=16 unit-stride fault-only-first
  # nfields imm is nf [ imm = nf + 1; ] { export *[const]:1 imm; }
  
@@ -4833,8 +4835,8 @@ index f21ed223f..a8c55cf57 100644
  # vse64.v        nf 28=0 27..26=0 vm 24..20=0 rs1 14..12=0x7 vs3 6..0=0x27
  # vse64.v   vs3, (rs1), vm  #   64-bit unit-stride store
 -:vse64.v    vs3, (rs1), vm   is nf & op2828=0x0 & op2627=0x0 & vm & op2024=0x0 & rs1 & op1214=0x7 & vs3 & op0006=0x27  unimpl
-+:vse64.v    vs3, (rs1)           is nf & op2931=0 & op2828=0x0 & op2627=0x0 & op2525=1 & op2024=0x0 & rs1 & op1214=0x7 & vs3 & op0006=0x27 {*:64 rs1=vse64_v(vs3);}
-+:vse64.v    vs3, (rs1), "v0.t"   is nf & op2931=0 & op2828=0x0 & op2627=0x0 & op2525=0 & op2024=0x0 & rs1 & op1214=0x7 & vs3 & op0006=0x27 {*:64 rs1=vse64_v(vs3,v0);}
++:vse64.v    vs3, (rs1)           is nf & op2931=0 & op2828=0x0 & op2627=0x0 & op2525=1 & op2024=0x0 & rs1 & op1214=0x7 & vs3 & op0006=0x27 {vse64_v(vs3,rs1);}
++:vse64.v    vs3, (rs1), "v0.t"   is nf & op2931=0 & op2828=0x0 & op2627=0x0 & op2525=0 & op2024=0x0 & rs1 & op1214=0x7 & vs3 & op0006=0x27 {vse64_v(vs3,rs1,v0);}
  
 +define pcodeop vsseg2e64_v;
 +:vsseg2e64.v    vs3, (rs1)           is nf & op2931=1 & op2828=0x0 & op2627=0x0 & op2525=1 & op2024=0x0 & rs1 & op1214=0x7 & vs3 & op0006=0x27 {vsseg2e64_v(vs3,rs1);}
@@ -4865,12 +4867,11 @@ index f21ed223f..a8c55cf57 100644
 +:vsseg8e64.v    vs3, (rs1), "v0.t"   is nf & op2931=7 & op2828=0x0 & op2627=0x0 & op2525=0 & op2024=0x0 & rs1 & op1214=0x7 & vs3 & op0006=0x27 {vsseg8e64_v(vs3,rs1,v0);}
 +
 +define pcodeop vse8_v;
-+# fake destination vector width as 64 bits for semantics
  # vse8.v         nf 28=0 27..26=0 vm 24..20=0 rs1 14..12=0x0 vs3 6..0=0x27
  # vse8.v    vs3, (rs1), vm  #    8-bit unit-stride store
 -:vse8.v     vs3, (rs1), vm   is nf & op2828=0x0 & op2627=0x0 & vm & op2024=0x0 & rs1 & op1214=0x0 & vs3 & op0006=0x27  unimpl
-+:vse8.v     vs3, (rs1)           is nf & op2931=0x0 & op2828=0x0 & op2627=0x0 & op2525=1 & op2024=0x0 & rs1 & op1214=0x0 & vs3 & op0006=0x27 {*:64 rs1=vse8_v(vs3);}
-+:vse8.v     vs3, (rs1), "v0.t"   is nf & op2931=0x0 & op2828=0x0 & op2627=0x0 & op2525=0 & op2024=0x0 & rs1 & op1214=0x0 & vs3 & op0006=0x27 {*:64 rs1=vse8_v(vs3,v0);}
++:vse8.v     vs3, (rs1)           is nf & op2931=0x0 & op2828=0x0 & op2627=0x0 & op2525=1 & op2024=0x0 & rs1 & op1214=0x0 & vs3 & op0006=0x27 {vse8_v(vs3,rs1);}
++:vse8.v     vs3, (rs1), "v0.t"   is nf & op2931=0x0 & op2828=0x0 & op2627=0x0 & op2525=0 & op2024=0x0 & rs1 & op1214=0x0 & vs3 & op0006=0x27 {vse8_v(vs3,rs1,v0);}
 +
 +define pcodeop vsseg2e8_v;
 +:vsseg2e8.v vs3, (rs1)           is nf & op2931=0x1 & op2828=0x0 & op2627=0x0 & op2525=1 & op2024=0x0 & rs1 & op1214=0x0 & vs3 & op0006=0x27 {vsseg2e8_v(vs3,rs1);}
