@@ -149,6 +149,130 @@ common pcodeops. This will reduce emulation burden, as well as making loads and
 stores explicit for dataflow analysis.
 
 WebAssembly: minor updates to sync to master
+
+Remove helpPath task - not needed after a7668c7f8
+
+SIMD refactoring: implement splat in P-code
+
+SIMD refactoring: implement extract and replace in P-code
+
+SIMD refactoring: implement shuffle in P-code
+
+SIMD refactoring: implement some bitwise and arith ops in P-code
+
+spectest bugfix: do not use float2float on constants
+
+float2float may modify the floating point value, but f{32,64}.const instructions
+are supposed to load the raw constant value. Fixes test failures on
+float_literals.
+
+spectest bugfix: don't crash when jumping to no-context addresses
+
+The VM may jump to an uninitialized address such as 0x00000000. If no context is
+available at that address, this would crash the emulator before the instruction
+can even be hit (e.g. for a breakpoint).
+
+spectest bugfix: initialize tables and element segments with 0x00
+
+Tables and element segments apparently default to holding null refs, and since
+we're using 0x00000000 for null (`ref.null`, `ref.is_null`), we need to ensure
+that they are initialized appropriately.
+
+In the future, we may want to revisit whether zero is the right value for null -
+e.g. can zero be a valid value for some reference type?
+
+spectest bugfix: avoid crash on parsing select after br
+
+After a br, the remaining code in the block is unreachable and types are no
+longer tracked on the stack. Thus, multiple null types can creep in, which was
+causing (among other things) crashes when analyzing a select instruction after a
+br.
+
+spectest bugfix: fix table.grow semantics
+
+table.grow produces an i32 (the old table size); this was incorrectly omitted
+and caused validation failures on modules containing that instruction.
+
+spectest bugfix: fix br_table semantics when unreachable
+
+When unreachable, br_table may underflow the stack, which is ok. However,
+br_table needs to push Unknown types back on the stack, rather than the expected
+types. This subtlety was caught by the unreached-valid meet-bottom testcase.
+
+spectest bugfix: fix copysign to work with nans, etc.
+
+Fixes test failures in f{32,64}_bitwise and float_misc.
+
+spectest bugfix: zero out locals when emulating
+
+This fixes some failures from call_indirect, among others. Instead of using an
+uponentry injection, this new implementation hijacks the ".locals" directive to
+add a CallOther pcodeop, which is usable from both the decompiler and emulator.
+
+Provide a simulateCall convenience function to set up a simulated call frame
+
+spectest bugfix: element section type param ("flags") is actually LEB128
+
+This is tested by binary-leb128, and previously was failing to load the module
+when the element section type parameter was encoded as a multi-byte LEB128.
+However, since we weren't checking to see whether the modules loaded
+successfully, this failed silently. The addition of WasmAnalysis forces us to
+check whether the Wasm module parses correctly.
+
+Don't create empty segments; this avoids angry warnings in the log
+
+spectest bugfix: be careful about zero-sized chunks.
+
+`readNextByteArray` may still throw an EOFError even if the read size is zero,
+which can happen if we're decoding the very last object in the file.
+
+spectest bugfix: escape custom section names to ensure valid datatype/memory block names
+
+custom section names can have arbitrary Unicode content, so we should use
+escapeJava to clean them.
+
+Add the spectest script
+
+spectest bugfix: fix implementation of float max/min/trunc
+
+max and min weren't handling NaNs correctly, and trunc was just not correct at
+all (it was limited to i32/i64 range). This fixes a bunch of failures in
+f32/f64.wast.
+
+spectest bugfix: encode externref as nonzero integers
+
+(ref.extern 0) is non-null, so we need to encode externrefs in order to pass
+a test in ref_is_null.
+
+spectest bugfix: fix parsing of `select funcref`
+
+Parsing of `select funcref` (1C 01 70) was failing because SLEIGH was committing
+to one of the select forms (in this case, `select valtype_64`) using a
+rudimentary mask check before going on to fully check the final byte. The LEB128
+parsing mixed with the `bytev` checking resulted in a very simplistic mask check
+for `select valtype_64`, which passed for 0x70, and resulted in a parsing
+failure when `0x70` later failed to match `0x7e` or `0x7c`. The
+DebugSleighInstructionParse script was instrumental in identifying this
+behaviour.
+
+Instead, the better solution is to check for the 0x01 LEB128 count as early as
+possible, and only then examine the final type byte.
+
+This change also improves the display of "ref.null t" and "select t*"
+instructions by using symbolic type names.
+
+spectest bugfix: disable C stack detection for wast tests
+
+Some of the tests (e.g. global.wast) were triggering the C stack detection
+logic, which was causing problems for the test.
+
+implement clz, ctz, popcnt
+
+Eliminate a few warnings about laneidx* tables
+
+Fix build with Ghidra 11.0
+
+Remove unneeded import, fix copy paste error
 ---
  .../SleighDevTools/pcodetest/build.py         |    2 +-
  .../pcodetest/c_src/misc_BODY.c               |    7 +
@@ -161,35 +285,36 @@ WebAssembly: minor updates to sync to master
  Ghidra/Processors/WebAssembly/Module.manifest |    0
  Ghidra/Processors/WebAssembly/build.gradle    |   27 +
  .../WebAssembly/certification.manifest        |   20 +
- .../WebAssembly/data/languages/BasicOps.sinc  |  518 +++++
+ .../WebAssembly/data/languages/BasicOps.sinc  |  522 +++++
  .../WebAssembly/data/languages/Leb128.sinc    |   60 +
  .../data/languages/Leb128_opc2.sinc           | 1152 ++++++++++
  .../data/languages/Leb128_opc2_1b.sinc        |    5 +
  .../data/languages/Leb128_opc2_2b.sinc        |    4 +
  .../data/languages/Leb128_u32.sinc            |   30 +
- .../WebAssembly/data/languages/VectorOps.sinc | 1439 +++++++++++++
- .../languages/WebAssembly-pos-stack.cspec     |  831 +++++++
- .../data/languages/WebAssembly.cspec          |   62 +
+ .../WebAssembly/data/languages/VectorOps.sinc | 1646 ++++++++++++++
+ .../languages/WebAssembly-pos-stack.cspec     |  836 +++++++
+ .../data/languages/WebAssembly.cspec          |   67 +
  .../data/languages/WebAssembly.dwarf          |    6 +
  .../data/languages/WebAssembly.ldefs          |   18 +
  .../data/languages/WebAssembly.opinion        |    5 +
  .../data/languages/WebAssembly.pspec          |   17 +
- .../data/languages/WebAssembly.sinc           |  497 +++++
- .../data/languages/WebAssembly.slaspec        | 1906 +++++++++++++++++
- .../ghidra_scripts/analyze_dyncalls.py        |  120 ++
+ .../data/languages/WebAssembly.sinc           |  503 +++++
+ .../data/languages/WebAssembly.slaspec        | 1923 +++++++++++++++++
+ .../ghidra_scripts/analyze_dyncalls.py        |  120 +
  .../ghidra_scripts/emulate_writev.py          |   57 +
  .../ghidra_scripts/rename_table_funcs.py      |   47 +
+ .../WebAssembly/ghidra_scripts/spectest.py    |  400 ++++
  .../src/main/help/help/TOC_Source.xml         |    7 +
  .../help/help/topics/WebAssembly/help.html    |  111 +
  .../main/help/help/topics/WebAssembly/help.md |  104 +
- .../WasmEmulateInstructionStateModifier.java  |  296 +++
- .../emulation/WasmEmulationHelper.java        |  135 ++
- .../src/main/java/wasm/WasmLoader.java        |  699 ++++++
+ .../WasmEmulateInstructionStateModifier.java  |  375 ++++
+ .../emulation/WasmEmulationHelper.java        |  191 ++
+ .../src/main/java/wasm/WasmLoader.java        |  708 ++++++
  .../wasm/analysis/ValidationException.java    |   32 +
- .../main/java/wasm/analysis/WasmAnalysis.java |  152 ++
+ .../main/java/wasm/analysis/WasmAnalysis.java |  151 ++
  .../java/wasm/analysis/WasmDWARFAnalyzer.java |   36 +
  .../java/wasm/analysis/WasmFuncSignature.java |   80 +
- .../wasm/analysis/WasmFunctionAnalysis.java   | 1513 +++++++++++++
+ .../wasm/analysis/WasmFunctionAnalysis.java   | 1525 +++++++++++++
  .../java/wasm/analysis/WasmPreAnalyzer.java   |  194 ++
  .../wasm/analysis/WasmSignatureAnalyzer.java  |  118 +
  .../analysis/WasmStackVariableAnalyzer.java   |  264 +++
@@ -212,25 +337,25 @@ WebAssembly: minor updates to sync to master
  .../format/sections/WasmStartSection.java     |   47 +
  .../format/sections/WasmTableSection.java     |   58 +
  .../wasm/format/sections/WasmTypeSection.java |   61 +
- .../sections/WasmUnknownCustomSection.java    |   52 +
+ .../sections/WasmUnknownCustomSection.java    |   58 +
  .../structures/ConstantExpression.java        |  223 ++
  .../sections/structures/WasmCodeEntry.java    |   87 +
- .../sections/structures/WasmDataSegment.java  |  103 +
- .../structures/WasmElementSegment.java        |  214 ++
+ .../sections/structures/WasmDataSegment.java  |  109 +
+ .../structures/WasmElementSegment.java        |  215 ++
  .../sections/structures/WasmExportEntry.java  |   60 +
  .../sections/structures/WasmFuncType.java     |   81 +
  .../sections/structures/WasmGlobalEntry.java  |   62 +
  .../sections/structures/WasmGlobalType.java   |   52 +
- .../sections/structures/WasmImportEntry.java  |  137 ++
+ .../sections/structures/WasmImportEntry.java  |  139 ++
  .../sections/structures/WasmLocalEntry.java   |   52 +
- .../format/sections/structures/WasmName.java  |   53 +
+ .../format/sections/structures/WasmName.java  |   57 +
  .../structures/WasmNameIndirectMap.java       |   71 +
  .../structures/WasmNameLocalSubsection.java   |   46 +
  .../sections/structures/WasmNameMap.java      |   73 +
- .../structures/WasmNameMapSubsection.java     |   50 +
+ .../structures/WasmNameMapSubsection.java     |   52 +
  .../structures/WasmNameModuleSubsection.java  |   46 +
  .../structures/WasmNameSubsection.java        |  123 ++
- .../structures/WasmNameUnknownSubsection.java |   41 +
+ .../structures/WasmNameUnknownSubsection.java |   45 +
  .../structures/WasmResizableLimits.java       |   62 +
  .../sections/structures/WasmTableType.java    |   56 +
  .../wasm/pcode/InjectPayloadWasmEntry.java    |   62 +
@@ -243,7 +368,7 @@ WebAssembly: minor updates to sync to master
  .../WebAssembly_O3_EmulatorTest.java          |   38 +
  .../WebAssembly_SIMD_O0_EmulatorTest.java     |   38 +
  .../WebAssembly_SIMD_O3_EmulatorTest.java     |   38 +
- 93 files changed, 14563 insertions(+), 4 deletions(-)
+ 94 files changed, 15387 insertions(+), 4 deletions(-)
  create mode 100644 Ghidra/Processors/WebAssembly/Module.manifest
  create mode 100644 Ghidra/Processors/WebAssembly/build.gradle
  create mode 100644 Ghidra/Processors/WebAssembly/certification.manifest
@@ -265,6 +390,7 @@ WebAssembly: minor updates to sync to master
  create mode 100644 Ghidra/Processors/WebAssembly/ghidra_scripts/analyze_dyncalls.py
  create mode 100644 Ghidra/Processors/WebAssembly/ghidra_scripts/emulate_writev.py
  create mode 100644 Ghidra/Processors/WebAssembly/ghidra_scripts/rename_table_funcs.py
+ create mode 100644 Ghidra/Processors/WebAssembly/ghidra_scripts/spectest.py
  create mode 100644 Ghidra/Processors/WebAssembly/src/main/help/help/TOC_Source.xml
  create mode 100644 Ghidra/Processors/WebAssembly/src/main/help/help/topics/WebAssembly/help.html
  create mode 100644 Ghidra/Processors/WebAssembly/src/main/help/help/topics/WebAssembly/help.md
@@ -578,10 +704,10 @@ index 000000000..63d922004
 +data/languages/WebAssembly.slaspec||GHIDRA||||END|
 diff --git a/Ghidra/Processors/WebAssembly/data/languages/BasicOps.sinc b/Ghidra/Processors/WebAssembly/data/languages/BasicOps.sinc
 new file mode 100644
-index 000000000..14baf5563
+index 000000000..e43635291
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/data/languages/BasicOps.sinc
-@@ -0,0 +1,518 @@
+@@ -0,0 +1,522 @@
 +## Memory Instructions
 +memalign: "align="^ULeb128 is ULeb128 {
 +	export ULeb128;
@@ -906,8 +1032,11 @@ index 000000000..14baf5563
 +	sp1_32 = floor(sp1_32);
 +}
 +:f32.trunc  is opc=0x8F; sp1_32; ctx_is_directive=0 {
-+	sp1_32 = trunc(sp1_32);
-+	sp1_32 = int2float(sp1_32);
++	if (sp1_32 f>= 0) goto <pos>;
++	sp1_32 = ceil(sp1_32);
++	goto inst_next;
++<pos>
++	sp1_32 = floor(sp1_32);
 +}
 +:f32.nearest  is opc=0x90; sp1_32; ctx_is_directive=0 {
 +	sp1_32 = round(sp1_32);
@@ -928,16 +1057,15 @@ index 000000000..14baf5563
 +	sp2_32 = sp2_32 f/ sp1_32;
 +}
 +:f32.min  is opc=0x96; sp1_32; sp2_32; ctx_is_directive=0 {
-+	if(sp1_32 f> sp2_32) goto inst_next;
++	if(sp1_32 f> sp2_32 || nan(sp2_32)) goto inst_next;
 +	sp2_32 = sp1_32;
 +}
 +:f32.max  is opc=0x97; sp1_32; sp2_32; ctx_is_directive=0 {
-+	if(sp1_32 f< sp2_32) goto inst_next;
++	if(sp1_32 f< sp2_32 || nan(sp2_32)) goto inst_next;
 +	sp2_32 = sp1_32;
 +}
 +:f32.copysign  is opc=0x98; sp1_32; sp2_32; ctx_is_directive=0 {
-+	if((sp2_32 f< int2float(0:4)) == (sp1_32 f< int2float(0:4))) goto inst_next;
-+	sp2_32 = f- sp2_32;
++	sp2_32 = (sp2_32 & 0x7fffffff) | (sp1_32 & 0x80000000);
 +}
 +:f64.abs  is opc=0x99; sp1_64; ctx_is_directive=0 {
 +	sp1_64 = abs(sp1_64);
@@ -952,8 +1080,11 @@ index 000000000..14baf5563
 +	sp1_64 = floor(sp1_64);
 +}
 +:f64.trunc  is opc=0x9D; sp1_64; ctx_is_directive=0 {
-+	sp1_64 = trunc(sp1_64);
-+	sp1_64 = int2float(sp1_64);
++	if (sp1_64 f>= 0) goto <pos>;
++	sp1_64 = ceil(sp1_64);
++	goto inst_next;
++<pos>
++	sp1_64 = floor(sp1_64);
 +}
 +:f64.nearest  is opc=0x9E; sp1_64; ctx_is_directive=0 {
 +	sp1_64 = round(sp1_64);
@@ -974,16 +1105,15 @@ index 000000000..14baf5563
 +	sp2_64 = sp2_64 f/ sp1_64;
 +}
 +:f64.min  is opc=0xA4; sp1_64; sp2_64; ctx_is_directive=0 {
-+	if(sp1_64 f> sp2_64) goto inst_next;
++	if(sp1_64 f> sp2_64 || nan(sp2_64)) goto inst_next;
 +	sp2_64 = sp1_64;
 +}
 +:f64.max  is opc=0xA5; sp1_64; sp2_64; ctx_is_directive=0 {
-+	if(sp1_64 f< sp2_64) goto inst_next;
++	if(sp1_64 f< sp2_64 || nan(sp2_64)) goto inst_next;
 +	sp2_64 = sp1_64;
 +}
 +:f64.copysign  is opc=0xA6; sp1_64; sp2_64; ctx_is_directive=0 {
-+	if((sp2_64 f< int2float(0:4)) == (sp1_64 f< int2float(0:4))) goto inst_next;
-+	sp2_64 = f- sp2_64;
++	sp2_64 = (sp2_64 & 0x7fffffffffffffff) | (sp1_64 & 0x8000000000000000);
 +}
 +:i32.wrap_i64  is opc=0xA7; sp1_32; sp1_64; ctx_is_directive=0 {
 +	sp1_32 = sp1_64:4;
@@ -2383,10 +2513,10 @@ index 000000000..a98eb4c72
 +{ $(EXPORT_EXPR) }
 diff --git a/Ghidra/Processors/WebAssembly/data/languages/VectorOps.sinc b/Ghidra/Processors/WebAssembly/data/languages/VectorOps.sinc
 new file mode 100644
-index 000000000..f87ba860c
+index 000000000..8b4653fde
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/data/languages/VectorOps.sinc
-@@ -0,0 +1,1439 @@
+@@ -0,0 +1,1646 @@
 +# Ghidra only supports scalars up to 64 bits
 +define token I128 (64)
 +	f128_0 = (0, 63) hex
@@ -2395,13 +2525,10 @@ index 000000000..f87ba860c
 +
 +define token laneidx_1 (8)
 +    laneidx = (0, 7) dec
-+;
-+
-+define token laneidx_4 (32)
-+    laneidx0_3 = (0, 31) hex
-+    laneidx4_7 = (0, 31) hex
-+    laneidx8_11 = (0, 31) hex
-+    laneidx12_15 = (0, 31) hex
++    laneidx0 = (0, 7)
++    laneidx1 = (0, 7)
++    laneidx2 = (0, 7)
++    laneidx3 = (0, 7)
 +;
 +
 +loadaddr2: memalign memoffset is memalign; memoffset; sp2_32 {
@@ -2409,21 +2536,94 @@ index 000000000..f87ba860c
 +	export addr;
 +}
 +
-+# splatN(value) construct vector by replicating the N-bit value
-+define pcodeop splat8;
-+define pcodeop splat16;
-+define pcodeop splat32;
-+define pcodeop splat64;
-+# extractN(vector, laneidx) extract a single N-bit lane from the vector
-+define pcodeop extract8;
-+define pcodeop extract16;
-+define pcodeop extract32;
-+define pcodeop extract64;
-+# replaceN(vector, laneidx, value) replace a single N-bit lane with provided value
-+define pcodeop replace8;
-+define pcodeop replace16;
-+define pcodeop replace32;
-+define pcodeop replace64;
++sp1_lane8_val: tmp_sp is ctx_sp; laneidx [tmp_sp = $(REG_STACK_BASE) + (ctx_sp - 1) * $(REG_SIZE) + laneidx * 1;] {
++	export *[register]:1 tmp_sp;
++}
++
++sp1_lane16_val: tmp_sp is ctx_sp; laneidx [tmp_sp = $(REG_STACK_BASE) + (ctx_sp - 1) * $(REG_SIZE) + laneidx * 2;] {
++	export *[register]:2 tmp_sp;
++}
++
++sp1_lane32_val: tmp_sp is ctx_sp; laneidx [tmp_sp = $(REG_STACK_BASE) + (ctx_sp - 1) * $(REG_SIZE) + laneidx * 4;] {
++	export *[register]:4 tmp_sp;
++}
++
++sp1_lane64_val: tmp_sp is ctx_sp; laneidx [tmp_sp = $(REG_STACK_BASE) + (ctx_sp - 1) * $(REG_SIZE) + laneidx * 8;] {
++	export *[register]:8 tmp_sp;
++}
++
++sp2_lane8_val: tmp_sp is ctx_sp; laneidx [tmp_sp = $(REG_STACK_BASE) + (ctx_sp - 2) * $(REG_SIZE) + laneidx * 1;] {
++	export *[register]:1 tmp_sp;
++}
++
++sp2_lane16_val: tmp_sp is ctx_sp; laneidx [tmp_sp = $(REG_STACK_BASE) + (ctx_sp - 2) * $(REG_SIZE) + laneidx * 2;] {
++	export *[register]:2 tmp_sp;
++}
++
++sp2_lane32_val: tmp_sp is ctx_sp; laneidx [tmp_sp = $(REG_STACK_BASE) + (ctx_sp - 2) * $(REG_SIZE) + laneidx * 4;] {
++	export *[register]:4 tmp_sp;
++}
++
++sp2_lane64_val: tmp_sp is ctx_sp; laneidx [tmp_sp = $(REG_STACK_BASE) + (ctx_sp - 2) * $(REG_SIZE) + laneidx * 8;] {
++	export *[register]:8 tmp_sp;
++}
++
++# Hack to show only the lane index in the disassembly
++sp1_lane8: laneidx is sp1_lane8_val & laneidx { export sp1_lane8_val; }
++sp1_lane16: laneidx is sp1_lane16_val & laneidx { export sp1_lane16_val; }
++sp1_lane32: laneidx is sp1_lane32_val & laneidx { export sp1_lane32_val; }
++sp1_lane64: laneidx is sp1_lane64_val & laneidx { export sp1_lane64_val; }
++sp2_lane8: laneidx is sp2_lane8_val & laneidx { export sp2_lane8_val; }
++sp2_lane16: laneidx is sp2_lane16_val & laneidx { export sp2_lane16_val; }
++sp2_lane32: laneidx is sp2_lane32_val & laneidx { export sp2_lane32_val; }
++sp2_lane64: laneidx is sp2_lane64_val & laneidx { export sp2_lane64_val; }
++
++# Hack: take advantage of the fact that sp1 is immediately after sp2 in memory,
++# such that lanes 16-31 overflow into sp1.
++# (For some reason, conditioning on bit (4, 4) of the laneidx did not work - sp2 was always selected)
++shuf0: is sp2_lane8_val { export sp2_lane8_val; }
++shuf1: is sp2_lane8_val { export sp2_lane8_val; }
++shuf2: is sp2_lane8_val { export sp2_lane8_val; }
++shuf3: is sp2_lane8_val { export sp2_lane8_val; }
++shuf4: is sp2_lane8_val { export sp2_lane8_val; }
++shuf5: is sp2_lane8_val { export sp2_lane8_val; }
++shuf6: is sp2_lane8_val { export sp2_lane8_val; }
++shuf7: is sp2_lane8_val { export sp2_lane8_val; }
++shuf8: is sp2_lane8_val { export sp2_lane8_val; }
++shuf9: is sp2_lane8_val { export sp2_lane8_val; }
++shuf10: is sp2_lane8_val { export sp2_lane8_val; }
++shuf11: is sp2_lane8_val { export sp2_lane8_val; }
++shuf12: is sp2_lane8_val { export sp2_lane8_val; }
++shuf13: is sp2_lane8_val { export sp2_lane8_val; }
++shuf14: is sp2_lane8_val { export sp2_lane8_val; }
++shuf15: is sp2_lane8_val { export sp2_lane8_val; }
++
++shuf_impl: is shuf0 ; shuf1 ; shuf2 ; shuf3 ; shuf4 ; shuf5 ; shuf6 ; shuf7 ; shuf8 ; shuf9 ; shuf10 ; shuf11 ; shuf12 ; shuf13 ; shuf14 ; shuf15 {
++    t0o[0,8] = shuf0;
++    t0o[8,8] = shuf1;
++    t0o[16,8] = shuf2;
++    t0o[24,8] = shuf3;
++    t0o[32,8] = shuf4;
++    t0o[40,8] = shuf5;
++    t0o[48,8] = shuf6;
++    t0o[56,8] = shuf7;
++    t0o[64,8] = shuf8;
++    t0o[72,8] = shuf9;
++    t0o[80,8] = shuf10;
++    t0o[88,8] = shuf11;
++    t0o[96,8] = shuf12;
++    t0o[104,8] = shuf13;
++    t0o[112,8] = shuf14;
++    t0o[120,8] = shuf15;
++}
++
++laneidx0_3: laneidx_disp is laneidx0; laneidx1; laneidx2; laneidx3 [ laneidx_disp = (laneidx3 << 24) | (laneidx2 << 16) | (laneidx1 << 8) | laneidx0; ] {}
++laneidx4_7: laneidx_disp is laneidx0; laneidx1; laneidx2; laneidx3 [ laneidx_disp = (laneidx3 << 24) | (laneidx2 << 16) | (laneidx1 << 8) | laneidx0; ] {}
++laneidx8_11: laneidx_disp is laneidx0; laneidx1; laneidx2; laneidx3 [ laneidx_disp = (laneidx3 << 24) | (laneidx2 << 16) | (laneidx1 << 8) | laneidx0; ] {}
++laneidx12_15: laneidx_disp is laneidx0; laneidx1; laneidx2; laneidx3 [ laneidx_disp = (laneidx3 << 24) | (laneidx2 << 16) | (laneidx1 << 8) | laneidx0; ] {}
++
++shuf_disp: laneidx0_3 laneidx4_7 laneidx8_11 laneidx12_15 is laneidx0_3 ; laneidx4_7 ; laneidx8_11 ; laneidx12_15 {
++}
 +
 +## Vector instructions
 +# [i32] -> [v128]
@@ -2485,22 +2685,52 @@ index 000000000..f87ba860c
 +
 +# [i32] -> [v128]
 +:v128.load8_splat loadaddr is opc=0xFD; opc2_7; loadaddr; sp1_128; ctx_is_directive=0 {
-+    sp1_128 = splat8(*:1 loadaddr);
++    local tmp:1 = *:1 loadaddr;
++    sp1_128[0,8] = tmp;
++    sp1_128[8,8] = tmp;
++    sp1_128[16,8] = tmp;
++    sp1_128[24,8] = tmp;
++    sp1_128[32,8] = tmp;
++    sp1_128[40,8] = tmp;
++    sp1_128[48,8] = tmp;
++    sp1_128[56,8] = tmp;
++    sp1_128[64,8] = tmp;
++    sp1_128[72,8] = tmp;
++    sp1_128[80,8] = tmp;
++    sp1_128[88,8] = tmp;
++    sp1_128[96,8] = tmp;
++    sp1_128[104,8] = tmp;
++    sp1_128[112,8] = tmp;
++    sp1_128[120,8] = tmp;
 +}
 +
 +# [i32] -> [v128]
 +:v128.load16_splat loadaddr is opc=0xFD; opc2_8; loadaddr; sp1_128; ctx_is_directive=0 {
-+    sp1_128 = splat16(*:2 loadaddr);
++    local tmp:2 = *:2 loadaddr;
++    sp1_128[0,16] = tmp;
++    sp1_128[16,16] = tmp;
++    sp1_128[32,16] = tmp;
++    sp1_128[48,16] = tmp;
++    sp1_128[64,16] = tmp;
++    sp1_128[80,16] = tmp;
++    sp1_128[96,16] = tmp;
++    sp1_128[112,16] = tmp;
 +}
 +
 +# [i32] -> [v128]
 +:v128.load32_splat loadaddr is opc=0xFD; opc2_9; loadaddr; sp1_128; ctx_is_directive=0 {
-+    sp1_128 = splat32(*:4 loadaddr);
++    local tmp:4 = *:4 loadaddr;
++    sp1_128[0,32] = tmp;
++    sp1_128[32,32] = tmp;
++    sp1_128[64,32] = tmp;
++    sp1_128[96,32] = tmp;
 +}
 +
 +# [i32] -> [v128]
 +:v128.load64_splat loadaddr is opc=0xFD; opc2_10; loadaddr; sp1_128; ctx_is_directive=0 {
-+    sp1_128 = splat64(*:8 loadaddr);
++    local tmp:8 = *:8 loadaddr;
++    sp1_128[0,64] = tmp;
++    sp1_128[64,64] = tmp;
 +}
 +
 +# [i32 v128] -> []
@@ -2514,10 +2744,9 @@ index 000000000..f87ba860c
 +    sp0_128[64,64] = f128_1;
 +}
 +
-+define pcodeop i8x16_shuffle;
 +# [v128 v128] -> [v128]
-+:i8x16.shuffle laneidx0_3 laneidx4_7 laneidx8_11 laneidx12_15 is opc=0xFD; opc2_13; laneidx0_3; laneidx4_7; laneidx8_11; laneidx12_15; sp1_128; sp2_128; ctx_is_directive=0 {
-+    sp2_128 = i8x16_shuffle(laneidx0_3:4, laneidx4_7:4, laneidx8_11:4, laneidx12_15:4, sp1_128, sp2_128);
++:i8x16.shuffle shuf_disp is opc=0xFD; opc2_13; ( shuf_impl & shuf_disp ) ; sp2_128; ctx_is_directive=0 {
++    sp2_128 = t0o;
 +}
 +
 +define pcodeop i8x16_swizzle;
@@ -2528,106 +2757,138 @@ index 000000000..f87ba860c
 +
 +# [i32] -> [v128]
 +:i8x16.splat is opc=0xFD; opc2_15; sp1_128; sp1_32; ctx_is_directive=0 {
-+    sp1_128 = splat8(sp1_32:1);
++    local tmp:1 = sp1_32:1;
++    sp1_128[0,8] = tmp;
++    sp1_128[8,8] = tmp;
++    sp1_128[16,8] = tmp;
++    sp1_128[24,8] = tmp;
++    sp1_128[32,8] = tmp;
++    sp1_128[40,8] = tmp;
++    sp1_128[48,8] = tmp;
++    sp1_128[56,8] = tmp;
++    sp1_128[64,8] = tmp;
++    sp1_128[72,8] = tmp;
++    sp1_128[80,8] = tmp;
++    sp1_128[88,8] = tmp;
++    sp1_128[96,8] = tmp;
++    sp1_128[104,8] = tmp;
++    sp1_128[112,8] = tmp;
++    sp1_128[120,8] = tmp;
 +}
 +
 +# [i32] -> [v128]
 +:i16x8.splat is opc=0xFD; opc2_16; sp1_128; sp1_32; ctx_is_directive=0 {
-+    sp1_128 = splat16(sp1_32:2);
++    local tmp:2 = sp1_32:2;
++    sp1_128[0,16] = tmp;
++    sp1_128[16,16] = tmp;
++    sp1_128[32,16] = tmp;
++    sp1_128[48,16] = tmp;
++    sp1_128[64,16] = tmp;
++    sp1_128[80,16] = tmp;
++    sp1_128[96,16] = tmp;
++    sp1_128[112,16] = tmp;
 +}
 +
 +# [i32] -> [v128]
 +:i32x4.splat is opc=0xFD; opc2_17; sp1_128; sp1_32; ctx_is_directive=0 {
-+    sp1_128 = splat32(sp1_32:4);
++    local tmp:4 = sp1_32:4;
++    sp1_128[0,32] = tmp;
++    sp1_128[32,32] = tmp;
++    sp1_128[64,32] = tmp;
++    sp1_128[96,32] = tmp;
 +}
 +
 +# [i64] -> [v128]
 +:i64x2.splat is opc=0xFD; opc2_18; sp1_128; sp1_64; ctx_is_directive=0 {
-+    sp1_128 = splat64(sp1_64:8);
++    local tmp:8 = sp1_64:8;
++    sp1_128[0,64] = tmp;
++    sp1_128[64,64] = tmp;
 +}
 +
 +# [f32] -> [v128]
 +:f32x4.splat is opc=0xFD; opc2_19; sp1_128; sp1_32; ctx_is_directive=0 {
-+    sp1_128 = splat32(sp1_32:4);
++    local tmp:4 = sp1_32:4;
++    sp1_128[0,32] = tmp;
++    sp1_128[32,32] = tmp;
++    sp1_128[64,32] = tmp;
++    sp1_128[96,32] = tmp;
 +}
 +
 +# [f64] -> [v128]
 +:f64x2.splat is opc=0xFD; opc2_20; sp1_128; sp1_64; ctx_is_directive=0 {
-+    sp1_128 = splat64(sp1_64:8);
++    local tmp:8 = sp1_64:8;
++    sp1_128[0,64] = tmp;
++    sp1_128[64,64] = tmp;
 +}
 +
 +# [v128] -> [i32]
-+:i8x16.extract_lane_s laneidx is opc=0xFD; opc2_21; laneidx; sp1_128; sp1_32; ctx_is_directive=0 {
-+    local tmp:1 = extract8(sp1_128, laneidx:1);
-+    sp1_32 = sext(tmp);
++:i8x16.extract_lane_s sp1_lane8 is opc=0xFD; opc2_21; sp1_lane8; sp1_32; ctx_is_directive=0 {
++    sp1_32 = sext(sp1_lane8);
 +}
 +
 +# [v128] -> [i32]
-+:i8x16.extract_lane_u laneidx is opc=0xFD; opc2_22; laneidx; sp1_128; sp1_32; ctx_is_directive=0 {
-+    local tmp:1 = extract8(sp1_128, laneidx:1);
-+    sp1_32 = zext(tmp);
++:i8x16.extract_lane_u sp1_lane8 is opc=0xFD; opc2_22; sp1_lane8; sp1_32; ctx_is_directive=0 {
++    sp1_32 = zext(sp1_lane8);
 +}
 +
 +# [v128 i32] -> [v128]
-+:i8x16.replace_lane laneidx is opc=0xFD; opc2_23; laneidx; sp1_32; sp2_128; ctx_is_directive=0 {
-+    sp2_128 = replace8(sp2_128, laneidx:1, sp1_32:1);
++:i8x16.replace_lane sp2_lane8 is opc=0xFD; opc2_23; sp1_32; sp2_lane8; ctx_is_directive=0 {
++    sp2_lane8 = sp1_32:1;
 +}
 +
 +# [v128] -> [i32]
-+:i16x8.extract_lane_s laneidx is opc=0xFD; opc2_24; laneidx; sp1_128; sp1_32; ctx_is_directive=0 {
-+    local tmp:2 = extract16(sp1_128, laneidx:1);
-+    sp1_32 = sext(tmp);
++:i16x8.extract_lane_s sp1_lane16 is opc=0xFD; opc2_24; sp1_lane16; sp1_32; ctx_is_directive=0 {
++    sp1_32 = sext(sp1_lane16);
 +}
 +
 +# [v128] -> [i32]
-+:i16x8.extract_lane_u laneidx is opc=0xFD; opc2_25; laneidx; sp1_128; sp1_32; ctx_is_directive=0 {
-+    local tmp:2 = extract16(sp1_128, laneidx:1);
-+    sp1_32 = zext(tmp);
++:i16x8.extract_lane_u sp1_lane16 is opc=0xFD; opc2_25; sp1_lane16; sp1_32; ctx_is_directive=0 {
++    sp1_32 = zext(sp1_lane16);
 +}
 +
 +# [v128 i32] -> [v128]
-+:i16x8.replace_lane laneidx is opc=0xFD; opc2_26; laneidx; sp1_32; sp2_128; ctx_is_directive=0 {
-+    sp2_128 = replace16(sp2_128, laneidx:1, sp1_32:2);
++:i16x8.replace_lane sp2_lane16 is opc=0xFD; opc2_26; sp1_32; sp2_lane16; ctx_is_directive=0 {
++    sp2_lane16 = sp1_32:2;
 +}
 +
 +# [v128] -> [i32]
-+:i32x4.extract_lane laneidx is opc=0xFD; opc2_27; laneidx; sp1_128; sp1_32; ctx_is_directive=0 {
-+    sp1_32 = extract32(sp1_128, laneidx:1);
++:i32x4.extract_lane sp1_lane32 is opc=0xFD; opc2_27; sp1_lane32; sp1_32; ctx_is_directive=0 {
++    sp1_32 = sp1_lane32;
 +}
 +
 +# [v128 i32] -> [v128]
-+:i32x4.replace_lane laneidx is opc=0xFD; opc2_28; laneidx; sp1_32; sp2_128; ctx_is_directive=0 {
-+    sp2_128 = replace32(sp2_128, laneidx:1, sp1_32);
++:i32x4.replace_lane sp2_lane32 is opc=0xFD; opc2_28; sp1_32; sp2_lane32; ctx_is_directive=0 {
++    sp2_lane32 = sp1_32;
 +}
 +
 +# [v128] -> [i64]
-+:i64x2.extract_lane laneidx is opc=0xFD; opc2_29; laneidx; sp1_128; sp1_64; ctx_is_directive=0 {
-+    sp1_64 = extract64(sp1_128, laneidx:1);
++:i64x2.extract_lane sp1_lane64 is opc=0xFD; opc2_29; sp1_lane64; sp1_64; ctx_is_directive=0 {
++    sp1_64 = sp1_lane64;
 +}
 +
 +# [v128 i64] -> [v128]
-+:i64x2.replace_lane laneidx is opc=0xFD; opc2_30; laneidx; sp1_64; sp2_128; ctx_is_directive=0 {
-+    sp2_128 = replace64(sp2_128, laneidx:1, sp1_64);
++:i64x2.replace_lane sp2_lane64 is opc=0xFD; opc2_30; sp1_64; sp2_lane64; ctx_is_directive=0 {
++    sp2_lane64 = sp1_64;
 +}
 +
 +# [v128] -> [f32]
-+:f32x4.extract_lane laneidx is opc=0xFD; opc2_31; laneidx; sp1_128; sp1_32; ctx_is_directive=0 {
-+    sp1_32 = extract32(sp1_128, laneidx:1);
++:f32x4.extract_lane sp1_lane32 is opc=0xFD; opc2_31; sp1_lane32; sp1_32; ctx_is_directive=0 {
++    sp1_32 = sp1_lane32;
 +}
 +
 +# [v128 f32] -> [v128]
-+:f32x4.replace_lane laneidx is opc=0xFD; opc2_32; laneidx; sp1_32; sp2_128; ctx_is_directive=0 {
-+    sp2_128 = replace32(sp2_128, laneidx:1, sp1_32);
++:f32x4.replace_lane sp2_lane32 is opc=0xFD; opc2_32; sp1_32; sp2_lane32; ctx_is_directive=0 {
++    sp2_lane32 = sp1_32;
 +}
 +
 +# [v128] -> [f64]
-+:f64x2.extract_lane laneidx is opc=0xFD; opc2_33; laneidx; sp1_128; sp1_64; ctx_is_directive=0 {
-+    sp1_64 = extract64(sp1_128, laneidx:1);
++:f64x2.extract_lane sp1_lane64 is opc=0xFD; opc2_33; sp1_lane64; sp1_64; ctx_is_directive=0 {
++    sp1_64 = sp1_lane64;
 +}
 +
 +# [v128 f64] -> [v128]
-+:f64x2.replace_lane laneidx is opc=0xFD; opc2_34; laneidx; sp1_64; sp2_128; ctx_is_directive=0 {
-+    sp2_128 = replace64(sp2_128, laneidx:1, sp1_64);
++:f64x2.replace_lane sp2_lane64 is opc=0xFD; opc2_34; sp1_64; sp2_lane64; ctx_is_directive=0 {
++    sp2_lane64 = sp1_64;
 +}
 +
 +define pcodeop i8x16_eq;
@@ -2882,34 +3143,29 @@ index 000000000..f87ba860c
 +    sp2_128 = f64x2_ge(sp1_128, sp2_128);
 +}
 +
-+define pcodeop v128_not;
 +# [v128] -> [v128]
 +:v128.not is opc=0xFD; opc2_77; sp1_128; ctx_is_directive=0 {
-+    sp1_128 = v128_not(sp1_128);
++    sp1_128 = ~sp1_128;
 +}
 +
-+define pcodeop v128_and;
 +# [v128 v128] -> [v128]
 +:v128.and is opc=0xFD; opc2_78; sp1_128; sp2_128; ctx_is_directive=0 {
-+    sp2_128 = v128_and(sp1_128, sp2_128);
++    sp2_128 = sp2_128 & sp1_128;
 +}
 +
-+define pcodeop v128_andnot;
 +# [v128 v128] -> [v128]
 +:v128.andnot is opc=0xFD; opc2_79; sp1_128; sp2_128; ctx_is_directive=0 {
-+    sp2_128 = v128_andnot(sp1_128, sp2_128);
++    sp2_128 = sp2_128 & ~sp1_128;
 +}
 +
-+define pcodeop v128_or;
 +# [v128 v128] -> [v128]
 +:v128.or is opc=0xFD; opc2_80; sp1_128; sp2_128; ctx_is_directive=0 {
-+    sp2_128 = v128_or(sp1_128, sp2_128);
++    sp2_128 = sp2_128 | sp1_128;
 +}
 +
-+define pcodeop v128_xor;
 +# [v128 v128] -> [v128]
 +:v128.xor is opc=0xFD; opc2_81; sp1_128; sp2_128; ctx_is_directive=0 {
-+    sp2_128 = v128_xor(sp1_128, sp2_128);
++    sp2_128 = sp2_128 ^ sp1_128;
 +}
 +
 +define pcodeop v128_bitselect;
@@ -2918,51 +3174,53 @@ index 000000000..f87ba860c
 +    sp3_128 = v128_bitselect(sp1_128, sp2_128, sp3_128);
 +}
 +
-+define pcodeop v128_any_true;
 +# [v128] -> [i32]
 +:v128.any_true is opc=0xFD; opc2_83; sp1_128; sp1_32; ctx_is_directive=0 {
-+    sp1_32 = v128_any_true(sp1_128);
++    sp1_32 = zext(sp1_128 != 0);
 +}
 +
 +# [i32 v128] -> [v128]
-+:v128.load8_lane loadaddr2 laneidx is opc=0xFD; opc2_84; loadaddr2; laneidx; sp1_128; sp2_128; ctx_is_directive=0 {
-+    sp2_128 = replace8(sp1_128, laneidx:1, *:1 loadaddr2);
-+}
-+
-+define pcodeop v128_load16_lane;
-+# [i32 v128] -> [v128]
-+:v128.load16_lane loadaddr2 laneidx is opc=0xFD; opc2_85; loadaddr2; laneidx; sp1_128; sp2_128; ctx_is_directive=0 {
-+    sp2_128 = replace16(sp1_128, laneidx:1, *:2 loadaddr2);
++:v128.load8_lane loadaddr2 sp2_lane8 is opc=0xFD; opc2_84; loadaddr2; sp1_128; sp2_128; sp2_lane8; ctx_is_directive=0 {
++    sp2_128 = sp1_128;
++    sp2_lane8 = *:1 loadaddr2;
 +}
 +
 +# [i32 v128] -> [v128]
-+:v128.load32_lane loadaddr2 laneidx is opc=0xFD; opc2_86; loadaddr2; laneidx; sp1_128; sp2_128; ctx_is_directive=0 {
-+    sp2_128 = replace32(sp1_128, laneidx:1, *:4 loadaddr2);
++:v128.load16_lane loadaddr2 sp2_lane16 is opc=0xFD; opc2_85; loadaddr2; sp1_128; sp2_128; sp2_lane16; ctx_is_directive=0 {
++    sp2_128 = sp1_128;
++    sp2_lane16 = *:2 loadaddr2;
 +}
 +
 +# [i32 v128] -> [v128]
-+:v128.load64_lane loadaddr2 laneidx is opc=0xFD; opc2_87; loadaddr2; laneidx; sp1_128; sp2_128; ctx_is_directive=0 {
-+    sp2_128 = replace64(sp1_128, laneidx:1, *:8 loadaddr2);
++:v128.load32_lane loadaddr2 sp2_lane32 is opc=0xFD; opc2_86; loadaddr2; sp1_128; sp2_128; sp2_lane32; ctx_is_directive=0 {
++    sp2_128 = sp1_128;
++    sp2_lane32 = *:4 loadaddr2;
++}
++
++# [i32 v128] -> [v128]
++:v128.load64_lane loadaddr2 sp2_lane64 is opc=0xFD; opc2_87; loadaddr2; sp1_128; sp2_128; sp2_lane64; ctx_is_directive=0 {
++    sp2_128 = sp1_128;
++    sp2_lane64 = *:8 loadaddr2;
 +}
 +
 +# [i32 v128] -> []
-+:v128.store8_lane storeaddr laneidx is opc=0xFD; opc2_88; storeaddr; laneidx; sp1_128; ctx_is_directive=0 {
-+    *:1 storeaddr = extract8(sp1_128, laneidx:1);
++:v128.store8_lane storeaddr sp1_lane8 is opc=0xFD; opc2_88; storeaddr; sp1_lane8; ctx_is_directive=0 {
++    *:1 storeaddr = sp1_lane8;
 +}
 +
 +# [i32 v128] -> []
-+:v128.store16_lane storeaddr laneidx is opc=0xFD; opc2_89; storeaddr; laneidx; sp1_128; ctx_is_directive=0 {
-+    *:2 storeaddr = extract16(sp1_128, laneidx:1);
++:v128.store16_lane storeaddr sp1_lane16 is opc=0xFD; opc2_89; storeaddr; sp1_lane16; ctx_is_directive=0 {
++    *:2 storeaddr = sp1_lane16;
 +}
 +
 +# [i32 v128] -> []
-+:v128.store32_lane storeaddr laneidx is opc=0xFD; opc2_90; storeaddr; laneidx; sp1_128; ctx_is_directive=0 {
-+    *:4 storeaddr = extract32(sp1_128, laneidx:1);
++:v128.store32_lane storeaddr sp1_lane32 is opc=0xFD; opc2_90; storeaddr; sp1_lane32; ctx_is_directive=0 {
++    *:4 storeaddr = sp1_lane32;
 +}
 +
 +# [i32 v128] -> []
-+:v128.store64_lane storeaddr laneidx is opc=0xFD; opc2_91; storeaddr; laneidx; sp1_128; ctx_is_directive=0 {
-+    *:8 storeaddr = extract64(sp1_128, laneidx:1);
++:v128.store64_lane storeaddr sp1_lane64 is opc=0xFD; opc2_91; storeaddr; sp1_lane64; ctx_is_directive=0 {
++    *:8 storeaddr = sp1_lane64;
 +}
 +
 +# [i32] -> [v128]
@@ -2975,16 +3233,19 @@ index 000000000..f87ba860c
 +    sp1_128 = zext(*:8 loadaddr);
 +}
 +
-+define pcodeop f32x4_demote_f64x2_zero;
 +# [v128] -> [v128]
 +:f32x4.demote_f64x2_zero is opc=0xFD; opc2_94; sp1_128; ctx_is_directive=0 {
-+    sp1_128 = f32x4_demote_f64x2_zero(sp1_128);
++    t0o = 0;
++    t0o[0, 32] = float2float(sp1_128[0, 64]);
++    t0o[32, 32] = float2float(sp1_128[64, 64]);
++    sp1_128 = t0o;
 +}
 +
-+define pcodeop f64x2_promote_low_f32x4;
 +# [v128] -> [v128]
 +:f64x2.promote_low_f32x4 is opc=0xFD; opc2_95; sp1_128; ctx_is_directive=0 {
-+    sp1_128 = f64x2_promote_low_f32x4(sp1_128);
++    t0o[0, 64] = float2float(sp1_128[0, 32]);
++    t0o[64, 64] = float2float(sp1_128[32, 32]);
++    sp1_128 = t0o;
 +}
 +
 +define pcodeop i8x16_abs;
@@ -2993,10 +3254,24 @@ index 000000000..f87ba860c
 +    sp1_128 = i8x16_abs(sp1_128);
 +}
 +
-+define pcodeop i8x16_neg;
 +# [v128] -> [v128]
 +:i8x16.neg is opc=0xFD; opc2_97; sp1_128; ctx_is_directive=0 {
-+    sp1_128 = i8x16_neg(sp1_128);
++    sp1_128[  0,8] = -sp1_128[  0,8];
++    sp1_128[  8,8] = -sp1_128[  8,8];
++    sp1_128[ 16,8] = -sp1_128[ 16,8];
++    sp1_128[ 24,8] = -sp1_128[ 24,8];
++    sp1_128[ 32,8] = -sp1_128[ 32,8];
++    sp1_128[ 40,8] = -sp1_128[ 40,8];
++    sp1_128[ 48,8] = -sp1_128[ 48,8];
++    sp1_128[ 56,8] = -sp1_128[ 56,8];
++    sp1_128[ 64,8] = -sp1_128[ 64,8];
++    sp1_128[ 72,8] = -sp1_128[ 72,8];
++    sp1_128[ 80,8] = -sp1_128[ 80,8];
++    sp1_128[ 88,8] = -sp1_128[ 88,8];
++    sp1_128[ 96,8] = -sp1_128[ 96,8];
++    sp1_128[104,8] = -sp1_128[104,8];
++    sp1_128[112,8] = -sp1_128[112,8];
++    sp1_128[120,8] = -sp1_128[120,8];
 +}
 +
 +define pcodeop i8x16_popcnt;
@@ -3071,10 +3346,24 @@ index 000000000..f87ba860c
 +    sp2_128 = i8x16_shr_u(sp1_32, sp2_128);
 +}
 +
-+define pcodeop i8x16_add;
 +# [v128 v128] -> [v128]
 +:i8x16.add is opc=0xFD; opc2_110; sp1_128; sp2_128; ctx_is_directive=0 {
-+    sp2_128 = i8x16_add(sp1_128, sp2_128);
++    sp2_128[  0,8] = sp2_128[  0,8] + sp1_128[  0,8];
++    sp2_128[  8,8] = sp2_128[  8,8] + sp1_128[  8,8];
++    sp2_128[ 16,8] = sp2_128[ 16,8] + sp1_128[ 16,8];
++    sp2_128[ 24,8] = sp2_128[ 24,8] + sp1_128[ 24,8];
++    sp2_128[ 32,8] = sp2_128[ 32,8] + sp1_128[ 32,8];
++    sp2_128[ 40,8] = sp2_128[ 40,8] + sp1_128[ 40,8];
++    sp2_128[ 48,8] = sp2_128[ 48,8] + sp1_128[ 48,8];
++    sp2_128[ 56,8] = sp2_128[ 56,8] + sp1_128[ 56,8];
++    sp2_128[ 64,8] = sp2_128[ 64,8] + sp1_128[ 64,8];
++    sp2_128[ 72,8] = sp2_128[ 72,8] + sp1_128[ 72,8];
++    sp2_128[ 80,8] = sp2_128[ 80,8] + sp1_128[ 80,8];
++    sp2_128[ 88,8] = sp2_128[ 88,8] + sp1_128[ 88,8];
++    sp2_128[ 96,8] = sp2_128[ 96,8] + sp1_128[ 96,8];
++    sp2_128[104,8] = sp2_128[104,8] + sp1_128[104,8];
++    sp2_128[112,8] = sp2_128[112,8] + sp1_128[112,8];
++    sp2_128[120,8] = sp2_128[120,8] + sp1_128[120,8];
 +}
 +
 +define pcodeop i8x16_add_sat_s;
@@ -3089,10 +3378,24 @@ index 000000000..f87ba860c
 +    sp2_128 = i8x16_add_sat_u(sp1_128, sp2_128);
 +}
 +
-+define pcodeop i8x16_sub;
 +# [v128 v128] -> [v128]
 +:i8x16.sub is opc=0xFD; opc2_113; sp1_128; sp2_128; ctx_is_directive=0 {
-+    sp2_128 = i8x16_sub(sp1_128, sp2_128);
++    sp2_128[  0,8] = sp2_128[  0,8] - sp1_128[  0,8];
++    sp2_128[  8,8] = sp2_128[  8,8] - sp1_128[  8,8];
++    sp2_128[ 16,8] = sp2_128[ 16,8] - sp1_128[ 16,8];
++    sp2_128[ 24,8] = sp2_128[ 24,8] - sp1_128[ 24,8];
++    sp2_128[ 32,8] = sp2_128[ 32,8] - sp1_128[ 32,8];
++    sp2_128[ 40,8] = sp2_128[ 40,8] - sp1_128[ 40,8];
++    sp2_128[ 48,8] = sp2_128[ 48,8] - sp1_128[ 48,8];
++    sp2_128[ 56,8] = sp2_128[ 56,8] - sp1_128[ 56,8];
++    sp2_128[ 64,8] = sp2_128[ 64,8] - sp1_128[ 64,8];
++    sp2_128[ 72,8] = sp2_128[ 72,8] - sp1_128[ 72,8];
++    sp2_128[ 80,8] = sp2_128[ 80,8] - sp1_128[ 80,8];
++    sp2_128[ 88,8] = sp2_128[ 88,8] - sp1_128[ 88,8];
++    sp2_128[ 96,8] = sp2_128[ 96,8] - sp1_128[ 96,8];
++    sp2_128[104,8] = sp2_128[104,8] - sp1_128[104,8];
++    sp2_128[112,8] = sp2_128[112,8] - sp1_128[112,8];
++    sp2_128[120,8] = sp2_128[120,8] - sp1_128[120,8];
 +}
 +
 +define pcodeop i8x16_sub_sat_s;
@@ -3185,10 +3488,16 @@ index 000000000..f87ba860c
 +    sp1_128 = i16x8_abs(sp1_128);
 +}
 +
-+define pcodeop i16x8_neg;
 +# [v128] -> [v128]
 +:i16x8.neg is opc=0xFD; opc2_129; sp1_128; ctx_is_directive=0 {
-+    sp1_128 = i16x8_neg(sp1_128);
++    sp1_128[  0,16] = -sp1_128[  0,16];
++    sp1_128[ 16,16] = -sp1_128[ 16,16];
++    sp1_128[ 32,16] = -sp1_128[ 32,16];
++    sp1_128[ 48,16] = -sp1_128[ 48,16];
++    sp1_128[ 64,16] = -sp1_128[ 64,16];
++    sp1_128[ 80,16] = -sp1_128[ 80,16];
++    sp1_128[ 96,16] = -sp1_128[ 96,16];
++    sp1_128[112,16] = -sp1_128[112,16];
 +}
 +
 +define pcodeop i16x8_q15mulr_sat_s;
@@ -3263,10 +3572,16 @@ index 000000000..f87ba860c
 +    sp2_128 = i16x8_shr_u(sp1_32, sp2_128);
 +}
 +
-+define pcodeop i16x8_add;
 +# [v128 v128] -> [v128]
 +:i16x8.add is opc=0xFD; opc2_142; sp1_128; sp2_128; ctx_is_directive=0 {
-+    sp2_128 = i16x8_add(sp1_128, sp2_128);
++    sp2_128[  0,16] = sp2_128[  0,16] + sp1_128[  0,16];
++    sp2_128[ 16,16] = sp2_128[ 16,16] + sp1_128[ 16,16];
++    sp2_128[ 32,16] = sp2_128[ 32,16] + sp1_128[ 32,16];
++    sp2_128[ 48,16] = sp2_128[ 48,16] + sp1_128[ 48,16];
++    sp2_128[ 64,16] = sp2_128[ 64,16] + sp1_128[ 64,16];
++    sp2_128[ 80,16] = sp2_128[ 80,16] + sp1_128[ 80,16];
++    sp2_128[ 96,16] = sp2_128[ 96,16] + sp1_128[ 96,16];
++    sp2_128[112,16] = sp2_128[112,16] + sp1_128[112,16];
 +}
 +
 +define pcodeop i16x8_add_sat_s;
@@ -3281,10 +3596,16 @@ index 000000000..f87ba860c
 +    sp2_128 = i16x8_add_sat_u(sp1_128, sp2_128);
 +}
 +
-+define pcodeop i16x8_sub;
 +# [v128 v128] -> [v128]
 +:i16x8.sub is opc=0xFD; opc2_145; sp1_128; sp2_128; ctx_is_directive=0 {
-+    sp2_128 = i16x8_sub(sp1_128, sp2_128);
++    sp2_128[  0,16] = sp2_128[  0,16] - sp1_128[  0,16];
++    sp2_128[ 16,16] = sp2_128[ 16,16] - sp1_128[ 16,16];
++    sp2_128[ 32,16] = sp2_128[ 32,16] - sp1_128[ 32,16];
++    sp2_128[ 48,16] = sp2_128[ 48,16] - sp1_128[ 48,16];
++    sp2_128[ 64,16] = sp2_128[ 64,16] - sp1_128[ 64,16];
++    sp2_128[ 80,16] = sp2_128[ 80,16] - sp1_128[ 80,16];
++    sp2_128[ 96,16] = sp2_128[ 96,16] - sp1_128[ 96,16];
++    sp2_128[112,16] = sp2_128[112,16] - sp1_128[112,16];
 +}
 +
 +define pcodeop i16x8_sub_sat_s;
@@ -3371,10 +3692,12 @@ index 000000000..f87ba860c
 +    sp1_128 = i32x4_abs(sp1_128);
 +}
 +
-+define pcodeop i32x4_neg;
 +# [v128] -> [v128]
 +:i32x4.neg is opc=0xFD; opc2_161; sp1_128; ctx_is_directive=0 {
-+    sp1_128 = i32x4_neg(sp1_128);
++    sp1_128[  0,32] = -sp1_128[  0,32];
++    sp1_128[ 32,32] = -sp1_128[ 32,32];
++    sp1_128[ 64,32] = -sp1_128[ 64,32];
++    sp1_128[ 96,32] = -sp1_128[ 96,32];
 +}
 +
 +define pcodeop i32x4_all_true;
@@ -3431,16 +3754,20 @@ index 000000000..f87ba860c
 +    sp2_128 = i32x4_shr_u(sp1_32, sp2_128);
 +}
 +
-+define pcodeop i32x4_add;
 +# [v128 v128] -> [v128]
 +:i32x4.add is opc=0xFD; opc2_174; sp1_128; sp2_128; ctx_is_directive=0 {
-+    sp2_128 = i32x4_add(sp1_128, sp2_128);
++    sp2_128[  0,32] = sp2_128[  0,32] + sp1_128[  0,32];
++    sp2_128[ 32,32] = sp2_128[ 32,32] + sp1_128[ 32,32];
++    sp2_128[ 64,32] = sp2_128[ 64,32] + sp1_128[ 64,32];
++    sp2_128[ 96,32] = sp2_128[ 96,32] + sp1_128[ 96,32];
 +}
 +
-+define pcodeop i32x4_sub;
 +# [v128 v128] -> [v128]
 +:i32x4.sub is opc=0xFD; opc2_177; sp1_128; sp2_128; ctx_is_directive=0 {
-+    sp2_128 = i32x4_sub(sp1_128, sp2_128);
++    sp2_128[  0,32] = sp2_128[  0,32] - sp1_128[  0,32];
++    sp2_128[ 32,32] = sp2_128[ 32,32] - sp1_128[ 32,32];
++    sp2_128[ 64,32] = sp2_128[ 64,32] - sp1_128[ 64,32];
++    sp2_128[ 96,32] = sp2_128[ 96,32] - sp1_128[ 96,32];
 +}
 +
 +define pcodeop i32x4_mul;
@@ -3509,10 +3836,10 @@ index 000000000..f87ba860c
 +    sp1_128 = i64x2_abs(sp1_128);
 +}
 +
-+define pcodeop i64x2_neg;
 +# [v128] -> [v128]
 +:i64x2.neg is opc=0xFD; opc2_193; sp1_128; ctx_is_directive=0 {
-+    sp1_128 = i64x2_neg(sp1_128);
++    sp1_128[  0,64] = -sp1_128[  0,64];
++    sp1_128[ 64,64] = -sp1_128[ 64,64];
 +}
 +
 +define pcodeop i64x2_all_true;
@@ -3569,16 +3896,16 @@ index 000000000..f87ba860c
 +    sp2_128 = i64x2_shr_u(sp1_32, sp2_128);
 +}
 +
-+define pcodeop i64x2_add;
 +# [v128 v128] -> [v128]
 +:i64x2.add is opc=0xFD; opc2_206; sp1_128; sp2_128; ctx_is_directive=0 {
-+    sp2_128 = i64x2_add(sp1_128, sp2_128);
++    sp2_128[  0,64] = sp2_128[  0,64] + sp1_128[  0,64];
++    sp2_128[ 64,64] = sp2_128[ 64,64] + sp1_128[ 64,64];
 +}
 +
-+define pcodeop i64x2_sub;
 +# [v128 v128] -> [v128]
 +:i64x2.sub is opc=0xFD; opc2_209; sp1_128; sp2_128; ctx_is_directive=0 {
-+    sp2_128 = i64x2_sub(sp1_128, sp2_128);
++    sp2_128[  0,64] = sp2_128[  0,64] - sp1_128[  0,64];
++    sp2_128[ 64,64] = sp2_128[ 64,64] - sp1_128[ 64,64];
 +}
 +
 +define pcodeop i64x2_mul;
@@ -3653,10 +3980,12 @@ index 000000000..f87ba860c
 +    sp1_128 = f32x4_abs(sp1_128);
 +}
 +
-+define pcodeop f32x4_neg;
 +# [v128] -> [v128]
 +:f32x4.neg is opc=0xFD; opc2_225; sp1_128; ctx_is_directive=0 {
-+    sp1_128 = f32x4_neg(sp1_128);
++    sp1_128[  0,32] = f- sp1_128[  0,32];
++    sp1_128[ 32,32] = f- sp1_128[ 32,32];
++    sp1_128[ 64,32] = f- sp1_128[ 64,32];
++    sp1_128[ 96,32] = f- sp1_128[ 96,32];
 +}
 +
 +define pcodeop f32x4_sqrt;
@@ -3665,28 +3994,36 @@ index 000000000..f87ba860c
 +    sp1_128 = f32x4_sqrt(sp1_128);
 +}
 +
-+define pcodeop f32x4_add;
 +# [v128 v128] -> [v128]
 +:f32x4.add is opc=0xFD; opc2_228; sp1_128; sp2_128; ctx_is_directive=0 {
-+    sp2_128 = f32x4_add(sp1_128, sp2_128);
++    sp2_128[  0,32] = sp2_128[  0,32] f+ sp1_128[  0,32];
++    sp2_128[ 32,32] = sp2_128[ 32,32] f+ sp1_128[ 32,32];
++    sp2_128[ 64,32] = sp2_128[ 64,32] f+ sp1_128[ 64,32];
++    sp2_128[ 96,32] = sp2_128[ 96,32] f+ sp1_128[ 96,32];
 +}
 +
-+define pcodeop f32x4_sub;
 +# [v128 v128] -> [v128]
 +:f32x4.sub is opc=0xFD; opc2_229; sp1_128; sp2_128; ctx_is_directive=0 {
-+    sp2_128 = f32x4_sub(sp1_128, sp2_128);
++    sp2_128[  0,32] = sp2_128[  0,32] f- sp1_128[  0,32];
++    sp2_128[ 32,32] = sp2_128[ 32,32] f- sp1_128[ 32,32];
++    sp2_128[ 64,32] = sp2_128[ 64,32] f- sp1_128[ 64,32];
++    sp2_128[ 96,32] = sp2_128[ 96,32] f- sp1_128[ 96,32];
 +}
 +
-+define pcodeop f32x4_mul;
 +# [v128 v128] -> [v128]
 +:f32x4.mul is opc=0xFD; opc2_230; sp1_128; sp2_128; ctx_is_directive=0 {
-+    sp2_128 = f32x4_mul(sp1_128, sp2_128);
++    sp2_128[  0,32] = sp2_128[  0,32] f* sp1_128[  0,32];
++    sp2_128[ 32,32] = sp2_128[ 32,32] f* sp1_128[ 32,32];
++    sp2_128[ 64,32] = sp2_128[ 64,32] f* sp1_128[ 64,32];
++    sp2_128[ 96,32] = sp2_128[ 96,32] f* sp1_128[ 96,32];
 +}
 +
-+define pcodeop f32x4_div;
 +# [v128 v128] -> [v128]
 +:f32x4.div is opc=0xFD; opc2_231; sp1_128; sp2_128; ctx_is_directive=0 {
-+    sp2_128 = f32x4_div(sp1_128, sp2_128);
++    sp2_128[  0,32] = sp2_128[  0,32] f/ sp1_128[  0,32];
++    sp2_128[ 32,32] = sp2_128[ 32,32] f/ sp1_128[ 32,32];
++    sp2_128[ 64,32] = sp2_128[ 64,32] f/ sp1_128[ 64,32];
++    sp2_128[ 96,32] = sp2_128[ 96,32] f/ sp1_128[ 96,32];
 +}
 +
 +define pcodeop f32x4_min;
@@ -3719,10 +4056,10 @@ index 000000000..f87ba860c
 +    sp1_128 = f64x2_abs(sp1_128);
 +}
 +
-+define pcodeop f64x2_neg;
 +# [v128] -> [v128]
 +:f64x2.neg is opc=0xFD; opc2_237; sp1_128; ctx_is_directive=0 {
-+    sp1_128 = f64x2_neg(sp1_128);
++    sp1_128[  0,64] = f- sp1_128[  0,64];
++    sp1_128[ 64,64] = f- sp1_128[ 64,64];
 +}
 +
 +define pcodeop f64x2_sqrt;
@@ -3731,28 +4068,28 @@ index 000000000..f87ba860c
 +    sp1_128 = f64x2_sqrt(sp1_128);
 +}
 +
-+define pcodeop f64x2_add;
 +# [v128 v128] -> [v128]
 +:f64x2.add is opc=0xFD; opc2_240; sp1_128; sp2_128; ctx_is_directive=0 {
-+    sp2_128 = f64x2_add(sp1_128, sp2_128);
++    sp2_128[  0,64] = sp2_128[  0,64] f+ sp1_128[  0,64];
++    sp2_128[ 64,64] = sp2_128[ 64,64] f+ sp1_128[ 64,64];
 +}
 +
-+define pcodeop f64x2_sub;
 +# [v128 v128] -> [v128]
 +:f64x2.sub is opc=0xFD; opc2_241; sp1_128; sp2_128; ctx_is_directive=0 {
-+    sp2_128 = f64x2_sub(sp1_128, sp2_128);
++    sp2_128[  0,64] = sp2_128[  0,64] f- sp1_128[  0,64];
++    sp2_128[ 64,64] = sp2_128[ 64,64] f- sp1_128[ 64,64];
 +}
 +
-+define pcodeop f64x2_mul;
 +# [v128 v128] -> [v128]
 +:f64x2.mul is opc=0xFD; opc2_242; sp1_128; sp2_128; ctx_is_directive=0 {
-+    sp2_128 = f64x2_mul(sp1_128, sp2_128);
++    sp2_128[  0,64] = sp2_128[  0,64] f* sp1_128[  0,64];
++    sp2_128[ 64,64] = sp2_128[ 64,64] f* sp1_128[ 64,64];
 +}
 +
-+define pcodeop f64x2_div;
 +# [v128 v128] -> [v128]
 +:f64x2.div is opc=0xFD; opc2_243; sp1_128; sp2_128; ctx_is_directive=0 {
-+    sp2_128 = f64x2_div(sp1_128, sp2_128);
++    sp2_128[  0,64] = sp2_128[  0,64] f/ sp1_128[  0,64];
++    sp2_128[ 64,64] = sp2_128[ 64,64] f/ sp1_128[ 64,64];
 +}
 +
 +define pcodeop f64x2_min;
@@ -3828,10 +4165,10 @@ index 000000000..f87ba860c
 +}
 diff --git a/Ghidra/Processors/WebAssembly/data/languages/WebAssembly-pos-stack.cspec b/Ghidra/Processors/WebAssembly/data/languages/WebAssembly-pos-stack.cspec
 new file mode 100644
-index 000000000..94bb0d0ca
+index 000000000..642db5c8e
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/data/languages/WebAssembly-pos-stack.cspec
-@@ -0,0 +1,831 @@
+@@ -0,0 +1,836 @@
 +<?xml version="1.0" encoding="UTF-8"?>
 +
 +<!-- See Relax specification: Ghidra/Framework/SoftwareModeling/data/languages/compiler_spec.rxg -->
@@ -4639,9 +4976,14 @@ index 000000000..94bb0d0ca
 +        <varnode space="register" offset="0x50000000" size="0x10000000"/>
 +        <register name="SP"/>
 +      </unaffected>
-+      <pcode inject="uponentry" dynamic="true" />
 +    </prototype>
 +  </default_proto>
++  <callotherfixup targetop="funcEntryCallOther">
++    <pcode dynamic="true">
++      <input name="in_offset" />
++      <input name="locals_offset" />
++    </pcode>
++  </callotherfixup>
 +  <callotherfixup targetop="popCallOther">
 +    <pcode dynamic="true">
 +      <input name="regoffset" />
@@ -4665,10 +5007,10 @@ index 000000000..94bb0d0ca
 +</compiler_spec>
 diff --git a/Ghidra/Processors/WebAssembly/data/languages/WebAssembly.cspec b/Ghidra/Processors/WebAssembly/data/languages/WebAssembly.cspec
 new file mode 100644
-index 000000000..1b3c1e8d5
+index 000000000..0ffabb966
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/data/languages/WebAssembly.cspec
-@@ -0,0 +1,62 @@
+@@ -0,0 +1,67 @@
 +<?xml version="1.0" encoding="UTF-8"?>
 +
 +<!-- See Relax specification: Ghidra/Framework/SoftwareModeling/data/languages/compiler_spec.rxg -->
@@ -4707,9 +5049,14 @@ index 000000000..1b3c1e8d5
 +        <varnode space="register" offset="0x50000000" size="0x10000000"/>
 +        <register name="SP"/>
 +      </unaffected>
-+      <pcode inject="uponentry" dynamic="true" />
 +    </prototype>
 +  </default_proto>
++  <callotherfixup targetop="funcEntryCallOther">
++    <pcode dynamic="true">
++      <input name="in_offset" />
++      <input name="locals_offset" />
++    </pcode>
++  </callotherfixup>
 +  <callotherfixup targetop="popCallOther">
 +    <pcode dynamic="true">
 +      <input name="regoffset" />
@@ -4805,10 +5152,10 @@ index 000000000..f4898dd96
 +</processor_spec>
 diff --git a/Ghidra/Processors/WebAssembly/data/languages/WebAssembly.sinc b/Ghidra/Processors/WebAssembly/data/languages/WebAssembly.sinc
 new file mode 100644
-index 000000000..9a9a043e6
+index 000000000..9193244e1
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/data/languages/WebAssembly.sinc
-@@ -0,0 +1,497 @@
+@@ -0,0 +1,503 @@
 +# sleigh include file for WebAssembly language instructions
 +
 +define token opbyte (8)
@@ -4817,7 +5164,6 @@ index 000000000..9a9a043e6
 +	bytev = (0, 7)
 +
 +	topbit = (7, 7)
-+	v = (0, 6)
 +	v0 = (0, 6)
 +	v1 = (0, 6)
 +	v2 = (0, 6)
@@ -4838,8 +5184,28 @@ index 000000000..9a9a043e6
 +	f64 = (0,63)
 +;
 +
++attach names valtype [
++  _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ # 0x0
++  _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ # 0x10
++  _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ # 0x20
++  _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ # 0x30
++  _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ # 0x40
++  _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ # 0x50
++  _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ externref # 0x60
++  funcref _ _ _ _ _ _ _ _ _ _ v128 f64 f32 i64 i32 # 0x70
++  _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ # 0x80
++  _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ # 0x90
++  _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ # 0xa0
++  _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ # 0xb0
++  _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ # 0xc0
++  _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ # 0xd0
++  _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ # 0xe0
++  _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ # 0xf0
++];
++
 +################################################################
 +
++define pcodeop funcEntryCallOther;
 +define pcodeop popCallOther;
 +define pcodeop pushCallOther;
 +define pcodeop callPrologueCallOther;
@@ -4866,6 +5232,7 @@ index 000000000..9a9a043e6
 +
 +# This is a silly hack because I couldn't work out how to use Leb128 itself
 +# in the disassembly actions section of another constructor...
++# NOTE: Recursive expansion doesn't seem to work, so we hardcode REG_SIZE and REG_LOCALS_BASE here.
 +@define SYMBOL local4
 +@define DEST_EXPR "0x10000000 + 16 * "
 +@define EXPORT_EXPR "export *[register]:4 dest;"
@@ -4903,51 +5270,51 @@ index 000000000..9a9a043e6
 +
 +@include "Leb128_opc2.sinc"
 +
-+sp0_32: tmp_sp is ctx_sp [tmp_sp = 0x50000000 + (ctx_sp - 0) * $(REG_SIZE);] {
++sp0_32: tmp_sp is ctx_sp [tmp_sp = $(REG_STACK_BASE) + (ctx_sp - 0) * $(REG_SIZE);] {
 +	export *[register]:4 tmp_sp;
 +}
 +
-+sp0_64: tmp_sp is ctx_sp [tmp_sp = 0x50000000 + (ctx_sp - 0) * $(REG_SIZE);] {
++sp0_64: tmp_sp is ctx_sp [tmp_sp = $(REG_STACK_BASE) + (ctx_sp - 0) * $(REG_SIZE);] {
 +	export *[register]:8 tmp_sp;
 +}
 +
-+sp0_128: tmp_sp is ctx_sp [tmp_sp = 0x50000000 + (ctx_sp - 0) * $(REG_SIZE);] {
++sp0_128: tmp_sp is ctx_sp [tmp_sp = $(REG_STACK_BASE) + (ctx_sp - 0) * $(REG_SIZE);] {
 +	export *[register]:16 tmp_sp;
 +}
 +
-+sp1_32: tmp_sp is ctx_sp [tmp_sp = 0x50000000 + (ctx_sp - 1) * $(REG_SIZE);] {
++sp1_32: tmp_sp is ctx_sp [tmp_sp = $(REG_STACK_BASE) + (ctx_sp - 1) * $(REG_SIZE);] {
 +	export *[register]:4 tmp_sp;
 +}
 +
-+sp1_64: tmp_sp is ctx_sp [tmp_sp = 0x50000000 + (ctx_sp - 1) * $(REG_SIZE);] {
++sp1_64: tmp_sp is ctx_sp [tmp_sp = $(REG_STACK_BASE) + (ctx_sp - 1) * $(REG_SIZE);] {
 +	export *[register]:8 tmp_sp;
 +}
 +
-+sp1_128: tmp_sp is ctx_sp [tmp_sp = 0x50000000 + (ctx_sp - 1) * $(REG_SIZE);] {
++sp1_128: tmp_sp is ctx_sp [tmp_sp = $(REG_STACK_BASE) + (ctx_sp - 1) * $(REG_SIZE);] {
 +	export *[register]:16 tmp_sp;
 +}
 +
-+sp2_32: tmp_sp is ctx_sp [tmp_sp = 0x50000000 + (ctx_sp - 2) * $(REG_SIZE);] {
++sp2_32: tmp_sp is ctx_sp [tmp_sp = $(REG_STACK_BASE) + (ctx_sp - 2) * $(REG_SIZE);] {
 +	export *[register]:4 tmp_sp;
 +}
 +
-+sp2_64: tmp_sp is ctx_sp [tmp_sp = 0x50000000 + (ctx_sp - 2) * $(REG_SIZE);] {
++sp2_64: tmp_sp is ctx_sp [tmp_sp = $(REG_STACK_BASE) + (ctx_sp - 2) * $(REG_SIZE);] {
 +	export *[register]:8 tmp_sp;
 +}
 +
-+sp2_128: tmp_sp is ctx_sp [tmp_sp = 0x50000000 + (ctx_sp - 2) * $(REG_SIZE);] {
++sp2_128: tmp_sp is ctx_sp [tmp_sp = $(REG_STACK_BASE) + (ctx_sp - 2) * $(REG_SIZE);] {
 +	export *[register]:16 tmp_sp;
 +}
 +
-+sp3_32: tmp_sp is ctx_sp [tmp_sp = 0x50000000 + (ctx_sp - 3) * $(REG_SIZE);] {
++sp3_32: tmp_sp is ctx_sp [tmp_sp = $(REG_STACK_BASE) + (ctx_sp - 3) * $(REG_SIZE);] {
 +	export *[register]:4 tmp_sp;
 +}
 +
-+sp3_64: tmp_sp is ctx_sp [tmp_sp = 0x50000000 + (ctx_sp - 3) * $(REG_SIZE);] {
++sp3_64: tmp_sp is ctx_sp [tmp_sp = $(REG_STACK_BASE) + (ctx_sp - 3) * $(REG_SIZE);] {
 +	export *[register]:8 tmp_sp;
 +}
 +
-+sp3_128: tmp_sp is ctx_sp [tmp_sp = 0x50000000 + (ctx_sp - 3) * $(REG_SIZE);] {
++sp3_128: tmp_sp is ctx_sp [tmp_sp = $(REG_STACK_BASE) + (ctx_sp - 3) * $(REG_SIZE);] {
 +	export *[register]:16 tmp_sp;
 +}
 +
@@ -4991,10 +5358,6 @@ index 000000000..9a9a043e6
 +	export ULeb128;
 +}
 +
-+reftype: "reftype="^bytev is bytev {
-+	export *[const]:1 bytev;
-+}
-+
 +# An explicit no-op operation, to be used before
 +# callother instructions to work around Ghidra issue #3390
 +# (which causes incorrect decompilation if the first pcodeop
@@ -5020,6 +5383,8 @@ index 000000000..9a9a043e6
 +
 +## Locals directives at the start of the function
 +:.locals is count; ctx_is_directive=1; ctx_directive_type=$(DIRECTIVE_LOCALS) {
++	nop();
++	funcEntryCallOther(&i0, &l0);
 +}
 +
 +:.local "count="^count "type="^typeidx is count; typeidx; ctx_is_directive=1; ctx_directive_type=$(DIRECTIVE_LOCAL) {
@@ -5097,7 +5462,7 @@ index 000000000..9a9a043e6
 +}
 +
 +## Reference Instructions
-+:ref.null reftype is opc=0xd0; reftype; sp0_32; ctx_is_directive=0 {
++:ref.null valtype is opc=0xd0; valtype; sp0_32; ctx_is_directive=0 {
 +	sp0_32 = 0;
 +}
 +:ref.is_null is opc=0xd1; sp1_32; ctx_is_directive=0 {
@@ -5140,33 +5505,21 @@ index 000000000..9a9a043e6
 +
 +# In the current version of Wasm, only one type index is permitted in select t*.
 +# This is functionally identical to regular select.
-+valtype_32: valtype is topbit=0 & v=1; valtype {}
-+valtype_32: valtype is topbit=1 & v=1; topbit=0 & v=0; valtype {}
-+valtype_32: valtype is topbit=1 & v=1; topbit=1 & v=0; topbit=0 & v=0; valtype {}
-+valtype_32: valtype is topbit=1 & v=1; topbit=1 & v=0; topbit=1 & v=0; topbit=0 & v=0; valtype {}
-+valtype_32: valtype is topbit=1 & v=1; topbit=1 & v=0; topbit=1 & v=0; topbit=1 & v=0; topbit=0 & v=0; valtype {}
-+valtype_64: valtype is topbit=0 & v=1; valtype & (bytev=0x7e | bytev=0x7c) {}
-+valtype_64: valtype is topbit=1 & v=1; topbit=0 & v=0; valtype & (bytev=0x7e | bytev=0x7c) {}
-+valtype_64: valtype is topbit=1 & v=1; topbit=1 & v=0; topbit=0 & v=0; valtype & (bytev=0x7e | bytev=0x7c) {}
-+valtype_64: valtype is topbit=1 & v=1; topbit=1 & v=0; topbit=1 & v=0; topbit=0 & v=0; valtype & (bytev=0x7e | bytev=0x7c) {}
-+valtype_64: valtype is topbit=1 & v=1; topbit=1 & v=0; topbit=1 & v=0; topbit=1 & v=0; topbit=0 & v=0; valtype & (bytev=0x7e | bytev=0x7c) {}
-+valtype_128: valtype is topbit=0 & v=1; valtype & bytev=0x7b {}
-+valtype_128: valtype is topbit=1 & v=1; topbit=0 & v=0; valtype & bytev=0x7b {}
-+valtype_128: valtype is topbit=1 & v=1; topbit=1 & v=0; topbit=0 & v=0; valtype & bytev=0x7b {}
-+valtype_128: valtype is topbit=1 & v=1; topbit=1 & v=0; topbit=1 & v=0; topbit=0 & v=0; valtype & bytev=0x7b {}
-+valtype_128: valtype is topbit=1 & v=1; topbit=1 & v=0; topbit=1 & v=0; topbit=1 & v=0; topbit=0 & v=0; valtype & bytev=0x7b {}
-+
-+:select valtype_32 is opc=0x1c; valtype_32; sp1_32; sp2_32; sp3_32; ctx_is_directive=0 {
++select_valtype: valtype is valtype; sp1_32; sp2_32; sp3_32 {
 +	# i32, f32, funcref, externref
 +	select32(sp1_32, sp2_32, sp3_32);
 +}
-+:select valtype_64 is opc=0x1c; valtype_64; sp1_32; sp2_64; sp3_64; ctx_is_directive=0 {
++select_valtype: valtype is valtype & (bytev=0x7e | bytev=0x7c); sp1_32; sp2_64; sp3_64 {
 +	# i64, f64
 +	select64(sp1_32, sp2_64, sp3_64);
 +}
-+:select valtype_128 is opc=0x1c; valtype_128; sp1_32; sp2_128; sp3_128; ctx_is_directive=0 {
++select_valtype: valtype is valtype & bytev=0x7b; sp1_32; sp2_128; sp3_128 {
 +	# v128
 +	select128(sp1_32, sp2_128, sp3_128);
++}
++
++# opc2_1 is used here to check that the LEB128 length of the type vector is 1.
++:select select_valtype is opc=0x1c; opc2_1; select_valtype; ctx_is_directive=0 {
 +}
 +
 +## Variable Instructions
@@ -5297,25 +5650,41 @@ index 000000000..9a9a043e6
 +}
 +
 +:f32.const f32 is opc=0x43; f32; sp0_32; ctx_is_directive=0 {
-+	sp0_32 = float2float(f32:4);
++	sp0_32 = f32:4;
 +}
 +
 +:f64.const f64 is opc=0x44; f64; sp0_64; ctx_is_directive=0 {
-+	sp0_64 = float2float(f64:8);
++	sp0_64 = f64:8;
 +}
 +
 +@include "BasicOps.sinc"
 +@include "VectorOps.sinc"
 diff --git a/Ghidra/Processors/WebAssembly/data/languages/WebAssembly.slaspec b/Ghidra/Processors/WebAssembly/data/languages/WebAssembly.slaspec
 new file mode 100644
-index 000000000..8f7d2a616
+index 000000000..6b745f519
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/data/languages/WebAssembly.slaspec
-@@ -0,0 +1,1906 @@
+@@ -0,0 +1,1923 @@
 +# sleigh specification file for WebAssembly Processor
 +
++## Constants
 +# support 128-bit registers for SSE
 +@define REG_SIZE 16
++# Base addresses for various register groups in the register space.
++# Keep these in sync with the cspec files!
++# function locals (lN)
++@define REG_LOCALS_BASE 0x10000000
++# function inputs (iN)
++@define REG_INPUTS_BASE 0x20000000
++# function outputs (oN)
++@define REG_OUTPUTS_BASE 0x30000000
++# temporary registers used to hold block arguments during branches (tN)
++@define REG_TEMP_BASE 0x40000000
++# Wasm stack within a function (sN)
++@define REG_STACK_BASE 0x50000000
++# shadow stack space used during emulation (ssN)
++@define REG_SSTACK_BASE 0x80000000
++
 +
 +define endian=little;
 +define alignment=1;
@@ -5336,7 +5705,7 @@ index 000000000..8f7d2a616
 +define register offset=0x1000 size=16   contextreg;
 +
 +# Wasm stack within a function
-+define register offset=0x50000000 size=16 [
++define register offset=$(REG_STACK_BASE) size=16 [
 +      s0o   s1o   s2o   s3o   s4o   s5o   s6o   s7o
 +      s8o   s9o  s10o  s11o  s12o  s13o  s14o  s15o
 +     s16o  s17o  s18o  s19o  s20o  s21o  s22o  s23o
@@ -5370,7 +5739,7 @@ index 000000000..8f7d2a616
 +    s240o s241o s242o s243o s244o s245o s246o s247o
 +    s248o s249o s250o s251o s252o s253o s254o s255o
 +];
-+define register offset=0x50000000 size=8 [
++define register offset=$(REG_STACK_BASE) size=8 [
 +      s0q _   s1q _   s2q _   s3q _   s4q _   s5q _   s6q _   s7q _
 +      s8q _   s9q _  s10q _  s11q _  s12q _  s13q _  s14q _  s15q _
 +     s16q _  s17q _  s18q _  s19q _  s20q _  s21q _  s22q _  s23q _
@@ -5404,7 +5773,7 @@ index 000000000..8f7d2a616
 +    s240q _ s241q _ s242q _ s243q _ s244q _ s245q _ s246q _ s247q _
 +    s248q _ s249q _ s250q _ s251q _ s252q _ s253q _ s254q _ s255q _
 +];
-+define register offset=0x50000000 size=4 [
++define register offset=$(REG_STACK_BASE) size=4 [
 +      s0 _ _ _   s1 _ _ _   s2 _ _ _   s3 _ _ _   s4 _ _ _   s5 _ _ _   s6 _ _ _   s7 _ _ _
 +      s8 _ _ _   s9 _ _ _  s10 _ _ _  s11 _ _ _  s12 _ _ _  s13 _ _ _  s14 _ _ _  s15 _ _ _
 +     s16 _ _ _  s17 _ _ _  s18 _ _ _  s19 _ _ _  s20 _ _ _  s21 _ _ _  s22 _ _ _  s23 _ _ _
@@ -5440,7 +5809,7 @@ index 000000000..8f7d2a616
 +];
 +
 +# Locals within a function
-+define register offset=0x10000000 size=16 [
++define register offset=$(REG_LOCALS_BASE) size=16 [
 +       l0o    l1o    l2o    l3o    l4o    l5o    l6o    l7o
 +       l8o    l9o   l10o   l11o   l12o   l13o   l14o   l15o
 +      l16o   l17o   l18o   l19o   l20o   l21o   l22o   l23o
@@ -5954,7 +6323,7 @@ index 000000000..8f7d2a616
 +    l4080o l4081o l4082o l4083o l4084o l4085o l4086o l4087o
 +    l4088o l4089o l4090o l4091o l4092o l4093o l4094o l4095o
 +];
-+define register offset=0x10000000 size=8 [
++define register offset=$(REG_LOCALS_BASE) size=8 [
 +       l0q _    l1q _    l2q _    l3q _    l4q _    l5q _    l6q _    l7q _
 +       l8q _    l9q _   l10q _   l11q _   l12q _   l13q _   l14q _   l15q _
 +      l16q _   l17q _   l18q _   l19q _   l20q _   l21q _   l22q _   l23q _
@@ -6468,7 +6837,7 @@ index 000000000..8f7d2a616
 +    l4080q _ l4081q _ l4082q _ l4083q _ l4084q _ l4085q _ l4086q _ l4087q _
 +    l4088q _ l4089q _ l4090q _ l4091q _ l4092q _ l4093q _ l4094q _ l4095q _
 +];
-+define register offset=0x10000000 size=4 [
++define register offset=$(REG_LOCALS_BASE) size=4 [
 +       l0 _ _ _    l1 _ _ _    l2 _ _ _    l3 _ _ _    l4 _ _ _    l5 _ _ _    l6 _ _ _    l7 _ _ _
 +       l8 _ _ _    l9 _ _ _   l10 _ _ _   l11 _ _ _   l12 _ _ _   l13 _ _ _   l14 _ _ _   l15 _ _ _
 +      l16 _ _ _   l17 _ _ _   l18 _ _ _   l19 _ _ _   l20 _ _ _   l21 _ _ _   l22 _ _ _   l23 _ _ _
@@ -6985,7 +7354,7 @@ index 000000000..8f7d2a616
 +
 +# Artificial registers used to hold function inputs
 +# Only used for the decompiler - emulation places inputs in locals directly
-+define register offset=0x20000000 size=16 [
++define register offset=$(REG_INPUTS_BASE) size=16 [
 +      i0o   i1o   i2o   i3o   i4o   i5o   i6o   i7o
 +      i8o   i9o  i10o  i11o  i12o  i13o  i14o  i15o
 +     i16o  i17o  i18o  i19o  i20o  i21o  i22o  i23o
@@ -7019,7 +7388,7 @@ index 000000000..8f7d2a616
 +    i240o i241o i242o i243o i244o i245o i246o i247o
 +    i248o i249o i250o i251o i252o i253o i254o i255o
 +];
-+define register offset=0x20000000 size=8 [
++define register offset=$(REG_INPUTS_BASE) size=8 [
 +      i0q _   i1q _   i2q _   i3q _   i4q _   i5q _   i6q _   i7q _
 +      i8q _   i9q _  i10q _  i11q _  i12q _  i13q _  i14q _  i15q _
 +     i16q _  i17q _  i18q _  i19q _  i20q _  i21q _  i22q _  i23q _
@@ -7053,7 +7422,7 @@ index 000000000..8f7d2a616
 +    i240q _ i241q _ i242q _ i243q _ i244q _ i245q _ i246q _ i247q _
 +    i248q _ i249q _ i250q _ i251q _ i252q _ i253q _ i254q _ i255q _
 +];
-+define register offset=0x20000000 size=4 [
++define register offset=$(REG_INPUTS_BASE) size=4 [
 +      i0 _ _ _   i1 _ _ _   i2 _ _ _   i3 _ _ _   i4 _ _ _   i5 _ _ _   i6 _ _ _   i7 _ _ _
 +      i8 _ _ _   i9 _ _ _  i10 _ _ _  i11 _ _ _  i12 _ _ _  i13 _ _ _  i14 _ _ _  i15 _ _ _
 +     i16 _ _ _  i17 _ _ _  i18 _ _ _  i19 _ _ _  i20 _ _ _  i21 _ _ _  i22 _ _ _  i23 _ _ _
@@ -7089,7 +7458,7 @@ index 000000000..8f7d2a616
 +];
 +
 +# Artificial registers used to hold function outputs
-+define register offset=0x30000000 size=16 [
++define register offset=$(REG_OUTPUTS_BASE) size=16 [
 +      o0o   o1o   o2o   o3o   o4o   o5o   o6o   o7o
 +      o8o   o9o  o10o  o11o  o12o  o13o  o14o  o15o
 +     o16o  o17o  o18o  o19o  o20o  o21o  o22o  o23o
@@ -7123,7 +7492,7 @@ index 000000000..8f7d2a616
 +    o240o o241o o242o o243o o244o o245o o246o o247o
 +    o248o o249o o250o o251o o252o o253o o254o o255o
 +];
-+define register offset=0x30000000 size=8 [
++define register offset=$(REG_OUTPUTS_BASE) size=8 [
 +      o0q _   o1q _   o2q _   o3q _   o4q _   o5q _   o6q _   o7q _
 +      o8q _   o9q _  o10q _  o11q _  o12q _  o13q _  o14q _  o15q _
 +     o16q _  o17q _  o18q _  o19q _  o20q _  o21q _  o22q _  o23q _
@@ -7157,7 +7526,7 @@ index 000000000..8f7d2a616
 +    o240q _ o241q _ o242q _ o243q _ o244q _ o245q _ o246q _ o247q _
 +    o248q _ o249q _ o250q _ o251q _ o252q _ o253q _ o254q _ o255q _
 +];
-+define register offset=0x30000000 size=4 [
++define register offset=$(REG_OUTPUTS_BASE) size=4 [
 +      o0 _ _ _   o1 _ _ _   o2 _ _ _   o3 _ _ _   o4 _ _ _   o5 _ _ _   o6 _ _ _   o7 _ _ _
 +      o8 _ _ _   o9 _ _ _  o10 _ _ _  o11 _ _ _  o12 _ _ _  o13 _ _ _  o14 _ _ _  o15 _ _ _
 +     o16 _ _ _  o17 _ _ _  o18 _ _ _  o19 _ _ _  o20 _ _ _  o21 _ _ _  o22 _ _ _  o23 _ _ _
@@ -7193,11 +7562,12 @@ index 000000000..8f7d2a616
 +];
 +
 +# Artificial temporary registers used to hold block arguments during branches
-+define register offset=0x40000000 size=4 [ t0 ];
++define register offset=$(REG_TEMP_BASE) size=16 [ t0o ];
++define register offset=$(REG_TEMP_BASE) size=4 [ t0 ];
 +
 +# Shadow stack registers used to store the locals, stacks and return addresses for other frames during emulation
 +# The current function's locals and stack are always stored in l*/s* registers.
-+define register offset=0x80000000 size=4 [ ss0 ];
++define register offset=$(REG_SSTACK_BASE) size=4 [ ss0 ];
 +
 +# All context registers are set by the pre-analyzer
 +define context contextreg
@@ -7460,6 +7830,412 @@ index 000000000..4c4350a0b
 +        if func.name.startswith("unnamed_function_"):
 +            func.setName(name, SourceType.ANALYSIS)
 +        currentProgram.symbolTable.createLabel(func.entryPoint, name, dynCallNamespace, SourceType.USER_DEFINED)
+diff --git a/Ghidra/Processors/WebAssembly/ghidra_scripts/spectest.py b/Ghidra/Processors/WebAssembly/ghidra_scripts/spectest.py
+new file mode 100644
+index 000000000..b2ced8efa
+--- /dev/null
++++ b/Ghidra/Processors/WebAssembly/ghidra_scripts/spectest.py
+@@ -0,0 +1,400 @@
++## ###
++#  IP: GHIDRA
++#
++#  Licensed under the Apache License, Version 2.0 (the "License");
++#  you may not use this file except in compliance with the License.
++#  You may obtain a copy of the License at
++#
++#       http://www.apache.org/licenses/LICENSE-2.0
++#
++#  Unless required by applicable law or agreed to in writing, software
++#  distributed under the License is distributed on an "AS IS" BASIS,
++#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++#  See the License for the specific language governing permissions and
++#  limitations under the License.
++##
++
++# A script to test the WebAssembly emulator against a .wast test suite.
++# As input, provide the .json file generated by wast2json.
++# It is recommended to run this script headless, as follows:
++# analyzeHeadless <projDir> <projName> -preScript spectest.py <test.json>
++# @author nneonneo
++# @category Analysis.Wasm
++# @keybinding
++# @menupath
++# @toolbar
++from __future__ import print_function
++import os
++import sys
++import json
++import struct
++
++from java.io import File
++from java.math import BigInteger
++from ghidra.app.emulator import EmulatorHelper
++from ghidra.app.plugin.core.analysis import AutoAnalysisManager
++from ghidra.program.emulation import WasmEmulationHelper
++from ghidra.program.flatapi import FlatProgramAPI
++from ghidra.program.model.listing import Program
++from wasm import WasmLoader
++from wasm.analysis import WasmAnalysis
++
++## Ensure output is not buffered
++class Unbuffered(object):
++   def __init__(self, stream):
++       self.stream = stream
++   def write(self, data):
++       self.stream.write(data)
++       self.stream.flush()
++   def writelines(self, datas):
++       self.stream.writelines(datas)
++       self.stream.flush()
++   def __getattr__(self, attr):
++       return getattr(self.stream, attr)
++
++sys.stdout = Unbuffered(sys.stdout)
++sys.stderr = Unbuffered(sys.stderr)
++eprint = lambda *args, **kwargs: print(*args, file=sys.stderr, **kwargs)
++
++"""
++Command schema (https://github.com/WebAssembly/wabt/blob/main/docs/wast2json.md):
++
++"module" 	{..., "name": <string>, "filename": <string>}
++"action" 	{..., "action": <action>}
++"assert_return" 	{..., "action": <action>, "expected": <expected>}
++"assert_exhaustion" 	{..., "action": <action>, "text": <string>}
++"assert_trap" 	{..., "action": <action>, "text": <string>}
++"assert_invalid" 	{..., "filename": <string>, "text": <string>, "module_type": <module_type>}
++"assert_malformed" 	{..., "filename": <string>, "text": <string>, "module_type": <module_type>}
++"assert_uninstantiable" 	{..., "filename": <string>, "text": <string>, "module_type": <module_type>}
++"assert_unlinkable" 	{..., "filename": <string>, "text": <string>, "module_type": <module_type>}
++"register" 	{..., "name": <string>, "as": <string>}
++"""
++
++null_val = 0x00000000
++# return address for the top-level function call
++ret_addr = 0x80000000
++
++class EmulationError(Exception):
++    pass
++
++def parse_ref(eit, eiv):
++    if eiv == "null":
++        return 0
++    if eit in ("externref", "exnref"):
++        # 0x0 is reserved for null, so we arbitrarily choose a nonzero encoding
++        # for externref objects. (This is essentially a host environment choice)
++        assert int(eiv) < 0x80000000
++        return 0x80000000 + int(eiv)
++    # this shouldn't actually happen: funcref is opaque to the host environment
++    # so wast commands should only be testing against funcref null
++    return int(eiv)
++
++def encode_arg(ei):
++    eit = ei["type"]
++    eiv = ei["value"]
++    if eit in ("i32", "f32"):
++        return struct.pack("<I", int(eiv))
++    elif eit in ("i64", "f64"):
++        return struct.pack("<Q", int(eiv))
++    elif eit in ("externref", "funcref", "exnref"):
++        return struct.pack("<I", parse_ref(eit, eiv))
++    elif eit == "v128":
++        eilt = ei["lane_type"]
++        if eilt == "i8":
++            return struct.pack("<16B", *[int(c) for c in eiv])
++        elif eilt == "i16":
++            return struct.pack("<8H", *[int(c) for c in eiv])
++        elif eilt in ("i32", "f32"):
++            return struct.pack("<4I", *[int(c) for c in eiv])
++        elif eilt in ("i64", "f64"):
++            return struct.pack("<2Q", *[int(c) for c in eiv])
++        else:
++            raise Exception("unknown lane type %s" % eilt)
++    else:
++        raise Exception("unknown value type %s" % eit)
++
++class EmulatedProgram(FlatProgramAPI):
++    def __init__(self, program):
++        super(EmulatedProgram, self).__init__(program)
++        self.emuHelper = EmulatorHelper(program)
++        self.wasmHelper = WasmEmulationHelper(self.emuHelper.language)
++        self.analysis = WasmAnalysis.getState(program)
++
++        ramSpace = self.currentProgram.addressFactory.defaultAddressSpace
++        self.retAddr = ramSpace.getAddress(ret_addr)
++        self.nullAddr = ramSpace.getAddress(null_val)
++        self.emuHelper.setBreakpoint(self.retAddr)
++        self.emuHelper.setBreakpoint(self.nullAddr)
++
++    def run_function(self, function, args):
++        stackBase = self.emuHelper.language.getRegister("s0").address
++        memState = self.emuHelper.emulator.memState
++
++        if len(args) != len(function.signature.arguments):
++            raise Exception("wrong number of arguments: got %d, expected %d" % (len(args), len(function.signature.arguments)))
++
++        biArgs = [BigInteger(1, encode_arg(arg)[::-1]) for arg in args]
++        self.wasmHelper.simulateCall(self.emuHelper.emulator, ret_addr, function.entryPoint.offset, biArgs)
++
++        while 1:
++            if not self.emuHelper.run(self.monitor):
++                err = self.emuHelper.lastError
++                if err.startswith("Unimplemented CALLOTHER pcodeop (halt_trap)"):
++                    raise EmulationError("unreachable")
++                elif err in ("Divide by 0", "Remainder by 0"):
++                    raise EmulationError("integer divide by zero")
++                raise EmulationError("Emulation stopped: " + err)
++            if self.emuHelper.executionAddress == self.retAddr:
++                break
++            elif self.emuHelper.executionAddress == self.nullAddr:
++                # tried to execute a null pointer
++                raise EmulationError("uninitialized element")
++
++        # Ghidra itself doesn't support multiple return values, so we grab that information from the Wasm analysis instead
++        sig = self.analysis.getFunctionByAddress(function.entryPoint)
++        res = []
++        for i, rt in enumerate(sig.returns):
++            res.append(self.emuHelper.readMemory(stackBase.add(i * WasmLoader.REG_SIZE), rt.size))
++        return res
++
++def import_program(dirname, filename):
++    prog = importFile(File(os.path.join(dirname, filename)))
++    if prog is None:
++        raise Exception("Failed to import file!")
++
++    tx = prog.startTransaction("analysis")
++    mgr = AutoAnalysisManager.getAnalysisManager(prog)
++
++    # Disable C stack analysis for wast tests
++    options = prog.getOptions(Program.ANALYSIS_PROPERTIES)
++    options.setInt("Wasm Pre-Analyzer.C Stack Pointer", -1)
++    mgr.initializeOptions(options)
++
++    mgr.reAnalyzeAll(None)
++    mgr.waitForAnalysis(None, monitor)
++    prog.endTransaction(tx, True)
++
++    prog_api = EmulatedProgram(prog)
++    return prog_api
++
++def execute_action(progs, action):
++    modname = action.get("module", None)
++    prog = progs.get(modname, None)
++    if prog is None:
++        raise ValueError("module was not loaded")
++
++    atype = action["type"]
++    field = action["field"]
++    export_ns = prog.getNamespace(None, "export")
++    syms = prog.getSymbols(field, export_ns)
++    if not syms:
++        raise ValueError("exported name %s not found" % (field.encode("unicode_escape"),))
++    sym_addr = syms[0].address
++
++    if atype == "get":
++        dlen = prog.getDataAt(sym_addr).length
++        return [prog.emuHelper.readMemory(sym_addr, dlen)]
++    elif atype == "invoke":
++        func = prog.getFunctionAt(sym_addr)
++        if func is None:
++            raise ValueError("exported symbol %s is not a function" % (field.encode("unicode_escape"),))
++        return prog.run_function(func, action["args"])
++    else:
++        raise ValueError("action type %s is not known" % (atype,))
++
++def assert_equal(msg, res, exp):
++    if res != exp:
++        raise AssertionError("wrong %s: got %s, expected %s" % (msg, res, exp))
++
++def format_f32(v):
++    return "0x%08x (%s)" % (v, struct.unpack("<f", struct.pack("<I", v))[0])
++
++def format_f64(v):
++    return "0x%016x (%s)" % (v, struct.unpack("<d", struct.pack("<Q", v))[0])
++
++def compare_f32(name, riv, eiv):
++    if eiv == "nan:canonical":
++        if (riv & 0x7fffffff) != 0x7fc00000:
++            raise AssertionError("wrong %s: got %s, expected canonical nan" % (name, format_f32(riv)))
++    elif eiv == "nan:arithmetic":
++        if (riv & 0x7fc00000) != 0x7fc00000:
++            raise AssertionError("wrong %s: got %s, expected arithmetic nan" % (name, format_f32(riv)))
++    else:
++        if riv != int(eiv):
++            raise AssertionError("wrong %s: got %s, expected %s" % (name, format_f32(riv), format_f32(int(eiv))))
++
++def compare_f64(name, riv, eiv):
++    if eiv == "nan:canonical":
++        if (riv & 0x7fffffffffffffff) != 0x7ff8000000000000:
++            raise AssertionError("wrong %s: got %s, expected canonical nan" % (name, format_f64(riv)))
++    elif eiv == "nan:arithmetic":
++        if (riv & 0x7ff8000000000000) != 0x7ff8000000000000:
++            raise AssertionError("wrong %s: got %s, expected arithmetic nan" % (name, format_f64(riv)))
++    else:
++        if riv != int(eiv):
++            raise AssertionError("wrong %s: got %s, expected %s" % (name, format_f64(riv), format_f64(int(eiv))))
++
++def compare_result_value(ei, ri):
++    eit = ei["type"]
++    eiv = ei["value"]
++    if eit == "i32":
++        assert_equal("i32 result length", len(ri), 4)
++        riv, = struct.unpack("<I", ri)
++        assert_equal("i32 result", riv, int(eiv))
++    elif eit == "i64":
++        assert_equal("i64 result length", len(ri), 8)
++        riv, = struct.unpack("<Q", ri)
++        assert_equal("i64 result", riv, int(eiv))
++    elif eit == "f32":
++        assert_equal("f32 result length", len(ri), 4)
++        riv, = struct.unpack("<I", ri)
++        compare_f32("f32 result", riv, eiv)
++    elif eit == "f64":
++        assert_equal("f64 result length", len(ri), 8)
++        riv, = struct.unpack("<Q", ri)
++        compare_f64("f64 result", riv, eiv)
++    elif eit in ("externref", "funcref", "exnref"):
++        assert_equal("ref result length", len(ri), 4)
++        riv, = struct.unpack("<I", ri)
++        assert_equal("ref result", riv, parse_ref(eit, eiv))
++    elif eit == "v128":
++        assert_equal("v128 result length", len(ri), 16)
++        eilt = ei["lane_type"]
++        if eilt == "i8":
++            assert_equal("i8x16 result", struct.unpack("<16B", ri), tuple([int(c) for c in eiv]))
++        elif eilt == "i16":
++            assert_equal("i16x8 result", struct.unpack("<8H", ri), tuple([int(c) for c in eiv]))
++        elif eilt == "i32":
++            assert_equal("i32x4 result", struct.unpack("<4I", ri), tuple([int(c) for c in eiv]))
++        elif eilt == "i64":
++            assert_equal("i64x2 result", struct.unpack("<2Q", ri), tuple([int(c) for c in eiv]))
++        elif eilt == "f32":
++            riv = struct.unpack("<4I", ri)
++            for i in range(4):
++                compare_f32("f32x4 lane %d" % i, riv[i], eiv[i])
++        elif eilt == "f64":
++            riv = struct.unpack("<2Q", ri)
++            for i in range(2):
++                compare_f64("f64x2 lane %d" % i, riv[i], eiv[i])
++        else:
++            raise Exception("unknown lane type %s" % eilt)
++    else:
++        raise Exception("unknown value type %s" % eit)
++
++def compare_result(result, expected):
++    assert_equal("number of values returned", len(result), len(expected))
++
++    for i in range(len(expected)):
++        ri = result[i]
++        ei = expected[i]
++        compare_result_value(ei, ri)
++
++def format_action(action):
++    return "%s %s" % (action["type"], action["field"].encode("unicode_escape"))
++
++def format_exception():
++    etype, exc, tb = sys.exc_info()
++    excs = unicode(exc)
++    if excs:
++        return "%s: %s" % (etype.__name__, excs)
++    else:
++        return etype.__name__
++
++def main():
++    file = askFile("wast .json file", "Open")
++    json_fn = file.absolutePath
++
++    testdata = json.load(open(json_fn))
++    testdir = os.path.dirname(json_fn)
++    # progs[None] is the current program
++    progs = {None: None}
++
++    succeeded_cmds = 0
++    failed_cmds = 0
++    skipped_cmds = 0
++
++    wast_fn = testdata["source_filename"]
++    for command in testdata["commands"]:
++        prefix = "%s:%d:" % (wast_fn, command["line"])
++        ctype = command["type"]
++        if ctype == "module":
++            try:
++                prog = import_program(testdir, command["filename"])
++                progs[None] = prog
++                if "name" in command:
++                    progs[command["name"]] = prog
++                succeeded_cmds += 1
++            except:
++                eprint(prefix, "ERROR: failed to load module %s: %s" % (command["filename"], format_exception()))
++                progs[None] = None
++                failed_cmds += 1
++
++        elif ctype == "action":
++            try:
++                execute_action(progs, command["action"])
++                succeeded_cmds += 1
++            except:
++                eprint(prefix, "ERROR: failed to execute action %s: %s" % (format_action(command["action"]), format_exception()))
++                failed_cmds += 1
++
++        elif ctype == "assert_return":
++            try:
++                result = execute_action(progs, command["action"])
++                compare_result(result, command["expected"])
++                succeeded_cmds += 1
++            except:
++                eprint(prefix, "ERROR: assert_return %s failed: %s" % (format_action(command["action"]), format_exception()))
++                failed_cmds += 1
++
++        elif ctype == "assert_exhaustion":
++            eprint(prefix, "NOTE: skipping assert_exhaustion %s" % format_action(command["action"]))
++            skipped_cmds += 1
++
++        elif ctype == "assert_trap":
++            try:
++                execute_action(progs, command["action"])
++                eprint(prefix, "ERROR: assert_trap %s did not trap; expected %r" % (format_action(command["action"]), command["text"]))
++                failed_cmds += 1
++            except EmulationError as e:
++                if e.args[0] == command["text"]:
++                    succeeded_cmds += 1
++                else:
++                    eprint(prefix, "ERROR: assert_trap %s trapped with %r but expected %r" % (format_action(command["action"]), e.args[0], command["text"]))
++                    failed_cmds += 1
++            except:
++                eprint(prefix, "ERROR: assert_trap %s failed: %s" % (format_action(command["action"]), format_exception()))
++                failed_cmds += 1
++
++        elif ctype == "assert_invalid":
++            eprint(prefix, "NOTE: skipping assert_invalid %s" % (command["filename"],))
++            skipped_cmds += 1
++
++        elif ctype == "assert_malformed":
++            eprint(prefix, "NOTE: skipping assert_malformed %s" % (command["filename"],))
++            skipped_cmds += 1
++
++        elif ctype == "assert_uninstantiable":
++            eprint(prefix, "NOTE: skipping assert_uninstantiable %s" % (command["filename"],))
++            skipped_cmds += 1
++
++        elif ctype == "assert_unlinkable":
++            eprint(prefix, "NOTE: skipping assert_unlinkable %s" % (command["filename"],))
++            skipped_cmds += 1
++
++        elif ctype == "register":
++            # TODO: save program in the root folder to benefit from automatic linking
++            progs[command["as"]] = progs[command.get("name", None)]
++            succeeded_cmds += 1
++
++        else:
++            eprint(prefix, "ERROR: unrecognized command %s" % (command["type"],))
++            failed_cmds += 1
++
++    if succeeded_cmds + failed_cmds + skipped_cmds != len(testdata["commands"]):
++        eprint("ERROR: invalid result totals!")
++
++    eprint("SUMMARY: %s: %d succeeded, %d failed, %d skipped (%d total)" % (os.path.basename(json_fn), succeeded_cmds, failed_cmds, skipped_cmds, len(testdata["commands"])))
++
++if __name__ == "__main__":
++    main()
 diff --git a/Ghidra/Processors/WebAssembly/src/main/help/help/TOC_Source.xml b/Ghidra/Processors/WebAssembly/src/main/help/help/TOC_Source.xml
 new file mode 100644
 index 000000000..dbad6be64
@@ -7703,10 +8479,10 @@ index 000000000..49935bfb0
 +- This module was directly based on https://github.com/garrettgu10/ghidra-wasm-plugin
 diff --git a/Ghidra/Processors/WebAssembly/src/main/java/ghidra/program/emulation/WasmEmulateInstructionStateModifier.java b/Ghidra/Processors/WebAssembly/src/main/java/ghidra/program/emulation/WasmEmulateInstructionStateModifier.java
 new file mode 100644
-index 000000000..e2d1b11d7
+index 000000000..3bafacc42
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/src/main/java/ghidra/program/emulation/WasmEmulateInstructionStateModifier.java
-@@ -0,0 +1,296 @@
+@@ -0,0 +1,375 @@
 +/* ###
 + * IP: GHIDRA
 + *
@@ -7725,8 +8501,11 @@ index 000000000..e2d1b11d7
 +package ghidra.program.emulation;
 +
 +import java.io.IOException;
++import java.math.BigInteger;
 +import java.util.Arrays;
 +import java.util.List;
++import java.util.function.IntUnaryOperator;
++import java.util.function.LongToIntFunction;
 +
 +import ghidra.app.util.bin.BinaryReader;
 +import ghidra.app.util.bin.ByteProvider;
@@ -7837,10 +8616,15 @@ index 000000000..e2d1b11d7
 +		helper = new WasmEmulationHelper(emu.getLanguage());
 +		localsBase = emu.getLanguage().getRegister("l0").getOffset();
 +
++		registerPcodeOpBehavior("funcEntryCallOther", new FuncEntryOpBehaviour());
 +		registerPcodeOpBehavior("popCallOther", new PopOpBehaviour());
 +		registerPcodeOpBehavior("pushCallOther", new PushOpBehaviour());
 +		registerPcodeOpBehavior("callPrologueCallOther", new CallPrologueOpBehaviour());
 +		registerPcodeOpBehavior("callEpilogueCallOther", new CallEpilogueOpBehaviour());
++
++		registerPcodeOpBehavior("ctz", new BitCountOpBehaviour("ctz", Integer::numberOfTrailingZeros, Long::numberOfTrailingZeros));
++		registerPcodeOpBehavior("clz", new BitCountOpBehaviour("clz", Integer::numberOfLeadingZeros, Long::numberOfLeadingZeros));
++		registerPcodeOpBehavior("popcnt", new BitCountOpBehaviour("popcnt", Integer::bitCount, Long::bitCount));
 +	}
 +
 +	private WasmFunctionAnalysis getAnalysis(Address address) {
@@ -7858,6 +8642,65 @@ index 000000000..e2d1b11d7
 +		}
 +		prevAnalysis = analysis;
 +		return analysis;
++	}
++
++	private class BitCountOpBehaviour implements OpBehaviorOther {
++		String name;
++		IntUnaryOperator i32Func;
++		LongToIntFunction i64Func;
++		public BitCountOpBehaviour(String name, IntUnaryOperator i32Func, LongToIntFunction i64Func) {
++			this.name = name;
++			this.i32Func = i32Func;
++			this.i64Func = i64Func;
++		}
++
++		@Override
++		public void evaluate(Emulate emu, Varnode out, Varnode[] inputs) {
++			MemoryState memState = emu.getMemoryState();
++			if (inputs.length != 2) {
++				throw new LowlevelError(name + " requires one input");
++			}
++
++			int size = inputs[1].getSize();
++			long value = memState.getValue(inputs[1]);
++			int result;
++			if (size == 4) {
++				result = i32Func.applyAsInt((int)value);
++			} else if (size == 8) {
++				result = i64Func.applyAsInt(value);
++			} else {
++				throw new LowlevelError(name + " cannot be applied to object of size " + size);
++			}
++
++			memState.setValue(out, (long)result);
++		}
++	}
++
++	private class FuncEntryOpBehaviour implements OpBehaviorOther {
++		@Override
++		public void evaluate(Emulate emu, Varnode out, Varnode[] inputs) {
++			MemoryState memState = emu.getMemoryState();
++			if (inputs.length != 3) {
++				throw new LowlevelError("funcEntryCallOther requires two inputs");
++			}
++
++			long inputOffset = inputs[1].getOffset();
++			long localsOffset = inputs[2].getOffset();
++			AddressSpace regSpace = emu.getLanguage().getAddressFactory().getAddressSpace("register");
++
++			WasmFunctionAnalysis funcAnalysis = getAnalysis(emu.getExecuteAddress());
++			if (funcAnalysis == null) {
++				throw new LowlevelError("Unable to find Wasm function analysis for address " +
++						emu.getExecuteAddress());
++			}
++			int numParams = funcAnalysis.getSignature().getParams().length;
++			int numLocals = funcAnalysis.getSignature().getLocals().length;
++			helper.copyRegisters(memState, inputOffset, localsOffset, numParams);
++			byte[] zero = new byte[WasmLoader.REG_SIZE];
++			for(int i=numParams; i<numLocals; i++) {
++				memState.setChunk(zero, regSpace, localsOffset + i * WasmLoader.REG_SIZE, zero.length);
++			}
++		}
 +	}
 +
 +	private class PopOpBehaviour implements OpBehaviorOther {
@@ -7916,6 +8759,11 @@ index 000000000..e2d1b11d7
 +		@Override
 +		public void evaluate(Emulate emu, Varnode out, Varnode[] inputs) {
 +			MemoryState memState = emu.getMemoryState();
++			if (inputs.length != 2) {
++				throw new LowlevelError("callPrologueCallOther requires one input");
++			}
++
++			long baseOffset = inputs[1].getOffset();
 +
 +			// Push locals onto shadow stack
 +			WasmFunctionAnalysis funcAnalysis = getAnalysis(emu.getExecuteAddress());
@@ -7925,7 +8773,7 @@ index 000000000..e2d1b11d7
 +			}
 +			helper.pushShadowStackRegs(memState, localsBase, funcAnalysis.getSignature().getLocals().length);
 +
-+			// Pop params into locals
++			// Pop params into i* registers
 +			StackEffect stackEffect = funcAnalysis.getStackEffect(emu.getExecuteAddress());
 +			if (stackEffect == null) {
 +				throw new LowlevelError("Unable to find stack effect for function at " + emu.getExecuteAddress());
@@ -7933,7 +8781,7 @@ index 000000000..e2d1b11d7
 +
 +			long stackOffset = helper.getStackOffset(stackEffect.getPopHeight());
 +			int count = stackEffect.getToPop().length;
-+			helper.copyRegisters(memState, stackOffset, localsBase, count);
++			helper.copyRegisters(memState, stackOffset, baseOffset, count);
 +
 +			// Push stack onto shadow stack
 +			helper.pushShadowStackRegs(memState, helper.getStackOffset(0), stackEffect.getPopHeight());
@@ -7978,6 +8826,20 @@ index 000000000..e2d1b11d7
 +		}
 +	}
 +
++	private void updateContextValue(Emulate emulate, Address currentAddress) {
++		WasmFunctionAnalysis funcAnalysis = getAnalysis(currentAddress);
++		if (funcAnalysis == null) {
++			return;
++		}
++
++		BigInteger context = funcAnalysis.getContext(currentAddress);
++		if (context == null) {
++			return;
++		}
++
++		emulate.setContextRegisterValue(new RegisterValue(contextRegister, context));
++	}
++
 +	@Override
 +	public void initialExecuteCallback(Emulate emulate, Address current_address, RegisterValue contextRegisterValue) throws LowlevelError {
 +		if (analysisProvider == null) {
@@ -7985,10 +8847,7 @@ index 000000000..e2d1b11d7
 +		}
 +
 +		// Set initial context value
-+		WasmFunctionAnalysis funcAnalysis = getAnalysis(current_address);
-+		if (funcAnalysis != null) {
-+			emulate.setContextRegisterValue(new RegisterValue(contextRegister, funcAnalysis.getContext(current_address)));
-+		}
++		updateContextValue(emulate, current_address);
 +
 +		// Set SSP register if not set
 +		helper.setInitialSSP(emulate.getMemoryState());
@@ -7996,19 +8855,15 @@ index 000000000..e2d1b11d7
 +
 +	@Override
 +	public void postExecuteCallback(Emulate emulate, Address lastExecuteAddress, PcodeOp[] lastExecutePcode, int lastPcodeIndex, Address currentAddress) throws LowlevelError {
-+		// Set updated context value
-+		WasmFunctionAnalysis funcAnalysis = getAnalysis(currentAddress);
-+		if (funcAnalysis != null) {
-+			emulate.setContextRegisterValue(new RegisterValue(contextRegister, funcAnalysis.getContext(currentAddress)));
-+		}
++		updateContextValue(emulate, currentAddress);
 +	}
 +}
 diff --git a/Ghidra/Processors/WebAssembly/src/main/java/ghidra/program/emulation/WasmEmulationHelper.java b/Ghidra/Processors/WebAssembly/src/main/java/ghidra/program/emulation/WasmEmulationHelper.java
 new file mode 100644
-index 000000000..0d986fb10
+index 000000000..2c7f12bf8
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/src/main/java/ghidra/program/emulation/WasmEmulationHelper.java
-@@ -0,0 +1,135 @@
+@@ -0,0 +1,191 @@
 +/* ###
 + * IP: GHIDRA
 + *
@@ -8025,6 +8880,8 @@ index 000000000..0d986fb10
 + * limitations under the License.
 + */
 +package ghidra.program.emulation;
++
++import java.math.BigInteger;
 +
 +import ghidra.app.emulator.Emulator;
 +import ghidra.pcode.memstate.MemoryState;
@@ -8043,6 +8900,7 @@ index 000000000..0d986fb10
 +     */
 +    private AddressSpace regSpace;
 +    private long stackBase;
++    private long inputsBase;
 +    private long localsBase;
 +    private Register sspRegister;
 +    private Register lrRegister;
@@ -8054,7 +8912,60 @@ index 000000000..0d986fb10
 +        lrRegister = language.getRegister("LR");
 +        regSpace = language.getAddressFactory().getAddressSpace("register");
 +        stackBase = language.getRegister("s0").getOffset();
++        inputsBase = language.getRegister("i0").getOffset();
 +        localsBase = language.getRegister("l0").getOffset();
++    }
++
++    public void simulateCall(Emulator emulator, long retAddress, long funcAddress, long... inputs) {
++        BigInteger[] biInputs = new BigInteger[inputs.length];
++        for (int i = 0; i < inputs.length; i++) {
++            biInputs[i] = BigInteger.valueOf(inputs[i]);
++        }
++        simulateCall(emulator, retAddress, funcAddress, biInputs);
++    }
++
++    /**
++     * Simulate a function call. Call this before emulating a WASM function, and
++     * the call will return to retAddress when it completes.
++     *
++     * @param emulate
++     *            the emulation context
++     * @param retAddress
++     *            the address to which the function will return on completion
++     * @param funcAddress
++     *            the address of the function to call
++     * @param inputs
++     *            the inputs to provide to the function
++     */
++    public void simulateCall(Emulator emulator, long retAddress, long funcAddress, BigInteger... inputs) {
++        MemoryState memState = emulator.getMemState();
++
++        setInitialSSP(memState);
++
++        // Push dummy locals
++        pushShadowStackRegs(memState, 0, 0);
++        // Push dummy stack
++        pushShadowStackRegs(memState, 0, 0);
++        // Push target LR
++        memState.setValue(lrRegister, retAddress);
++        pushShadowStackLR(memState);
++
++        // Set inputs
++        for (int i = 0; i < inputs.length; i++) {
++            memState.setValue(regSpace, inputsBase + i * WasmLoader.REG_SIZE, WasmLoader.REG_SIZE, inputs[i]);
++        }
++
++        // Set up for call
++        memState.setValue(emulator.getPCRegisterName(), funcAddress);
++        emulator.setExecuteAddress(funcAddress);
++    }
++
++    public void simulateReturn(Emulator emulator, long... outputs) {
++        BigInteger[] biOutputs = new BigInteger[outputs.length];
++        for (int i = 0; i < outputs.length; i++) {
++            biOutputs[i] = BigInteger.valueOf(outputs[i]);
++        }
++        simulateReturn(emulator, biOutputs);
 +    }
 +
 +    /**
@@ -8067,7 +8978,7 @@ index 000000000..0d986fb10
 +     *            the function outputs to push onto the caller's stack. The number
 +     *            of outputs must match the function signature.
 +     */
-+    public void simulateReturn(Emulator emulator, long... outputs) {
++    public void simulateReturn(Emulator emulator, BigInteger... outputs) {
 +        MemoryState memState = emulator.getMemState();
 +
 +        // Pop LR from shadow stack
@@ -8078,7 +8989,7 @@ index 000000000..0d986fb10
 +
 +        // Push outputs onto stack
 +        for (int i = 0; i < outputs.length; i++) {
-+            memState.setValue(regSpace, getStackOffset(stackHeight + i), 8, outputs[i]);
++            memState.setValue(regSpace, getStackOffset(stackHeight + i), WasmLoader.REG_SIZE, outputs[i]);
 +        }
 +
 +        // Pop shadow locals into locals
@@ -8146,10 +9057,10 @@ index 000000000..0d986fb10
 +}
 diff --git a/Ghidra/Processors/WebAssembly/src/main/java/wasm/WasmLoader.java b/Ghidra/Processors/WebAssembly/src/main/java/wasm/WasmLoader.java
 new file mode 100644
-index 000000000..5aaa4cfcf
+index 000000000..397ea1edb
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/src/main/java/wasm/WasmLoader.java
-@@ -0,0 +1,699 @@
+@@ -0,0 +1,708 @@
 +/* ###
 + * IP: GHIDRA
 + *
@@ -8443,10 +9354,13 @@ index 000000000..5aaa4cfcf
 +	}
 +
 +	private static void createTableBlock(Program program, DataType elementDataType, long numElements, int tableidx, TaskMonitor monitor) {
++		if (numElements == 0) {
++			return;
++		}
 +		long byteSize = elementDataType.getLength() * numElements;
 +		Address dataStart = getTableAddress(program.getAddressFactory(), tableidx, 0);
 +		try {
-+			MemoryBlock block = program.getMemory().createInitializedBlock(".table" + tableidx, dataStart, byteSize, (byte) 0xff, monitor, false);
++			MemoryBlock block = program.getMemory().createInitializedBlock(".table" + tableidx, dataStart, byteSize, (byte) 0x00, monitor, false);
 +			block.setRead(true);
 +			block.setWrite(true);
 +			block.setExecute(false);
@@ -8459,6 +9373,9 @@ index 000000000..5aaa4cfcf
 +	}
 +
 +	private static void createMemoryBlock(Program program, int memidx, long length, TaskMonitor monitor) {
++		if (length == 0) {
++			return;
++		}
 +		Address dataStart = getMemoryAddress(program.getAddressFactory(), memidx, 0);
 +		try {
 +			MemoryBlock block = program.getMemory().createInitializedBlock(".memory" + memidx, dataStart, length, (byte) 0x00, monitor, false);
@@ -8478,7 +9395,7 @@ index 000000000..5aaa4cfcf
 +			if (initBytes == null) {
 +				block = program.getMemory().createUninitializedBlock(".global" + globalidx, dataStart, dataType.getLength(), false);
 +			} else {
-+				block = program.getMemory().createInitializedBlock(".global" + globalidx, dataStart, dataType.getLength(), (byte) 0xff, monitor, false);
++				block = program.getMemory().createInitializedBlock(".global" + globalidx, dataStart, dataType.getLength(), (byte) 0x00, monitor, false);
 +				program.getMemory().setBytes(dataStart, initBytes);
 +			}
 +			block.setRead(true);
@@ -8782,7 +9699,7 @@ index 000000000..5aaa4cfcf
 +
 +	private MemoryBlock createCustomSectionBlock(Program program, FileBytes fileBytes, WasmUnknownCustomSection customSection, Address address)
 +			throws Exception {
-+		MemoryBlock block = program.getMemory().createInitializedBlock(customSection.getCustomName(), address, fileBytes, customSection.getContentOffset(), customSection.getCustomSize(), false);
++		MemoryBlock block = program.getMemory().createInitializedBlock(customSection.getName(), address, fileBytes, customSection.getContentOffset(), customSection.getCustomSize(), false);
 +		block.setRead(true);
 +		block.setWrite(false);
 +		block.setExecute(false);
@@ -8800,6 +9717,9 @@ index 000000000..5aaa4cfcf
 +			}
 +			WasmUnknownCustomSection customSection = (WasmUnknownCustomSection) section;
 +			try {
++				if (customSection.getCustomSize() == 0) {
++					continue;
++				}
 +				monitor.setMessage("Creating custom section " + section.getName());
 +				MemoryBlock block = createCustomSectionBlock(program, fileBytes, customSection, address);
 +				address = address.add(block.getSize());
@@ -8889,10 +9809,10 @@ index 000000000..61c7a50f4
 +}
 diff --git a/Ghidra/Processors/WebAssembly/src/main/java/wasm/analysis/WasmAnalysis.java b/Ghidra/Processors/WebAssembly/src/main/java/wasm/analysis/WasmAnalysis.java
 new file mode 100644
-index 000000000..807905255
+index 000000000..3f5907409
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/src/main/java/wasm/analysis/WasmAnalysis.java
-@@ -0,0 +1,152 @@
+@@ -0,0 +1,151 @@
 +/* ###
 + * IP: GHIDRA
 + *
@@ -8918,7 +9838,6 @@ index 000000000..807905255
 +import java.util.Map;
 +
 +import ghidra.app.plugin.core.analysis.TransientProgramProperties;
-+import ghidra.app.plugin.core.analysis.TransientProgramProperties.PropertyValueSupplier;
 +import ghidra.app.plugin.core.analysis.TransientProgramProperties.SCOPE;
 +import ghidra.app.util.bin.BinaryReader;
 +import ghidra.app.util.bin.ByteArrayProvider;
@@ -8936,27 +9855,27 @@ index 000000000..807905255
 +
 +public class WasmAnalysis {
 +	/**
-+	 * Return persistent <code>ClassFileAnalysisState</code> which corresponds to
++	 * Return persistent <code>WasmAnalysis</code> which corresponds to
 +	 * the specified program instance.
 +	 *
 +	 * @param program
-+	 * @return <code>ClassFileAnalysisState</code> for specified program instance
++	 * @return <code>WasmAnalysis</code> for specified program instance
 +	 */
 +	public static synchronized WasmAnalysis getState(Program program) {
-+		return TransientProgramProperties.getProperty(program, WasmAnalysis.class,
-+			SCOPE.PROGRAM, WasmAnalysis.class, () -> {
-+				Memory mem = program.getMemory();
-+				Address moduleStart = WasmLoader.getModuleAddress(program.getAddressFactory());
-+				ByteProvider memByteProvider = new MemoryByteProvider(mem, moduleStart);
-+				BinaryReader memBinaryReader = new BinaryReader(memByteProvider, true);
-+				WasmModule module;
-+				try {
-+					module = new WasmModule(memBinaryReader);
-+				} catch (IOException e) {
-+					throw new RuntimeException(e);
-+				}
-+				return new WasmAnalysis(program.getAddressFactory(), module);
-+			});
++		return TransientProgramProperties.getProperty(program, WasmAnalysis.class, SCOPE.PROGRAM, WasmAnalysis.class, () -> {
++			Memory mem = program.getMemory();
++			Address moduleStart = WasmLoader.getModuleAddress(program.getAddressFactory());
++			ByteProvider memByteProvider = new MemoryByteProvider(mem, moduleStart);
++			BinaryReader memBinaryReader = new BinaryReader(memByteProvider, true);
++			WasmModule module;
++			try {
++				module = new WasmModule(memBinaryReader);
++			} catch (IOException e) {
++				throw new RuntimeException(e);
++			}
++
++			return new WasmAnalysis(program.getAddressFactory(), module);
++		});
 +	}
 +
 +	private WasmModule module = null;
@@ -9175,10 +10094,10 @@ index 000000000..9c3d9c41d
 +}
 diff --git a/Ghidra/Processors/WebAssembly/src/main/java/wasm/analysis/WasmFunctionAnalysis.java b/Ghidra/Processors/WebAssembly/src/main/java/wasm/analysis/WasmFunctionAnalysis.java
 new file mode 100644
-index 000000000..8377ce858
+index 000000000..e14c2c3fb
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/src/main/java/wasm/analysis/WasmFunctionAnalysis.java
-@@ -0,0 +1,1513 @@
+@@ -0,0 +1,1525 @@
 +/* ###
 + * IP: GHIDRA
 + *
@@ -9317,7 +10236,10 @@ index 000000000..8377ce858
 +		 * and select instructions.
 +		 */
 +		public void setOperandSize(Address address, ValType type) {
-+			setRegister(address, REG_OPERAND_SIZE, type.getSize());
++			if (type != null) {
++				// might be null if we're in an unreachable area
++				setRegister(address, REG_OPERAND_SIZE, type.getSize());
++			}
 +		}
 +
 +		/** Mark this global.* instruction as operating on the C stack pointer. */
@@ -9557,18 +10479,12 @@ index 000000000..8377ce858
 +		return valueStack.remove(valueStack.size() - 1);
 +	}
 +
-+	private ValType popValue(Address instAddress, ValType type) {
-+		ValType top = popValue(instAddress);
-+		if (type == null) {
-+			return top;
++	private ValType popValue(Address instAddress, ValType expected) {
++		ValType actual = popValue(instAddress);
++		if (actual != expected && actual != null && expected != null) {
++			throw new ValidationException(instAddress, "pop type mismatch: got " + actual + ", expected " + expected);
 +		}
-+		if (top == null) {
-+			return type;
-+		}
-+		if (top != type) {
-+			throw new ValidationException(instAddress, "pop type mismatch: got " + top + ", expected " + type);
-+		}
-+		return top;
++		return actual;
 +	}
 +
 +	private void pushValues(Address instAddress, ValType[] types) {
@@ -9577,10 +10493,12 @@ index 000000000..8377ce858
 +		}
 +	}
 +
-+	private void popValues(Address instAddress, ValType[] types) {
++	private ValType[] popValues(Address instAddress, ValType[] types) {
++		ValType[] popped = new ValType[types.length];
 +		for (int i = types.length - 1; i >= 0; i--) {
-+			popValue(instAddress, types[i]);
++			popped[i] = popValue(instAddress, types[i]);
 +		}
++		return popped;
 +	}
 +	// #endregion
 +
@@ -9619,15 +10537,6 @@ index 000000000..8377ce858
 +	// #endregion
 +
 +	// #region Common instruction code
-+	private void branchToBlock(Address instAddress, long labelidx) {
-+		ControlFrame block = getBlock(instAddress, labelidx);
-+		ValType[] arguments = block.getBranchArguments();
-+		popValues(instAddress, arguments);
-+		setStackEffect(instAddress, valueStack.size(), arguments, block.initialStack.size(), arguments);
-+		block.addBranch(instAddress);
-+		pushValues(instAddress, arguments);
-+	}
-+
 +	private void memoryLoad(BinaryReader reader, Address instAddress, ValType destType) throws IOException {
 +		readLeb128(reader); /* align */
 +		readLeb128(reader); /* offset */
@@ -9715,14 +10624,27 @@ index 000000000..8377ce858
 +
 +		case 0x0C: /* br l */ {
 +			long labelidx = readLeb128(reader);
-+			branchToBlock(instAddress, labelidx);
++
++			ControlFrame block = getBlock(instAddress, labelidx);
++			ValType[] arguments = block.getBranchArguments();
++			popValues(instAddress, arguments);
++			setStackEffect(instAddress, valueStack.size(), arguments, block.initialStack.size(), arguments);
++			block.addBranch(instAddress);
++
 +			markUnreachable(instAddress);
 +			break;
 +		}
 +		case 0x0D: /* br_if l */ {
 +			long labelidx = readLeb128(reader);
 +			popValue(instAddress, ValType.i32);
-+			branchToBlock(instAddress, labelidx);
++
++			ControlFrame block = getBlock(instAddress, labelidx);
++			ValType[] arguments = block.getBranchArguments();
++			popValues(instAddress, arguments);
++			setStackEffect(instAddress, valueStack.size(), arguments, block.initialStack.size(), arguments);
++			block.addBranch(instAddress);
++			pushValues(instAddress, arguments);
++
 +			break;
 +		}
 +		case 0x0E: /* br_table l* l */ {
@@ -9732,7 +10654,15 @@ index 000000000..8377ce858
 +				Address caseAddress = func.getStartAddr().add(reader.getPointerIndex());
 +				contextreg.setBrTableCase(caseAddress, (i < count) ? i : -1);
 +				long labelidx = readLeb128(reader);
-+				branchToBlock(caseAddress, labelidx);
++
++				ControlFrame block = getBlock(caseAddress, labelidx);
++				ValType[] arguments = block.getBranchArguments();
++				ValType[] actualArgs = popValues(caseAddress, arguments);
++				setStackEffect(caseAddress, valueStack.size(), arguments, block.initialStack.size(), arguments);
++				block.addBranch(caseAddress);
++				if (i < count) {
++					pushValues(caseAddress, actualArgs);
++				}
 +			}
 +			markUnreachable(instAddress);
 +			break;
@@ -10207,6 +11137,7 @@ index 000000000..8377ce858
 +				readLeb128(reader); /* tableidx */
 +				popValue(instAddress, ValType.i32);
 +				popValue(instAddress);
++				pushValue(instAddress, ValType.i32);
 +				break;
 +			}
 +			case 0x10: /* table.size x */ {
@@ -11018,7 +11949,7 @@ index 000000000..829d68dd7
 +}
 diff --git a/Ghidra/Processors/WebAssembly/src/main/java/wasm/analysis/WasmStackVariableAnalyzer.java b/Ghidra/Processors/WebAssembly/src/main/java/wasm/analysis/WasmStackVariableAnalyzer.java
 new file mode 100644
-index 000000000..eab1b17bc
+index 000000000..f410fbfab
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/src/main/java/wasm/analysis/WasmStackVariableAnalyzer.java
 @@ -0,0 +1,264 @@
@@ -11106,7 +12037,7 @@ index 000000000..eab1b17bc
 +		monitor.initialize(program.getFunctionManager().getFunctionCount());
 +
 +		for (Function function : program.getListing().getFunctions(set, true)) {
-+			monitor.checkCanceled();
++			monitor.checkCancelled();
 +			monitor.setMessage("C Stack " + function.getName());
 +			monitor.incrementProgress(1);
 +
@@ -11237,7 +12168,7 @@ index 000000000..eab1b17bc
 +
 +		InstructionIterator iter = program.getListing().getInstructions(func.getBody(), true);
 +		while (iter.hasNext()) {
-+			monitor.checkCanceled();
++			monitor.checkCancelled();
 +			Instruction instr = iter.next();
 +
 +			try {
@@ -12937,10 +13868,10 @@ index 000000000..4a8b20a77
 +}
 diff --git a/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/WasmUnknownCustomSection.java b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/WasmUnknownCustomSection.java
 new file mode 100644
-index 000000000..d0c8d7319
+index 000000000..9ca7ab84f
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/WasmUnknownCustomSection.java
-@@ -0,0 +1,52 @@
+@@ -0,0 +1,58 @@
 +/* ###
 + * IP: GHIDRA
 + *
@@ -12960,6 +13891,8 @@ index 000000000..d0c8d7319
 +
 +import java.io.IOException;
 +
++import org.apache.commons.text.StringEscapeUtils;
++
 +import ghidra.app.util.bin.BinaryReader;
 +import ghidra.util.exception.DuplicateNameException;
 +import wasm.format.StructureBuilder;
@@ -12971,7 +13904,11 @@ index 000000000..d0c8d7319
 +	public WasmUnknownCustomSection(BinaryReader reader) throws IOException {
 +		super(reader);
 +		contentOffset = reader.getPointerIndex();
-+		contents = reader.readNextByteArray((int) getCustomSize());
++		if (getCustomSize() == 0) {
++			contents = new byte[0];
++		} else {
++			contents = reader.readNextByteArray((int) getCustomSize());
++		}
 +	}
 +
 +	@Override
@@ -12982,7 +13919,7 @@ index 000000000..d0c8d7319
 +
 +	@Override
 +	public String getName() {
-+		return ".custom" + getCustomName(); // to avoid DataType conflict
++		return ".custom." + StringEscapeUtils.escapeJava(getCustomName()); // to avoid DataType conflict
 +	}
 +
 +	public long getContentOffset() {
@@ -12995,7 +13932,7 @@ index 000000000..d0c8d7319
 +}
 diff --git a/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/ConstantExpression.java b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/ConstantExpression.java
 new file mode 100644
-index 000000000..e12f684ac
+index 000000000..0b0484bc0
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/ConstantExpression.java
 @@ -0,0 +1,223 @@
@@ -13076,11 +14013,11 @@ index 000000000..e12f684ac
 +			break;
 +		case 0x41:
 +			type = ConstantInstruction.I32_CONST;
-+			value = reader.readNext(LEB128Info::unsigned);
++			value = reader.readNext(LEB128Info::signed);
 +			break;
 +		case 0x42:
 +			type = ConstantInstruction.I64_CONST;
-+			value = reader.readNext(LEB128Info::unsigned);
++			value = reader.readNext(LEB128Info::signed);
 +			break;
 +		case 0x43:
 +			type = ConstantInstruction.F32_CONST;
@@ -13317,10 +14254,10 @@ index 000000000..c637a23d4
 +}
 diff --git a/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmDataSegment.java b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmDataSegment.java
 new file mode 100644
-index 000000000..761fbb507
+index 000000000..7444f29ab
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmDataSegment.java
-@@ -0,0 +1,103 @@
+@@ -0,0 +1,109 @@
 +/* ###
 + * IP: GHIDRA
 + *
@@ -13349,6 +14286,7 @@ index 000000000..761fbb507
 +
 +public class WasmDataSegment implements StructConverter {
 +
++	private LEB128Info mode;
 +	private LEB128Info index;
 +	private ConstantExpression offsetExpr;
 +	private long fileOffset;
@@ -13356,15 +14294,16 @@ index 000000000..761fbb507
 +	private byte[] data;
 +
 +	public WasmDataSegment(BinaryReader reader) throws IOException {
-+		int mode = reader.readNextUnsignedByte();
-+		if (mode == 2) {
++		mode = reader.readNext(LEB128Info::unsigned);
++		long modeVal = mode.asLong();
++		if (modeVal == 2) {
 +			index = reader.readNext(LEB128Info::unsigned);
 +		} else {
 +			/* for mode < 2, index defaults to 0 */
 +			index = null;
 +		}
 +
-+		if (mode == 0 || mode == 2) {
++		if (modeVal == 0 || modeVal == 2) {
 +			/* "active" segment with predefined offset */
 +			offsetExpr = new ConstantExpression(reader);
 +		} else {
@@ -13374,7 +14313,11 @@ index 000000000..761fbb507
 +
 +		size = reader.readNext(LEB128Info::unsigned);
 +		fileOffset = reader.getPointerIndex();
-+		data = reader.readNextByteArray((int) size.asLong());
++		if (size.asLong() == 0) {
++			data = new byte[0];
++		} else {
++			data = reader.readNextByteArray((int) size.asLong());
++		}
 +	}
 +
 +	public long getIndex() {
@@ -13410,7 +14353,7 @@ index 000000000..761fbb507
 +		}
 +		StructureBuilder builder = new StructureBuilder(structName);
 +
-+		builder.add(BYTE, "mode");
++		builder.addUnsignedLeb128(mode, "mode");
 +		if (index != null) {
 +			builder.addUnsignedLeb128(index, "index");
 +		}
@@ -13426,10 +14369,10 @@ index 000000000..761fbb507
 +}
 diff --git a/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmElementSegment.java b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmElementSegment.java
 new file mode 100644
-index 000000000..31217e6ff
+index 000000000..2491375fe
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmElementSegment.java
-@@ -0,0 +1,214 @@
+@@ -0,0 +1,215 @@
 +/* ###
 + * IP: GHIDRA
 + *
@@ -13466,7 +14409,7 @@ index 000000000..31217e6ff
 +
 +public class WasmElementSegment implements StructConverter {
 +
-+	private int flags;
++	private LEB128Info flags;
 +	private ElementSegmentMode mode;
 +
 +	private LEB128Info tableidx; /* if (flags & 3) == 2 */
@@ -13486,8 +14429,9 @@ index 000000000..31217e6ff
 +	}
 +
 +	public WasmElementSegment(BinaryReader reader) throws IOException {
-+		flags = reader.readNextUnsignedByte();
-+		if ((flags & 3) == 2) {
++		flags = reader.readNext(LEB128Info::unsigned);
++		long flagVal = flags.asLong();
++		if ((flagVal & 3) == 2) {
 +			/* active segment with explicit table index */
 +			tableidx = reader.readNext(LEB128Info::unsigned);
 +		} else {
@@ -13495,24 +14439,24 @@ index 000000000..31217e6ff
 +			tableidx = null;
 +		}
 +
-+		if ((flags & 1) == 0) {
++		if ((flagVal & 1) == 0) {
 +			/* active segment */
 +			mode = ElementSegmentMode.active;
 +			offset = new ConstantExpression(reader);
-+		} else if ((flags & 2) == 0) {
++		} else if ((flagVal & 2) == 0) {
 +			mode = ElementSegmentMode.passive;
 +		} else {
 +			mode = ElementSegmentMode.declarative;
 +		}
 +
-+		if ((flags & 3) == 0) {
++		if ((flagVal & 3) == 0) {
 +			/* implicit element type */
 +			elemkind = 0;
 +			elemtype = ValType.funcref;
 +		} else {
 +			/* explicit element type */
 +			int typeCode = reader.readNextUnsignedByte();
-+			if ((flags & 4) == 0) {
++			if ((flagVal & 4) == 0) {
 +				/* elemkind */
 +				elemkind = typeCode;
 +			} else {
@@ -13522,7 +14466,7 @@ index 000000000..31217e6ff
 +		}
 +
 +		count = reader.readNext(LEB128Info::unsigned);
-+		if ((flags & 4) == 0) {
++		if ((flagVal & 4) == 0) {
 +			/* vector of funcidx */
 +			funcidxs = new ArrayList<>();
 +			for (int i = 0; i < count.asLong(); i++) {
@@ -13556,7 +14500,7 @@ index 000000000..31217e6ff
 +	}
 +
 +	public ValType getElementType() {
-+		if ((flags & 4) == 0) {
++		if ((flags.asLong() & 4) == 0) {
 +			if (elemkind == 0) {
 +				return ValType.funcref;
 +			}
@@ -13591,7 +14535,7 @@ index 000000000..31217e6ff
 +		int elemSize = getElementType().getSize();
 +		int count = (int) this.count.asLong();
 +		byte[] result = new byte[count * elemSize];
-+		Arrays.fill(result, (byte) 0xff);
++		Arrays.fill(result, (byte) 0x00);
 +
 +		if (funcidxs != null) {
 +			for (int i = 0; i < count; i++) {
@@ -13617,14 +14561,14 @@ index 000000000..31217e6ff
 +	@Override
 +	public DataType toDataType() throws DuplicateNameException, IOException {
 +		StructureBuilder builder = new StructureBuilder("element_segment");
-+		builder.add(BYTE, "flags");
++		builder.addUnsignedLeb128(flags, "flags");
 +		if (tableidx != null) {
 +			builder.addUnsignedLeb128(tableidx, "tableidx");
 +		}
 +		if (offset != null) {
 +			builder.add(offset, "offset");
 +		}
-+		if ((flags & 3) != 0) {
++		if ((flags.asLong() & 3) != 0) {
 +			/* both elemkind and reftype are single bytes */
 +			builder.add(BYTE, "element_type");
 +		}
@@ -13925,10 +14869,10 @@ index 000000000..5a07a3abd
 +}
 diff --git a/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmImportEntry.java b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmImportEntry.java
 new file mode 100644
-index 000000000..21cc25b56
+index 000000000..f13a6f9ed
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmImportEntry.java
-@@ -0,0 +1,137 @@
+@@ -0,0 +1,139 @@
 +/* ###
 + * IP: GHIDRA
 + *
@@ -13947,6 +14891,8 @@ index 000000000..21cc25b56
 +package wasm.format.sections.structures;
 +
 +import java.io.IOException;
++
++import org.apache.commons.text.StringEscapeUtils;
 +
 +import ghidra.app.util.bin.BinaryReader;
 +import ghidra.app.util.bin.LEB128Info;
@@ -14043,7 +14989,7 @@ index 000000000..21cc25b56
 +
 +	@Override
 +	public DataType toDataType() throws DuplicateNameException, IOException {
-+		StructureBuilder builder = new StructureBuilder("import_" + getName());
++		StructureBuilder builder = new StructureBuilder("import_" + StringEscapeUtils.escapeJava(getName()));
 +		builder.add(module, "module");
 +		builder.add(field, "field");
 +		builder.add(BYTE, "kind");
@@ -14126,10 +15072,10 @@ index 000000000..c2025e5ea
 +}
 diff --git a/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmName.java b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmName.java
 new file mode 100644
-index 000000000..c7b9ab522
+index 000000000..4988debdf
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmName.java
-@@ -0,0 +1,53 @@
+@@ -0,0 +1,57 @@
 +/* ###
 + * IP: GHIDRA
 + *
@@ -14163,8 +15109,12 @@ index 000000000..c7b9ab522
 +
 +	public WasmName(BinaryReader reader) throws IOException {
 +		size = reader.readNext(LEB128Info::unsigned);
-+		byte[] data = reader.readNextByteArray((int) size.asLong());
-+		value = new String(data, StandardCharsets.UTF_8);
++		if (size.asLong() == 0) {
++			value = "";
++		} else {
++			byte[] data = reader.readNextByteArray((int) size.asLong());
++			value = new String(data, StandardCharsets.UTF_8);
++		}
 +	}
 +
 +	public long getSize() {
@@ -14393,10 +15343,10 @@ index 000000000..ca2577281
 +}
 diff --git a/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmNameMapSubsection.java b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmNameMapSubsection.java
 new file mode 100644
-index 000000000..b21d5ef46
+index 000000000..62f933821
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmNameMapSubsection.java
-@@ -0,0 +1,50 @@
+@@ -0,0 +1,52 @@
 +/* ###
 + * IP: GHIDRA
 + *
@@ -14415,6 +15365,8 @@ index 000000000..b21d5ef46
 +package wasm.format.sections.structures;
 +
 +import java.io.IOException;
++
++import org.apache.commons.text.StringEscapeUtils;
 +
 +import ghidra.app.util.bin.BinaryReader;
 +import ghidra.util.exception.DuplicateNameException;
@@ -14439,12 +15391,12 @@ index 000000000..b21d5ef46
 +
 +	@Override
 +	public void addToStructure(StructureBuilder builder) throws DuplicateNameException, IOException {
-+		builder.add(nameMap, entityName + "_names");
++		builder.add(nameMap, StringEscapeUtils.escapeJava(entityName) + "_names");
 +	}
 +
 +	@Override
 +	public String getName() {
-+		return ".name." + entityName;
++		return ".name." + StringEscapeUtils.escapeJava(entityName);
 +	}
 +}
 diff --git a/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmNameModuleSubsection.java b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmNameModuleSubsection.java
@@ -14630,10 +15582,10 @@ index 000000000..41ebf1268
 +}
 diff --git a/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmNameUnknownSubsection.java b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmNameUnknownSubsection.java
 new file mode 100644
-index 000000000..161ac18f8
+index 000000000..f45569779
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/src/main/java/wasm/format/sections/structures/WasmNameUnknownSubsection.java
-@@ -0,0 +1,41 @@
+@@ -0,0 +1,45 @@
 +/* ###
 + * IP: GHIDRA
 + *
@@ -14662,7 +15614,11 @@ index 000000000..161ac18f8
 +
 +	public WasmNameUnknownSubsection(BinaryReader reader) throws IOException {
 +		super(reader);
-+		contents = reader.readNextByteArray((int) getContentSize());
++		if (getContentSize() == 0) {
++			contents = new byte[0];
++		} else {
++			contents = reader.readNextByteArray((int) getContentSize());
++		}
 +	}
 +
 +	@Override
@@ -14807,7 +15763,7 @@ index 000000000..5dcad9f8c
 +}
 diff --git a/Ghidra/Processors/WebAssembly/src/main/java/wasm/pcode/InjectPayloadWasmEntry.java b/Ghidra/Processors/WebAssembly/src/main/java/wasm/pcode/InjectPayloadWasmEntry.java
 new file mode 100644
-index 000000000..98f5ff607
+index 000000000..eccbe957a
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/src/main/java/wasm/pcode/InjectPayloadWasmEntry.java
 @@ -0,0 +1,62 @@
@@ -14830,7 +15786,7 @@ index 000000000..98f5ff607
 +
 +import ghidra.program.model.address.Address;
 +import ghidra.program.model.lang.InjectContext;
-+import ghidra.program.model.lang.InjectPayloadSleigh;
++import ghidra.program.model.lang.InjectPayloadCallother;
 +import ghidra.program.model.listing.Program;
 +import ghidra.program.model.pcode.PcodeOp;
 +import wasm.WasmLoader;
@@ -14839,13 +15795,13 @@ index 000000000..98f5ff607
 +import wasm.format.WasmEnums.ValType;
 +
 +/**
-+ * The "uponentry" injection for a Wasm function. We inject code to copy from
++ * The function entry injection for a Wasm function. We inject code to copy from
 + * the artificial "inputs" registers into the real "locals" registers.
 + */
-+public class InjectPayloadWasmEntry extends InjectPayloadSleigh {
++public class InjectPayloadWasmEntry extends InjectPayloadCallother {
 +
-+	public InjectPayloadWasmEntry(String nm, int tp, String sourceName) {
-+		super(nm, tp, sourceName);
++	public InjectPayloadWasmEntry(String sourceName) {
++		super(sourceName);
 +	}
 +
 +	@Override
@@ -15034,7 +15990,7 @@ index 000000000..18b1ebeff
 +}
 diff --git a/Ghidra/Processors/WebAssembly/src/main/java/wasm/pcode/PcodeInjectLibraryWasm.java b/Ghidra/Processors/WebAssembly/src/main/java/wasm/pcode/PcodeInjectLibraryWasm.java
 new file mode 100644
-index 000000000..d77dd78c6
+index 000000000..d93ea9c7b
 --- /dev/null
 +++ b/Ghidra/Processors/WebAssembly/src/main/java/wasm/pcode/PcodeInjectLibraryWasm.java
 @@ -0,0 +1,53 @@
@@ -15076,10 +16032,10 @@ index 000000000..d77dd78c6
 +
 +	@Override
 +	public InjectPayload allocateInject(String sourceName, String name, int tp) {
-+		if (tp == InjectPayload.CALLMECHANISM_TYPE) {
-+			return new InjectPayloadWasmEntry(name, tp, sourceName);
-+		} else if (tp == InjectPayload.CALLOTHERFIXUP_TYPE) {
++		if (tp == InjectPayload.CALLOTHERFIXUP_TYPE) {
 +			switch (name) {
++			case "funcEntryCallOther":
++				return new InjectPayloadWasmEntry(sourceName);
 +			case "popCallOther":
 +			case "callEpilogueCallOther":
 +			case "callPrologueCallOther":
