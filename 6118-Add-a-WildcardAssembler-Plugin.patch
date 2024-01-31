@@ -6,14 +6,16 @@ Subject: [PATCH] 6118: Add a WildcardAssembler Plugin.
 Allows assembling instructions containing wildcards. Includes support for filtering assembly results to only include some completions for each wildcard.
 
 Update documentation and add example scripts for WildSleighAssembler.
+
+Address pull request feedback.
 ---
  .../WildcardAssembler/Module.manifest         |   0
  .../Features/WildcardAssembler/build.gradle   |  29 +
  .../WildcardAssembler/certification.manifest  |   6 +
- .../FindInstructionWithWildcard.java          | 346 ++++++++
+ .../FindInstructionWithWildcard.java          | 338 ++++++++
  .../WildSleighAssemblerInfo.java              | 157 ++++
  .../src/main/help/help/TOC_Source.xml         |  59 ++
- .../Wildcard_Assembler.html                   |  94 +++
+ .../Wildcard_Assembler.html                   |  96 +++
  .../java/ghidra/asm/wild/WildOperandInfo.java |  30 +
  .../ghidra/asm/wild/WildSleighAssembler.java  |  50 ++
  .../asm/wild/WildSleighAssemblerBuilder.java  | 128 +++
@@ -43,14 +45,14 @@ Update documentation and add example scripts for WildSleighAssembler.
  .../tree/WildAssemblyParseHiddenNode.java     |  46 +
  .../asm/wild/tree/WildAssemblyParseToken.java | 191 +++++
  .../asm/wild/WildSleighAssemblerTest.java     | 788 ++++++++++++++++++
- 36 files changed, 3234 insertions(+)
+ 36 files changed, 3228 insertions(+)
  create mode 100644 Ghidra/Features/WildcardAssembler/Module.manifest
  create mode 100644 Ghidra/Features/WildcardAssembler/build.gradle
  create mode 100644 Ghidra/Features/WildcardAssembler/certification.manifest
  create mode 100644 Ghidra/Features/WildcardAssembler/ghidra_scripts/FindInstructionWithWildcard.java
  create mode 100644 Ghidra/Features/WildcardAssembler/ghidra_scripts/WildSleighAssemblerInfo.java
  create mode 100644 Ghidra/Features/WildcardAssembler/src/main/help/help/TOC_Source.xml
- create mode 100644 Ghidra/Features/WildcardAssembler/src/main/help/help/topics/WildcardAssemblerPlugin/Wildcard_Assembler.html
+ create mode 100644 Ghidra/Features/WildcardAssembler/src/main/help/help/topics/WildcardAssemblerModule/Wildcard_Assembler.html
  create mode 100644 Ghidra/Features/WildcardAssembler/src/main/java/ghidra/asm/wild/WildOperandInfo.java
  create mode 100644 Ghidra/Features/WildcardAssembler/src/main/java/ghidra/asm/wild/WildSleighAssembler.java
  create mode 100644 Ghidra/Features/WildcardAssembler/src/main/java/ghidra/asm/wild/WildSleighAssemblerBuilder.java
@@ -121,7 +123,7 @@ index 000000000..c06bb9a20
 +}
 diff --git a/Ghidra/Features/WildcardAssembler/certification.manifest b/Ghidra/Features/WildcardAssembler/certification.manifest
 new file mode 100644
-index 000000000..f08f61572
+index 000000000..7815f1140
 --- /dev/null
 +++ b/Ghidra/Features/WildcardAssembler/certification.manifest
 @@ -0,0 +1,6 @@
@@ -130,13 +132,13 @@ index 000000000..f08f61572
 +##MODULE IP: Oxygen Icons - LGPL 3.0
 +Module.manifest||GHIDRA||||END|
 +src/main/help/help/TOC_Source.xml||GHIDRA||reviewed||END|
-+src/main/help/help/topics/WildcardAssemblerPlugin/Wildcard_Assembler.html||GHIDRA||||END|
++src/main/help/help/topics/WildcardAssemblerModule/Wildcard_Assembler.html||GHIDRA||||END|
 diff --git a/Ghidra/Features/WildcardAssembler/ghidra_scripts/FindInstructionWithWildcard.java b/Ghidra/Features/WildcardAssembler/ghidra_scripts/FindInstructionWithWildcard.java
 new file mode 100644
-index 000000000..21a637f94
+index 000000000..fd7401d83
 --- /dev/null
 +++ b/Ghidra/Features/WildcardAssembler/ghidra_scripts/FindInstructionWithWildcard.java
-@@ -0,0 +1,346 @@
+@@ -0,0 +1,338 @@
 +/* ###
 + * IP: GHIDRA
 + *
@@ -173,6 +175,8 @@ index 000000000..21a637f94
 +import java.util.HashMap;
 +import java.util.HashSet;
 +import java.util.List;
++import java.util.Map;
++import java.util.Set;
 +
 +import ghidra.app.plugin.assembler.AssemblySelector;
 +import ghidra.app.plugin.assembler.sleigh.parse.AssemblyParseResult;
@@ -186,19 +190,16 @@ index 000000000..21a637f94
 +import ghidra.asm.wild.WildSleighAssemblerBuilder;
 +import ghidra.asm.wild.sem.WildAssemblyResolvedPatterns;
 +import ghidra.program.model.mem.*;
-+import ghidra.program.model.listing.*;
-+import ghidra.program.database.ProgramBuilder;
 +import ghidra.program.model.address.*;
 +
 +public class FindInstructionWithWildcard extends GhidraScript {
 +
 +	public void run() throws Exception {
 +
-+		// The wildcard here specifies that the second operand of this instruction is
-+		// either "R12D" or "R13D". The instruction and/or wildcard here can be modified
-+		// to an instruction found in your x86_64 binary, or patch your binary to have
-+		// the bytes "0x45 0x31 0xed" somewhere.
-+		var allValidResults = getAllResolvedPatterns("XOR R13D,`Q1/R1(2|3)D`");
++		var instruction = askString("Instruction to search",
++			"Instruction to search for with wildcard (example is for x86_64, adjust if you are using a different architecture):",
++			"XOR R13D,`Q1/R1(2|3)D`");
++		var allValidResults = getAllResolvedPatterns(instruction);
 +
 +		var encodings = getMapOfUniqueInstructionEncodings(allValidResults);
 +
@@ -206,58 +207,39 @@ index 000000000..21a637f94
 +	}
 +
 +	/**
-+	 * Use an x86_64 WildSleighAssembler to assemble the given {@code wildcardedInstruction}
++	 * Use a {@link WildSleighAssembler} to assemble the given {@code wildcardedInstruction}
 +	 *
 +	 * @param wildcardedInstruction
-+	 * @return All WildAssemblyResolvedPatterns produced from the given input (e.g. All VALID
-+	 *         results of assembling the given input)
++	 * @return All {@link WildAssemblyResolvedPatterns} produced from the given input (e.g. All
++	 *         VALID results of assembling the given input)
 +	 */
-+	private ArrayList<WildAssemblyResolvedPatterns> getAllResolvedPatterns(
++	private List<WildAssemblyResolvedPatterns> getAllResolvedPatterns(
 +			String wildcardedInstruction) {
 +		var allValidResults = new ArrayList<WildAssemblyResolvedPatterns>();
 +
-+		// Get our current program or build a new program if our current binary isn't x86_64
-+		Program baseProgram = currentProgram;
-+		if (!baseProgram.getLanguageCompilerSpecPair().languageID.getIdAsString()
-+				.equals("x86:LE:64:default")) {
-+			println(
-+				"WARNING: Current program is not 'x86:LE:64:default' so using a builder instead!");
++		SleighLanguage currentLanguage = (SleighLanguage) currentProgram.getLanguage();
 +
-+			ProgramBuilder baseProgramBuilder;
-+			try {
-+				baseProgramBuilder = new ProgramBuilder("x86_64_test", "x86:LE:64:default");
-+			}
-+			catch (Exception e) {
-+				println(
-+					"Couldn't create ProgramBuilder with hardcoded languageName! Something is very wrong!");
-+				e.printStackTrace();
-+				return allValidResults;
-+			}
-+
-+			baseProgram = baseProgramBuilder.getProgram();
-+		}
-+
-+		SleighLanguage x8664Language = (SleighLanguage) baseProgram.getLanguage();
-+
-+		// Create a WildSleighAssembler that we'll use to assemble our wildcard-included instruction
-+		WildSleighAssemblerBuilder builderX8664 = new WildSleighAssemblerBuilder(x8664Language);
-+		WildSleighAssembler asmX8664 =
-+			builderX8664.getAssembler(new AssemblySelector(), baseProgram);
++		// Create a WildSleighAssembler that we'll use to assemble our wildcard-included
++		// instruction
++		WildSleighAssemblerBuilder assemblerBuilder =
++			new WildSleighAssemblerBuilder(currentLanguage);
++		WildSleighAssembler assembler =
++			assemblerBuilder.getAssembler(new AssemblySelector(), currentProgram);
 +
 +		// Parse a single line of assembly which includes a wildcard.
-+		Collection<AssemblyParseResult> parses = asmX8664.parseLine(wildcardedInstruction);
++		Collection<AssemblyParseResult> parses = assembler.parseLine(wildcardedInstruction);
 +
 +		// Remove all the AssemblyParseResults that represent parse errors
-+		AssemblyParseResult[] allResults = parses.stream()
++		List<AssemblyParseResult> allResults = parses.stream()
 +				.filter(p -> !p.isError())
-+				.toArray(AssemblyParseResult[]::new);
++				.toList();
 +
-+		// Try to resolve each AssemblyParseResult at address 0 and collect all the
-+		// results which are valid
-+		Address addr0 = x8664Language.getAddressFactory().getDefaultAddressSpace().getAddress(0);
++		// Try to resolve each AssemblyParseResult at address 0 and collect all the results which
++		// are valid
++		Address addr0 = currentLanguage.getAddressFactory().getDefaultAddressSpace().getAddress(0);
 +
 +		for (AssemblyParseResult r : allResults) {
-+			AssemblyResolutionResults results = asmX8664.resolveTree(r, addr0);
++			AssemblyResolutionResults results = assembler.resolveTree(r, addr0);
 +
 +			allValidResults.addAll(getValidResults(results));
 +		}
@@ -272,23 +254,22 @@ index 000000000..21a637f94
 +	 * @param allValidResolvedPatterns
 +	 * @return
 +	 */
-+	private HashMap<AssemblyPatternBlock, HashSet<WildOperandInfo>> getMapOfUniqueInstructionEncodings(
-+			ArrayList<WildAssemblyResolvedPatterns> allValidResolvedPatterns) {
++	private Map<AssemblyPatternBlock, Set<WildOperandInfo>> getMapOfUniqueInstructionEncodings(
++			List<WildAssemblyResolvedPatterns> allValidResolvedPatterns) {
 +
 +		// Bail out early if we were not able to find any results (should only happen if the hard
 +		// coded instruction in this example script is changed)
-+		if (allValidResolvedPatterns.size() < 1) {
++		if (allValidResolvedPatterns.isEmpty()) {
 +			println("No assembly results for given assembly with wildcard!");
-+			return new HashMap<AssemblyPatternBlock, HashSet<WildOperandInfo>>();
++			return Map.of();
 +		}
 +
 +		// 'allValidResolvedPatterns' has one entry for each encoding/wildcard value pair. We're
 +		// going to reduce that down to a map where each:
-+		// * Key is a single encoding of an instruction WITHOUT the wildcard operand
-+		// bits specified
-+		// * Value is a set of WildOperandInfo instances containing each valid wildcard
-+		// completion
-+		var encodings = new HashMap<AssemblyPatternBlock, HashSet<WildOperandInfo>>();
++		// * Key is a single encoding of an instruction WITHOUT the wildcard operand bits specified
++		// * Value is a set of WildOperandInfo instances containing each valid wildcard completion
++		Map<AssemblyPatternBlock, Set<WildOperandInfo>> encodings =
++			new HashMap<AssemblyPatternBlock, Set<WildOperandInfo>>();
 +		for (WildAssemblyResolvedPatterns x : allValidResolvedPatterns) {
 +			var y = new ReducedWildcardAssemblyResolvedPattern(x);
 +			var existing = encodings.get(y.maskedInstruction);
@@ -309,7 +290,7 @@ index 000000000..21a637f94
 +	 * correspond to the {@code WildOperandInfo} values found in the
 +	 * {@code WildAssemblyResolvedPatterns}.
 +	 */
-+	class ReducedWildcardAssemblyResolvedPattern {
++	static class ReducedWildcardAssemblyResolvedPattern {
 +		/**
 +		 * The original WildAssemblyResolvedPatterns that this is based on
 +		 */
@@ -322,8 +303,8 @@ index 000000000..21a637f94
 +		ReducedWildcardAssemblyResolvedPattern(WildAssemblyResolvedPatterns input) {
 +			parent = input;
 +
-+			// Remove all the bits which correspond to wildcarded opcodes from the instruction and
-+			// save the result as maskedInstruction
++			// Remove all the bits which correspond to wildcarded opcodes from the instruction save
++			// the result as maskedInstruction
 +			var reducedInstruction = input.getInstruction();
 +			for (WildOperandInfo info : input.getOperandInfo()) {
 +				reducedInstruction = reducedInstruction.maskOut(info.location());
@@ -340,22 +321,32 @@ index 000000000..21a637f94
 +		 * @return True if both values share the same maskedInstruction and wildcard(s)
 +		 */
 +		boolean sameBaseEncoding(ReducedWildcardAssemblyResolvedPattern other) {
-+			if (this.maskedInstruction.compareTo(other.maskedInstruction) != 0) {
++			if (!this.maskedInstruction.equals(other.maskedInstruction)) {
 +				return false;
 +			}
 +
++			// Loop over each WildOperandInfo in this to ensure that there is a matching one in
++			// other which shares the same wildcard (name) and location. Remember that there might
++			// be more than one wildcard in an instruction with the same name so we can't assume
++			// there's not a match if a matching name doesn't have the same location.
 +			for (WildOperandInfo info : this.parent.getOperandInfo()) {
 +				var foundMatch = false;
++
++				// Check all of other's WildOperandInfo
 +				for (WildOperandInfo otherInfo : other.parent.getOperandInfo()) {
-+					if (info.wildcard().equals(otherInfo.wildcard())) {
-+						if (!info.equals(otherInfo)) {
-+							return false;
-+						}
++					// Check if we have matching wildcards (names), expressions, and locations.
++					// Notice that we're *NOT* checking choice here, as we expect those to be different.
++					if (info.wildcard().equals(otherInfo.wildcard()) &&
++						info.expression().equals(otherInfo.expression()) &&
++						info.location().equals(otherInfo.location())) {
 +						foundMatch = true;
 +						break;
 +					}
 +				}
++
 +				if (!foundMatch) {
++					// We were unable to find a wildcard that matched so we declare that these
++					// encodings don't have the same base encoding
 +					return false;
 +				}
 +			}
@@ -366,9 +357,9 @@ index 000000000..21a637f94
 +	/**
 +	 * Searches for at most 10 matches for each given encoding, starting at {@code currentAddress}
 +	 * and prints results to the console.
-+	 *
++	 * <p>
 +	 * This searches encoding by encoding, restarting back at the start of memory for each.
-+	 *
++	 * <p>
 +	 * Does not currently print wildcard information about the search results, but this could be
 +	 * added.
 +	 *
@@ -378,14 +369,13 @@ index 000000000..21a637f94
 +	 *             If we find bytes but can't read them
 +	 */
 +	private void searchMemoryForEncodings(
-+			HashMap<AssemblyPatternBlock, HashSet<WildOperandInfo>> encodings,
-+			ArrayList<WildAssemblyResolvedPatterns> allValidResolvedPatterns)
++			Map<AssemblyPatternBlock, Set<WildOperandInfo>> encodings,
++			List<WildAssemblyResolvedPatterns> allValidResolvedPatterns)
 +			throws MemoryAccessException {
 +
 +		Memory memory = currentProgram.getMemory();
 +
-+		for (var entry : encodings.entrySet()) {
-+			var encoding = entry.getKey();
++		for (var encoding : encodings.keySet()) {
 +			println("Searching for encoding: " + encoding.toString());
 +
 +			// Start/restart back at currentAddress for each new encoding search
@@ -421,7 +411,7 @@ index 000000000..21a637f94
 +
 +	/**
 +	 * Print information about a specific search hit to the console
-+	 *
++	 * <p>
 +	 * NOTE: This is certainly not the highest performance way to do this, but it is reasonably
 +	 * simple and shows what is possible.
 +	 *
@@ -433,25 +423,28 @@ index 000000000..21a637f94
 +	 *            All resolved patterns which were searched from (used to find wildcard information)
 +	 */
 +	private void printSearchHitInfo(Address matchAddress, byte[] matchData,
-+			ArrayList<WildAssemblyResolvedPatterns> allValidResolvedPatterns) {
++			List<WildAssemblyResolvedPatterns> allValidResolvedPatterns) {
 +
 +		println("Hit at address: " + matchAddress.toString());
 +
-+		// Search over all the resolutions we were searching for and find the one which matches and
-+		// use it determine what the wildcard values are for the given hit.
++		// Check all the resolutions we were searching for and find the one which matches the found
++		// bytes and use that resolution to determine what the wildcard values are for the given
++		// hit.
 +		//
-+		// It'd likely be much faster the deduplicate similar WildAssemblyResolvedPatterns based on
++		// It'd likely be much faster to deduplicate similar WildAssemblyResolvedPatterns based on
 +		// their instruction with wildcards masked out (similar to what is done in
 +		// ReducedWildcardAssemblyResolvedPattern) and create a lookup table for wildcard values but
 +		// that's beyond this basic example script.
 +		for (WildAssemblyResolvedPatterns resolved : allValidResolvedPatterns) {
 +			var resolvedInstruction = resolved.getInstruction();
 +			if (resolvedInstruction.length() > matchData.length) {
-+				// It can't be this resolution because we were not given enough bytes of matchData
++				// It can't be this resolution because we were not given enough bytes of
++				// matchData
 +				continue;
 +			}
 +
-+			// Mask out the matchData with the mask of our candidate resolvedInstruction and see if
++			// Mask out the matchData with the mask of our candidate resolvedInstruction and
++			// see if
 +			// the results match. If they do, then this is the WildAssemblyResolvedPatterns
 +			var matchMasked = resolvedInstruction.getMaskedValue(matchData);
 +			if (matchMasked.equals(resolvedInstruction)) {
@@ -467,10 +460,11 @@ index 000000000..21a637f94
 +
 +	/**
 +	 * Return all items from {@code results} which are instances of
-+	 * {@code WildAssemblyResolvedPatterns}
++	 * {@link WildAssemblyResolvedPatterns}
 +	 *
 +	 * @param results
-+	 * @return
++	 *            The results to return {@link WildAssemblyResolvePatterns} from
++	 * @return All {@link WildAssemblyResolvedPatterns} which were found in the input
 +	 */
 +	private List<WildAssemblyResolvedPatterns> getValidResults(AssemblyResolutionResults results) {
 +		var out = new ArrayList<WildAssemblyResolvedPatterns>();
@@ -485,7 +479,7 @@ index 000000000..21a637f94
 +}
 diff --git a/Ghidra/Features/WildcardAssembler/ghidra_scripts/WildSleighAssemblerInfo.java b/Ghidra/Features/WildcardAssembler/ghidra_scripts/WildSleighAssemblerInfo.java
 new file mode 100644
-index 000000000..ed5772428
+index 000000000..8f0adfc68
 --- /dev/null
 +++ b/Ghidra/Features/WildcardAssembler/ghidra_scripts/WildSleighAssemblerInfo.java
 @@ -0,0 +1,157 @@
@@ -517,7 +511,6 @@ index 000000000..ed5772428
 +
 +import java.util.Arrays;
 +import java.util.Collection;
-+import java.util.Collections;
 +import java.util.List;
 +import java.util.stream.Collectors;
 +
@@ -551,9 +544,10 @@ index 000000000..ed5772428
 +	}
 +
 +	/**
-+	 * Use a WildSleighAssembler to assemble the given {@code wildcardedInstruction}
++	 * Use a {@link WildSleighAssembler} to assemble the given {@code wildcardedInstruction}
 +	 *
 +	 * @param wildcardedInstruction
++	 *            String of the instruction to assemble, possibly including a wildcard
 +	 * @return All AssemblyParseResult produced from the given input
 +	 */
 +	private List<AssemblyResolution> getAllAssemblyResolutions(
@@ -566,9 +560,9 @@ index 000000000..ed5772428
 +		if (sampleInstructions.contains(wildcardedInstruction) &&
 +			!language.getLanguageID().toString().equals("x86:LE:64:default")) {
 +			popup(
-+				"The current program must be a \"x86:LE:64:default\" binary for the example " +
-+					"instructions to work. Retry with a custom instruction in your architecture!");
-+			return Collections.emptyList();
++				"The current program is not a \"x86:LE:64:default\" binary that the example was " +
++					"designed for. This script will continue and try anyway, but the results might " +
++					"not be as expected. Retry with a custom instruction in your architecture!");
 +		}
 +
 +		// Create a WildSleighAssembler that we'll use to assemble our wildcard-included instruction
@@ -594,7 +588,7 @@ index 000000000..ed5772428
 +	}
 +
 +	/**
-+	 * Print information about the WildAssemblyResolvedPatterns in the given list.
++	 * Print information about the {@link WildAssemblyResolvedPatterns} in the given list.
 +	 *
 +	 * @param resolutionResults
 +	 */
@@ -622,7 +616,7 @@ index 000000000..ed5772428
 +	}
 +
 +	/**
-+	 * Print information about a single {@code WildAssemblyResolvedPatterns}, including information
++	 * Print information about a single {@link WildAssemblyResolvedPatterns}, including information
 +	 * about each of its wildcards.
 +	 *
 +	 * @param x
@@ -648,7 +642,7 @@ index 000000000..ed5772428
 +}
 diff --git a/Ghidra/Features/WildcardAssembler/src/main/help/help/TOC_Source.xml b/Ghidra/Features/WildcardAssembler/src/main/help/help/TOC_Source.xml
 new file mode 100644
-index 000000000..402241303
+index 000000000..d8d46b518
 --- /dev/null
 +++ b/Ghidra/Features/WildcardAssembler/src/main/help/help/TOC_Source.xml
 @@ -0,0 +1,59 @@
@@ -707,16 +701,16 @@ index 000000000..402241303
 +
 +		<tocdef id="Wildcard Assembler"
 +				text="Wildcard Assembler"
-+				target="help/topics/WildcardAssemblerPlugin/Wildcard_Assembler.html" >
++				target="help/topics/WildcardAssemblerModule/Wildcard_Assembler.html" >
 +		</tocdef>
 +	</tocref>
 +</tocroot>
-diff --git a/Ghidra/Features/WildcardAssembler/src/main/help/help/topics/WildcardAssemblerPlugin/Wildcard_Assembler.html b/Ghidra/Features/WildcardAssembler/src/main/help/help/topics/WildcardAssemblerPlugin/Wildcard_Assembler.html
+diff --git a/Ghidra/Features/WildcardAssembler/src/main/help/help/topics/WildcardAssemblerModule/Wildcard_Assembler.html b/Ghidra/Features/WildcardAssembler/src/main/help/help/topics/WildcardAssemblerModule/Wildcard_Assembler.html
 new file mode 100644
-index 000000000..5a20ffac8
+index 000000000..6071cf272
 --- /dev/null
-+++ b/Ghidra/Features/WildcardAssembler/src/main/help/help/topics/WildcardAssemblerPlugin/Wildcard_Assembler.html
-@@ -0,0 +1,94 @@
++++ b/Ghidra/Features/WildcardAssembler/src/main/help/help/topics/WildcardAssemblerModule/Wildcard_Assembler.html
+@@ -0,0 +1,96 @@
 +<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
 +
 +<HTML>
@@ -724,17 +718,19 @@ index 000000000..5a20ffac8
 +    <META http-equiv="Content-Language" content="en-us">
 +    <META http-equiv="Content-Type" content="text/html; charset=windows-1252">
 +
-+    <TITLE>Wildcard Assembler Plugin</TITLE>
++    <TITLE>Wildcard Assembler Module</TITLE>
 +    <LINK rel="stylesheet" type="text/css" href="help/shared/DefaultStyle.css">
 +  </HEAD>
 +
 +  <BODY>
-+    <H1><A name="Wildcard_Assembler_Plugin"></A>Wildcard Assembler Plugin</H1>
++    <H1><A name="Wildcard_Assembler_Module"></A>Wildcard Assembler Module</H1>
 +
 +    <BLOCKQUOTE>
 +
 +      <P><B>This feature is currently only available as an API for Ghidra
-+        scripts and plugins.</B></P>
++      scripts and plugins. For an example of how to use the API, see the
++      FindInstructionWithWildcard and WildSleighAssemblerInfo scripts in the
++      Script Manager.</B></P>
 +
 +      <P>The <I>Wildcard Assembler</I> extends Ghidra's assembler to enable
 +      assembling instructions with specific tokens replaced with wildcards.</P>
@@ -789,24 +785,24 @@ index 000000000..5a20ffac8
 +      <CODE>!</CODE> character. For example, in a x86:LE:32:default binary:</P>
 +      <BLOCKQUOTE>
 +        <DL>
-+          <DT>Assembles (no wildcard):</DT>
++          <DT>No wildcard:</DT>
 +          <DD><CODE>MOVSD.REP ES:EDI,ESI</CODE></DD>
 +
-+          <DT>Assembles (single token):</DT>
++          <DT>Single token:</DT>
 +          <DD><CODE>MOVSD.REP `Q1`:EDI,ESI</CODE></DD>
 +
-+          <DT>Assembles (single token):</DT>
++          <DT>Single token:</DT>
 +          <DD><CODE>MOVSD.REP ES:`Q2`,ESI</CODE></DD>
 +
-+          <DT>Does <I>NOT</I> assemble (single token):</DT>
++          <DT>Single token (Does <I>NOT</I> assemble):</DT>
 +          <DD><CODE>MOVSD.REP `Q3`,ESI</CODE></DD>
 +
-+          <DT>Assembles (multi-token):</DT>
++          <DT>Multi-token:</DT>
 +          <DD><CODE>MOVSD.REP `!Q4`,ESI</CODE></DD>
 +        </DL>
 +      </BLOCKQUOTE>
 +
-+      <P class="providedbyplugin">Provided by: <I>Wildcard Assembler Plugin</I></P>
++      <P class="providedbyplugin">Provided by: <I>Wildcard Assembler Module</I></P>
 +
 +    </BLOCKQUOTE>
 +  </BODY>
