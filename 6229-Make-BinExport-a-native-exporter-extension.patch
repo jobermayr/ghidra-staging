@@ -1,0 +1,1317 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Christian Blichmann <cblichmann@google.com>
+Date: Tue, 13 Feb 2024 18:27:26 +0100
+Subject: [PATCH] 6229: Make BinExport a native exporter extension
+
+- Add the code from https://github.com/google/binexport/tree/main/java
+  with small changes
+- Update all Gradle protobuf dependencies to 3.25.1
+- Ship a copy of `binexport2.proto` (authoritative version at
+  https://github.com/google/binexport/blob/main/binexport2.proto)
+- Performed a full build using `gradle buildGhidra`
+---
+ .../Debug/Framework-AsyncComm/Module.manifest |   2 +-
+ Ghidra/Debug/Framework-AsyncComm/build.gradle |   2 +-
+ .../MachineLearning/Module.manifest           |   2 +-
+ .../Extensions/MachineLearning/build.gradle   |   2 +-
+ Ghidra/Features/Base/build.gradle             |  52 +-
+ Ghidra/Features/Base/certification.manifest   |   1 +
+ .../app/util/exporter/BinExport2Builder.java  | 501 ++++++++++++++++++
+ .../app/util/exporter/BinExportExporter.java  | 208 ++++++++
+ .../Base/src/main/proto/binexport2.proto      | 416 +++++++++++++++
+ 9 files changed, 1181 insertions(+), 5 deletions(-)
+ create mode 100644 Ghidra/Features/Base/src/main/java/ghidra/app/util/exporter/BinExport2Builder.java
+ create mode 100644 Ghidra/Features/Base/src/main/java/ghidra/app/util/exporter/BinExportExporter.java
+ create mode 100644 Ghidra/Features/Base/src/main/proto/binexport2.proto
+
+diff --git a/Ghidra/Debug/Framework-AsyncComm/Module.manifest b/Ghidra/Debug/Framework-AsyncComm/Module.manifest
+index 89174007c..5445d02ab 100644
+--- a/Ghidra/Debug/Framework-AsyncComm/Module.manifest
++++ b/Ghidra/Debug/Framework-AsyncComm/Module.manifest
+@@ -1 +1 @@
+-MODULE FILE LICENSE: lib/protobuf-java-3.21.8.jar BSD-3-GOOGLE
++MODULE FILE LICENSE: lib/protobuf-java-3.25.1.jar BSD-3-GOOGLE
+diff --git a/Ghidra/Debug/Framework-AsyncComm/build.gradle b/Ghidra/Debug/Framework-AsyncComm/build.gradle
+index a84e15680..982df851c 100644
+--- a/Ghidra/Debug/Framework-AsyncComm/build.gradle
++++ b/Ghidra/Debug/Framework-AsyncComm/build.gradle
+@@ -22,7 +22,7 @@ apply plugin: 'eclipse'
+ eclipse.project.name = 'Debug Framework-AsyncComm'
+ 
+ dependencies {
+-	api 'com.google.protobuf:protobuf-java:3.21.8'
++	api 'com.google.protobuf:protobuf-java:3.25.1'
+ 	api project(':Generic')
+ 	api project(':Graph')
+ 	api project(':ProposedUtils')
+diff --git a/Ghidra/Extensions/MachineLearning/Module.manifest b/Ghidra/Extensions/MachineLearning/Module.manifest
+index b819a8578..7a32a3535 100644
+--- a/Ghidra/Extensions/MachineLearning/Module.manifest
++++ b/Ghidra/Extensions/MachineLearning/Module.manifest
+@@ -1,6 +1,6 @@
+ MODULE FILE LICENSE: lib/olcut-config-protobuf-5.2.0.jar BSD-2-ORACLE
+ MODULE FILE LICENSE: lib/olcut-core-5.2.0.jar BSD-2-ORACLE
+-MODULE FILE LICENSE: lib/protobuf-java-3.17.3.jar BSD-3-GOOGLE
++MODULE FILE LICENSE: lib/protobuf-java-3.25.1.jar BSD-3-GOOGLE
+ MODULE FILE LICENSE: lib/tribuo-classification-core-4.2.0.jar Apache License 2.0
+ MODULE FILE LICENSE: lib/tribuo-classification-tree-4.2.0.jar Apache License 2.0
+ MODULE FILE LICENSE: lib/tribuo-common-tree-4.2.0.jar Apache License 2.0
+diff --git a/Ghidra/Extensions/MachineLearning/build.gradle b/Ghidra/Extensions/MachineLearning/build.gradle
+index caaa610a7..6820daa41 100644
+--- a/Ghidra/Extensions/MachineLearning/build.gradle
++++ b/Ghidra/Extensions/MachineLearning/build.gradle
+@@ -26,7 +26,7 @@ dependencies {
+ 
+     api "com.oracle.labs.olcut:olcut-config-protobuf:5.2.0" //{exclude group: "com.google.protobuf", module: "protobuf-java"}
+     api ("com.oracle.labs.olcut:olcut-core:5.2.0") {exclude group: "org.jline"}
+-    api "com.google.protobuf:protobuf-java:3.17.3"   //only needed for running junits
++    api "com.google.protobuf:protobuf-java:3.25.1"   //only needed for running junits
+     api "org.tribuo:tribuo-classification-core:4.2.0"
+     api "org.tribuo:tribuo-classification-tree:4.2.0"
+     api "org.tribuo:tribuo-common-tree:4.2.0"
+diff --git a/Ghidra/Features/Base/build.gradle b/Ghidra/Features/Base/build.gradle
+index 20d8b7724..587b680cb 100644
+--- a/Ghidra/Features/Base/build.gradle
++++ b/Ghidra/Features/Base/build.gradle
+@@ -19,6 +19,7 @@ apply from: "$rootProject.projectDir/gradle/helpProject.gradle"
+ apply from: "$rootProject.projectDir/gradle/jacocoProject.gradle"
+ apply from: "$rootProject.projectDir/gradle/javaTestProject.gradle"
+ apply from: "$rootProject.projectDir/gradle/javadoc.gradle"
++apply plugin: 'com.google.protobuf'
+ apply plugin: 'eclipse'
+ eclipse.project.name = 'Features Base'
+ 
+@@ -33,8 +34,21 @@ rootProject.createJsondocs.exclude '**/ghidra/app/plugin/core/**'
+ 	a bit of custom help file generation.
+ */
+ 
++buildscript {
++	repositories {
++		maven {
++			url = uri("https://plugins.gradle.org/m2/")
++		}
++	}
++	dependencies {
++		classpath("com.google.protobuf:protobuf-gradle-plugin:0.9.4")
++	}
++}
++
++
+ configurations {
+ 	javacc
++	proto
+ }
+ 
+ dependencies {
+@@ -63,17 +77,53 @@ dependencies {
+ 	testImplementation project(path: ':DB', configuration: 'testArtifacts')
+ 	
+ 	javacc 'net.java.dev.javacc:javacc:5.0'
++
++	proto 'com.google.protobuf:protobuf-java:3.25.1'
++	configurations.implementation.extendsFrom(configurations.proto)
+ }
+ 
++protobuf {
++    // Configure the protoc executable
++    protoc {
++        artifact = 'com.google.protobuf:protoc:3.25.1'
++    }
++    // Make generator tasks visible in Eclipse
++    generateProtoTasks {
++        all().each {
++            it.group = 'generate proto'
++        }
++    }
++}
+ 
+-// add in the output of the javacc tasks to the java source
+ sourceSets {
+ 	main {
+ 		java {	
++			// Add in the output of the javacc tasks to the java source
+ 			srcDirs 'build/generated-src/javacc'
++			// Generated protobuf sources
++			srcDirs 'build/generated/source/proto/main/java'
+ 		}
+ 	}
+ }
++eclipse {
++    classpath {
++        file {
++            whenMerged {
++                def source = entries.find {
++                    it.path == 'build/generated/source/proto/main/java'
++                }
++                source.entryAttributes['ignore_optional_problems'] = 'true'
++            }
++        }
++    }
++}
++
++// Extend jar task to collect extra dependencies.
++jar {
++    from {
++        configurations.proto.collect { it.isDirectory() ? it : zipTree(it) }
++    }
++}
+ 
+ task buildCParser(type: JavaExec) {
+ 	group 'private'
+diff --git a/Ghidra/Features/Base/certification.manifest b/Ghidra/Features/Base/certification.manifest
+index ee1cfc78b..8d458932c 100644
+--- a/Ghidra/Features/Base/certification.manifest
++++ b/Ghidra/Features/Base/certification.manifest
+@@ -1,5 +1,6 @@
+ ##VERSION: 2.0
+ ##MODULE IP: Apache License 2.0
++##MODULE IP: BSD-3-GOOGLE
+ ##MODULE IP: Copyright Distribution Permitted
+ ##MODULE IP: FAMFAMFAM Icons - CC 2.5
+ ##MODULE IP: LGPL 2.1
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/exporter/BinExport2Builder.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/exporter/BinExport2Builder.java
+new file mode 100644
+index 000000000..f1af68672
+--- /dev/null
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/exporter/BinExport2Builder.java
+@@ -0,0 +1,501 @@
++/* ###
++ * IP: GHIDRA
++ *
++ * Copyright 2011-2024 Google LLC
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except
++ * in compliance with the License. You may obtain a copy of the License at
++ *
++ * http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software distributed under the License
++ * is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
++ * or implied. See the License for the specific language governing permissions and limitations under
++ * the License.
++ */
++
++package ghidra.app.util.exporter;
++
++import com.google.protobuf.ByteString;
++import com.google.security.zynamics.BinExport.BinExport2;
++import com.google.security.zynamics.BinExport.BinExport2.Builder;
++import ghidra.program.model.address.Address;
++import ghidra.program.model.block.BasicBlockModel;
++import ghidra.program.model.block.CodeBlock;
++import ghidra.program.model.block.CodeBlockReference;
++import ghidra.program.model.listing.CodeUnitFormat;
++import ghidra.program.model.listing.CodeUnitFormatOptions;
++import ghidra.program.model.listing.Function;
++import ghidra.program.model.listing.FunctionManager;
++import ghidra.program.model.listing.Instruction;
++import ghidra.program.model.listing.Listing;
++import ghidra.program.model.listing.Program;
++import ghidra.program.model.mem.MemoryAccessException;
++import ghidra.program.model.mem.MemoryBlock;
++import ghidra.program.model.symbol.FlowType;
++import ghidra.program.model.symbol.RefType;
++import ghidra.program.model.symbol.Reference;
++import ghidra.program.model.symbol.SymbolUtilities;
++import ghidra.util.exception.CancelledException;
++import ghidra.util.task.TaskMonitor;
++import java.io.File;
++import java.util.ArrayList;
++import java.util.Comparator;
++import java.util.HashMap;
++import java.util.Map;
++import java.util.Map.Entry;
++import java.util.TreeMap;
++import java.util.function.ToIntFunction;
++
++/**
++ * Java implementation of the BinExport2 writer class for Ghidra using a builder pattern.
++ *
++ * @see <a href=
++ *      "https://github.com/google/binexport/blob/5591588fd6b30f9f751914cb8766aa258bd6f6f5/binexport2_writer.h#L24">C++
++ *      implementation</a>
++ */
++public class BinExport2Builder {
++	private final Builder builder = BinExport2.newBuilder();
++
++	private TaskMonitor monitor;
++
++	private final Program program;
++	private final Listing listing;
++	private final BasicBlockModel bbModel;
++
++	private BinExportExporter.MnemonicMapper mnemonicMapper =
++		new BinExportExporter.IdentityMnemonicMapper();
++	private long addressOffset = 0;
++	private boolean prependNamespace = false;
++
++	public BinExport2Builder(Program ghidraProgram) {
++		program = ghidraProgram;
++		listing = program.getListing();
++		bbModel = new BasicBlockModel(program, true);
++	}
++
++	public BinExport2Builder setMnemonicMapper(BinExportExporter.MnemonicMapper mapper) {
++		mnemonicMapper = mapper;
++		return this;
++	}
++
++	public BinExport2Builder setAddressOffset(long offset) {
++		addressOffset = offset;
++		return this;
++	}
++
++	public BinExport2Builder setPrependNamespace(boolean isPrepended) {
++		prependNamespace = isPrepended;
++		return this;
++	}
++
++	private long getMappedAddress(Address address) {
++		return address.getOffset() - addressOffset;
++	}
++
++	private long getMappedAddress(Instruction instr) {
++		return getMappedAddress(instr.getAddress());
++	}
++
++	private void buildMetaInformation() {
++		monitor.setIndeterminate(true);
++		monitor.setMessage("Exporting meta data");
++
++		// Ghidra uses a quad format like x86:LE:32:default, BinExport just keeps
++		// the processor and address size.
++		String[] quad = program.getLanguageID().toString().split(":", 4);
++		// TODO(cblichmann): Canonicalize architecture names
++		String arch = quad[0] + "-" + quad[2];
++
++		builder.getMetaInformationBuilder()
++				.setExecutableName(new File(program.getExecutablePath()).getName())
++				.setExecutableId(program.getExecutableSHA256())
++				.setArchitectureName(arch)
++				.setTimestamp(System.currentTimeMillis() / 1000);
++	}
++
++	private void buildExpressions(Map<String, Integer> expressionIndices) {
++		var cuf = new CodeUnitFormat(new CodeUnitFormatOptions());
++		int id = 0;
++		for (Instruction instr : listing.getInstructions(true)) {
++			for (int i = 0; i < instr.getNumOperands(); i++) {
++				String opRep = cuf.getOperandRepresentationString(instr, i);
++				if (expressionIndices.putIfAbsent(opRep, id) != null) {
++					continue;
++				}
++				id++;
++				builder.addExpressionBuilder()
++						.setType(BinExport2.Expression.Type.SYMBOL)
++						.setSymbol(opRep);
++			}
++		}
++	}
++
++	private void buildOperands(Map<String, Integer> expressionIndices) {
++		var entries = new ArrayList<>(expressionIndices.entrySet());
++		entries.sort(Entry.comparingByValue());
++		for (var entry : entries) {
++			builder.addOperandBuilder().addExpressionIndex(entry.getValue());
++		}
++	}
++
++	private void buildMnemonics(Map<String, Integer> mnemonicIndices) {
++		monitor.setIndeterminate(true);
++		monitor.setMessage("Computing mnemonic histogram");
++		var mnemonicHist = new HashMap<String, Integer>();
++		for (Instruction instr : listing.getInstructions(true)) {
++			mnemonicHist.merge(mnemonicMapper.getInstructionMnemonic(instr), 1,
++				Integer::sum);
++		}
++		var mnemonicList = new ArrayList<>(mnemonicHist.entrySet());
++		mnemonicList.sort(Comparator
++				.comparingInt((ToIntFunction<Entry<String, Integer>>) Entry::getValue)
++				.reversed()
++				.thenComparing(Entry::getKey));
++		int id = 0;
++		for (var entry : mnemonicList) {
++			builder.addMnemonicBuilder().setName(entry.getKey());
++			mnemonicIndices.put(entry.getKey(), id++);
++		}
++	}
++
++	private void buildInstructions(Map<String, Integer> mnemonics,
++			Map<String, Integer> expressionIndices,
++			Map<Long, Integer> instructionIndices) {
++		monitor.setIndeterminate(false);
++		monitor.setMessage("Exporting instructions");
++		monitor.setMaximum(listing.getNumInstructions());
++		int progress = 0;
++		Instruction prevInstr = null;
++		long prevAddress = 0;
++		int prevSize = 0;
++		int id = 0;
++		var cuf = new CodeUnitFormat(new CodeUnitFormatOptions());
++		for (Instruction instr : listing.getInstructions(true)) {
++			long address = getMappedAddress(instr);
++
++			var instrBuilder = builder.addInstructionBuilder();
++			// Write the full instruction address iff:
++			// - there is no previous instruction
++			// - the previous instruction doesn't have code flow into the current one
++			// - the previous instruction overlaps the current one
++			// - the current instruction is a function entry point
++			if (prevInstr == null || !prevInstr.hasFallthrough() ||
++				prevAddress + prevSize != address ||
++				listing.getFunctionAt(instr.getAddress()) != null) {
++				instrBuilder.setAddress(address);
++			}
++			try {
++				var bytes = instr.getBytes();
++				instrBuilder.setRawBytes(ByteString.copyFrom(bytes));
++				prevSize = bytes.length;
++			}
++			catch (MemoryAccessException e) {
++				// Leave raw bytes empty
++			}
++			int mnemonicIndex =
++				mnemonics.get(mnemonicMapper.getInstructionMnemonic(instr));
++			if (mnemonicIndex != 0) {
++				// Only store if different from default value
++				instrBuilder.setMnemonicIndex(mnemonicIndex);
++			}
++			instructionIndices.put(address, id++);
++
++			// TODO(cblichmann): One expression per operand for now
++			for (int i = 0; i < instr.getNumOperands(); i++) {
++				var lookup =
++					expressionIndices.get(cuf.getOperandRepresentationString(instr, i));
++				if (lookup == null) {
++					continue;
++				}
++				instrBuilder.addOperandIndex(lookup);
++			}
++
++			// Export call targets.
++			for (Reference ref : instr.getReferenceIteratorTo()) {
++				RefType refType = ref.getReferenceType();
++				if (!refType.isCall()) {
++					continue;
++				}
++				instrBuilder.addCallTarget(getMappedAddress(ref.getToAddress()));
++			}
++
++			prevInstr = instr;
++			prevAddress = address;
++			monitor.setProgress(progress++);
++		}
++	}
++
++	private void buildBasicBlocks(Map<Long, Integer> instructionIndices,
++			Map<Long, Integer> basicBlockIndices) throws CancelledException {
++		int id = 0;
++		for (var bbIter = bbModel.getCodeBlocks(monitor); bbIter.hasNext();) {
++			CodeBlock bb = bbIter.next();
++
++			var protoBb = builder.addBasicBlockBuilder();
++
++			int instructionIndex;
++			int beginIndex = -1;
++			int endIndex = -1;
++			for (Instruction instr : listing.getInstructions(bb, true)) {
++				instructionIndex = instructionIndices.get(getMappedAddress(instr));
++				if (beginIndex < 0) {
++					beginIndex = instructionIndex;
++					endIndex = beginIndex + 1;
++				}
++				else if (instructionIndex != endIndex) {
++					// Sequence is broken, store an interval
++					var indexRange =
++						protoBb.addInstructionIndexBuilder().setBeginIndex(beginIndex);
++					if (endIndex != beginIndex + 1) {
++						// Omit end index in the single instruction interval case
++						indexRange.setEndIndex(endIndex);
++					}
++					beginIndex = instructionIndex;
++					endIndex = beginIndex + 1;
++				}
++				else {
++					// Sequence is unbroken, remember endIndex
++					endIndex = instructionIndex + 1;
++				}
++			}
++			var indexRange =
++				protoBb.addInstructionIndexBuilder().setBeginIndex(beginIndex);
++			if (endIndex != beginIndex + 1) {
++				// Like above, omit end index in the single instruction interval case
++				indexRange.setEndIndex(endIndex);
++			}
++			basicBlockIndices.put(getMappedAddress(bb.getFirstStartAddress()), id++);
++		}
++	}
++
++	private void buildFlowGraphs(Map<Long, Integer> basicBlockIndices)
++			throws CancelledException {
++		FunctionManager funcManager = program.getFunctionManager();
++		monitor.setIndeterminate(false);
++		monitor.setMaximum(funcManager.getFunctionCount());
++		int i = 0;
++
++		for (Function func : funcManager.getFunctions(true)) {
++			monitor.setProgress(i++);
++			if (func.getEntryPoint().isNonLoadedMemoryAddress()) {
++				continue;
++			}
++
++			var bbIter = bbModel.getCodeBlocksContaining(func.getBody(), monitor);
++			if (!bbIter.hasNext()) {
++				continue; // Skip empty flow graphs, they only exist as call graph nodes
++			}
++			var flowGraph = builder.addFlowGraphBuilder();
++			while (bbIter.hasNext()) {
++				CodeBlock bb = bbIter.next();
++				long bbAddress = getMappedAddress(bb.getFirstStartAddress());
++				int id = basicBlockIndices.get(bbAddress);
++				if (bbAddress == getMappedAddress(func.getEntryPoint())) {
++					flowGraph.setEntryBasicBlockIndex(id);
++				}
++				flowGraph.addBasicBlockIndex(id);
++
++				long bbLastInstrAddress =
++					getMappedAddress(listing.getInstructionBefore(bb.getMaxAddress()));
++				var edges = new ArrayList<BinExport2.FlowGraph.Edge>();
++				var lastFlow = RefType.INVALID;
++				for (var bbDestIter = bb.getDestinations(monitor); bbDestIter
++						.hasNext();) {
++					CodeBlockReference bbRef = bbDestIter.next();
++					// BinExport2 only stores flow from the very last instruction of a
++					// basic block.
++					if (getMappedAddress(bbRef.getReferent()) != bbLastInstrAddress) {
++						continue;
++					}
++
++					var edge = BinExport2.FlowGraph.Edge.newBuilder();
++					var targetId = basicBlockIndices
++							.get(getMappedAddress(bbRef.getDestinationAddress()));
++					FlowType flow = bbRef.getFlowType();
++					if (flow.isConditional() || lastFlow.isConditional()) {
++						edge.setType(flow.isConditional()
++								? BinExport2.FlowGraph.Edge.Type.CONDITION_TRUE
++								: BinExport2.FlowGraph.Edge.Type.CONDITION_FALSE);
++						edge.setSourceBasicBlockIndex(id);
++						if (targetId != null) {
++							edge.setTargetBasicBlockIndex(targetId);
++						}
++						edges.add(edge.build());
++					}
++					else if (flow.isUnConditional() && !flow.isComputed()) {
++						edge.setSourceBasicBlockIndex(id);
++						if (targetId != null) {
++							edge.setTargetBasicBlockIndex(targetId);
++						}
++						edges.add(edge.build());
++					}
++					else if (flow.isJump() && flow.isComputed()) {
++						edge.setSourceBasicBlockIndex(id);
++						if (targetId != null) {
++							edge.setTargetBasicBlockIndex(targetId);
++							edge.setType(BinExport2.FlowGraph.Edge.Type.SWITCH);
++						}
++						edges.add(edge.build());
++					}
++					lastFlow = flow;
++				}
++				flowGraph.addAllEdge(edges);
++			}
++			assert flowGraph.getEntryBasicBlockIndex() > 0;
++		}
++	}
++
++	private void buildCallGraph() throws CancelledException {
++		var callGraph = builder.getCallGraphBuilder();
++		FunctionManager funcManager = program.getFunctionManager();
++		monitor.setIndeterminate(false);
++		monitor.setMaximum(funcManager.getFunctionCount() * 2L);
++		int i = 0;
++		int id = 0;
++		Map<Long, Integer> vertexIndices = new HashMap<>();
++
++		// First round, gather vertex indices for all functions.
++		// TODO(cblichmann): Handle imports using getExternalFunctions()
++		for (Function func : funcManager.getFunctions(true)) {
++			monitor.setProgress(i++);
++			Address entryPoint = func.getEntryPoint();
++			if (entryPoint.isNonLoadedMemoryAddress()) {
++				continue;
++			}
++			long mappedEntryPoint = getMappedAddress(entryPoint);
++
++			var vertex = callGraph.addVertexBuilder().setAddress(mappedEntryPoint);
++			if (func.isThunk()) {
++				// Only store type if different from default value (NORMAL)
++				vertex.setType(BinExport2.CallGraph.Vertex.Type.THUNK);
++			}
++
++			if (!func.getName()
++					.equals(SymbolUtilities.getDefaultFunctionName(entryPoint))) {
++				// Ghidra does not seem to provide both mangled and demangled names
++				// (like IDA). Once the Demangle analyzer or DemangleAllScript has run,
++				// function names will always appear demangled. Short of running the
++				// demangler ourselves and comparing before/after names, there is no way
++				// to distinguish mangled from demangled names.
++				// Hence, the BinExport will have the names in the mangle_name field.
++
++				// Mangled name is the default, optionally prefixed with namespace.
++				vertex.setMangledName(getFunctionName(func));
++			}
++			vertexIndices.put(mappedEntryPoint, id++);
++		}
++
++		// Second round, insert all call graph edges.
++		for (Function func : funcManager.getFunctions(true)) {
++			monitor.setProgress(i++);
++			Address entryPoint = func.getEntryPoint();
++			if (entryPoint.isNonLoadedMemoryAddress()) {
++				continue;
++			}
++
++			var bbIter = bbModel.getCodeBlocksContaining(func.getBody(), monitor);
++			if (!bbIter.hasNext()) {
++				continue; // Skip empty flow graphs, they only exist as call graph nodes
++			}
++			id = vertexIndices.get(getMappedAddress(func.getEntryPoint()));
++
++			while (bbIter.hasNext()) {
++				CodeBlock bb = bbIter.next();
++
++				for (var bbDestIter = bb.getDestinations(monitor); bbDestIter
++						.hasNext();) {
++					CodeBlockReference bbRef = bbDestIter.next();
++					FlowType flow = bbRef.getFlowType();
++					if (!flow.isCall()) {
++						continue;
++					}
++
++					var targetId = vertexIndices
++							.get(getMappedAddress(bbRef.getDestinationAddress()));
++					if (targetId != null) {
++						callGraph.addEdgeBuilder()
++								.setSourceVertexIndex(id)
++								.setTargetVertexIndex(targetId);
++					}
++				}
++			}
++		}
++	}
++
++	private void buildSections() {
++		monitor.setMessage("Exporting sections");
++		monitor.setIndeterminate(false);
++		MemoryBlock[] blocks = program.getMemory().getBlocks();
++		monitor.setMaximum(blocks.length);
++		for (int i = 0; i < blocks.length; i++) {
++			var block = blocks[i];
++			builder.addSectionBuilder()
++					.setAddress(block.getStart().getOffset())
++					.setSize(block.getSize())
++					.setFlagR(block.isRead())
++					.setFlagW(block.isWrite())
++					.setFlagX(block.isExecute());
++			monitor.setProgress(i);
++		}
++	}
++
++	private String getFunctionName(Function function) {
++		if (!prependNamespace) {
++			return function.getName();
++		}
++		// Push all parent namespace names on top of the Vector.
++		var functionNameComponents = new ArrayList<String>();
++		var parentNamespace = function.getParentNamespace();
++		while (parentNamespace != null && !"Global".equals(parentNamespace.getName())) {
++			functionNameComponents.add(0, parentNamespace.getName());
++			parentNamespace = parentNamespace.getParentNamespace();
++		}
++		// Add the name of the function as the last component.
++		functionNameComponents.add(function.getName());
++		return String.join("::", functionNameComponents);
++	}
++
++	public BinExport2 build(TaskMonitor taskMonitor) throws CancelledException {
++		monitor = taskMonitor != null ? taskMonitor : TaskMonitor.DUMMY;
++
++		buildMetaInformation();
++
++		// TODO(cblichmann): Implement full expression trees. For now, each
++		// expression corresponds to exactly one operand. Those
++		// consist of Ghidra's string representation and are of
++		// type SYMBOL.
++		var expressionIndices = new HashMap<String, Integer>();
++		buildExpressions(expressionIndices);
++		buildOperands(expressionIndices);
++
++		var mnemonics = new TreeMap<String, Integer>();
++		buildMnemonics(mnemonics);
++		var instructionIndices = new TreeMap<Long, Integer>();
++		buildInstructions(mnemonics, expressionIndices, instructionIndices);
++		monitor.setMessage("Exporting basic block structure");
++		var basicBlockIndices = new HashMap<Long, Integer>();
++		buildBasicBlocks(instructionIndices, basicBlockIndices);
++		// TODO(cblichmann): Implement these:
++		// buildComments()
++		// buildStrings();
++		// buildDataReferences()
++		monitor.setMessage("Exporting flow graphs");
++		buildFlowGraphs(basicBlockIndices);
++		monitor.setMessage("Exporting call graph");
++		buildCallGraph();
++		buildSections();
++
++		return builder.build();
++	}
++
++	public BinExport2 build() {
++		try {
++			return build(TaskMonitor.DUMMY);
++		}
++		catch (final CancelledException e) {
++			assert false : "TaskMonitor.DUMMY should not throw";
++			throw new RuntimeException(e);
++		}
++	}
++}
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/exporter/BinExportExporter.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/exporter/BinExportExporter.java
+new file mode 100644
+index 000000000..56af438df
+--- /dev/null
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/exporter/BinExportExporter.java
+@@ -0,0 +1,208 @@
++/* ###
++ * IP: GHIDRA
++ *
++ * Copyright 2011-2024 Google LLC
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except
++ * in compliance with the License. You may obtain a copy of the License at
++ *
++ * http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software distributed under the License
++ * is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
++ * or implied. See the License for the specific language governing permissions and limitations under
++ * the License.
++ */
++
++package ghidra.app.util.exporter;
++
++import java.io.File;
++import java.io.FileOutputStream;
++import java.io.IOException;
++import java.util.HashMap;
++import java.util.List;
++import java.util.Map;
++
++import com.google.security.zynamics.BinExport.BinExport2;
++
++import ghidra.app.util.DomainObjectService;
++import ghidra.app.util.Option;
++import ghidra.app.util.OptionException;
++import ghidra.framework.model.DomainObject;
++import ghidra.program.model.address.AddressSetView;
++import ghidra.program.model.lang.Language;
++import ghidra.program.model.listing.Instruction;
++import ghidra.program.model.listing.Program;
++import ghidra.util.exception.CancelledException;
++import ghidra.util.task.TaskMonitor;
++
++/**
++ * Exports Ghidra disassembly into BinExport v2 format.
++ * <p>
++ * This is the native format used by BinDiff.
++ */
++public class BinExportExporter extends Exporter {
++	/**
++	 * File extension. For historical reasons, this does not include a version nubmer and is usually
++	 * stylized in Pascal case.
++	 */
++	public static final String EXTENSION = "BinExport";
++	public static final String SUFFIX = "." + EXTENSION;
++
++	/** Display name that appears in the export dialog. */
++	public static final String NAME = "Binary BinExport (v2, for BinDiff)";
++
++	// Option names
++	private static final String IDAPRO_COMPAT_OPTGROUP = "IDA Pro Compatibility";
++	private static final String IDAPRO_COMPAT_OPT_SUBTRACT_IMAGEBASE =
++		"Subtract Imagebase";
++	private static final String IDAPRO_COMPAT_OPT_REMAP_MNEMONICS =
++		"Remap mnemonics";
++	private static final String IDAPRO_COMPAT_OPT_PREPEND_NAMESPACE =
++		"Prepend Namespace to Function Names";
++
++	/** Whether to subtract the program image base from addresses for export. */
++	private boolean subtractImagebase = false;
++
++	/**
++	 * Whether to remap Ghidra's mnemonics into IDA Pro style ones. Note that this is does not performa
++	 * comprehensive remapping, but is rather a best effort to somewhat minimize the differences between
++	 * disassembly representations.
++	 */
++	private boolean remapMnemonics = false;
++
++	/** Whether to prepend "namespace::" to function names where the namespace is not "Global". */
++	private boolean prependNamespace = false;
++
++	/** Remaps Ghidra instruction mnemonics. */
++	public interface MnemonicMapper {
++
++		/**
++		 * Returns the remapped instruction mnemonic for a Ghidra instruction.
++		 * <p>
++		 * The default implementation maps each instruction to itself.
++		 */
++		default String getInstructionMnemonic(Instruction instr) {
++			return instr.getMnemonicString();
++		}
++	}
++
++	/** Default implementation of the {@code MnemonicMapper} interface. */
++	public static class IdentityMnemonicMapper implements MnemonicMapper {
++	}
++
++	/**
++	 * IDA uses lowercase instruction mnemonics for some architectures (notably X86).
++	 */
++	public static class IdaProMnemonicMapper implements MnemonicMapper {
++
++		private enum IdaProArchitecture {
++			ARM, DALVIK, METAPC, MIPS, PPC, GENERIC
++		}
++
++		private final IdaProArchitecture idaArch;
++
++		private final Map<String, String> mapCache = new HashMap<>();
++
++		public IdaProMnemonicMapper(Language language) {
++			switch (language.getProcessor().toString().toLowerCase()) {
++				case "x86":
++					idaArch = IdaProArchitecture.METAPC;
++					mapCache.put("RET", "retn");
++					break;
++				default:
++					idaArch = IdaProArchitecture.GENERIC;
++			}
++		}
++
++		@Override
++		public String getInstructionMnemonic(Instruction instr) {
++			// TODO(cblichmann): Implement a more sophisticated scheme close to what IDA Pro does.
++			final String mnemnonic = instr.getMnemonicString();
++			if (idaArch != IdaProArchitecture.METAPC) {
++				return mnemnonic;
++			}
++			return mapCache.computeIfAbsent(mnemnonic, String::toLowerCase);
++		}
++	}
++
++	public BinExportExporter() {
++		// TODO(cblichmann): Add help location.
++		super(NAME, EXTENSION, null);
++	}
++
++	@Override
++	public List<Option> getOptions(DomainObjectService domainObjectService) {
++		return List.of(
++			new Option(IDAPRO_COMPAT_OPTGROUP, IDAPRO_COMPAT_OPT_SUBTRACT_IMAGEBASE,
++				Boolean.FALSE),
++			new Option(IDAPRO_COMPAT_OPTGROUP, IDAPRO_COMPAT_OPT_REMAP_MNEMONICS,
++				Boolean.FALSE),
++			new Option(IDAPRO_COMPAT_OPTGROUP, IDAPRO_COMPAT_OPT_PREPEND_NAMESPACE,
++				Boolean.FALSE));
++	}
++
++	@Override
++	public void setOptions(List<Option> options) throws OptionException {
++		for (final var option : options) {
++			switch (option.getName()) {
++				case IDAPRO_COMPAT_OPT_SUBTRACT_IMAGEBASE:
++					subtractImagebase = (boolean) option.getValue();
++					break;
++				case IDAPRO_COMPAT_OPT_REMAP_MNEMONICS:
++					remapMnemonics = (boolean) option.getValue();
++					break;
++				case IDAPRO_COMPAT_OPT_PREPEND_NAMESPACE:
++					prependNamespace = (boolean) option.getValue();
++					break;
++			}
++		}
++	}
++
++	/**
++	 * Returns false. BinExport export only supports entire databases.
++	 */
++	@Override
++	public boolean supportsAddressRestrictedExport() {
++		return false;
++	}
++
++	@Override
++	public boolean export(File file, DomainObject domainObj,
++			AddressSetView addrSet, TaskMonitor monitor)
++			throws ExporterException, IOException {
++		if (!(domainObj instanceof Program)) {
++			log.appendMsg("Unsupported type: " + domainObj.getClass().getName());
++			return false;
++		}
++		final var program = (Program) domainObj;
++
++		monitor.setCancelEnabled(true);
++		try {
++			final var builder = new BinExport2Builder(program);
++			if (remapMnemonics) {
++				builder.setMnemonicMapper(new IdaProMnemonicMapper(program.getLanguage()));
++			}
++			if (subtractImagebase) {
++				builder.setAddressOffset(program.getImageBase().getOffset());
++			}
++			if (prependNamespace) {
++				builder.setPrependNamespace(true);
++			}
++			final BinExport2 proto = builder.build(monitor);
++
++			monitor.setMessage("Writing BinExport2 file");
++			try (final var outputStream = new FileOutputStream(file)) {
++				proto.writeTo(outputStream);
++			}
++		}
++		catch (final CancelledException e) {
++			return false;
++		}
++		catch (Exception e) {
++			log.appendMsg("Unexpected exception exporting file: " + e.getMessage());
++			throw new ExporterException(e);
++		}
++		return true;
++	}
++}
+diff --git a/Ghidra/Features/Base/src/main/proto/binexport2.proto b/Ghidra/Features/Base/src/main/proto/binexport2.proto
+new file mode 100644
+index 000000000..42faec965
+--- /dev/null
++++ b/Ghidra/Features/Base/src/main/proto/binexport2.proto
+@@ -0,0 +1,416 @@
++/* ###
++ * IP: GHIDRA
++ *
++ * Note: This file is a copy of BinExport's original protobuf definition. The
++ *       authoritative version is always in the upstream GitHub repository at:
++ *       https://github.com/google/binexport/blob/main/binexport2.proto
++ */
++// Copyright 2011-2024 Google LLC
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     https://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++// This file describes a compact representation for disassembled binaries. It is
++// loosely based on the PostgreSQL database schema used by BinNavi's
++// postgresql_tables.sql (https://git.io/vzlYw).
++// It is the output format for the BinExport IDA plugin and the BinDetego
++// disassembler and consumed by the BinDiff comparison engine.
++
++// The representation is generic to accommodate various source architectures.
++// In particular 32 and 64 bit versions of x86, ARM, PowerPC and MIPS have been
++// tested.
++//
++// Multiple levels of deduping have been applied to make the format more compact
++// and avoid redundant data duplication. Some of this due to hard-earned
++// experience trying to cope with intentionally obfuscated malicious binaries.
++// Note in particular that the same instruction may occur in multiple basic
++// blocks and the same basic block in multiple functions (instruction and basic
++// block sharing). Implemented naively, malware can use this to cause
++// combinatorial explosion in memory usage, DOSing the analyst. This format
++// should store every unique expression, mnemonic, operand, instruction and
++// basic block only once instead of duplicating the information for every
++// instance of it.
++//
++// This format does _not_ try to be 100% backwards compatible with the old
++// version. In particular, we do not store IDA's comment types, making lossless
++// porting of IDA comments impossible. We do however, store comments and
++// expression substitutions, so porting the actual data is possible, just not
++// the exact IDA type.
++//
++// While it would be more natural to use addresses when defining call graph and
++// flow graph edges and other such references, it is more efficient to employ
++// one more level of indirection and use indices into the basic block or
++// function arrays instead. This is because addresses will usually use most of
++// the available 64 bit space while indices will be much smaller and compress
++// much better (less randomly distributed).
++//
++// We omit all fields that are set to their default value anyways. Note that
++// this has two side effects:
++//   - changing the defaults in this proto file will, in effect, change what's
++//     read from disk
++//   - the generated code has_* methods are somewhat less useful
++// WARNING: We omit the defaults manually in the code writing the data. Do not
++//          change the defaults here without changing the code!
++//
++// TODO(cblichmann): Link flow graphs to call graph nodes. The connection is
++//                   there via the address, but tricky to extract.
++
++syntax = "proto2";
++
++option java_package = "com.google.security.zynamics";
++option java_outer_classname = "BinExport";
++
++message BinExport2 {
++  message Meta {
++    reserved 5;  // Pre-BinDiff 4.3 padding
++
++    // Input binary filename including file extension but excluding file path.
++    // example: "insider_gcc.exe"
++    optional string executable_name = 1;
++
++    // Application defined executable id. Often the SHA256 hash of the input
++    // binary.
++    optional string executable_id = 2;
++
++    // Input architecture name, e.g. x86-32.
++    optional string architecture_name = 3;
++
++    // When did this file get created? Unix time. This may be used for some
++    // primitive versioning in case the file format ever changes.
++    optional int64 timestamp = 4;
++  }
++
++  message CallGraph {
++    message Vertex {
++      enum Type {
++        // Regular function with full disassembly.
++        NORMAL = 0;
++
++        // This function is a well known library function.
++        LIBRARY = 1;
++
++        // Imported from a dynamic link library (e.g. dll).
++        IMPORTED = 2;
++
++        // A thunk function, forwarding its work via an unconditional jump.
++        THUNK = 3;
++
++        // An invalid function (a function that contained invalid code or was
++        // considered invalid by some heuristics).
++        INVALID = 4;
++      }
++
++      // The function's entry point address.
++      optional uint64 address = 1;
++      optional Type type = 2 [default = NORMAL];
++
++      // If the function has a user defined, real name it will be given here.
++      // main() is a proper name, sub_BAADF00D is not (auto generated dummy
++      // name).
++      optional string mangled_name = 3;
++
++      // Demangled name if the function is a mangled C++ function and we could
++      // demangle it.
++      optional string demangled_name = 4;
++
++      // If this is a library function, what is its index in library arrays.
++      optional int32 library_index = 5;
++
++      // If module name, such as class name for DEX files, is present - index in
++      // module table.
++      optional int32 module_index = 6;
++    }
++
++    message Edge {
++      // source and target index into the vertex repeated field.
++      optional int32 source_vertex_index = 1;
++      optional int32 target_vertex_index = 2;
++    }
++
++    // vertices == functions in the call graph.
++    repeated Vertex vertex = 1;
++
++    // edges == calls in the call graph.
++    repeated Edge edge = 2;
++  }
++
++  // An operand consists of 1 or more expressions, linked together as a tree.
++  message Expression {
++    enum Type {
++      SYMBOL = 1;
++      IMMEDIATE_INT = 2;
++      IMMEDIATE_FLOAT = 3;
++      OPERATOR = 4;
++      REGISTER = 5;
++      SIZE_PREFIX = 6;
++      DEREFERENCE = 7;
++    }
++
++    // IMMEDIATE_INT is by far the most common type and thus we can save some
++    // space by omitting it as the default.
++    optional Type type = 1 [default = IMMEDIATE_INT];
++
++    // Symbol for this expression. Interpretation depends on type. Examples
++    // include: "eax", "[", "+"
++    optional string symbol = 2;
++
++    // If the expression can be interpreted as an integer value (IMMEDIATE_INT)
++    // the value is given here.
++    optional uint64 immediate = 3;
++
++    // The parent expression. Example expression tree for the second operand of:
++    // mov eax, b4 [ebx + 12]
++    // "b4" --- "[" --- "+" --- "ebx"
++    //                       \  "12"
++    optional int32 parent_index = 4;
++
++    // true if the expression has entry in relocation table
++    optional bool is_relocation = 5;
++  }
++
++  // An instruction may have 0 or more operands.
++  message Operand {
++    // Contains all expressions constituting this operand. All expressions
++    // should be linked into a single tree, i.e. there should only be one
++    // expression in this list with parent_index == NULL and all others should
++    // descend from that. Rendering order for expressions on the same tree level
++    // (siblings) is implicitly given by the order they are referenced in this
++    // repeated field.
++    // Implicit: expression sequence
++    repeated int32 expression_index = 1;
++  }
++
++  // An instruction has exactly 1 mnemonic.
++  message Mnemonic {
++    // Literal representation of the mnemonic, e.g.: "mov".
++    optional string name = 1;
++  }
++
++  message Instruction {
++    // This will only be filled for instructions that do not just flow from the
++    // immediately preceding instruction. Regular instructions will have to
++    // calculate their own address by adding raw_bytes.size() to the previous
++    // instruction's address.
++    optional uint64 address = 1;
++
++    // If this is a call instruction and call targets could be determined
++    // they'll be given here. Note that we may or may not have a flow graph for
++    // the target and thus cannot use an index into the flow graph table here.
++    // We could potentially use call graph nodes, but linking instructions to
++    // the call graph directly does not seem a good choice.
++    repeated uint64 call_target = 2;
++
++    // Index into the mnemonic array of strings. Used for de-duping the data.
++    // The default value is used for the most common mnemonic in the executable.
++    optional int32 mnemonic_index = 3 [default = 0];
++
++    // Indices into the operand tree. On X86 this can be 0, 1 or 2 elements
++    // long, 3 elements with VEX/EVEX.
++    // Implicit: operand sequence
++    repeated int32 operand_index = 4;
++
++    // The unmodified input bytes corresponding to this instruction.
++    optional bytes raw_bytes = 5;
++
++    // Implicit: comment sequence
++    repeated int32 comment_index = 6;
++  }
++
++  message BasicBlock {
++    // This is a space optimization. The instructions for an individual basic
++    // block will usually be in a continuous index range. Thus it is more
++    // efficient to store the range instead of individual indices. However, this
++    // does not hold true for all basic blocks, so we need to be able to store
++    // multiple index ranges per block.
++    message IndexRange {
++      // These work like begin and end iterators, i.e. the sequence is
++      // [begin_index, end_index). If the sequence only contains a single
++      // element end_index will be omitted.
++      optional int32 begin_index = 1;
++      optional int32 end_index = 2;
++    }
++
++    // Implicit: instruction sequence
++    repeated IndexRange instruction_index = 1;
++  }
++
++  message FlowGraph {
++    message Edge {
++      enum Type {
++        CONDITION_TRUE = 1;
++        CONDITION_FALSE = 2;
++        UNCONDITIONAL = 3;
++        SWITCH = 4;
++      }
++
++      // Source instruction will always be the last instruction of the source
++      // basic block, target instruction the first instruction of the target
++      // basic block.
++      optional int32 source_basic_block_index = 1;
++      optional int32 target_basic_block_index = 2;
++      optional Type type = 3 [default = UNCONDITIONAL];
++
++      // Indicates whether this is a loop edge as determined by Lengauer-Tarjan.
++      optional bool is_back_edge = 4 [default = false];
++    }
++
++    // Basic blocks are sorted by address.
++    repeated int32 basic_block_index = 1;
++
++    // The flow graph's entry point address is the first instruction of the
++    // entry_basic_block.
++    optional int32 entry_basic_block_index = 3;
++
++    repeated Edge edge = 2;
++  }
++
++  // Generic reference class used for address comments (deprecated), string
++  // references and expression substitutions. It allows referencing from an
++  // instruction, operand, expression subtree tuple to a de-duped string in the
++  // string table.
++  message Reference {
++    // Index into the global instruction table.
++    optional int32 instruction_index = 1;
++
++    // Index into the operand array local to an instruction.
++    optional int32 instruction_operand_index = 2 [default = 0];
++
++    // Index into the expression array local to an operand.
++    optional int32 operand_expression_index = 3 [default = 0];
++
++    // Index into the global string table.
++    optional int32 string_table_index = 4;
++  }
++
++  message DataReference {
++    // Index into the global instruction table.
++    optional int32 instruction_index = 1;
++
++    // Address being referred.
++    optional uint64 address = 2;
++  }
++
++  message Comment {
++    enum Type {
++      // A regular instruction comment. Typically displayed next to the
++      // instruction disassembly.
++      DEFAULT = 0;
++
++      // A comment line that is typically displayed before (above) the
++      // instruction it refers to.
++      ANTERIOR = 1;
++
++      // Like ANTERIOR, but a typically displayed after (below).
++      POSTERIOR = 2;
++
++      // Similar to an ANTERIOR comment, but applies to the beginning of an
++      // identified function. Programs displaying the proto may choose to render
++      // these differently (e.g. above an inferred function signature).
++      FUNCTION = 3;
++
++      // Named constants, bitfields and similar.
++      ENUM = 4;
++
++      // Named locations, usually the target of a jump.
++      LOCATION = 5;
++
++      // Data cross references.
++      GLOBAL_REFERENCE = 6;
++
++      // Local/stack variables.
++      LOCAL_REFERENCE = 7;
++    }
++
++    // Index into the global instruction table. This is here to enable
++    // comment processing without having to iterate over all instructions.
++    // There is an N:M mapping of instructions to comments.
++    optional int32 instruction_index = 1;
++
++    // Index into the operand array local to an instruction.
++    optional int32 instruction_operand_index = 2 [default = 0];
++
++    // Index into the expression array local to an operand, like in Reference.
++    // This is not currently used, but allows to implement expression
++    // substitutions.
++    optional int32 operand_expression_index = 3 [default = 0];
++
++    // Index into the global string table.
++    optional int32 string_table_index = 4;
++
++    // Comment is propagated to all locations that reference the original
++    // location.
++    optional bool repeatable = 5;
++
++    optional Type type = 6 [default = DEFAULT];
++  }
++
++  message Section {
++    // Section start address.
++    optional uint64 address = 1;
++
++    // Section size.
++    optional uint64 size = 2;
++
++    // Read flag of the section, True when section is readable.
++    optional bool flag_r = 3;
++
++    // Write flag of the section, True when section is writable.
++    optional bool flag_w = 4;
++
++    // Execute flag of the section, True when section is executable.
++    optional bool flag_x = 5;
++  }
++
++  message Library {
++    // If this library is statically linked.
++    optional bool is_static = 1;
++
++    // Address where this library was loaded, 0 if unknown.
++    optional uint64 load_address = 2 [default = 0];
++
++    // Name of the library (format is platform-dependent).
++    optional string name = 3;
++  }
++
++  message Module {
++    // Name, such as Java class name. Platform-dependent.
++    optional string name = 1;
++  }
++
++  optional Meta meta_information = 1;
++  repeated Expression expression = 2;
++  repeated Operand operand = 3;
++  repeated Mnemonic mnemonic = 4;
++  repeated Instruction instruction = 5;
++  repeated BasicBlock basic_block = 6;
++  repeated FlowGraph flow_graph = 7;
++  optional CallGraph call_graph = 8;
++
++  repeated string string_table = 9;
++
++  // No longer written. This is here so that BinDiff can work with older
++  // BinExport files.
++  repeated Reference address_comment = 10 [deprecated = true];
++
++  // Rich comment index used for BinDiff's comment porting.
++  repeated Comment comment = 17;
++  repeated Reference string_reference = 11;
++  repeated Reference expression_substitution = 12;
++  repeated Section section = 13;
++
++  repeated Library library = 14;
++  repeated DataReference data_reference = 15;
++  repeated Module module = 16;
++
++  // Allow for future extensions.
++  extensions 100000000 to max;
++}
+-- 
+2.43.0
+
