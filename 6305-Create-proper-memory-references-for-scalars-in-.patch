@@ -1,0 +1,85 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Alessandro Gatti <a.gatti@frob.it>
+Date: Sun, 10 Mar 2024 11:21:51 +0100
+Subject: [PATCH] 6305: Create proper memory references for scalars in
+ segmented address spaces.
+
+Create proper memory references for scalars.
+
+The "Create Memory Reference" action did not take segmented memory
+address spaces into account when creating memory references out of
+scalar operands.
+---
+ .../CreateDefaultReferenceAction.java         | 49 ++++++++++++++-----
+ 1 file changed, 36 insertions(+), 13 deletions(-)
+
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/references/CreateDefaultReferenceAction.java b/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/references/CreateDefaultReferenceAction.java
+index 55ae504418..201f1e4c6a 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/references/CreateDefaultReferenceAction.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/references/CreateDefaultReferenceAction.java
+@@ -234,26 +234,49 @@ public class CreateDefaultReferenceAction extends ListingContextAction {
+ 		return actionOK;
+ 	}
+ 
+-	private boolean initMemoryAddress(AddressFactory addrFactory, long offset) {
+-		AddressSpace contextAddrSpace = context.getAddress().getAddressSpace();
++	private Address buildDestinationAddress(AddressSpace addrSpace,
++			Address sourceAddress, long offset) {
+ 		try {
+-			memAddr = contextAddrSpace.getAddress(offset, true);
+-			return true;
++			if ((addrSpace instanceof SegmentedAddressSpace) &&
++					(sourceAddress instanceof SegmentedAddress)) {
++				return ((SegmentedAddressSpace) addrSpace).getAddress(
++					((SegmentedAddress) sourceAddress).getSegment(),
++					(int) (offset & 0xFFFF));
++			}
++
++			return addrSpace.getAddress(offset, true);
+ 		}
+ 		catch (AddressOutOfBoundsException ei) {
+-			// try the default space!
+ 		}
+-		AddressSpace defaultSpace = addrFactory.getDefaultAddressSpace();
+ 
++		return null;
++	}
++
++	private boolean initMemoryAddress(AddressFactory addrFactory, long offset) {
++		// Use the context's address space.
++
++		AddressSpace contextAddrSpace = context.getAddress().getAddressSpace();
++		Address address = buildDestinationAddress(contextAddrSpace,
++				context.getAddress(), offset);
++		if (address != null) {
++			memAddr = address;
++			return true;
++		}
++
++		// Try the default space.
++
++		AddressSpace defaultSpace = addrFactory.getDefaultAddressSpace();
+ 		if (contextAddrSpace != defaultSpace) {
+-			try {
+-				memAddr = defaultSpace.getAddress(offset, true);
+-				return true;
+-			}
+-			catch (AddressOutOfBoundsException ei) {
+-				// ignore
+-			}
++			address = buildDestinationAddress(defaultSpace, context.getAddress(),
++					offset);
++		}
++		if (address != null) {
++			memAddr = address;
++			return true;
+ 		}
++
++		// Ignore.
++
+ 		return false;
+ 	}
+ 
+-- 
+2.44.0
+

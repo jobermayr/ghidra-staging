@@ -7,14 +7,14 @@ Building decomp_dbg and sleigh_dbg can now easily enabled via 'gradle -Pdebug' s
 
 Fixes: #5296
 ---
- .../Features/Decompiler/buildNatives.gradle   | 417 +++++++++++-------
- 1 file changed, 263 insertions(+), 154 deletions(-)
+ .../Features/Decompiler/buildNatives.gradle   | 449 +++++++++++-------
+ 1 file changed, 285 insertions(+), 164 deletions(-)
 
 diff --git a/Ghidra/Features/Decompiler/buildNatives.gradle b/Ghidra/Features/Decompiler/buildNatives.gradle
-index 304b536fbb..a6ef4b249d 100644
+index ad4ba8270e..dd0d7b3c90 100644
 --- a/Ghidra/Features/Decompiler/buildNatives.gradle
 +++ b/Ghidra/Features/Decompiler/buildNatives.gradle
-@@ -22,21 +22,177 @@ if (findProject(':Generic') == null) {
+@@ -22,20 +22,179 @@ if (findProject(':Generic') == null) {
  	apply from: "../../../GPL/nativeBuildProperties.gradle"
  }
  
@@ -133,11 +133,13 @@ index 304b536fbb..a6ef4b249d 100644
 +]
 +
 +def sleigh_common_files = [
++	"compression.cc",
 +	"context.cc",
 +	"filemanage.cc",
 +	"pcodecompile.cc",
 +	"pcodeparse.cc",
 +	"semantics.cc",
++	"slaformat.cc",
 +	"sleigh.cc",
 +	"sleighbase.cc",
 +	"slghpatexpress.cc",
@@ -184,13 +186,12 @@ index 304b536fbb..a6ef4b249d 100644
  /**
   * Define the "native build model" for building the decompiler executables.
   */
--model {
- 
++
+ model {
 -	// Define the source files that are compiled and linked to become the decompiler.
 -	// The decompiler source is a bit weird in that all the cpp and headers all live in
 -	// the same directory with other files that are not used by the decompiler.
 -	// That is why we have to list every cpp file that makes up the decomplier.
-+model {
  	components {
 -
  		decompile(NativeExecutableSpec) {
@@ -200,8 +201,8 @@ index 304b536fbb..a6ef4b249d 100644
  			// these tell gradle for which platforms to build a decompiler executable.
  			targetPlatform "win_x86_64"
  			targetPlatform "linux_x86_64"
-@@ -46,101 +202,22 @@ model {
- 			targetPlatform "freebsd_x86_64"
+@@ -46,101 +205,22 @@ model {
+ 			targetPlatform "freebsd_arm_64"
  			sources {
  				cpp {
 -					// NOTE: The bison/flex generated files are assumed to be up-to-date.
@@ -315,8 +316,8 @@ index 304b536fbb..a6ef4b249d 100644
  		} // end decompile
  
  		sleigh(NativeExecutableSpec) {
-@@ -152,69 +229,112 @@ model {
- 			targetPlatform "freebsd_x86_64"
+@@ -153,85 +233,137 @@ model {
+ 			targetPlatform "freebsd_arm_64"
  			sources {
  				cpp {
 -					// NOTE: The bison/flex generated files are assumed to be up-to-date.
@@ -341,6 +342,8 @@ index 304b536fbb..a6ef4b249d 100644
 -						include "slghpattern.cc"
 -						include "semantics.cc"
 -						include "context.cc"
+-						include "slaformat.cc"
+-						include "compression.cc"
 -						include "filemanage.cc"
 -						include "slgh_compile.cc"
 -
@@ -358,13 +361,35 @@ index 304b536fbb..a6ef4b249d 100644
  						srcDir "src/decompile/cpp"
  					}
 -				} // end cpp
--			} // end sources (sleigh)
+-				
+-				c {
+-					source {
+-						srcDir "src/decompile/zlib"
+-						include "*.c"
 +				}
++				if (isCurrentWindows()) {
++					c {
++						source {
++							srcDir "src/decompile/zlib"
++							include "*.c"
++						}
+ 					}
+ 				}
+-			} // end sources (sleigh)
+-			
+-			binaries {
+-				all{ b ->
 +			}
 +			binaries.all { b ->
 +				if (b.toolChain in Gcc || b.toolChain in Clang) {
 +					b.cppCompiler.args "-O2"
++					b.linker.args "-lz"
 +				}
++				if (!project.hasProperty('sysZlib')) {
+ 					b.cppCompiler.define "LOCAL_ZLIB"
+ 					b.cCompiler.define "NO_GZIP"
+ 				}
+-			} // end binaries.all (sleigh)
 +			}
  		} // end sleigh
  
@@ -425,15 +450,27 @@ index 304b536fbb..a6ef4b249d 100644
 +							srcDir "src/decompile/cpp"
 +						}
 +					}
++					if (isCurrentWindows()) {
++						c {
++							source {
++								srcDir "src/decompile/zlib"
++								include "*.c"
++							}
++						}
++					}
 +				}
 +				binaries.all { b ->
 +					if (b.toolChain in Gcc || b.toolChain in Clang) {
 +						b.cppCompiler.args "-g"
++						b.linker.args "-lz"
 +					}
 +					else if (b.toolChain in VisualCpp) {
 +						b.cppCompiler.args "/Zi"
 +						b.cppCompiler.args "/FS"
 +						b.linker.args "/DEBUG"
++					}
++					if (!project.hasProperty('sysZlib')) {
++						b.cppCompiler.define "LOCAL_ZLIB"
 +					}
 +					b.cppCompiler.define "YYDEBUG"
 +				}
@@ -469,9 +506,9 @@ index 304b536fbb..a6ef4b249d 100644
  				if (b.targetPlatform.operatingSystem.windows) {
  					b.cppCompiler.define "WINDOWS"
  					b.cppCompiler.define "_WINDOWS"
-@@ -226,17 +346,6 @@ model {
- 					}
- 				}
+@@ -249,17 +381,6 @@ model {
+ 				b.cCompiler.define "_CRT_NONSTDC_NO_DEPRECATE"
+ 				b.cCompiler.define "ZLIB_WINAPI"
  			}
 -			else if (b.toolChain in Clang) {
 -				b.cppCompiler.args "-std=c++11"
@@ -490,5 +527,5 @@ index 304b536fbb..a6ef4b249d 100644
 +	} // end binaries
  } // end model
 -- 
-2.43.0
+2.44.0
 

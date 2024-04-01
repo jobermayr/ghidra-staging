@@ -57,6 +57,12 @@ Resolved conflics
 Added new override of getAlignedLength to class AddressModelDB
 
 Remove old HEAD commented out code and add import .../AddressModel
+
+Resolved new isEquivalent interface.
+
+Reconciled updates in LibrarySymbolTable and corrected spelling of 'forward' in LibraryExport
+
+In merging the previous commit, I missed that I'd commented out the loop that was updated, so this fixes it!!!
 ---
  Ghidra/Features/Base/certification.manifest   |    1 +
  .../Base/data/FunctionNames.properties        | 2308 +++++++++++++++++
@@ -73,7 +79,7 @@ Remove old HEAD commented out code and add import .../AddressModel
  .../app/util/cparser/C/Declaration.java       |   80 +-
  .../app/util/opinion/LibraryExport.java       |   85 +
  .../app/util/opinion/LibraryLookupTable.java  |   16 +-
- .../app/util/opinion/LibrarySymbolTable.java  |   54 +-
+ .../app/util/opinion/LibrarySymbolTable.java  |   79 +-
  .../ghidra/app/util/opinion/NeLoader.java     |    9 +-
  .../javacc/ghidra/app/util/cparser/C/C.jj     |  180 +-
  .../EditFunctionSignatureDialogTest.java      |   33 +
@@ -82,10 +88,10 @@ Remove old HEAD commented out code and add import .../AddressModel
  .../Decompiler/src/decompile/cpp/marshal.cc   |    2 +-
  .../src/decompile/cpp/modelrules.cc           |    2 +-
  .../data/languages/compiler_spec.rxg          |    1 +
- .../program/database/data/AddressModelDB.java |  222 ++
- .../database/data/AddressModelDBAdapter.java  |  189 ++
+ .../program/database/data/AddressModelDB.java |  221 ++
+ .../database/data/AddressModelDBAdapter.java  |  190 ++
  .../data/AddressModelDBAdapterNoTable.java    |   70 +
- .../data/AddressModelDBAdapterV0.java         |  111 +
+ .../data/AddressModelDBAdapterV0.java         |  112 +
  .../program/database/data/DataTypeDB.java     |   11 +
  .../program/database/data/PointerDB.java      |    3 +
  .../program/database/function/FunctionDB.java |    6 +-
@@ -107,7 +113,7 @@ Remove old HEAD commented out code and add import .../AddressModel
  .../model/TestDoubleFunctionSignature.java    |    6 +
  .../program/model/data/StubDataType.java      |   10 +
  .../x86/data/languages/x86-16.cspec           |  288 +-
- 49 files changed, 6078 insertions(+), 126 deletions(-)
+ 49 files changed, 6104 insertions(+), 126 deletions(-)
  create mode 100644 Ghidra/Features/Base/data/FunctionNames.properties
  create mode 100644 Ghidra/Features/Base/ghidra_scripts/FixPascalCallingConvention.java
  create mode 100644 Ghidra/Features/Base/ghidra_scripts/FixWin16LibraryFunctionNames.java
@@ -127,7 +133,7 @@ Remove old HEAD commented out code and add import .../AddressModel
  create mode 100644 Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/data/SegmentCodePointerDataType.java
 
 diff --git a/Ghidra/Features/Base/certification.manifest b/Ghidra/Features/Base/certification.manifest
-index 05e0a96b45..ee1cfc78be 100644
+index 12e4779907..e25066e8be 100644
 --- a/Ghidra/Features/Base/certification.manifest
 +++ b/Ghidra/Features/Base/certification.manifest
 @@ -55,6 +55,7 @@ data/symbols/win16/toolhelp.exports||GHIDRA||||END|
@@ -3995,10 +4001,10 @@ index 0000000000..16bdf47fba
 +
 +}
 diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/cmd/function/ApplyFunctionSignatureCmd.java b/Ghidra/Features/Base/src/main/java/ghidra/app/cmd/function/ApplyFunctionSignatureCmd.java
-index 6150b8db97..4fbc8dfb0a 100644
+index bb2f990d9a..95fa377e9c 100644
 --- a/Ghidra/Features/Base/src/main/java/ghidra/app/cmd/function/ApplyFunctionSignatureCmd.java
 +++ b/Ghidra/Features/Base/src/main/java/ghidra/app/cmd/function/ApplyFunctionSignatureCmd.java
-@@ -299,7 +299,7 @@ public class ApplyFunctionSignatureCmd extends BackgroundCommand {
+@@ -300,7 +300,7 @@ public class ApplyFunctionSignatureCmd extends BackgroundCommand<Program> {
  			return 0;
  		}
  
@@ -4520,7 +4526,7 @@ index a93b06e43b..15335dadac 100644
  }
 diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/opinion/LibraryExport.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/opinion/LibraryExport.java
 new file mode 100644
-index 0000000000..e6ee471c10
+index 0000000000..c73aaf4b65
 --- /dev/null
 +++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/opinion/LibraryExport.java
 @@ -0,0 +1,85 @@
@@ -4549,8 +4555,8 @@ index 0000000000..e6ee471c10
 +	private String symbolName;
 +	private int purge;
 +	private String comment;
-+	private String fowardLibName;
-+	private String fowardSymName;
++	private String forwardLibName;
++	private String forwardSymName;
 +
 +	private String noReturnStr;
 +	private boolean noReturn;
@@ -4561,8 +4567,8 @@ index 0000000000..e6ee471c10
 +		symbolName = export.getAttributeValue("NAME");
 +		purge = Integer.parseInt(export.getAttributeValue("PURGE"));
 +		comment = export.getAttributeValue("COMMENT");
-+		fowardLibName = export.getAttributeValue("FOWARDLIBRARY");
-+		fowardSymName = export.getAttributeValue("FOWARDSYMBOL");
++		forwardLibName = export.getAttributeValue("FOWARDLIBRARY");
++		forwardSymName = export.getAttributeValue("FOWARDSYMBOL");
 +
 +		noReturnStr = export.getAttributeValue("NO_RETURN");
 +		noReturn = noReturnStr != null && "y".equals(noReturnStr);
@@ -4589,13 +4595,13 @@ index 0000000000..e6ee471c10
 +	}
 +
 +
-+	public String getFowardLibName() {
-+		return fowardLibName;
++	public String getForwardLibName() {
++		return forwardLibName;
 +	}
 +
 +
-+	public String getFowardSymName() {
-+		return fowardSymName;
++	public String getForwardSymName() {
++		return forwardSymName;
 +	}
 +
 +
@@ -4662,40 +4668,104 @@ index 596e21d240..fbac22a50f 100644
  	 * @param size The architecture size of the DLL (e.g., 32 or 64).
  	 * @param log The message log
 diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/opinion/LibrarySymbolTable.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/opinion/LibrarySymbolTable.java
-index 6c1a2c9209..dadb05e9e1 100644
+index 6c1a2c9209..33b953fbc2 100644
 --- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/opinion/LibrarySymbolTable.java
 +++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/opinion/LibrarySymbolTable.java
-@@ -43,7 +43,7 @@ import util.CollectionUtils;
- class LibrarySymbolTable {
+@@ -4,9 +4,9 @@
+  * Licensed under the Apache License, Version 2.0 (the "License");
+  * you may not use this file except in compliance with the License.
+  * You may obtain a copy of the License at
+- * 
++ *
+  *      http://www.apache.org/licenses/LICENSE-2.0
+- * 
++ *
+  * Unless required by applicable law or agreed to in writing, software
+  * distributed under the License is distributed on an "AS IS" BASIS,
+  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+@@ -86,7 +86,7 @@ class LibrarySymbolTable {
+ 	}
  
- 	private static final SimpleDateFormat TIMESTAMP_FORMAT =
--		new SimpleDateFormat("EEE MMM dd HH:mm:ss zzz yyyy");
-+		new SimpleDateFormat("EEE MMM dd kk:mm:ss zzz yyyy");
+ 	/**
+-	 * Construct a library symbol table based upon a specified library in the 
++	 * Construct a library symbol table based upon a specified library in the
+ 	 * form of a {@link Program} object.
+ 	 * @param library library program
+ 	 * @param monitor task monitor
+@@ -260,7 +260,7 @@ class LibrarySymbolTable {
+ 	 * Each ordinal mapping line is expected to have the format, starting with ordinal number and
+ 	 * ending with symbol name:
+ 	 *   &lt;ordinal&gt; &lt;other-column-data&gt; &lt;name&gt;
+-	 * The name column contains the symbol name followed by an optional demangled form.  If the name starts with 
++	 * The name column contains the symbol name followed by an optional demangled form.  If the name starts with
+ 	 * [NONAME] this will be stripped.
+ 	 * @param ordinalExportsFile file path to ordinal mapping file produced by DUMPBIN /EXPORTS
+ 	 * @param addMissingOrdinals if true new entries will be created for ordinal mappings
+@@ -279,7 +279,7 @@ class LibrarySymbolTable {
+ 			while ((inString = in.readLine()) != null) {
  
- 	private static final int NONE = 0;
- 	private static final int LIBRARY = 1;
-@@ -426,16 +426,52 @@ class LibrarySymbolTable {
- 			date = root.getAttributeValue("DATE");
+ 				if (mode == NONE && inString.trim().startsWith("ordinal")) {
+-					// rely on column header labels to establish ordinal and name column start/end 
++					// rely on column header labels to establish ordinal and name column start/end
+ 					int ordinalColumnStartIndex = inString.indexOf("ordinal");
+ 					if (ordinalColumnStartIndex < 0) {
+ 						continue;
+@@ -367,7 +367,7 @@ class LibrarySymbolTable {
+ 
+ 	/**
+ 	 * Returns the symbol for the specified ordinal.
+-	 * 
++	 *
+ 	 * @param ordinal the ordinal value of the desired symbol
+ 	 * @return the symbol for the specified ordinal, or null if one does not
+ 	 *         exist.
+@@ -378,7 +378,7 @@ class LibrarySymbolTable {
+ 
+ 	/**
+ 	 * Returns the symbol for the specified name
+-	 * 
++	 *
+ 	 * @param symbol the name of the desired symbol
+ 	 * @return symbol map entry or null if not found
+ 	 */
+@@ -389,7 +389,7 @@ class LibrarySymbolTable {
+ 	/**
+ 	 * Returns a string describing the version of this library. For example,
+ 	 * "5.100.2566".
+-	 * 
++	 *
+ 	 * @return a string describing the version of this library
+ 	 */
+ 	String getVersion() {
+@@ -427,6 +427,7 @@ class LibrarySymbolTable {
  			version = root.getAttributeValue("VERSION");
  
+ 			List<Element> children = CollectionUtils.asList(root.getChildren(), Element.class);
++/*
+ 			for (Element export : children) {
+ 				int ordinal = Integer.parseInt(export.getAttributeValue("ORDINAL"));
+ 				String name = export.getAttributeValue("NAME");
+@@ -443,6 +444,66 @@ class LibrarySymbolTable {
+ 					forwards.add(forwardLibName);
+ 				}
+ 
++				LibraryExportedSymbol sym = new LibraryExportedSymbol(tableName, size, ordinal,
++					name, forwardLibName, forwardSymName, purge, noReturn, comment);
++
++				exportList.add(sym);
++				symMap.put(name, sym);
++				ordMap.put(Integer.valueOf(ordinal), sym);
++			}
++*/
++
 +			List<LibraryExport> libraryExports = new ArrayList<LibraryExport>();
 +
- 			List<Element> children = CollectionUtils.asList(root.getChildren(), Element.class);
-+
- 			for (Element export : children) {
--				int ordinal = Integer.parseInt(export.getAttributeValue("ORDINAL"));
--				String name = export.getAttributeValue("NAME");
--				int purge = Integer.parseInt(export.getAttributeValue("PURGE"));
--				String comment = export.getAttributeValue("COMMENT");
--				String forwardLibName = export.getAttributeValue("FOWARDLIBRARY");
--				String forwardSymName = export.getAttributeValue("FOWARDSYMBOL");
--
--				String noReturnStr = export.getAttributeValue("NO_RETURN");
-+				libraryExports.add(new LibraryExport(export));
++			for (Element child : children) {
++				libraryExports.add(new LibraryExport(child));
 +			}
 +
 +			try {
-+				//ShowDebugInfo.printf("Size of %s is %d\n", tableName, libraryExports.size());
++//ShowDebugInfo.printf("Size of %s is %d\n", tableName, libraryExports.size());
 +				libraryExports.sort((e1, e2) -> {
 +					int result = 0;
 +					if (e1.getOrdinal() != e2.getOrdinal()) {
@@ -4724,22 +4794,38 @@ index 6c1a2c9209..dadb05e9e1 100644
 +
 +				preOrdinal = ordinal;
 +				String name = export.getName();
-+				//ShowDebugInfo.printf("In LibrarySymbolTable.read:(...) %s <ord %3d> : '%s'\n", file.getName(), ordinal, name);
-+				System.out.printf("In LibrarySymbolTable.read:(...) %s <ord %3d> : '%s'\n", file.getName(), ordinal, name);
++//ShowDebugInfo.printf("In LibrarySymbolTable.read:(...) %s <ord %3d> : '%s'\n", file.getName(), ordinal, name);
++System.out.printf("In LibrarySymbolTable.read:(...) %s <ord %3d> : '%s'\n", file.getName(), ordinal, name);
 +				int purge = export.getPurge();
 +				String comment = export.getComment();
-+				String forwardLibName = export.getFowardLibName();
-+				String forwardSymName = export.getFowardSymName();
++				String forwardLibName = export.getForwardLibName();
++				String forwardSymName = export.getForwardSymName();
 +
 +				String noReturnStr = export.getNoReturnStr();
- 				boolean noReturn = noReturnStr != null && "y".equals(noReturnStr);
++				boolean noReturn = noReturnStr != null && "y".equals(noReturnStr);
++
++				if (forwardLibName != null && forwardLibName.length() > 0 &&
++					!forwardLibName.equals(tableName)) {
++					forwards.add(forwardLibName);
++				}
++
+ 				LibraryExportedSymbol sym = new LibraryExportedSymbol(tableName, size, ordinal,
+ 					name, forwardLibName, forwardSymName, purge, noReturn, comment);
  
- 				if (forwardLibName != null && forwardLibName.length() > 0 &&
+@@ -557,7 +618,7 @@ class LibrarySymbolTable {
+ 	/**
+ 	 * Check an existing exports file to verify that it corresponds to the
+ 	 * specified libraryFile.
+-	 * 
++	 *
+ 	 * @param exportsFile existing exports file
+ 	 * @param libraryFile library file
+ 	 * @return true if exports file corresponds to library file
 diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/opinion/NeLoader.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/opinion/NeLoader.java
-index a0a38f7e53..1e0fa7ef69 100644
+index 1c20444cba..2a5d50a24d 100644
 --- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/opinion/NeLoader.java
 +++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/opinion/NeLoader.java
-@@ -427,6 +427,7 @@ public class NeLoader extends AbstractOrdinalSupportLoader {
+@@ -426,6 +426,7 @@ public class NeLoader extends AbstractOrdinalSupportLoader {
  		ExternalManager externalManager = program.getExternalManager();
  		FunctionManager functionManager = program.getFunctionManager();
  		Namespace globalNamespace = program.getGlobalNamespace();
@@ -4747,7 +4833,7 @@ index a0a38f7e53..1e0fa7ef69 100644
  
  		LengthStringSet[] names = mrt.getNames();
  		String[][] mod2proclist = new String[names.length][];
-@@ -472,9 +473,15 @@ public class NeLoader extends AbstractOrdinalSupportLoader {
+@@ -475,9 +476,15 @@ public class NeLoader extends AbstractOrdinalSupportLoader {
  				try {
  					functionManager.createThunkFunction(null, globalNamespace, addr, body,
  						refFunction, SourceType.IMPORTED);
@@ -5187,7 +5273,7 @@ index f9f6fda857..d60b8f3b84 100644
  	public void testParseSignature_Good() throws Exception {
  
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.cc
-index a84a439235..4c5649201d 100644
+index 38fe7b466f..289e0fabe5 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.cc
 @@ -34,6 +34,7 @@ AttributeId ATTRIB_STACKSHIFT = AttributeId("stackshift",126);
@@ -5256,7 +5342,7 @@ index a84a439235..4c5649201d 100644
      int4 wordsize = spc->getWordSize();
      Datatype *pointertp = typefactory.getTypePointer(pointersize, proto.outtype, wordsize);
      if (responseCode == AssignAction::hiddenret_specialreg_void) {
-@@ -2250,6 +2269,7 @@ ProtoModel::ProtoModel(const string &nm,const ProtoModel &op2)
+@@ -2244,6 +2263,7 @@ ProtoModel::ProtoModel(const string &nm,const ProtoModel &op2)
    if (name == "__thiscall")
      hasThis = true;
    compatModel = &op2;
@@ -5264,7 +5350,7 @@ index a84a439235..4c5649201d 100644
  }
  
  ProtoModel::~ProtoModel(void)
-@@ -2305,8 +2325,30 @@ void ProtoModel::assignParameterStorage(const PrototypePieces &proto,vector<Para
+@@ -2299,8 +2319,30 @@ void ProtoModel::assignParameterStorage(const PrototypePieces &proto,vector<Para
    else {
      output->assignMap(proto,*glb->types,res);
    }
@@ -5295,7 +5381,7 @@ index a84a439235..4c5649201d 100644
    if (hasThis && res.size() > 1) {
      int4 thisIndex = 1;
      if ((res[1].flags & ParameterPieces::hiddenretparm) != 0 && res.size() > 2) {
-@@ -2322,6 +2364,31 @@ void ProtoModel::assignParameterStorage(const PrototypePieces &proto,vector<Para
+@@ -2316,6 +2358,31 @@ void ProtoModel::assignParameterStorage(const PrototypePieces &proto,vector<Para
    }
  }
  
@@ -5327,7 +5413,7 @@ index a84a439235..4c5649201d 100644
  /// \brief Look up an effect from the given EffectRecord list
  ///
  /// If a given memory range matches an EffectRecord, return the effect type.
-@@ -2423,6 +2490,7 @@ void ProtoModel::decode(Decoder &decoder)
+@@ -2417,6 +2484,7 @@ void ProtoModel::decode(Decoder &decoder)
    extrapop = -300;
    hasThis = false;
    isConstruct = false;
@@ -5335,7 +5421,7 @@ index a84a439235..4c5649201d 100644
    isPrinted = true;
    effectlist.clear();
    injectUponEntry = -1;
-@@ -2449,6 +2517,9 @@ void ProtoModel::decode(Decoder &decoder)
+@@ -2443,6 +2511,9 @@ void ProtoModel::decode(Decoder &decoder)
      else if (attribId == ATTRIB_CONSTRUCTOR) {
        isConstruct = decoder.readBool();
      }
@@ -5346,7 +5432,7 @@ index a84a439235..4c5649201d 100644
        throw LowlevelError("Unknown prototype attribute");
    }
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.hh
-index e48bbf338f..f290c9c3f2 100644
+index 8daaf70e13..0d6f299f11 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.hh
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.hh
 @@ -43,6 +43,7 @@ extern AttributeId ATTRIB_STACKSHIFT;	///< Marshaling attribute "stackshift"
@@ -5357,7 +5443,7 @@ index e48bbf338f..f290c9c3f2 100644
  
  extern ElementId ELEM_GROUP;		///< Marshaling element \<group>
  extern ElementId ELEM_INTERNALLIST;	///< Marshaling element \<internallist>
-@@ -433,7 +434,7 @@ public:
+@@ -432,7 +433,7 @@ public:
    /// \param proto is the ordered list of data-types
    /// \param typefactory is the TypeFactory (for constructing pointers)
    /// \param res will contain the storage locations corresponding to the datatypes
@@ -5366,7 +5452,7 @@ index e48bbf338f..f290c9c3f2 100644
  
    /// \brief Given an unordered list of storage locations, calculate a function prototype
    ///
-@@ -741,6 +742,7 @@ class ProtoModel {
+@@ -740,6 +741,7 @@ class ProtoModel {
    bool stackgrowsnegative;	///< True if stack parameters have (normal) low address to high address ordering
    bool hasThis;			///< True if this model has a \b this parameter (auto-parameter)
    bool isConstruct;		///< True if this model is a constructor for a particular object
@@ -5374,7 +5460,7 @@ index e48bbf338f..f290c9c3f2 100644
    bool isPrinted;		///< True if this model should be printed as part of function declarations
    void defaultLocalRange(void);	///< Set the default stack range used for local variables
    void defaultParamRange(void);	///< Set the default stack range used for input parameters
-@@ -761,6 +763,7 @@ public:
+@@ -760,6 +762,7 @@ public:
    int4 getInjectUponEntry(void) const { return injectUponEntry; }	///< Get the inject \e uponentry id
    int4 getInjectUponReturn(void) const { return injectUponReturn; }	///< Get the inject \e uponreturn id
    bool isCompatible(const ProtoModel *op2) const;	///< Return \b true if other given model can be substituted for \b this
@@ -5382,7 +5468,7 @@ index e48bbf338f..f290c9c3f2 100644
  
    /// \brief Given a list of input \e trials, derive the most likely input prototype
    ///
-@@ -778,6 +781,11 @@ public:
+@@ -777,6 +780,11 @@ public:
  
    void assignParameterStorage(const PrototypePieces &proto,vector<ParameterPieces> &res,bool ignoreOutputError);
  
@@ -5395,10 +5481,10 @@ index e48bbf338f..f290c9c3f2 100644
    ///
    /// Within the conventions of this model, do the two (hi/lo) locations represent
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/marshal.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/marshal.cc
-index 7e7ef1b194..7e5d38892a 100644
+index c1561dcdd2..c2def3d169 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/marshal.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/marshal.cc
-@@ -1148,7 +1148,7 @@ AttributeId ATTRIB_VALUE = AttributeId("value",25);
+@@ -1253,7 +1253,7 @@ AttributeId ATTRIB_VALUE = AttributeId("value",25);
  AttributeId ATTRIB_WORDSIZE = AttributeId("wordsize",26);
  AttributeId ATTRIB_STORAGE = AttributeId("storage",149);
  
@@ -5434,10 +5520,10 @@ index 7d15537052..d72099dccd 100644
  
 diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/data/AddressModelDB.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/data/AddressModelDB.java
 new file mode 100644
-index 0000000000..68d0f873ec
+index 0000000000..fc0206b63b
 --- /dev/null
 +++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/data/AddressModelDB.java
-@@ -0,0 +1,222 @@
+@@ -0,0 +1,221 @@
 +/* ###
 + * IP: GHIDRA
 + *
@@ -5529,14 +5615,9 @@ index 0000000000..68d0f873ec
 +	}
 +
 +	@Override
-+	protected boolean isEquivalent(DataType dt, DataTypeConflictHandler handler) {
++	public boolean isEquivalent(DataType dt) {
 +		// TODO Auto-generated method stub
 +		return false;
-+	}
-+
-+	@Override
-+	public boolean isEquivalent(DataType dt) {
-+		return isEquivalent(dt, null);
 +	}
 +
 +	@Override
@@ -5659,13 +5740,17 @@ index 0000000000..68d0f873ec
 +		return 0;
 +	}
 +
++	@Override
++	protected boolean isEquivalent(DataType dataType, DataTypeConflictHandler handler) {
++		return this.addressModel.equals(dataType.getAddressModel());
++	}
 +}
 diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/data/AddressModelDBAdapter.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/data/AddressModelDBAdapter.java
 new file mode 100644
-index 0000000000..e6753bb0fe
+index 0000000000..752e138b72
 --- /dev/null
 +++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/data/AddressModelDBAdapter.java
-@@ -0,0 +1,189 @@
+@@ -0,0 +1,190 @@
 +/* ###
 + * IP: GHIDRA
 + *
@@ -5686,6 +5771,7 @@ index 0000000000..e6753bb0fe
 +import java.io.IOException;
 +
 +import db.*;
++import ghidra.framework.data.OpenMode;
 +import ghidra.util.UniversalID;
 +import ghidra.util.exception.VersionException;
 +import ghidra.util.task.TaskMonitor;
@@ -5711,17 +5797,17 @@ index 0000000000..e6753bb0fe
 +	 * @throws VersionException if the database handle's version doesn't match the expected version.
 +	 * @throws IOException if there is trouble accessing the database.
 +	 */
-+	static AddressModelDBAdapter getAdapter(DBHandle handle, int openMode,
++	static AddressModelDBAdapter getAdapter(DBHandle handle, OpenMode openMode,
 +			TaskMonitor monitor) throws VersionException, IOException {
 +		try {
 +			return new AddressModelDBAdapterV0(handle, openMode);
 +		}
 +		catch (VersionException e) {
-+			if (!e.isUpgradable() || openMode == DBConstants.UPDATE) {
++			if (!e.isUpgradable() || openMode == OpenMode.UPDATE) {
 +				throw e;
 +			}
 +			AddressModelDBAdapter adapter = findReadOnlyAdapter(handle);
-+			if (openMode == DBConstants.UPGRADE) {
++			if (openMode == OpenMode.UPGRADE) {
 +				adapter = upgrade(handle, adapter);
 +			}
 +			return adapter;
@@ -5738,7 +5824,7 @@ index 0000000000..e6753bb0fe
 +	static AddressModelDBAdapter findReadOnlyAdapter(DBHandle handle)
 +			throws VersionException, IOException {
 +		try {
-+			return new AddressModelDBAdapterV0(handle, DBConstants.READ_ONLY);
++			return new AddressModelDBAdapterV0(handle, OpenMode.IMMUTABLE);
 +		}
 +		catch (VersionException e) {
 +			if (!e.isUpgradable()) {
@@ -5765,7 +5851,7 @@ index 0000000000..e6753bb0fe
 +		long id = tmpHandle.startTransaction();
 +		AddressModelDBAdapter tmpAdapter = null;
 +		try {
-+			tmpAdapter = new AddressModelDBAdapterV0(tmpHandle, DBConstants.CREATE);
++			tmpAdapter = new AddressModelDBAdapterV0(tmpHandle, OpenMode.CREATE);
 +			RecordIterator it = oldAdapter.getRecords();
 +			while (it.hasNext()) {
 +				DBRecord rec = it.next();
@@ -5773,7 +5859,7 @@ index 0000000000..e6753bb0fe
 +			}
 +			oldAdapter.deleteTable(handle);
 +			AddressModelDBAdapterV0 newAdapter =
-+				new AddressModelDBAdapterV0(handle, DBConstants.CREATE);
++				new AddressModelDBAdapterV0(handle, OpenMode.CREATE);
 +			it = tmpAdapter.getRecords();
 +			while (it.hasNext()) {
 +				DBRecord rec = it.next();
@@ -5933,10 +6019,10 @@ index 0000000000..dfc24b6389
 +}
 diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/data/AddressModelDBAdapterV0.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/data/AddressModelDBAdapterV0.java
 new file mode 100644
-index 0000000000..86160b03cf
+index 0000000000..eff6e95ec0
 --- /dev/null
 +++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/data/AddressModelDBAdapterV0.java
-@@ -0,0 +1,111 @@
+@@ -0,0 +1,112 @@
 +/* ###
 + * IP: GHIDRA
 + *
@@ -5957,6 +6043,7 @@ index 0000000000..86160b03cf
 +import java.io.IOException;
 +
 +import db.*;
++import ghidra.framework.data.OpenMode;
 +import ghidra.program.model.data.*;
 +import ghidra.util.Msg;
 +import ghidra.util.UniversalID;
@@ -5981,14 +6068,14 @@ index 0000000000..86160b03cf
 +	/**
 +	 * Gets a version 0 adapter for the Function Definition database table.
 +	 * @param handle handle to the database containing the table.
-+	 * @param openMode {@link DBConstants} value.
++	 * @param openMode {@link OpenMode} value.
 +	 * @throws VersionException if the the table's version does not match the expected version
 +	 * for this adapter.
 +	 * @throws IOException if unable to create database table.
 +	 */
-+	public AddressModelDBAdapterV0(DBHandle handle, int openMode) throws VersionException, IOException {
++	public AddressModelDBAdapterV0(DBHandle handle, OpenMode openMode) throws VersionException, IOException {
 +
-+		if (openMode == DBConstants.CREATE) {
++		if (openMode == OpenMode.CREATE) {
 +			table = handle.createTable(ADDRESS_MODEL_TABLE_NAME, V0_ADDRESS_MODEL_SCHEMA,
 +				new int[] { V0_ADDRESS_MODEL_DT_ID_COL });
 +		}
@@ -6092,10 +6179,10 @@ index 21aa3c398c..75235c2cf7 100644
  					displayName = dt.getDisplayName() + " *";
  				}
 diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/function/FunctionDB.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/function/FunctionDB.java
-index 3e47b12837..e16bd5e4cf 100644
+index ace0699cd5..9dcc12602e 100644
 --- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/function/FunctionDB.java
 +++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/function/FunctionDB.java
-@@ -1375,7 +1375,7 @@ public class FunctionDB extends DatabaseObject implements Function {
+@@ -1385,7 +1385,7 @@ public class FunctionDB extends DatabaseObject implements Function {
  
  				if (updateType == FunctionUpdateType.DYNAMIC_STORAGE_ALL_PARAMS &&
  					!thisParamRemoved &&
@@ -6104,7 +6191,7 @@ index 3e47b12837..e16bd5e4cf 100644
  					newParams.size() != 0) {
  					// Attempt to remove inferred unnamed 'this' parameter
  					// WARNING! This is a bit of a hack - not sure how to account for what may be auto-params
-@@ -2230,7 +2230,7 @@ public class FunctionDB extends DatabaseObject implements Function {
+@@ -2240,7 +2240,7 @@ public class FunctionDB extends DatabaseObject implements Function {
  	 */
  	private static boolean removeExplicitThisParameter(List<? extends Variable> params,
  			String callingConventionName) {
@@ -6113,7 +6200,7 @@ index 3e47b12837..e16bd5e4cf 100644
  			int thisIndex = findExplicitThisParameter(params);
  			if (thisIndex >= 0) {
  				params.remove(thisIndex); // remove explicit 'this' parameter
-@@ -2246,7 +2246,7 @@ public class FunctionDB extends DatabaseObject implements Function {
+@@ -2256,7 +2256,7 @@ public class FunctionDB extends DatabaseObject implements Function {
  	 * @return true if 'this' parameter removed
  	 */
  	private boolean removeExplicitThisParameter() {
@@ -7015,7 +7102,7 @@ index 8ae21a15db..eb5f52659c 100644
 +	public AddressModel getAddressModel();
  }
 diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/AttributeId.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/AttributeId.java
-index a82880f468..45633b5c06 100644
+index aa3364e86c..afafa3af78 100644
 --- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/AttributeId.java
 +++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/AttributeId.java
 @@ -243,5 +243,7 @@ public record AttributeId(String name, int id) {
@@ -7415,5 +7502,5 @@ index 9b7c3a602d..00ebb0f2b9 100644
        <register name="DF"/>
      </unaffected>
 -- 
-2.43.0
+2.44.0
 

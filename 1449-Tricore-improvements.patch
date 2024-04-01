@@ -5,88 +5,12 @@ Subject: [PATCH] 1449: Tricore improvements
 
 tricore analysis
 ---
- .../Processors/tricore/certification.manifest |   2 +
- .../tricore/data/languages/tricore.pspec      |   3 -
- .../data/patterns/patternconstraints.xml      |   5 +
- .../data/patterns/tricore_patterns.xml        |  31 +
  .../TRICOREElfRelocationConstants.java        | 140 ++++
  .../TRICOREElfRelocationHandler.java          | 625 ++++++++++++++++++
- 6 files changed, 803 insertions(+), 3 deletions(-)
- create mode 100644 Ghidra/Processors/tricore/data/patterns/patternconstraints.xml
- create mode 100644 Ghidra/Processors/tricore/data/patterns/tricore_patterns.xml
+ 2 files changed, 765 insertions(+)
  create mode 100644 Ghidra/Processors/tricore/src/main/java/ghidra/app/util/bin/format/elf/relocation/TRICOREElfRelocationConstants.java
  create mode 100644 Ghidra/Processors/tricore/src/main/java/ghidra/app/util/bin/format/elf/relocation/TRICOREElfRelocationHandler.java
 
-diff --git a/Ghidra/Processors/tricore/certification.manifest b/Ghidra/Processors/tricore/certification.manifest
-index 9f9ba7efa0..369942d44e 100644
---- a/Ghidra/Processors/tricore/certification.manifest
-+++ b/Ghidra/Processors/tricore/certification.manifest
-@@ -14,3 +14,5 @@ data/languages/tricore.sinc||GHIDRA||||END|
- data/languages/tricore.slaspec||GHIDRA||||END|
- data/manuals/tricore.idx||GHIDRA||||END|
- data/manuals/tricore2.idx||GHIDRA||||END|
-+data/patterns/patternconstraints.xml||GHIDRA||||END|
-+data/patterns/tricore_patterns.xml||GHIDRA||||END|
-diff --git a/Ghidra/Processors/tricore/data/languages/tricore.pspec b/Ghidra/Processors/tricore/data/languages/tricore.pspec
-index 73048dde07..835220220d 100644
---- a/Ghidra/Processors/tricore/data/languages/tricore.pspec
-+++ b/Ghidra/Processors/tricore/data/languages/tricore.pspec
-@@ -7,7 +7,4 @@
-   </properties>
-   
-   <programcounter register="PC"/>
--  <volatile outputop="write" inputop="read">
--    <range space="ram" first="0x0" last="0x20"/>
--  </volatile>
- </processor_spec>
-diff --git a/Ghidra/Processors/tricore/data/patterns/patternconstraints.xml b/Ghidra/Processors/tricore/data/patterns/patternconstraints.xml
-new file mode 100644
-index 0000000000..6fc69f94a6
---- /dev/null
-+++ b/Ghidra/Processors/tricore/data/patterns/patternconstraints.xml
-@@ -0,0 +1,5 @@
-+<patternconstraints>
-+  <language id="tricore:LE:32:*">
-+    <patternfile>tricore_patterns.xml</patternfile>
-+  </language>
-+</patternconstraints>
-diff --git a/Ghidra/Processors/tricore/data/patterns/tricore_patterns.xml b/Ghidra/Processors/tricore/data/patterns/tricore_patterns.xml
-new file mode 100644
-index 0000000000..bdcb9c585c
---- /dev/null
-+++ b/Ghidra/Processors/tricore/data/patterns/tricore_patterns.xml
-@@ -0,0 +1,31 @@
-+<patternlist>
-+  <patternpairs totalbits="32" postbits="16">
-+    <prepatterns>
-+      <data>00000000 10010000</data> <!-- ret -->>
-+      <data>10011101 ........ ........ ........</data> <!-- ja disp24 -->>
-+      <data>00011101 ........ ........ ........</data> <!-- j disp24 -->>
-+      <data>11011100 00001011</data> <!-- ji a11 -->>
-+      <data>00101101 00001011 00000000 00110000</data> <!-- ji a11 -->>
-+      <data>00111100 ........</data> <!-- j disp8 -->>
-+    </prepatterns>
-+    <postpatterns>
-+      <data>00000010 ........</data> <!-- sub.a a10, const8 -->>
-+      <data>00000101 ....1111 ........ ....01..</data> <!-- ld.bu d15, off18 -->>
-+      <data>00001100 ........</data> <!-- ld.bu d15, [aN], off4 -->>
-+      <data>00111011 ....0000 ........ 1111....</data> <!-- mov d15, const16 -->>
-+      <data>00111011 ....0000 ........ 0100....</data> <!-- mov d4, const16 -->>
-+      <data>00111011 ....0000 ........ 1000....</data> <!-- mov d8, const16 -->>
-+      <data>10000010 ....1111</data> <!-- mov d15, const4 -->>
-+      <data>10000010 ....0100</data> <!-- mov d4, const4 -->>
-+      <data>10000010 ....1000</data> <!-- mov d8, const4 -->>
-+      <data>01111101 ....0000 ........ 1111....</data> <!-- movh d15, const16 -->>
-+      <data>10010001 ....0000 ........ 1111....</data> <!-- movh.a a15, const16 -->>
-+      <data>01111101 ....0000 ........ 0100....</data> <!-- movh d4, const16 -->>
-+      <data>01111101 ....0000 ........ 1000....</data> <!-- movh d8, const16 -->>
-+      <data>11011010 ........</data> <!-- mov d15, const8 -->>
-+      <data>00011101 ........ ........ ........</data> <!-- j disp24  (thunk detection) -->>
-+      <data>10000101 ....1111 ........ ....00..</data> <!-- ld.w d15, off18 -->>
-+      <funcstart/>
-+    </postpatterns>
-+  </patternpairs>
-+</patternlist>
 diff --git a/Ghidra/Processors/tricore/src/main/java/ghidra/app/util/bin/format/elf/relocation/TRICOREElfRelocationConstants.java b/Ghidra/Processors/tricore/src/main/java/ghidra/app/util/bin/format/elf/relocation/TRICOREElfRelocationConstants.java
 new file mode 100644
 index 0000000000..840a351d3a
@@ -865,5 +789,5 @@ index 0000000000..2898cf34e3
 +	}
 +}
 -- 
-2.43.0
+2.44.0
 
