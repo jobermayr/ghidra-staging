@@ -21,13 +21,16 @@ Overflow flag is still incorrect
 
 6502: Fix ADC
 Fix for ADC in Decimal mode
+
+6502: Fix SBC
+Fix SBC when in Decimal mode
 ---
- .../Processors/6502/data/languages/6502.sinc  | 281 ++++++++++++------
+ .../Processors/6502/data/languages/6502.sinc  | 313 ++++++++++++------
  .../6502/data/languages/melps740.slaspec      |   4 +-
- 2 files changed, 187 insertions(+), 98 deletions(-)
+ 2 files changed, 219 insertions(+), 98 deletions(-)
 
 diff --git a/Ghidra/Processors/6502/data/languages/6502.sinc b/Ghidra/Processors/6502/data/languages/6502.sinc
-index 9154c59e0b..792ce7ab71 100644
+index 9154c59e0b..619ae00a08 100644
 --- a/Ghidra/Processors/6502/data/languages/6502.sinc
 +++ b/Ghidra/Processors/6502/data/languages/6502.sinc
 @@ -9,11 +9,18 @@ define space register type=register_space size=1;
@@ -52,7 +55,7 @@ index 9154c59e0b..792ce7ab71 100644
  
  #TOKENS
  
-@@ -37,49 +44,115 @@ define token data (16)
+@@ -37,49 +44,142 @@ define token data (16)
  # PLP and RTI ignore b5 (unused) and b4 (B flag) as neither bit has storage on chip
  # and only exist in stack data.
  macro popSR() {
@@ -142,20 +145,20 @@ index 9154c59e0b..792ce7ab71 100644
 +
 +	local adjust_low:4 = zext(low_nibble >= 0xa);
 +
-+	local low_nibble2:1 = (!adjust_low:1)*(low_nibble) + (adjust_low:1)*(((low_nibble + 0x6) & 0xF) + 0x10);
++	low_nibble = (!adjust_low:1)*(low_nibble) + (adjust_low:1)*(((low_nibble + 0x6) & 0xF) + 0x10);
 +
-+	local result1:2 = zext(A & 0xf0) + zext(op1 & 0xf0) + zext(low_nibble2);
++	local result1:2 = zext(A & 0xf0) + zext(op1 & 0xf0) + zext(low_nibble);
 +
 +	$(N_FLAG) = (result1:1 & 0x80) != 0;
 +	$(V_FLAG) = (((result1:1 ^ A) & (result1:1 ^ op1)) & 0x80) != 0;
 +
 +	local adjust_high:2 = zext(result1 >= 0xa0);
 +
-+	local result2:2 = result1 + (adjust_high * 0x60);
++	result1 = result1 + (adjust_high * 0x60);
 +
-+	$(C_FLAG) = (result2 >> 8) != 0;
++	$(C_FLAG) = (result1 >> 8) != 0;
 +
-+	A = result2:1;
++	A = result1:1;
 +	$(Z_FLAG) = (decimalResult:1 == 0);
 +
 +	goto <END>;
@@ -169,6 +172,33 @@ index 9154c59e0b..792ce7ab71 100644
 +	$(C_FLAG) = (result & 0xFF00) != 0;
 +	A = (result:1 & 0xFF);
 +<END>
++}
++
++# macro to handle SBC instruction in decimal mode
++macro sbc_decimal(op1) {
++
++	local notCarry:2 = zext(!$(C_FLAG));
++	local decimalResult:2 = zext(A) - zext(op1) - notCarry;
++
++	local tmp16:2 = zext(A & 0xf) - zext(op1 & 0xf) - notCarry;
++	local sub_6:2 = zext(tmp16 > 0xf);
++	local tmp16_2:2 = tmp16 - zext(sub_6 * 0x6);
++
++	local or_mask:2 = zext(tmp16_2 > 0xf);
++	local tmp16_3:2 = (tmp16_2 & 0xf) | zext(or_mask * 0xfff0);
++	local tmp16_4:2 =  tmp16_3 + zext(A & 0xf0) - zext(op1 & 0xf0);
++
++	$(V_FLAG) = ((decimalResult ^ zext(A)) & (~decimalResult ^ zext(op1)) & 0x80) != 0;
++	$(N_FLAG) = (tmp16_4:1 & 0x80) != 0;
++	$(Z_FLAG) = (decimalResult:1 == 0);
++
++	local sub_60:2 = zext(tmp16_4 > 0xff);
++	local tmp16_5:2 = tmp16_4 - zext(sub_60 * 0x60);
++	local X_2:2 = zext(tmp16_5 >> 8);
++
++	$(C_FLAG) = (tmp16_5 >> 8) == 0;
++
++	A = tmp16_5:1;
  }
  
 +# reads two bytes from the specified address
@@ -194,7 +224,7 @@ index 9154c59e0b..792ce7ab71 100644
  
  ################################################################
  # Pseudo Instructions
-@@ -104,26 +177,26 @@ OP1: imm16,X    is bbb=7 & X; imm16		{ tmp:2 = imm16 + zext(X); export *:1 tmp;
+@@ -104,26 +204,26 @@ OP1: imm16,X    is bbb=7 & X; imm16		{ tmp:2 = imm16 + zext(X); export *:1 tmp;
  OP1: imm16,Y    is bbb=6 & Y; imm16		{ tmp:2 = imm16 + zext(Y); export *:1 tmp; }
  # Indirect X
  OP1: (imm8,X)   is bbb=0 & X; imm8		{
@@ -238,7 +268,7 @@ index 9154c59e0b..792ce7ab71 100644
  }
  
  # Immediate
-@@ -147,7 +220,7 @@ OP2LD: imm16,Y  is bbb=7 & Y; imm16		{ tmp:2 = imm16 + zext(Y); export *:1 tmp;
+@@ -147,7 +247,7 @@ OP2LD: imm16,Y  is bbb=7 & Y; imm16		{ tmp:2 = imm16 + zext(Y); export *:1 tmp;
  
  
  ADDR8:  imm8    is imm8		{ export *:1 imm8; }
@@ -247,7 +277,7 @@ index 9154c59e0b..792ce7ab71 100644
  @if 6502_VERSION == "CMOS"
  ADDRI:  (imm16)   is imm16    { tmp:2 = imm16; export *:2 tmp; }
  @else
-@@ -182,7 +255,7 @@ ADDRI:  (imm16)   is imm16    {
+@@ -182,7 +282,7 @@ ADDRI:  (imm16)   is imm16    {
  :ASL OP2     is (op=0x06 | op=0x0A | op=0x0E | op=0x16 | op=0x1E) ... & OP2
  {
  	local tmp = OP2;
@@ -256,7 +286,7 @@ index 9154c59e0b..792ce7ab71 100644
  	tmp = tmp << 1;
  	OP2 = tmp;
  	resultFlags(tmp);
-@@ -190,80 +263,81 @@ ADDRI:  (imm16)   is imm16    {
+@@ -190,80 +290,81 @@ ADDRI:  (imm16)   is imm16    {
  
  :BCC  REL			is op=0x90; REL
  {
@@ -356,7 +386,7 @@ index 9154c59e0b..792ce7ab71 100644
  }
  
  :CMP OP1     is (cc=1 & aaa=6) ... & OP1
-@@ -271,7 +345,7 @@ ADDRI:  (imm16)   is imm16    {
+@@ -271,7 +372,7 @@ ADDRI:  (imm16)   is imm16    {
  	local op1 = OP1;
  	local tmp = A - op1;
  	resultFlags(tmp);
@@ -365,7 +395,7 @@ index 9154c59e0b..792ce7ab71 100644
  }
  
  :CPX OP2     is (op=0xE0 | op=0xE4 | op=0xEC) ... & OP2
-@@ -279,7 +353,7 @@ ADDRI:  (imm16)   is imm16    {
+@@ -279,7 +380,7 @@ ADDRI:  (imm16)   is imm16    {
  	local op1 = OP2;
  	local tmp = X - op1;
  	resultFlags(tmp);
@@ -374,7 +404,7 @@ index 9154c59e0b..792ce7ab71 100644
  }
  
  :CPY OP2     is (op=0xC0 | op=0xC4 | op=0xCC) ... & OP2
-@@ -287,7 +361,7 @@ ADDRI:  (imm16)   is imm16    {
+@@ -287,7 +388,7 @@ ADDRI:  (imm16)   is imm16    {
  	local op1 = OP2;
  	local tmp = Y - op1;
  	resultFlags(tmp);
@@ -383,7 +413,7 @@ index 9154c59e0b..792ce7ab71 100644
  }
  
  :DEC OP2     is (op=0xC6 | op=0xCE | op=0xD6 | op=0xDE) ... & OP2
-@@ -341,17 +415,20 @@ ADDRI:  (imm16)   is imm16    {
+@@ -341,17 +442,20 @@ ADDRI:  (imm16)   is imm16    {
  	goto ADDR16;
  }
  
@@ -410,7 +440,7 @@ index 9154c59e0b..792ce7ab71 100644
  	call ADDR16;
  }
  
-@@ -376,11 +453,11 @@ ADDRI:  (imm16)   is imm16    {
+@@ -376,11 +480,11 @@ ADDRI:  (imm16)   is imm16    {
  :LSR OP2     is (op=0x46 | op=0x4A | op=0x4E | op=0x56 | op=0x5E) ... & OP2
  {
  	local tmp = OP2;
@@ -425,7 +455,7 @@ index 9154c59e0b..792ce7ab71 100644
  }
  
  :NOP     is op=0xEA
-@@ -400,27 +477,31 @@ ADDRI:  (imm16)   is imm16    {
+@@ -400,27 +504,31 @@ ADDRI:  (imm16)   is imm16    {
  
  :PLP     is op=0x28
  {
@@ -462,7 +492,7 @@ index 9154c59e0b..792ce7ab71 100644
  	local result = op2 << 1;
  	result = result | tmpC;
  	OP2 = result;
-@@ -429,9 +510,9 @@ ADDRI:  (imm16)   is imm16    {
+@@ -429,9 +537,9 @@ ADDRI:  (imm16)   is imm16    {
  
  :ROR OP2     is (op=0x66 | op=0x6A | op=0x6E | op=0x76 | op=0x7E) ... & OP2
  {
@@ -474,7 +504,7 @@ index 9154c59e0b..792ce7ab71 100644
  	tmp = tmp >> 1;
  	tmp = tmp | tmpC;
  	OP2 = tmp;
-@@ -442,20 +523,28 @@ ADDRI:  (imm16)   is imm16    {
+@@ -442,40 +550,53 @@ ADDRI:  (imm16)   is imm16    {
  {
  	popSR();
  
@@ -511,7 +541,14 @@ index 9154c59e0b..792ce7ab71 100644
  }
  
  :SBC OP1     is (cc=1 & aaa=7) ... & OP1
-@@ -465,17 +554,17 @@ ADDRI:  (imm16)   is imm16    {
+ {
++	if($(D_FLAG) == 0) goto <NOT_DECIMAL>;
++	sbc_decimal(OP1);
++	goto <END>;
++<NOT_DECIMAL>
+ 	adc(~OP1);
++<END>
+ }
  
  :SEC     is op=0x38
  {
