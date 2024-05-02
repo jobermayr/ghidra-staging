@@ -215,6 +215,7 @@ gradle buildNatives sleighCompile
  .../cpp/{ => include/ghidra}/memstate.hh      |  4 +-
  .../cpp/{ => include/ghidra}/merge.hh         |  2 +-
  .../cpp/{ => include/ghidra}/modelrules.hh    |  2 +-
+ .../{ => include/ghidra}/multiprecision.hh    |  2 +-
  .../decompile/cpp/{ => include/ghidra}/op.hh  |  2 +-
  .../cpp/{ => include/ghidra}/opbehavior.hh    |  4 +-
  .../cpp/{ => include/ghidra}/opcodes.hh       |  0
@@ -282,6 +283,7 @@ gradle buildNatives sleighCompile
  .../Decompiler/src/decompile/cpp/memstate.cc  |  4 +-
  .../Decompiler/src/decompile/cpp/merge.cc     |  4 +-
  .../src/decompile/cpp/modelrules.cc           |  4 +-
+ .../src/decompile/cpp/multiprecision.cc       |  2 +-
  .../Decompiler/src/decompile/cpp/op.cc        |  4 +-
  .../src/decompile/cpp/opbehavior.cc           |  4 +-
  .../Decompiler/src/decompile/cpp/opcodes.cc   |  4 +-
@@ -300,7 +302,7 @@ gradle buildNatives sleighCompile
  .../src/decompile/cpp/printlanguage.cc        |  4 +-
  .../Decompiler/src/decompile/cpp/rangeutil.cc |  4 +-
  .../Decompiler/src/decompile/cpp/raw_arch.cc  |  2 +-
- .../src/decompile/cpp/ruleaction.cc           |  8 +-
+ .../src/decompile/cpp/ruleaction.cc           | 10 +--
  .../src/decompile/cpp/rulecompile.cc          |  4 +-
  .../Decompiler/src/decompile/cpp/ruleparse.y  |  2 +-
  .../Decompiler/src/decompile/cpp/semantics.cc |  4 +-
@@ -345,7 +347,7 @@ gradle buildNatives sleighCompile
  .../src/decompile/unittests/testmarshal.cc    |  4 +-
  .../src/decompile/unittests/testparamstore.cc |  6 +-
  .../src/decompile/unittests/testtypes.cc      |  6 +-
- 238 files changed, 495 insertions(+), 512 deletions(-)
+ 240 files changed, 498 insertions(+), 515 deletions(-)
  rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/action.hh (99%)
  rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/address.hh (99%)
  rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/analyzesigs.hh (97%)
@@ -404,6 +406,7 @@ gradle buildNatives sleighCompile
  rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/memstate.hh (99%)
  rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/merge.hh (99%)
  rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/modelrules.hh (99%)
+ rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/multiprecision.hh (98%)
  rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/op.hh (99%)
  rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/opbehavior.hh (99%)
  rename Ghidra/Features/Decompiler/src/decompile/cpp/{ => include/ghidra}/opcodes.hh (100%)
@@ -472,10 +475,10 @@ index f3544674a5..aeb95037bf 100644
  	return task("bison_${binaryName}_$filename", type: Exec) {
  
 diff --git a/Ghidra/Features/Decompiler/buildNatives.gradle b/Ghidra/Features/Decompiler/buildNatives.gradle
-index dd0d7b3c90..1d2300aef1 100644
+index 9a9ce5b7be..4a1b376154 100644
 --- a/Ghidra/Features/Decompiler/buildNatives.gradle
 +++ b/Ghidra/Features/Decompiler/buildNatives.gradle
-@@ -212,7 +212,7 @@ model {
+@@ -213,7 +213,7 @@ model {
  						include decompiler_opt_files
  					}
  					exportedHeaders {
@@ -484,7 +487,7 @@ index dd0d7b3c90..1d2300aef1 100644
  					}
  				}
  			}
-@@ -240,7 +240,7 @@ model {
+@@ -241,7 +241,7 @@ model {
  						include sleigh_files
  					}
  					exportedHeaders {
@@ -493,7 +496,7 @@ index dd0d7b3c90..1d2300aef1 100644
  					}
  				}
  				if (isCurrentWindows()) {
-@@ -282,7 +282,7 @@ model {
+@@ -283,7 +283,7 @@ model {
  							include sleigh_common_files
  						}
  						exportedHeaders {
@@ -502,7 +505,7 @@ index dd0d7b3c90..1d2300aef1 100644
  						}
  					}
  				}
-@@ -317,7 +317,7 @@ model {
+@@ -318,7 +318,7 @@ model {
  							include sleigh_debug_files
  						}
  						exportedHeaders {
@@ -534,7 +537,7 @@ index 6b2dce549e..361e7198ea 100644
  # The EXCLUDE_SYMLINKS tag can be used select whether or not files or 
  # directories that are symbolic links (a Unix filesystem feature) are excluded 
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/Makefile b/Ghidra/Features/Decompiler/src/decompile/cpp/Makefile
-index 5e5d298441..8f1244977c 100644
+index d2d3a31988..2a6dc5a1b0 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/Makefile
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/Makefile
 @@ -46,10 +46,11 @@ DBG_CXXFLAGS=-g -Wall -Wno-sign-compare
@@ -752,7 +755,7 @@ index 4031b6c878..0953798e9c 100644
  namespace ghidra {
  
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/address.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/address.cc
-index c5d1cbe5cc..12d14ca7ba 100644
+index e3017e6d92..3df5f5ddac 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/address.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/address.cc
 @@ -13,8 +13,8 @@
@@ -798,7 +801,7 @@ index 3987da1f25..e05c2fed12 100644
  namespace ghidra {
  
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/block.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/block.cc
-index b633c4b072..d0c27ced70 100644
+index 391f1f6663..78b3e49bcb 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/block.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/block.cc
 @@ -14,8 +14,8 @@
@@ -1174,7 +1177,7 @@ index 0f67e3e56a..0cf8099250 100644
  namespace ghidra {
  
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.cc
-index 4e395760fa..9c48af8505 100644
+index fc4b2f9167..ed8d70eba8 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.cc
 @@ -13,8 +13,8 @@
@@ -1232,7 +1235,7 @@ index 99376cedf3..cf893a94a4 100644
  namespace ghidra {
  
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/funcdata_varnode.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/funcdata_varnode.cc
-index 16fd1d90bf..75a21e9719 100644
+index 997aae1054..a747f0b3f7 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/funcdata_varnode.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/funcdata_varnode.cc
 @@ -13,7 +13,7 @@
@@ -1449,7 +1452,7 @@ diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/address.hh b/Ghidra/Fe
 similarity index 99%
 rename from Ghidra/Features/Decompiler/src/decompile/cpp/address.hh
 rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/address.hh
-index 2ebde08a61..ccdb037311 100644
+index 6474e8bf32..6ec55a783d 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/address.hh
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/address.hh
 @@ -26,7 +26,7 @@
@@ -1545,7 +1548,7 @@ diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/block.hh b/Ghidra/Feat
 similarity index 99%
 rename from Ghidra/Features/Decompiler/src/decompile/cpp/block.hh
 rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/block.hh
-index 2a3d0a5b7d..0011786ada 100644
+index 9730f6f3d6..1c28287e15 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/block.hh
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/block.hh
 @@ -19,7 +19,7 @@
@@ -1996,7 +1999,7 @@ diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/funcdata.hh b/Ghidra/F
 similarity index 99%
 rename from Ghidra/Features/Decompiler/src/decompile/cpp/funcdata.hh
 rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/funcdata.hh
-index c5ff8eb11f..7cb7685be9 100644
+index 55b3a73523..24af02e674 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/funcdata.hh
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/funcdata.hh
 @@ -19,12 +19,12 @@
@@ -2259,7 +2262,7 @@ diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/jumptable.hh b/Ghidra/
 similarity index 99%
 rename from Ghidra/Features/Decompiler/src/decompile/cpp/jumptable.hh
 rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/jumptable.hh
-index 8b77a12318..e770c91f8a 100644
+index 917bb04ea1..71fe4e619d 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/jumptable.hh
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/jumptable.hh
 @@ -19,8 +19,8 @@
@@ -2415,7 +2418,7 @@ diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/modelrules.hh b/Ghidra
 similarity index 99%
 rename from Ghidra/Features/Decompiler/src/decompile/cpp/modelrules.hh
 rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/modelrules.hh
-index 7daad20273..f82a834e5a 100644
+index d352655b10..a97e0f8637 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/modelrules.hh
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/modelrules.hh
 @@ -19,7 +19,7 @@
@@ -2424,6 +2427,22 @@ index 7daad20273..f82a834e5a 100644
  
 -#include "op.hh"
 +#include "ghidra/op.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/multiprecision.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/multiprecision.hh
+similarity index 98%
+rename from Ghidra/Features/Decompiler/src/decompile/cpp/multiprecision.hh
+rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/multiprecision.hh
+index 32d4e97144..71dc71c60a 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/multiprecision.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/multiprecision.hh
+@@ -18,7 +18,7 @@
+ #ifndef __CPUI_MULTIPRECISION__
+ #define __CPUI_MULTIPRECISION__
+ 
+-#include "error.hh"
++#include "ghidra/error.hh"
  
  namespace ghidra {
  
@@ -2715,7 +2734,7 @@ diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.hh b/Ghidra
 similarity index 99%
 rename from Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.hh
 rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/ruleaction.hh
-index d30e604258..7a41949953 100644
+index 6e8177c888..9e2d87e124 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.hh
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/ruleaction.hh
 @@ -25,7 +25,7 @@
@@ -3229,7 +3248,7 @@ diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/varnode.hh b/Ghidra/Fe
 similarity index 99%
 rename from Ghidra/Features/Decompiler/src/decompile/cpp/varnode.hh
 rename to Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/varnode.hh
-index 2fb160392a..ff797b8c43 100644
+index 487d8918b0..7647b93346 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/varnode.hh
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/varnode.hh
 @@ -18,8 +18,8 @@
@@ -3321,7 +3340,7 @@ index d0764370c8..8a2eb9c784 100644
  #include "sys/socket.h"
  #include "sys/un.h"
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/jumptable.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/jumptable.cc
-index 3aedf94599..2796c93945 100644
+index f589ac8360..82ae470df3 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/jumptable.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/jumptable.cc
 @@ -13,9 +13,9 @@
@@ -3472,6 +3491,19 @@ index e9565d6f95..7282201610 100644
 -#include "funcdata.hh"
 +#include "ghidra/modelrules.hh"
 +#include "ghidra/funcdata.hh"
+ 
+ namespace ghidra {
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/multiprecision.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/multiprecision.cc
+index 80623beb2e..8a71e652e6 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/multiprecision.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/multiprecision.cc
+@@ -13,7 +13,7 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-#include "multiprecision.hh"
++#include "ghidra/multiprecision.hh"
  
  namespace ghidra {
  
@@ -3740,10 +3772,10 @@ index db9f3e0cce..b28603742b 100644
  namespace ghidra {
  
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc
-index f803008344..822535d22c 100644
+index 1a26c23784..2f4005c7d5 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc
-@@ -13,10 +13,10 @@
+@@ -13,11 +13,11 @@
   * See the License for the specific language governing permissions and
   * limitations under the License.
   */
@@ -3751,10 +3783,12 @@ index f803008344..822535d22c 100644
 -#include "coreaction.hh"
 -#include "subflow.hh"
 -#include "rangeutil.hh"
+-#include "multiprecision.hh"
 +#include "ghidra/ruleaction.hh"
 +#include "ghidra/coreaction.hh"
 +#include "ghidra/subflow.hh"
 +#include "ghidra/rangeutil.hh"
++#include "ghidra/multiprecision.hh"
  #include <climits>
  
  namespace ghidra {
@@ -3921,7 +3955,7 @@ index 45f44e90a0..4e627c768f 100644
  --LNK=src/libsla.a -lz
  --
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/slgh_compile.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/slgh_compile.cc
-index 0eb12f882d..26af4e4bb4 100644
+index 8bd82b33ff..6b19977f02 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/slgh_compile.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/slgh_compile.cc
 @@ -13,8 +13,8 @@
@@ -4395,7 +4429,7 @@ index c724852f64..5b9826115e 100644
  namespace ghidra {
  
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/varnode.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/varnode.cc
-index 8d0f4a53b4..de275643bc 100644
+index 79993db842..22b57d4b16 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/varnode.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/varnode.cc
 @@ -13,8 +13,8 @@
