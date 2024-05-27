@@ -1,0 +1,510 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Sleigh-InSPECtor <166091708+Sleigh-InSPECtor@users.noreply.github.com>
+Date: Mon, 20 May 2024 14:35:47 +0930
+Subject: [PATCH] 6551: RISCV: NV and DZ float flags
+
+---
+ .../RISCV/data/languages/riscv.rv32d.sinc     | 57 ++++++++++++--
+ .../RISCV/data/languages/riscv.rv32f.sinc     | 76 +++++++++++++++----
+ .../RISCV/data/languages/riscv.rv64d.sinc     | 16 +++-
+ .../RISCV/data/languages/riscv.rv64f.sinc     | 16 +++-
+ .../RISCV/data/languages/riscv.table.sinc     | 39 ++++++++--
+ 5 files changed, 177 insertions(+), 27 deletions(-)
+
+diff --git a/Ghidra/Processors/RISCV/data/languages/riscv.rv32d.sinc b/Ghidra/Processors/RISCV/data/languages/riscv.rv32d.sinc
+index 948be9ad95..d7a59bcfa6 100644
+--- a/Ghidra/Processors/RISCV/data/languages/riscv.rv32d.sinc
++++ b/Ghidra/Processors/RISCV/data/languages/riscv.rv32d.sinc
+@@ -1,13 +1,26 @@
+ # RV32D  Standard Extension
+ 
++macro invalidOpForMultD(fr1, fr2) {
++	if ((fr1[0,63] != 0 || fr2[0,63] != 0x7FF0000000000000)
++		&& (fr1[0,63] != 0x7FF0000000000000 || fr2[0,63] != 0)) goto <MULTVALID>;
++	setFflags($(FFLAGNV));
++	<MULTVALID>
++}
++
++macro invalidOpForAddD(fr1, fr2) {
++	if ((fr1 != 0xFFF0000000000000 || fr2 != 0x7FF0000000000000)
++		&& (fr1 != 0x7FF0000000000000 || fr2 != 0xFFF0000000000000)) goto <ADDVALID>;
++	setFflags($(FFLAGNV));
++	<ADDVALID>
++}
+ 
+ # fadd.d D,S,T,m 02000053 fe00007f SIMPLE (0, 0) 
+ :fadd.d frd,frs1D,frs2D,FRM is frs1D & frd & frs2D & FRM & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct7=0x1
+ {
++	invalidOpForAddD(frs1D, frs2D);
+ 	frd = frs1D f+ frs2D;
+ }
+ 
+-
+ # fclass.d d,S e2001053 fff0707f SIMPLE (0, 0) 
+ :fclass.d rd,frs1D is frs1D & rd & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct3=0x1 & funct7=0x71 & op2024=0x0
+ {
+@@ -63,6 +76,11 @@
+ # fcvt.w.d d,S,m c2000053 fff0007f SIMPLE (0, 0) 
+ :fcvt.w.d rd,frs1D,FRM is frs1D & FRM & rd & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct7=0x61 & op2024=0x0
+ {
++	local low:8 = 0xC1E0000000000000;
++	local high:8 = 0x41E0000000000000;
++	if (frs1D f>= low && frs1D f<= high) goto <VALID>;
++	setFflags($(FFLAGNV));
++	<VALID>
+ 	local tmp:$(WXLEN) = trunc(frs1D);
+ 	rd = sext(tmp);
+ }
+@@ -71,6 +89,11 @@
+ # fcvt.wu.d d,S,m c2100053 fff0007f SIMPLE (0, 0) 
+ :fcvt.wu.d rd,frs1D,FRM is frs1D & FRM & rd & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct7=0x61 & op2024=0x1
+ {
++	local low:8 = 0x0;
++	local high:8 = 0x41F0000000000000;
++	if (frs1D f>= low && frs1D f<= high) goto <VALID>;
++	setFflags($(FFLAGNV));
++	<VALID>
+ 	local tmp:$(WXLEN) = trunc(frs1D);
+ 	#TODO  unsigned
+ 	rd = sext(tmp);
+@@ -80,6 +103,13 @@
+ # fdiv.d D,S,T,m 1a000053 fe00007f SIMPLE (0, 0) 
+ :fdiv.d frd,frs1D,frs2D,FRM is frs1D & frd & frs2D & FRM & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct7=0xd
+ {
++	if ((frs1D[0,63] != 0 || frs2D[0,63] != 0)
++		&& (frs1D[0,63] != 0x7FF0000000000000 || frs2D[0,63] != 0x7FF0000000000000)) goto <VALID>;
++	setFflags($(FFLAGNV));
++	<VALID>
++	if (frs1D[52,11] == 0x7ff || frs1D[0,63] == 0 || frs2D[0,63] != 0) goto <NOTDIVZERO>;
++	setFflags($(FFLAGDZ));
++	<NOTDIVZERO>
+ 	frd = frs1D f/ frs2D;
+ }
+ 
+@@ -117,7 +147,10 @@
+ # fmadd.d D,S,T,R,m 02000043 0600007f SIMPLE (0, 0) 
+ :fmadd.d frd,frs1D,frs2D,frs3D,FRM is frs1D & frd & frs2D & FRM & frs3D & op0001=0x3 & op0204=0x0 & op0506=0x2 & op2526=0x1
+ {
+-	frd = (frs1D f* frs2D) f+ frs3D;
++	invalidOpForMultD(frs1D, frs2D);
++	local tmp:$(DFLEN) = frs1D f* frs2D;
++	invalidOpForAddD(tmp, frs3D);
++	frd = tmp f+ frs3D;
+ }
+ 
+ 
+@@ -148,13 +181,17 @@
+ # fmsub.d D,S,T,R,m 02000047 0600007f SIMPLE (0, 0) 
+ :fmsub.d frd,frs1D,frs2D,frs3D,FRM is frs1D & frd & frs2D & FRM & frs3D & op0001=0x3 & op0204=0x1 & op0506=0x2 & op2526=0x1
+ {
+-	frd = (frs1D f* frs2D) f- frs3D;
++	invalidOpForMultD(frs1D, frs2D);
++	local tmp:$(DFLEN) = frs1D f* frs2D;
++	invalidOpForAddD(tmp, f- frs3D);
++	frd = tmp f- frs3D;
+ }
+ 
+ 
+ # fmul.d D,S,T,m 12000053 fe00007f SIMPLE (0, 0) 
+ :fmul.d frd,frs1D,frs2D,FRM is frs1D & frd & frs2D & FRM & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct7=0x9
+ {
++	invalidOpForMultD(frs1D, frs2D);
+ 	frd = frs1D f* frs2D;
+ }
+ 
+@@ -162,14 +199,20 @@
+ # fnmadd.d D,S,T,R,m 0200004f 0600007f SIMPLE (0, 0) 
+ :fnmadd.d frd,frs1D,frs2D,frs3D,FRM is frs1D & frd & frs2D & FRM & frs3D & op0001=0x3 & op0204=0x3 & op0506=0x2 & op2526=0x1
+ {
+-	frd = (f- (frs1D f* frs2D)) f- frs3D;
++	invalidOpForMultD(frs1D, frs2D);
++	local tmp:$(DFLEN) = f- (frs1D f* frs2D);
++	invalidOpForAddD(tmp, f- frs3D);
++	frd = tmp f- frs3D;
+ }
+ 
+ 
+ # fnmsub.d D,S,T,R,m 0200004b 0600007f SIMPLE (0, 0) 
+ :fnmsub.d frd,frs1D,frs2D,frs3D,FRM is frs1D & frd & frs2D & FRM & frs3D & op0001=0x3 & op0204=0x2 & op0506=0x2 & op2526=0x1
+ {
+-	frd = (f- (frs1D f* frs2D)) f+ frs3D;
++	invalidOpForMultD(frs1D, frs2D);
++	local tmp:$(DFLEN) = f- (frs1D f* frs2D);
++	invalidOpForAddD(tmp, frs3D);
++	frd = tmp f+ frs3D;
+ }
+ 
+ 
+@@ -229,6 +272,9 @@
+ # fsqrt.d D,S,m 5a000053 fff0007f SIMPLE (0, 0) 
+ :fsqrt.d frd,frs1D,FRM is frs1D & frd & FRM & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct7=0x2d & op2024=0x0
+ {
++	if (nan(frs1D) | frs1D f>= 0) goto <VALID>;
++	setFflags($(FFLAGNV));
++	<VALID>
+ 	frd = sqrt(frs1D);
+ }
+ 
+@@ -236,5 +282,6 @@
+ # fsub.d D,S,T,m 0a000053 fe00007f SIMPLE (0, 0) 
+ :fsub.d frd,frs1D,frs2D,FRM is frs1D & frd & frs2D & FRM & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct7=0x5
+ {
++	invalidOpForAddD(frs1D, f- frs2D);
+ 	frd = frs1D f- frs2D;
+ }
+diff --git a/Ghidra/Processors/RISCV/data/languages/riscv.rv32f.sinc b/Ghidra/Processors/RISCV/data/languages/riscv.rv32f.sinc
+index 1d66fc1041..1b74d4f108 100644
+--- a/Ghidra/Processors/RISCV/data/languages/riscv.rv32f.sinc
++++ b/Ghidra/Processors/RISCV/data/languages/riscv.rv32f.sinc
+@@ -1,9 +1,24 @@
+ # RV32F  Standard Extension
+ 
++macro invalidOpForMultS(fr1, fr2) {
++	if ((fr1[0,31] != 0 || fr2[0,31] != 0x7F800000)
++		&& (fr1[0,31] != 0x7F800000 || fr2[0,31] != 0)) goto <MULTVALID>;
++	setFflags($(FFLAGNV));
++	<MULTVALID>
++}
++
++macro invalidOpForAddS(fr1, fr2) {
++	if ((fr1 != 0xFF800000 || fr2 != 0x7F800000)
++		&& (fr1 != 0x7F800000 || fr2 != 0xFF800000)) goto <ADDVALID>;
++	setFflags($(FFLAGNV));
++	<ADDVALID>
++}
++
+ # fadd.s D,S,T,m 00000053 fe00007f SIMPLE (0, 0) 
+ :fadd.s frd,frs1S,frs2S,FRM is frs1S & frd & frs2S & FRM & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct7=0x0
+ {
+-	local tmp:4 = frs1S f+ frs2S;
++	invalidOpForAddS(frs1S, frs2S);
++	local tmp:$(SFLEN) = frs1S f+ frs2S;
+ 	fassignS(frd, tmp);
+ }
+ 
+@@ -29,7 +44,7 @@
+ # fcvt.s.w D,s,m d0000053 fff0007f SIMPLE (0, 0) 
+ :fcvt.s.w frd,rs1W,FRM is frd & FRM & rs1W & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct7=0x68 & op2024=0x0
+ {
+-	local tmp:4 = int2float(rs1W);
++	local tmp:$(SFLEN) = int2float(rs1W);
+ 	fassignS(frd, tmp);
+ }
+ 
+@@ -39,7 +54,7 @@
+ {
+ 	#ATTN  unsigned can be an issue here
+ 	local u32:$(XLEN2) = zext(rs1W);
+-	local tmp:4 = int2float(u32);
++	local tmp:$(SFLEN) = int2float(u32);
+ 	fassignS(frd, tmp);
+ }
+ 
+@@ -47,6 +62,11 @@
+ # fcvt.w.s d,S,m c0000053 fff0007f SIMPLE (0, 0) 
+ :fcvt.w.s rd,frs1S,FRM is frs1S & FRM & rd & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct7=0x60 & op2024=0x0
+ {
++	local low:4 = 0xCF000000;
++	local high:4 = 0x4F000000;
++	if (frs1S f>= low && frs1S f<= high) goto <VALID>;
++	setFflags($(FFLAGNV));
++	<VALID>
+ 	local tmp:$(WXLEN) = trunc(frs1S);
+ 	rd = sext(tmp);
+ }
+@@ -55,6 +75,11 @@
+ # fcvt.wu.s d,S,m c0100053 fff0007f SIMPLE (0, 0) 
+ :fcvt.wu.s rd,frs1S,FRM is frs1S & FRM & rd & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct7=0x60 & op2024=0x1
+ {
++	local low:4 = 0x0;
++	local high:4 = 0x4F800000;
++	if (frs1S f>= low && frs1S f<= high) goto <VALID>;
++	setFflags($(FFLAGNV));
++	<VALID>
+ 	local tmp:$(WXLEN) = trunc(frs1S);
+ 	#TODO  unsigned
+ 	rd = sext(tmp);
+@@ -64,7 +89,15 @@
+ # fdiv.s D,S,T,m 18000053 fe00007f SIMPLE (0, 0) 
+ :fdiv.s frd,frs1S,frs2S,FRM is frs1S & frd & frs2S & FRM & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct7=0xc
+ {
+-	local tmp:4 = frs1S f/ frs2S;
++	if ((frs1S[0,31] != 0 || frs2S[0,31] != 0)
++		&& (frs1S[0,31] != 0x7F800000 || frs2S[0,31] != 0x7F800000)) goto <VALID>;
++	setFflags($(FFLAGNV));
++	<VALID>
++	if (frs1S[23,8] == 0xff || frs1S[0,31] == 0 || frs2S[0,31] != 0) goto <NOTDIVZERO>;
++	setFflags($(FFLAGDZ));
++	<NOTDIVZERO>
++
++	local tmp:$(SFLEN) = frs1S f/ frs2S;
+ 	fassignS(frd, tmp);
+ }
+ 
+@@ -101,7 +134,10 @@
+ # fmadd.s D,S,T,R,m 00000043 0600007f SIMPLE (0, 0) 
+ :fmadd.s frd,frs1S,frs2S,frs3S,FRM is frs1S & frd & frs2S & FRM & frs3S & op0001=0x3 & op0204=0x0 & op0506=0x2 & op2526=0x0
+ {
+-	local tmp:4 = (frs1S f* frs2S) f+ frs3S;
++	invalidOpForMultS(frs1S, frs2S);
++	local tmp:$(SFLEN) = (frs1S f* frs2S);
++	invalidOpForAddS(tmp, frs3S);
++	tmp = tmp f+ frs3S;
+ 	fassignS(frd, tmp);
+ }
+ 
+@@ -133,7 +169,10 @@
+ # fmsub.s D,S,T,R,m 00000047 0600007f SIMPLE (0, 0) 
+ :fmsub.s frd,frs1S,frs2S,frs3S,FRM is frs1S & frd & frs2S & FRM & frs3S & op0001=0x3 & op0204=0x1 & op0506=0x2 & op2526=0x0
+ {
+-	local tmp:4 = (frs1S f* frs2S) f- frs3S;
++	invalidOpForMultS(frs1S, frs2S);
++	local tmp:$(SFLEN) = (frs1S f* frs2S);
++	invalidOpForAddS(tmp, f- frs3S);
++	tmp = tmp f- frs3S;
+ 	fassignS(frd, tmp);
+ }
+ 
+@@ -141,7 +180,8 @@
+ # fmul.s D,S,T,m 10000053 fe00007f SIMPLE (0, 0) 
+ :fmul.s frd,frs1S,frs2S,FRM is frs1S & frd & frs2S & FRM & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct7=0x8
+ {
+-	local tmp:4 = frs1S f* frs2S;
++	invalidOpForMultS(frs1S, frs2S);
++	local tmp:$(SFLEN) = frs1S f* frs2S;
+ 	fassignS(frd, tmp);
+ }
+ 
+@@ -162,7 +202,10 @@
+ # fnmadd.s D,S,T,R,m 0000004f 0600007f SIMPLE (0, 0) 
+ :fnmadd.s frd,frs1S,frs2S,frs3S,FRM is frs1S & frd & frs2S & FRM & frs3S & op0001=0x3 & op0204=0x3 & op0506=0x2 & op2526=0x0
+ {
+-	local tmp:4 = (f- (frs1S f* frs2S)) f- frs3S;
++	invalidOpForMultS(frs1S, frs2S);
++	local tmp:$(SFLEN) = (f- (frs1S f* frs2S));
++	invalidOpForAddS(tmp, f- frs3S);
++	tmp = tmp f- frs3S;
+ 	fassignS(frd, tmp);
+ }
+ 
+@@ -170,7 +213,10 @@
+ # fnmsub.s D,S,T,R,m 0000004b 0600007f SIMPLE (0, 0) 
+ :fnmsub.s frd,frs1S,frs2S,frs3S,FRM is frs1S & frd & frs2S & FRM & frs3S & op0001=0x3 & op0204=0x2 & op0506=0x2 & op2526=0x0
+ {
+-	local tmp:4 = (f- (frs1S f* frs2S)) f+ frs3S;
++	invalidOpForMultS(frs1S, frs2S);
++	local tmp:$(SFLEN) = (f- (frs1S f* frs2S));
++	invalidOpForAddS(tmp, frs3S);
++	tmp = tmp f+ frs3S;
+ 	fassignS(frd, tmp);
+ }
+ 
+@@ -201,7 +247,7 @@
+ # fneg.s D,U 20001053 fe00707f ALIAS (0, 0)
+ :fneg.s frd,frs1S is frs1S & frd & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct3=0x1 & funct7=0x10 & op1519=op2024
+ {
+-	local tmp:4 = f- frs1S;
++	local tmp:$(SFLEN) = f- frs1S;
+ 	fassignS(frd, tmp);
+ }
+ 
+@@ -217,7 +263,7 @@
+ # fabs.s D,U 20002053 fe00707f ALIAS (0, 0)
+ :fabs.s frd,frs1S is frd & frs1S & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct3=0x2 & funct7=0x10 & op1519=op2024
+ {
+-	local tmp:4 = abs(frs1S);
++	local tmp:$(SFLEN) = abs(frs1S);
+ 	fassignS(frd, tmp);
+ }
+ 
+@@ -225,7 +271,10 @@
+ # fsqrt.s D,S,m 58000053 fff0007f SIMPLE (0, 0) 
+ :fsqrt.s frd,frs1S,FRM is frs1S & frd & FRM & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct7=0x2c & op2024=0x0
+ {
+-	local tmp:4 = sqrt(frs1S);
++	if (nan(frs1S) | frs1S f>= 0) goto <VALID>;
++	setFflags($(FFLAGNV));
++	<VALID>
++	local tmp:$(SFLEN) = sqrt(frs1S);
+ 	fassignS(frd, tmp);
+ }
+ 
+@@ -233,7 +282,8 @@
+ # fsub.s D,S,T,m 08000053 fe00007f SIMPLE (0, 0) 
+ :fsub.s frd,frs1S,frs2S,FRM is frs1S & frd & frs2S & FRM & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct7=0x4
+ {
+-	local tmp:4 = frs1S f- frs2S;
++	invalidOpForAddS(frs1S, f- frs2S);
++	local tmp:$(SFLEN) = frs1S f- frs2S;
+ 	fassignS(frd, tmp);
+ }
+ 
+diff --git a/Ghidra/Processors/RISCV/data/languages/riscv.rv64d.sinc b/Ghidra/Processors/RISCV/data/languages/riscv.rv64d.sinc
+index 0436594765..9e1d57f9ef 100644
+--- a/Ghidra/Processors/RISCV/data/languages/riscv.rv64d.sinc
++++ b/Ghidra/Processors/RISCV/data/languages/riscv.rv64d.sinc
+@@ -21,15 +21,27 @@
+ # fcvt.l.d d,S,m c2200053 fff0007f SIMPLE (64, 0) 
+ :fcvt.l.d rdL,frs1D,FRM is frs1D & FRM & rdL & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct7=0x61 & op2024=0x2
+ {
+-	rdL = trunc(frs1D);
++	local low:8 = 0xC3E0000000000000;
++	local high:8 = 0x43E0000000000000;
++	if (frs1D f>= low && frs1D f<= high) goto <VALID>;
++	setFflags($(FFLAGNV));
++	<VALID>
++	local tmp:$(DXLEN) = trunc(frs1D);
++	rdL = zext(tmp);
+ }
+ 
+ 
+ # fcvt.lu.d d,S,m c2300053 fff0007f SIMPLE (64, 0) 
+ :fcvt.lu.d rdL,frs1D,FRM is frs1D & FRM & rdL & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct7=0x61 & op2024=0x3
+ {
++	local low:8 = 0x0;
++	local high:8 = 0x43F0000000000000;
++	if (frs1D f>= low && frs1D f<= high) goto <VALID>;
++	setFflags($(FFLAGNV));
++	<VALID>
+ 	#TODO  unsigned
+-	rdL = trunc(frs1D);
++	local tmp:$(DXLEN) = trunc(frs1D);
++	rdL = zext(tmp);
+ }
+ 
+ 
+diff --git a/Ghidra/Processors/RISCV/data/languages/riscv.rv64f.sinc b/Ghidra/Processors/RISCV/data/languages/riscv.rv64f.sinc
+index 9a88490281..01176641b6 100644
+--- a/Ghidra/Processors/RISCV/data/languages/riscv.rv64f.sinc
++++ b/Ghidra/Processors/RISCV/data/languages/riscv.rv64f.sinc
+@@ -3,15 +3,27 @@
+ # fcvt.l.s d,S,m c0200053 fff0007f SIMPLE (64, 0) 
+ :fcvt.l.s rdL,frs1S,FRM is frs1S & FRM & rdL & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct7=0x60 & op2024=0x2
+ {
+-	rdL = trunc(frs1S);
++	local low:4 = 0xDF000000;
++	local high:4 = 0x5F000000;
++	if (frs1S f>= low && frs1S f<= high) goto <VALID>;
++	setFflags($(FFLAGNV));
++	<VALID>
++	local tmp:$(DXLEN) = trunc(frs1S);
++	rdL = sext(tmp);
+ }
+ 
+ 
+ # fcvt.lu.s d,S,m c0300053 fff0007f SIMPLE (64, 0) 
+ :fcvt.lu.s rdL,frs1S,FRM is frs1S & FRM & rdL & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct7=0x60 & op2024=0x3
+ {
++	local low:4 = 0x0;
++	local high:4 = 0x5F800000;
++	if (frs1S f>= low && frs1S f<= high) goto <VALID>;
++	setFflags($(FFLAGNV));
++	<VALID>
++	local tmp:$(DXLEN) = trunc(frs1S);
+ 	#TODO  unsigned
+-	rdL = trunc(frs1S);
++	rdL = sext(tmp);
+ }
+ 
+ 
+diff --git a/Ghidra/Processors/RISCV/data/languages/riscv.table.sinc b/Ghidra/Processors/RISCV/data/languages/riscv.table.sinc
+index a6ebaf6e19..704cdc23e3 100644
+--- a/Ghidra/Processors/RISCV/data/languages/riscv.table.sinc
++++ b/Ghidra/Processors/RISCV/data/languages/riscv.table.sinc
+@@ -11,6 +11,11 @@
+ @define DXLEN 8
+ @define QXLEN 16
+ 
++@define FFLAGNX 0x1
++@define FFLAGUF 0x2
++@define FFLAGOF 0x4
++@define FFLAGDZ 0x8
++@define FFLAGNV 0x10
+ 
+ define pcodeop unimp;
+ define pcodeop trap;
+@@ -69,6 +74,10 @@ rdL: zero is r0711 & zero & op0711=0 { export 0:8; }
+ # # 128-bit quad-precision  $(QFLEN)
+ # fmt: ".q" is op2526=3 { export $(QFLEN):1; }
+ 
++macro setFflags(val) {
++	fflags = fflags | val;
++	fcsr = fcsr | val;
++}
+ 
+ frd:  fr0711 is fr0711 { export fr0711; }
+ frs1: fr1519 is fr1519 { export fr1519; }
+@@ -89,6 +98,8 @@ frs1S: fr1519 is fr1519 {
+ 	if (fr1519 s>> 32 == ~0) goto <FR1519NOTNAN>;
+ 	tmp = 0x7FC00000;
+ 	<FR1519NOTNAN>
++	local invalid:$(XLEN) = zext(nan(tmp) && tmp[22,1] == 0);
++	setFflags($(FFLAGNV) * invalid);
+ 	export tmp;
+ }
+ frs2S: fr2024 is fr2024 {
+@@ -96,6 +107,8 @@ frs2S: fr2024 is fr2024 {
+ 	if (fr2024 s>> 32 == ~0) goto <fr2024NOTNAN>;
+ 	tmp = 0x7FC00000;
+ 	<fr2024NOTNAN>
++	local invalid:$(XLEN) = zext(nan(tmp) && tmp[22,1] == 0);
++	setFflags($(FFLAGNV) * invalid);
+ 	export tmp;
+ }
+ frs3S: fr2731 is fr2731 {
+@@ -103,15 +116,33 @@ frs3S: fr2731 is fr2731 {
+ 	if (fr2731 s>> 32 == ~0) goto <fr2731NOTNAN>;
+ 	tmp = 0x7FC00000;
+ 	<fr2731NOTNAN>
++	local invalid:$(XLEN) = zext(nan(tmp) && tmp[22,1] == 0);
++	setFflags($(FFLAGNV) * invalid);
+ 	export tmp;
+ }
+ @endif
+ 
+ @if ((FPSIZE == "64") || (FPSIZE == "128"))
+ #TODO  dest may be bad, might need an assign macro
+-frs1D: fr1519 is fr1519 { local tmp = fr1519:$(DFLEN); export tmp; }
+-frs2D: fr2024 is fr2024 { local tmp = fr2024:$(DFLEN); export tmp; }
+-frs3D: fr2731 is fr2731 { local tmp = fr2731:$(DFLEN); export tmp; }
++#frdD:  fr0711 is fr0711 { local tmp = fr0711:$(DFLEN); export tmp; }
++frs1D: fr1519 is fr1519 {
++	local tmp = fr1519:$(DFLEN);
++	local invalid:$(XLEN) = zext(nan(tmp) && tmp[51,1] == 0);
++	setFflags($(FFLAGNV) * invalid);
++	export tmp;
++}
++frs2D: fr2024 is fr2024 {
++	local tmp = fr2024:$(DFLEN);
++	local invalid:$(XLEN) = zext(nan(tmp) && tmp[51,1] == 0);
++	setFflags($(FFLAGNV) * invalid);
++	export tmp;
++}
++frs3D: fr2731 is fr2731 {
++	local tmp = fr2731:$(DFLEN);
++	local invalid:$(XLEN) = zext(nan(tmp) && tmp[51,1] == 0);
++	setFflags($(FFLAGNV) * invalid);
++	export tmp;
++}
+ @endif
+ 
+ macro fassignS(dest, src) {
+@@ -122,7 +153,6 @@ macro fassignS(dest, src) {
+ @endif
+ }
+ 
+-
+ macro assignW(dest, src) {
+ @if ADDRSIZE == "32"
+ 	dest = src;
+@@ -155,7 +185,6 @@ macro assignD(dest, src) {
+ @endif
+ }
+ 
+-
+ immI: sop2031 is sop2031 { local tmp:$(XLEN) = sop2031; export tmp; }
+ 
+ immS: imm is op0711 & sop2531 [ imm = (sop2531 << 5) | op0711; ] { local tmp:$(XLEN) = imm; export tmp; }
+-- 
+2.45.1
+
