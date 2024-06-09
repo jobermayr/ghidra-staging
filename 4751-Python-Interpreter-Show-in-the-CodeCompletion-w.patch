@@ -7,11 +7,11 @@ Subject: [PATCH] 4751: Python Interpreter: Show in the CodeCompletion window
 Include in Python Interpreter's CodeCompletion window all names containing the typed string
 ---
  .../core/interpreter/InterpreterPanel.java    |   7 +-
- .../Features/Python/python-src/introspect.py  |  35 ++++-
- .../python/GhidraPythonInterpreter.java       |  17 ++-
- .../python/PythonCodeCompletionFactory.java   | 121 +++++++++++++++++-
- .../main/java/ghidra/python/PythonPlugin.java |  22 +++-
- .../python/PythonCodeCompletionTest.java      |  17 ++-
+ .../Features/Jython/jython-src/introspect.py  |  35 ++++-
+ .../jython/GhidraJythonInterpreter.java       |  17 ++-
+ .../jython/JythonCodeCompletionFactory.java   | 121 +++++++++++++++++-
+ .../main/java/ghidra/jython/JythonPlugin.java |  22 +++-
+ .../jython/JythonCodeCompletionTest.java      |  17 ++-
  6 files changed, 206 insertions(+), 13 deletions(-)
 
 diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/interpreter/InterpreterPanel.java b/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/interpreter/InterpreterPanel.java
@@ -39,10 +39,10 @@ index 48b73d53f3..b410bca2dc 100644
  					// and let the key go through to the text input field
  			}
  		}
-diff --git a/Ghidra/Features/Python/python-src/introspect.py b/Ghidra/Features/Python/python-src/introspect.py
-index aeb4ae2f30..2db9096725 100644
---- a/Ghidra/Features/Python/python-src/introspect.py
-+++ b/Ghidra/Features/Python/python-src/introspect.py
+diff --git a/Ghidra/Features/Jython/jython-src/introspect.py b/Ghidra/Features/Jython/jython-src/introspect.py
+index 97096f78ec..ef6809000f 100644
+--- a/Ghidra/Features/Jython/jython-src/introspect.py
++++ b/Ghidra/Features/Jython/jython-src/introspect.py
 @@ -28,7 +28,8 @@ except NameError:
  #from java.lang.System.out import println
      
@@ -101,18 +101,18 @@ index aeb4ae2f30..2db9096725 100644
  def compare_completions(comp1, comp2):
      return cmp(comp1.description, comp2.description)
                         
-diff --git a/Ghidra/Features/Python/src/main/java/ghidra/python/GhidraPythonInterpreter.java b/Ghidra/Features/Python/src/main/java/ghidra/python/GhidraPythonInterpreter.java
-index bc54a00a72..c04929e4b8 100644
---- a/Ghidra/Features/Python/src/main/java/ghidra/python/GhidraPythonInterpreter.java
-+++ b/Ghidra/Features/Python/src/main/java/ghidra/python/GhidraPythonInterpreter.java
-@@ -446,10 +446,13 @@ public class GhidraPythonInterpreter extends InteractiveInterpreter {
+diff --git a/Ghidra/Features/Jython/src/main/java/ghidra/jython/GhidraJythonInterpreter.java b/Ghidra/Features/Jython/src/main/java/ghidra/jython/GhidraJythonInterpreter.java
+index 8a8428b315..ac91e1f726 100644
+--- a/Ghidra/Features/Jython/src/main/java/ghidra/jython/GhidraJythonInterpreter.java
++++ b/Ghidra/Features/Jython/src/main/java/ghidra/jython/GhidraJythonInterpreter.java
+@@ -446,10 +446,13 @@ public class GhidraJythonInterpreter extends InteractiveInterpreter {
  	 * @param cmd The command line.
  	 * @param includeBuiltins True if we should include python built-ins; otherwise, false.
  	 * @param caretPos The position of the caret in the input string 'cmd'
 +	 * @param includeOnlyPrefixCompletions True if we should only include completions that start
 +	 *        with the word we're trying to complete here; otherwise, false.
  	 * @return A list of possible command completions.  Could be empty if there aren't any.
- 	 * @see PythonPlugin#getCompletions
+ 	 * @see JythonPlugin#getCompletions
  	 */
 -	List<CodeCompletion> getCommandCompletions(String cmd, boolean includeBuiltins, int caretPos) {
 +	List<CodeCompletion> getCommandCompletions(String cmd, boolean includeBuiltins, int caretPos,
@@ -120,7 +120,7 @@ index bc54a00a72..c04929e4b8 100644
  		// At this point the caret is assumed to be positioned right after the value we need to
  		// complete (example: "[complete.Me<caret>, rest, code]"). To make the completion work
  		// in our case, it's sufficient (albeit naive) to just remove the text on the right side
-@@ -460,7 +463,7 @@ public class GhidraPythonInterpreter extends InteractiveInterpreter {
+@@ -460,7 +463,7 @@ public class GhidraJythonInterpreter extends InteractiveInterpreter {
  		if ((cmd.length() > 0) && (cmd.charAt(cmd.length() - 1) == '(')) {
  			return getMethodCommandCompletions(cmd);
  		}
@@ -129,7 +129,7 @@ index bc54a00a72..c04929e4b8 100644
  	}
  
  	/**
-@@ -500,10 +503,12 @@ public class GhidraPythonInterpreter extends InteractiveInterpreter {
+@@ -500,10 +503,12 @@ public class GhidraJythonInterpreter extends InteractiveInterpreter {
  	 *
  	 * @param cmd current command
  	 * @param includeBuiltins True if we should include python built-ins; otherwise, false.
@@ -143,7 +143,7 @@ index bc54a00a72..c04929e4b8 100644
  		try {
  			PyObject getAutoCompleteList = introspectModule.__findattr__("getAutoCompleteList");
  			PyString command = new PyString(cmd);
-@@ -512,7 +517,11 @@ public class GhidraPythonInterpreter extends InteractiveInterpreter {
+@@ -512,7 +517,11 @@ public class GhidraJythonInterpreter extends InteractiveInterpreter {
  				// Add in the __builtin__ module's contents for the search
  				locals.update(builtinModule.__dict__);
  			}
@@ -156,12 +156,12 @@ index bc54a00a72..c04929e4b8 100644
  			return CollectionUtils.asList(list, CodeCompletion.class);
  		}
  		catch (Exception e) {
-diff --git a/Ghidra/Features/Python/src/main/java/ghidra/python/PythonCodeCompletionFactory.java b/Ghidra/Features/Python/src/main/java/ghidra/python/PythonCodeCompletionFactory.java
-index d0a9132072..b26fbd3517 100644
---- a/Ghidra/Features/Python/src/main/java/ghidra/python/PythonCodeCompletionFactory.java
-+++ b/Ghidra/Features/Python/src/main/java/ghidra/python/PythonCodeCompletionFactory.java
+diff --git a/Ghidra/Features/Jython/src/main/java/ghidra/jython/JythonCodeCompletionFactory.java b/Ghidra/Features/Jython/src/main/java/ghidra/jython/JythonCodeCompletionFactory.java
+index 0c45d61c41..0fccaa6394 100644
+--- a/Ghidra/Features/Jython/src/main/java/ghidra/jython/JythonCodeCompletionFactory.java
++++ b/Ghidra/Features/Jython/src/main/java/ghidra/jython/JythonCodeCompletionFactory.java
 @@ -16,10 +16,22 @@
- package ghidra.python;
+ package ghidra.jython;
  
  import java.awt.Color;
 +import java.awt.Font;
@@ -183,7 +183,7 @@ index d0a9132072..b26fbd3517 100644
  
  import org.python.core.PyInstance;
  import org.python.core.PyObject;
-@@ -209,6 +221,7 @@ public class PythonCodeCompletionFactory {
+@@ -209,6 +221,7 @@ public class JythonCodeCompletionFactory {
  	public static CodeCompletion newCodeCompletion(String description, String insertion,
  			PyObject pyObj, String userInput) {
  		JComponent comp = null;
@@ -191,7 +191,7 @@ index d0a9132072..b26fbd3517 100644
  
  		if (pyObj != null) {
  			if (includeTypes) {
-@@ -225,7 +238,10 @@ public class PythonCodeCompletionFactory {
+@@ -225,7 +238,10 @@ public class JythonCodeCompletionFactory {
  				description = description + " (" + className + ")";
  			}
  
@@ -203,7 +203,7 @@ index d0a9132072..b26fbd3517 100644
  			Iterator<Class<?>> iter = classes.iterator();
  			while (iter.hasNext()) {
  				Class<?> testClass = iter.next();
-@@ -236,7 +252,6 @@ public class PythonCodeCompletionFactory {
+@@ -236,7 +252,6 @@ public class JythonCodeCompletionFactory {
  			}
  		}
  
@@ -211,7 +211,7 @@ index d0a9132072..b26fbd3517 100644
  		return new CodeCompletion(description, insertion, comp, charsToRemove);
  	}
  
-@@ -298,4 +313,106 @@ public class PythonCodeCompletionFactory {
+@@ -298,4 +313,106 @@ public class JythonCodeCompletionFactory {
  
  		return callMethodList.toArray();
  	}
@@ -318,11 +318,11 @@ index d0a9132072..b26fbd3517 100644
 +		}
 +	}
  }
-diff --git a/Ghidra/Features/Python/src/main/java/ghidra/python/PythonPlugin.java b/Ghidra/Features/Python/src/main/java/ghidra/python/PythonPlugin.java
-index f1769d9af5..0611938a09 100644
---- a/Ghidra/Features/Python/src/main/java/ghidra/python/PythonPlugin.java
-+++ b/Ghidra/Features/Python/src/main/java/ghidra/python/PythonPlugin.java
-@@ -76,6 +76,16 @@ public class PythonPlugin extends ProgramPlugin
+diff --git a/Ghidra/Features/Jython/src/main/java/ghidra/jython/JythonPlugin.java b/Ghidra/Features/Jython/src/main/java/ghidra/jython/JythonPlugin.java
+index a683ca5132..f4dfd7bbb4 100644
+--- a/Ghidra/Features/Jython/src/main/java/ghidra/jython/JythonPlugin.java
++++ b/Ghidra/Features/Jython/src/main/java/ghidra/jython/JythonPlugin.java
+@@ -76,6 +76,16 @@ public class JythonPlugin extends ProgramPlugin
  
  	private boolean includeBuiltins = INCLUDE_BUILTINS_DEFAULT;
  
@@ -337,9 +337,9 @@ index f1769d9af5..0611938a09 100644
 +	private boolean includeOnlyPrefixCompletions = INCLUDE_ONLY_PREFIX_COMPLETIONS_DEFAULT;
 +
  	/**
- 	 * Creates a new PythonPlugin object.
+ 	 * Creates a new {@link JythonPlugin} object.
  	 * 
-@@ -197,6 +207,12 @@ public class PythonPlugin extends ProgramPlugin
+@@ -197,6 +207,12 @@ public class JythonPlugin extends ProgramPlugin
  			includeBuiltins = options.getBoolean(INCLUDE_BUILTINS_LABEL, INCLUDE_BUILTINS_DEFAULT);
  			options.registerOption(INCLUDE_BUILTINS_LABEL, INCLUDE_BUILTINS_DEFAULT, null,
  				INCLUDE_BUILTINS_DESCRIPTION);
@@ -351,8 +351,8 @@ index f1769d9af5..0611938a09 100644
 +				INCLUDE_ONLY_PREFIX_COMPLETIONS_DESCRIPTION);
  			options.addOptionsChangeListener(this);
  
- 			interpreter = GhidraPythonInterpreter.get();
-@@ -261,6 +277,9 @@ public class PythonPlugin extends ProgramPlugin
+ 			interpreter = GhidraJythonInterpreter.get();
+@@ -261,6 +277,9 @@ public class JythonPlugin extends ProgramPlugin
  		else if (optionName.equals(INCLUDE_BUILTINS_LABEL)) {
  			includeBuiltins = ((Boolean) newValue).booleanValue();
  		}
@@ -362,7 +362,7 @@ index f1769d9af5..0611938a09 100644
  	}
  
  	/**
-@@ -290,7 +309,8 @@ public class PythonPlugin extends ProgramPlugin
+@@ -290,7 +309,8 @@ public class JythonPlugin extends ProgramPlugin
  				currentSelection, currentHighlight),
  			interactiveTaskMonitor, console.getOutWriter());
  
@@ -372,11 +372,11 @@ index f1769d9af5..0611938a09 100644
  	}
  
  	@Override
-diff --git a/Ghidra/Features/Python/src/test.slow/java/ghidra/python/PythonCodeCompletionTest.java b/Ghidra/Features/Python/src/test.slow/java/ghidra/python/PythonCodeCompletionTest.java
-index 7e155cd7f1..3df1c5e673 100644
---- a/Ghidra/Features/Python/src/test.slow/java/ghidra/python/PythonCodeCompletionTest.java
-+++ b/Ghidra/Features/Python/src/test.slow/java/ghidra/python/PythonCodeCompletionTest.java
-@@ -61,6 +61,8 @@ public class PythonCodeCompletionTest extends AbstractGhidraHeadedIntegrationTes
+diff --git a/Ghidra/Features/Jython/src/test.slow/java/ghidra/jython/JythonCodeCompletionTest.java b/Ghidra/Features/Jython/src/test.slow/java/ghidra/jython/JythonCodeCompletionTest.java
+index 5cab08353b..7484058b25 100644
+--- a/Ghidra/Features/Jython/src/test.slow/java/ghidra/jython/JythonCodeCompletionTest.java
++++ b/Ghidra/Features/Jython/src/test.slow/java/ghidra/jython/JythonCodeCompletionTest.java
+@@ -61,6 +61,8 @@ public class JythonCodeCompletionTest extends AbstractGhidraHeadedIntegrationTes
  			        return self.id
  			    def getName(self):
  			        return self.name
@@ -385,15 +385,15 @@ index 7e155cd7f1..3df1c5e673 100644
  
  			employee = Employee(42, "Bob")
  				""".stripIndent();
-@@ -69,6 +71,7 @@ public class PythonCodeCompletionTest extends AbstractGhidraHeadedIntegrationTes
+@@ -69,6 +71,7 @@ public class JythonCodeCompletionTest extends AbstractGhidraHeadedIntegrationTes
  	public TemporaryFolder tempScriptFolder = new TemporaryFolder();
  
- 	private GhidraPythonInterpreter interpreter;
+ 	private GhidraJythonInterpreter interpreter;
 +	private boolean includeOnlyPrefixCompletions = true;
  
  	@Before
  	public void setUp() throws Exception {
-@@ -129,6 +132,17 @@ public class PythonCodeCompletionTest extends AbstractGhidraHeadedIntegrationTes
+@@ -129,6 +132,17 @@ public class JythonCodeCompletionTest extends AbstractGhidraHeadedIntegrationTes
  		assertCharsToRemoveEqualsTo(testCase, "e".length());
  	}
  
@@ -411,7 +411,7 @@ index 7e155cd7f1..3df1c5e673 100644
  	private void assertCompletionsInclude(String command, Collection<String> expectedCompletions) {
  		Set<String> completions = getCodeCompletions(command)
  				.stream()
-@@ -157,7 +171,8 @@ public class PythonCodeCompletionTest extends AbstractGhidraHeadedIntegrationTes
+@@ -157,7 +171,8 @@ public class JythonCodeCompletionTest extends AbstractGhidraHeadedIntegrationTes
  			caretPos = command.length(); 
  		}
  
@@ -420,7 +420,7 @@ index 7e155cd7f1..3df1c5e673 100644
 +			includeOnlyPrefixCompletions);
  	}
  
- 	private void executePythonProgram(String code) {
+ 	private void executeJythonProgram(String code) {
 -- 
 2.45.1
 

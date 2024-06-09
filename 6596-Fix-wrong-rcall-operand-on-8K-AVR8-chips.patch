@@ -4,25 +4,32 @@ Date: Thu, 30 May 2024 01:02:01 +0200
 Subject: [PATCH] 6596: Fix wrong rcall operand on 8K AVR8 chips
 
 Adding support dedicated for ATMega8 (and probably other AVR8 8KB memory chips) by fixing wrong interpretation of rcall operand #1951
+
+Support dedicated for ATMega8 - fix build errors #1951
+
+Adding support for sistership processor: ATMega168p
 ---
- .../Processors/Atmel/certification.manifest   |    3 +
- .../Atmel/data/languages/avr8.ldefs           |   15 +
+ .../Processors/Atmel/certification.manifest   |    4 +
+ .../Atmel/data/languages/avr8.ldefs           |   34 +-
+ .../Atmel/data/languages/avr8mega168p.pspec   |  163 +++
  .../Atmel/data/languages/avr8mega8.pspec      |  139 ++
  .../Atmel/data/languages/avr8mega8.sinc       | 1219 +++++++++++++++++
  .../Atmel/data/languages/avr8mega8.slaspec    |    6 +
- 5 files changed, 1382 insertions(+)
+ 6 files changed, 1564 insertions(+), 1 deletion(-)
+ create mode 100644 Ghidra/Processors/Atmel/data/languages/avr8mega168p.pspec
  create mode 100644 Ghidra/Processors/Atmel/data/languages/avr8mega8.pspec
  create mode 100644 Ghidra/Processors/Atmel/data/languages/avr8mega8.sinc
  create mode 100644 Ghidra/Processors/Atmel/data/languages/avr8mega8.slaspec
 
 diff --git a/Ghidra/Processors/Atmel/certification.manifest b/Ghidra/Processors/Atmel/certification.manifest
-index 30116f230b..b5d919900e 100644
+index 30116f230b..f60f4f1a16 100644
 --- a/Ghidra/Processors/Atmel/certification.manifest
 +++ b/Ghidra/Processors/Atmel/certification.manifest
-@@ -31,6 +31,9 @@ data/languages/avr8eind.slaspec||GHIDRA||||END|
+@@ -31,6 +31,10 @@ data/languages/avr8eind.slaspec||GHIDRA||||END|
  data/languages/avr8gcc.cspec||GHIDRA||||END|
  data/languages/avr8iarV1.cspec||GHIDRA||||END|
  data/languages/avr8imgCraftV8.cspec||GHIDRA||||END|
++data/languages/avr8mega168p.pspec||GHIDRA||||END|
 +data/languages/avr8mega8.pspec||GHIDRA||||END|
 +data/languages/avr8mega8.sinc||GHIDRA||||END|
 +data/languages/avr8mega8.slaspec||GHIDRA||||END|
@@ -30,13 +37,32 @@ index 30116f230b..b5d919900e 100644
  data/languages/avr8xmega.slaspec||GHIDRA||||END|
  data/manuals/AVR32.idx||GHIDRA||||END|
 diff --git a/Ghidra/Processors/Atmel/data/languages/avr8.ldefs b/Ghidra/Processors/Atmel/data/languages/avr8.ldefs
-index eeadec0f58..2c01326412 100644
+index eeadec0f58..41e0f83415 100644
 --- a/Ghidra/Processors/Atmel/data/languages/avr8.ldefs
 +++ b/Ghidra/Processors/Atmel/data/languages/avr8.ldefs
-@@ -19,6 +19,21 @@
+@@ -18,7 +18,39 @@
+     <external_name tool="gnu" name="avr:31"/>
      <external_name tool="IDA-PRO" name="avr"/>
    </language>
-   
+-  
++
++  <language processor="AVR8"
++            endian="little"
++            size="16"
++            variant="atmega168p"
++            version="1.3"
++            slafile="avr8.sla"
++            processorspec="avr8mega168p.pspec"
++            manualindexfile="../manuals/AVR8.idx"
++            id="avr8:LE:16:atmega168p">
++    <description>AVR8 with 16-bit word addressable code space</description>
++    <compiler name="gcc"        spec="avr8gcc.cspec"        id="gcc"/>
++    <compiler name="iarV1"      spec="avr8iarV1.cspec"      id="iarV1"/>
++    <compiler name="imgCraftV8" spec="avr8imgCraftV8.cspec" id="imgCraftV8"/>
++    <external_name tool="gnu" name="avr:31"/>
++    <external_name tool="IDA-PRO" name="avr"/>
++  </language>
++
 +  <language processor="AVR8"
 +            endian="little"
 +            size="16"
@@ -55,6 +81,175 @@ index eeadec0f58..2c01326412 100644
    <language processor="AVR8"
              deprecated="true"
              endian="little"
+diff --git a/Ghidra/Processors/Atmel/data/languages/avr8mega168p.pspec b/Ghidra/Processors/Atmel/data/languages/avr8mega168p.pspec
+new file mode 100644
+index 0000000000..4d33839a7b
+--- /dev/null
++++ b/Ghidra/Processors/Atmel/data/languages/avr8mega168p.pspec
+@@ -0,0 +1,163 @@
++<?xml version="1.0" encoding="UTF-8"?>
++
++<processor_spec>
++  <properties>
++    <property key="assemblyRating:avr8:LE:16:extended" value="PLATINUM"/>
++  </properties>
++
++  <programcounter register="PC"/>
++
++  <data_space space="mem"/>
++
++  <!--
++     - NOTE: The settings within this file may be specific to a particular
++     - processor variant and will likely need to be changed to reflect
++     - the specific target processor.
++     The RAMPx, EIND, SREG registers are not marked volatile, even though they could be changed
++     indirectly with memory references.  If they are made volatile, then the addressing
++     won't work in decompiler or reference recovery.
++	 Some registers only appear in newer avr8's, or with large memory spaces
++    -->
++
++  <volatile outputop="write_volatile" inputop="read_volatile">
++    <range space="mem" first="0x20" last="0x57"/>
++    <range space="mem" first="0x60" last="0xff"/>
++  </volatile>
++
++  <context_data>
++    <tracked_set space="code">
++      <set name="R1" val="0"/>
++    </tracked_set>
++  </context_data>
++
++  <default_symbols>
++
++    <symbol name="RESET" address="code:0x0000" entry="true"/>
++    <symbol name="INT0" address="code:0x0002" entry="true"/>
++    <symbol name="INT1" address="code:0x0004" entry="true"/>
++    <symbol name="PCINT0" address="code:0x0006" entry="true"/>
++    <symbol name="PCINT1" address="code:0x0008" entry="true"/>
++    <symbol name="PCINT2" address="code:0x000A" entry="true"/>
++    <symbol name="WDT" address="code:0x000C" entry="true"/>
++    <symbol name="TIMER2_COMPA" address="code:0x000E" entry="true"/>
++    <symbol name="TIMER2_COMPB" address="code:0x0010" entry="true"/>
++    <symbol name="TIMER2_OVF" address="code:0x0012" entry="true"/>
++    <symbol name="TIMER1_CAPT" address="code:0x0014" entry="true"/>
++    <symbol name="TIMER1_COMPA" address="code:0x0016" entry="true"/>
++    <symbol name="TIMER1_COMPB" address="code:0x0018" entry="true"/>
++    <symbol name="TIMER1_OVF" address="code:0x001A" entry="true"/>
++    <symbol name="TIMER0_COMPA" address="code:0x001C" entry="true"/>
++    <symbol name="TIMER0_COMPB" address="code:0x001E" entry="true"/>
++    <symbol name="TIMER0_OVF" address="code:0x0020" entry="true"/>
++    <symbol name="SPI_STC" address="code:0x0022" entry="true"/>
++    <symbol name="USART_RX" address="code:0x0024" entry="true"/>
++    <symbol name="USART_UDRE" address="code:0x0026" entry="true"/>
++    <symbol name="USART_TX" address="code:0x0028" entry="true"/>
++    <symbol name="ADC" address="code:0x002A" entry="true"/>
++    <symbol name="EE_READY" address="code:0x002C" entry="true"/>
++    <symbol name="ANALOG_COMP" address="code:0x002E" entry="true"/>
++    <symbol name="TWI" address="code:0x0030" entry="true"/>
++    <symbol name="SPM_READY" address="code:0x0032" entry="true"/>
++
++
++    <!-- See Atmega168p datasheet -->
++    <symbol name="UDR0" address="mem:0xC6"/>
++    <symbol name="UBRR0H" address="mem:0xC5"/>
++    <symbol name="UBRR0L" address="mem:0xC4"/>
++    <symbol name="UCSR0C" address="mem:0xC2"/>
++    <symbol name="UCSR0B" address="mem:0xC1"/>
++    <symbol name="UCSR0A" address="mem:0xC0"/>
++    <symbol name="TWAMR" address="mem:0xBD"/>
++    <symbol name="TWCR" address="mem:0xBC"/>
++    <symbol name="TWDR" address="mem:0xBB"/>
++    <symbol name="TWAR" address="mem:0xBA"/>
++    <symbol name="TWSR" address="mem:0xB9"/>
++    <symbol name="TWBR" address="mem:0xB8"/>
++    <symbol name="ASSR" address="mem:0xB6"/>
++    <symbol name="OCR2B" address="mem:0xB4"/>
++    <symbol name="OCR2A" address="mem:0xB3"/>
++    <symbol name="TCNT2" address="mem:0xB2"/>
++    <symbol name="TCCR2B" address="mem:0xB1"/>
++    <symbol name="TCCR2A" address="mem:0xB0"/>
++    <symbol name="OCR1BH" address="mem:0x8B"/>
++    <symbol name="OCR1BL" address="mem:0x8A"/>
++    <symbol name="OCR1AH" address="mem:0x89"/>
++    <symbol name="OCR1AL" address="mem:0x88"/>
++    <symbol name="ICR1H" address="mem:0x87"/>
++    <symbol name="ICR1L" address="mem:0x86"/>
++    <symbol name="TCNT1H" address="mem:0x85"/>
++    <symbol name="TCNT1L" address="mem:0x84"/>
++    <symbol name="TCCR1C" address="mem:0x82"/>
++    <symbol name="TCCR1B" address="mem:0x81"/>
++    <symbol name="TCCR1A" address="mem:0x80"/>
++    <symbol name="DIDR1" address="mem:0x7F"/>
++    <symbol name="DIDR0" address="mem:0x7E"/>
++    <symbol name="ADMUX" address="mem:0x7C"/>
++    <symbol name="ADCSRB" address="mem:0x7B"/>
++    <symbol name="ADCSRA" address="mem:0x7A"/>
++    <symbol name="ADCH" address="mem:0x79"/>
++    <symbol name="ADCL" address="mem:0x78"/>
++    <symbol name="TIMSK2" address="mem:0x70"/>
++    <symbol name="TIMSK1" address="mem:0x6F"/>
++    <symbol name="TIMSK0" address="mem:0x6E"/>
++    <symbol name="PCMSK2" address="mem:0x6D"/>
++    <symbol name="PCMSK1" address="mem:0x6C"/>
++    <symbol name="PCMSK0" address="mem:0x6B"/>
++    <symbol name="EICRA" address="mem:0x69"/>
++    <symbol name="PCICR" address="mem:0x68"/>
++    <symbol name="OSCCAL" address="mem:0x66"/>
++    <symbol name="PRR" address="mem:0x64"/>
++    <symbol name="CLKPR" address="mem:0x61"/>
++    <symbol name="WDTCSR" address="mem:0x60"/>
++    <symbol name="SREG" address="mem:0x5F"/>
++    <symbol name="SPH" address="mem:0x5E"/>
++    <symbol name="SPL" address="mem:0x5D"/>
++    <symbol name="SPMCSR" address="mem:0x57"/>
++    <symbol name="MCUCR" address="mem:0x55"/>
++    <symbol name="MCUSR" address="mem:0x54"/>
++    <symbol name="SMCR" address="mem:0x53"/>
++    <symbol name="ACSR" address="mem:0x50"/>
++    <symbol name="SPDR" address="mem:0x4E"/>
++    <symbol name="SPSR" address="mem:0x4D"/>
++    <symbol name="SPCR" address="mem:0x4C"/>
++    <symbol name="GPIOR2" address="mem:0x4B"/>
++    <symbol name="GPIOR1" address="mem:0x4A"/>
++    <symbol name="OCR0B" address="mem:0x48"/>
++    <symbol name="OCR0A" address="mem:0x47"/>
++    <symbol name="TCNT0" address="mem:0x46"/>
++    <symbol name="TCCR0B" address="mem:0x45"/>
++    <symbol name="TCCR0A" address="mem:0x44"/>
++    <symbol name="GTCCR" address="mem:0x43"/>
++    <symbol name="EEARH" address="mem:0x42"/>
++    <symbol name="EEARL" address="mem:0x41"/>
++    <symbol name="EEDR" address="mem:0x40"/>
++    <symbol name="EECR" address="mem:0x3F"/>
++    <symbol name="GPIOR0" address="mem:0x3E"/>
++    <symbol name="EIMSK" address="mem:0x3D"/>
++    <symbol name="EIFR" address="mem:0x3C"/>
++    <symbol name="PCIFR" address="mem:0x3B"/>
++    <symbol name="TIFR2" address="mem:0x37"/>
++    <symbol name="TIFR1" address="mem:0x36"/>
++    <symbol name="TIFR0" address="mem:0x35"/>
++    <symbol name="PORTD" address="mem:0x2B"/>
++    <symbol name="DDRD" address="mem:0x2A"/>
++    <symbol name="PIND" address="mem:0x29"/>
++    <symbol name="PORTC" address="mem:0x28"/>
++    <symbol name="DDRC" address="mem:0x27"/>
++    <symbol name="PINC" address="mem:0x26"/>
++    <symbol name="PORTB" address="mem:0x25"/>
++    <symbol name="DDRB" address="mem:0x24"/>
++    <symbol name="PINB" address="mem:0x23"/>
++
++  </default_symbols>
++
++  <default_memory_blocks>
++    <memory_block name="regalias" start_address="mem:0x00" length="0x20" initialized="false"/>
++    <memory_block name="iospace" start_address="mem:0x20" length="0x40" initialized="false"/>
++    <memory_block name="regs_res" start_address="mem:0x60" length="0xA0" initialized="false"/>
++    <memory_block name="mem" start_address="mem:0x100" length="0x400" initialized="false"/>
++    <memory_block name="codebyte" start_address="codebyte:0x0" length="0x4000" byte_mapped_address="code:0x0"/>
++  </default_memory_blocks>
++
++
++</processor_spec>
 diff --git a/Ghidra/Processors/Atmel/data/languages/avr8mega8.pspec b/Ghidra/Processors/Atmel/data/languages/avr8mega8.pspec
 new file mode 100644
 index 0000000000..ad9ead19a5
