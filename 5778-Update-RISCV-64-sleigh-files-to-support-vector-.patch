@@ -52,6 +52,14 @@ Add semantics for riscv bit manipulation extension instructions
 
 Add basic support for RISCV half precision floating point extension znh
 * conversion semantics are only approximate
+
+Implement @jobermayr patch to half precision RISC floating point support
+
+Cleanup RISCV half-precision floating point support
+
+cleanup 16 bit floating point riscv support
+
+Allow for 32 bit floating point registers when converting 16 bit floats
 ---
  .../Processors/RISCV/certification.manifest   |   16 +
  .../data/languages/Readme_isa_extensions.md   |  119 +
@@ -64,15 +72,17 @@ Add basic support for RISCV half precision floating point extension znh
  .../RISCV/data/languages/riscv.priv.sinc      |   44 +-
  .../RISCV/data/languages/riscv.reg.sinc       |    6 +
  .../RISCV/data/languages/riscv.rv32b.sinc     |  178 +-
+ .../RISCV/data/languages/riscv.rv32d.sinc     |   10 +-
+ .../RISCV/data/languages/riscv.rv32f.sinc     |   19 +-
  .../RISCV/data/languages/riscv.rv32i.sinc     |    6 +
  .../RISCV/data/languages/riscv.rv32p.sinc     |   44 +-
  .../RISCV/data/languages/riscv.rv64b.sinc     |   12 +-
  .../RISCV/data/languages/riscv.rv64k.sinc     |    2 +
  .../RISCV/data/languages/riscv.rvv.sinc       | 4392 ++++++++++++++---
- .../RISCV/data/languages/riscv.table.sinc     |   26 +-
+ .../RISCV/data/languages/riscv.table.sinc     |   34 +-
  .../RISCV/data/languages/riscv.xthead.sinc    |  712 +++
  .../RISCV/data/languages/riscv.zcb.sinc       |   71 +
- .../RISCV/data/languages/riscv.zfh.sinc       |  249 +
+ .../RISCV/data/languages/riscv.zfh.sinc       |  289 ++
  .../RISCV/data/languages/riscv.zknd.sinc      |   21 +
  .../RISCV/data/languages/riscv.zkne.sinc      |    7 +
  .../RISCV/data/languages/riscv.zknh.sinc      |   55 +
@@ -82,7 +92,7 @@ Add basic support for RISCV half precision floating point extension znh
  .../RISCV/data/languages/riscv.zvbc.sinc      |   19 +
  .../RISCV/data/languages/riscv.zvkng.sinc     |   55 +
  .../RISCV/data/languages/riscv.zvksg.sinc     |   19 +
- 29 files changed, 5475 insertions(+), 777 deletions(-)
+ 31 files changed, 5532 insertions(+), 797 deletions(-)
  create mode 100644 Ghidra/Processors/RISCV/data/languages/Readme_isa_extensions.md
  create mode 100644 Ghidra/Processors/RISCV/data/languages/riscv.ilp32d_thead.slaspec
  create mode 100644 Ghidra/Processors/RISCV/data/languages/riscv.lp64d_thead.slaspec
@@ -866,6 +876,78 @@ index 41512c11c2..3744c35ecf 100644
 +define pcodeop xperm_n;
 +:xperm.nf rd, rs1, rs2 is op0006=0x33 & rd & op1214=0x2 & rs1 & rs2 & op2531=0x14 {rd=xperm_n(rs1,rs2);}
 \ No newline at end of file
+diff --git a/Ghidra/Processors/RISCV/data/languages/riscv.rv32d.sinc b/Ghidra/Processors/RISCV/data/languages/riscv.rv32d.sinc
+index e8d298bfbe..f00ddcec38 100644
+--- a/Ghidra/Processors/RISCV/data/languages/riscv.rv32d.sinc
++++ b/Ghidra/Processors/RISCV/data/languages/riscv.rv32d.sinc
+@@ -61,17 +61,19 @@
+ 
+ 
+ # fcvt.w.d d,S,m c2000053 fff0007f SIMPLE (0, 0) 
+-:fcvt.w.d rdW,frs1D,FRM is frs1D & FRM & rdW & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct7=0x61 & op2024=0x0
++:fcvt.w.d rd,frs1D,FRM is frs1D & FRM & rd & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct7=0x61 & op2024=0x0
+ {
+-	rdW = trunc(frs1D);
++	local tmp:$(XLEN) = trunc(frs1D);
++	rd = sext(tmp);
+ }
+ 
+ 
+ # fcvt.wu.d d,S,m c2100053 fff0007f SIMPLE (0, 0) 
+-:fcvt.wu.d rdW,frs1D,FRM is frs1D & FRM & rdW & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct7=0x61 & op2024=0x1
++:fcvt.wu.d rd,frs1D,FRM is frs1D & FRM & rd & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct7=0x61 & op2024=0x1
+ {
+ 	#TODO  unsigned
+-	rdW = trunc(frs1D);
++	local tmp:$(XLEN) = trunc(frs1D);
++	rd = sext(tmp);
+ }
+ 
+ 
+diff --git a/Ghidra/Processors/RISCV/data/languages/riscv.rv32f.sinc b/Ghidra/Processors/RISCV/data/languages/riscv.rv32f.sinc
+index e830008391..e53a3b8094 100644
+--- a/Ghidra/Processors/RISCV/data/languages/riscv.rv32f.sinc
++++ b/Ghidra/Processors/RISCV/data/languages/riscv.rv32f.sinc
+@@ -45,17 +45,19 @@
+ 
+ 
+ # fcvt.w.s d,S,m c0000053 fff0007f SIMPLE (0, 0) 
+-:fcvt.w.s rdW,frs1S,FRM is frs1S & FRM & rdW & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct7=0x60 & op2024=0x0
++:fcvt.w.s rd,frs1S,FRM is frs1S & FRM & rd & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct7=0x60 & op2024=0x0
+ {
+-	rdW = trunc(frs1S);
++	local tmp:$(WXLEN) = trunc(frs1S);
++	rd = sext(tmp);
+ }
+ 
+ 
+ # fcvt.wu.s d,S,m c0100053 fff0007f SIMPLE (0, 0) 
+-:fcvt.wu.s rdW,frs1S,FRM is frs1S & FRM & rdW & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct7=0x60 & op2024=0x1
++:fcvt.wu.s rd,frs1S,FRM is frs1S & FRM & rd & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct7=0x60 & op2024=0x1
+ {
+-	#TODO  unsigned
+-	rdW = trunc(frs1S);
++	#TODO proper emulation needs a trunc_unsigned
++	local tmp:$(WXLEN) = trunc(frs1S);
++	rd = sext(tmp);
+ }
+ 
+ 
+@@ -159,11 +161,10 @@
+ }
+ 
+ # fmv.x.w d,S e0000053 fff0707f SIMPLE (0, 0) 
+-:fmv.x.w rdW,frs1S is frs1S & rdW & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct3=0x0 & funct7=0x70 & op2024=0x0
++:fmv.x.w rd,frs1S is frs1S & rd & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct3=0x0 & funct7=0x70 & op2024=0x0
+ {
+-	local tmpreg:4 = &frs1S;
+-	local tmp:4 = *[register]:4 tmpreg;
+-	rdW = tmp;
++	local tmp:$(WXLEN) = trunc(frs1S);
++	rd = sext(tmp);
+ }
+ 
+ 
 diff --git a/Ghidra/Processors/RISCV/data/languages/riscv.rv32i.sinc b/Ghidra/Processors/RISCV/data/languages/riscv.rv32i.sinc
 index 0fbdfac2e1..93b91f79d2 100644
 --- a/Ghidra/Processors/RISCV/data/languages/riscv.rv32i.sinc
@@ -6730,10 +6812,23 @@ index f21ed223f0..3202f7dbb8 100644
 +:vzext.vf8  vd, vs2         is op2631=0x12 & op2525=1 & vs2 & op1519=0x2 & op1214=0x2 & vd & op0006=0x57 {vd=vzext_vf8(vs2);}
 +:vzext.vf8  vd, vs2, "v0.t" is op2631=0x12 & op2525=0 & vs2 & op1519=0x2 & op1214=0x2 & vd & op0006=0x57 {vd=vzext_vf8(vs2,v0);}
 diff --git a/Ghidra/Processors/RISCV/data/languages/riscv.table.sinc b/Ghidra/Processors/RISCV/data/languages/riscv.table.sinc
-index 749ac3e8e4..a592fa2e18 100644
+index 749ac3e8e4..2e93bf8ada 100644
 --- a/Ghidra/Processors/RISCV/data/languages/riscv.table.sinc
 +++ b/Ghidra/Processors/RISCV/data/languages/riscv.table.sinc
-@@ -78,18 +78,21 @@ rdL: zero is r0711 & zero & op0711=0 { export 0:8; }
+@@ -41,12 +41,6 @@ rs1W: zero is r1519 & zero & op1519=0 { export 0:$(WXLEN); }
+ rs2W: r2024 is r2024 { local tmp:$(WXLEN) = r2024:$(WXLEN); export tmp; }
+ rs2W: zero is r2024 & zero & op2024=0 { export 0:$(WXLEN); }
+ 
+-#TODO  dest may be bad, might need an assign macro
+-rdW: r0711 is r0711 { local tmp:$(WXLEN) = r0711:$(WXLEN); export tmp; }
+-rdW: zero is r0711 & zero & op0711=0 { export 0:$(WXLEN); }
+-
+-
+-
+ #TODO  does this need to be in an if/endif
+ @if ADDRSIZE == "64"
+ rs1L: r1519 is r1519 { local tmp:8 = r1519:8; export tmp; }
+@@ -78,18 +72,21 @@ rdL: zero is r0711 & zero & op0711=0 { export 0:8; }
  
  frd:  fr0711 is fr0711 { export fr0711; }
  frs1: fr1519 is fr1519 { export fr1519; }
@@ -6757,7 +6852,16 @@ index 749ac3e8e4..a592fa2e18 100644
  frs1D: fr1519 is fr1519 { local tmp = fr1519:$(DFLEN); export tmp; }
  frs2D: fr2024 is fr2024 { local tmp = fr2024:$(DFLEN); export tmp; }
  frs3D: fr2731 is fr2731 { local tmp = fr2731:$(DFLEN); export tmp; }
-@@ -172,10 +175,8 @@ aqrl: ".rl"   is op2526=1 { export 1:$(XLEN); }
+@@ -97,7 +94,7 @@ frs3D: fr2731 is fr2731 { local tmp = fr2731:$(DFLEN); export tmp; }
+ 
+ macro fassignS(dest, src) {
+ @if FPSIZE == "32"
+-	dest = src;
++	dest = zext(src);
+ @else
+ 	dest = zext(src);
+ @endif
+@@ -172,10 +169,8 @@ aqrl: ".rl"   is op2526=1 { export 1:$(XLEN); }
  aqrl: ".aq"   is op2526=2 { export 2:$(XLEN); }
  aqrl: ".aqrl" is op2526=3 { export 3:$(XLEN); }
  
@@ -6770,7 +6874,7 @@ index 749ac3e8e4..a592fa2e18 100644
  
  crd: cd0711 is cd0711 { export cd0711; }
  crd: zero is zero & cop0711=0 { export 0:$(XLEN); }
-@@ -183,17 +184,11 @@ crd: zero is zero & cop0711=0 { export 0:$(XLEN); }
+@@ -183,17 +178,11 @@ crd: zero is zero & cop0711=0 { export 0:$(XLEN); }
  crs2: cr0206 is cr0206 { export cr0206; }
  crs2: zero is cr0206 & zero & cop0206=0 { export 0:$(XLEN); }
  
@@ -6788,7 +6892,7 @@ index 749ac3e8e4..a592fa2e18 100644
  cimmI: imm is scop1212 & cop0206 [ imm = (scop1212 << 5) | (cop0206); ] { local tmp:$(XLEN) = imm; export tmp; }
  
  # used for goto
-@@ -204,10 +199,11 @@ cbimm: reloc is scop1212 & cop1011 & cop0506 & cop0304 & cop0202 [ reloc = inst_
+@@ -204,10 +193,11 @@ cbimm: reloc is scop1212 & cop1011 & cop0506 & cop0304 & cop0202 [ reloc = inst_
  cjimm: reloc is scop1212 & cop1111 & cop0910 & cop0808 & cop0707 & cop0606 & cop0305 & cop0202 [ reloc = inst_start + ((scop1212 << 11) | (cop1111 << 4) | (cop0910 << 8) | (cop0808 << 10) | (cop0707 << 6) | (cop0606 << 7) | (cop0305 << 1) | (cop0202 << 5)); ] { export *[ram]:$(XLEN) reloc; }
  
  
@@ -6801,7 +6905,7 @@ index 749ac3e8e4..a592fa2e18 100644
  c6imm: uimm is cop1212=0 & cop0206 & nzuimm5 [ uimm = (cop0206 + 0); ] { local tmp:$(XLEN) = uimm; export tmp; }
  @elif ADDRSIZE == "64"
  c6imm: uimm is cop1212 & cop0206 & nzuimm6 [ uimm = (cop1212 << 5) | (cop0206); ] { local tmp:$(XLEN) = uimm; export tmp; }
-@@ -366,15 +362,13 @@ vs3: v0711 is v0711 { export v0711; }
+@@ -366,15 +356,13 @@ vs3: v0711 is v0711 { export v0711; }
  vd:  v0711 is v0711 { export v0711; }
  
  simm5: sop1519 is sop1519 { local tmp:$(XLEN) = sop1519; export tmp; }
@@ -7616,230 +7720,269 @@ index 0000000000..1d04755a08
 \ No newline at end of file
 diff --git a/Ghidra/Processors/RISCV/data/languages/riscv.zfh.sinc b/Ghidra/Processors/RISCV/data/languages/riscv.zfh.sinc
 new file mode 100644
-index 0000000000..f8e0c69a4b
+index 0000000000..5cf9d8a593
 --- /dev/null
 +++ b/Ghidra/Processors/RISCV/data/languages/riscv.zfh.sinc
-@@ -0,0 +1,249 @@
+@@ -0,0 +1,289 @@
 +# 16 bit floating point support
 +# Ref: https://drive.google.com/file/d/1z3tQQLm5ALsAD77PM0l0CHnapxWCeVzP/view
 +# Note:
 +#    Many of these  halfword instructions are identical to their full-word equivalents (see riscv.rv32f.sinc)
 +#    except that funct3=0x1 instead of 0x2 or funct7 |= 0x02
 +
-+# TODO: do we need an fassignH macro defined?
++# 16 bit floats loaded into FP registers have their high order bits set to '1'
++# so that they appear as NaNs and will not be mistaken as floats or doubles
++
++# Optimize output for emulation and RTL fidelity if EMULATION == 1
++#  Note: Ghidra currently has no intrinsic half-precision floating point support, so
++#        emulation will give misleading results
++# Optimize output for decompilation and C-like implicit type conversion if EMULATION == 0
++@define EMULATION 0
++
++# Half precision FP registers with values in the low order 16 bits and
++# NaNboxed to fill the register
++frs1H: fr1519 is fr1519 { local tmp = fr1519:$(HFLEN); export tmp; }
++frs2H: fr2024 is fr2024 { local tmp = fr2024:$(HFLEN); export tmp; }
++frs3H: fr2731 is fr2731 { local tmp = fr2731:$(HFLEN); export tmp; }
++
++macro nanboxH(dest, src){
++@if EMULATION
++@if FPSIZE == "32"
++	dest = 0xFFFF0000 | zext(src[0,16]);
++@else
++	dest = 0xFFFFFFFFFFFF0000 | zext(src[0,16]);
++@endif
++@else
++	dest = sext(src);
++@endif
++}
++
++define pcodeop copybitsH;
 +
 +# Half-Precision Load Instruction
 +:flh frd,immI(rs1) is immI & frd & rs1 & op0001=0x3 & op0204=0x1 & op0506=0x0 & funct3=0x1
 +{
 +    local ea:$(XLEN) = immI + rs1;
-+    fassignS(frd, *[ram]:4 ea);
++	local tmp:$(HFLEN) = *[ram]:$(HFLEN) ea;
++    nanboxH(frd, tmp);
 +}
 +
 +# Half-Precision Store Instruction
-+:fsh frs2S,immS(rs1) is frs2S & immS & rs1 & op0001=0x3 & op0204=0x1 & op0506=0x1 & funct3=0x1
++:fsh frs2H,immS(rs1) is frs2H & immS & rs1 & op0001=0x3 & op0204=0x1 & op0506=0x1 & funct3=0x1
 +{
 +	local ea:$(XLEN) = immS + rs1;
-+	*[ram]:2 ea = frs2S;
++	*[ram]:2 ea = frs2H;
 +}
 +
 +# Half-Precision Computational Instructions
-+:fadd.h frd,frs1S,frs2S,FRM is frs1S & frd & frs2S & FRM & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct7=0x02
++:fadd.h frd,frs1H,frs2H,FRM is frs1H & frd & frs2H & FRM & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct7=0x02
 +{
-+	local tmp:4 = frs1S f+ frs2S;
-+	fassignS(frd, tmp);
++	local tmp:2 = frs1H f+ frs2H;
++	nanboxH(frd, tmp);
 +}
 +
-+:fsub.h frd,frs1S,frs2S,FRM is frs1S & frd & frs2S & FRM & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct7=0x6
++:fsub.h frd,frs1H,frs2H,FRM is frs1H & frd & frs2H & FRM & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct7=0x6
 +{
-+	local tmp:4 = frs1S f- frs2S;
-+	fassignS(frd, tmp);
++	local tmp:2 = frs1H f- frs2H;
++	nanboxH(frd, tmp);
 +}
 +
-+:fmul.h frd,frs1S,frs2S,FRM is frs1S & frd & frs2S & FRM & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct7=0xa
++:fmul.h frd,frs1H,frs2H,FRM is frs1H & frd & frs2H & FRM & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct7=0xa
 +{
-+	local tmp:4 = frs1S f* frs2S;
-+	fassignS(frd, tmp);
++	local tmp:2 = frs1H f* frs2H;
++	nanboxH(frd, tmp);
 +}
 +
-+:fdiv.h frd,frs1S,frs2S,FRM is frs1S & frd & frs2S & FRM & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct7=0xe
++:fdiv.h frd,frs1H,frs2H,FRM is frs1H & frd & frs2H & FRM & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct7=0xe
 +{
-+	local tmp:4 = frs1S f/ frs2S;
-+	fassignS(frd, tmp);
++	local tmp:2 = frs1H f/ frs2H;
++	nanboxH(frd, tmp);
 +}
 +
-+:fmin.h frd,frs1S,frs2S is frs1S & frd & frs2S & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct3=0x0 & funct7=0x16
++:fmin.h frd,frs1H,frs2H is frs1H & frd & frs2H & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct3=0x0 & funct7=0x16
 +{
 +	#TODO  redo this
-+	local tmpfrs1 = frs1S;
-+	local tmpfrs2 = frs2S;
-+	fassignS(frd, tmpfrs1);
++	local tmpfrs1 = frs1H;
++	local tmpfrs2 = frs2H;
++	nanboxH(frd, tmpfrs1);
 +	if (nan(tmpfrs1) && nan(tmpfrs2)) goto inst_next;
 +	if (nan(tmpfrs2)) goto inst_next;
-+	fassignS(frd, tmpfrs2);
++	nanboxH(frd, tmpfrs2);
 +	if (nan(tmpfrs1)) goto inst_next;
 +	if (tmpfrs2 f<= tmpfrs1) goto inst_next;
-+	fassignS(frd, tmpfrs1);
++	nanboxH(frd, tmpfrs1);
 +}
 +
-+:fmax.h frd,frs1S,frs2S is frs1S & frd & frs2S & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct3=0x1 & funct7=0x16
++:fmax.h frd,frs1H,frs2H is frs1H & frd & frs2H & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct3=0x1 & funct7=0x16
 +{
 +	#TODO  redo this
-+	local tmpfrs1 = frs1S;
-+	local tmpfrs2 = frs2S;
-+	fassignS(frd, tmpfrs1);
++	local tmpfrs1 = frs1H;
++	local tmpfrs2 = frs2H;
++	nanboxH(frd, tmpfrs1);
 +	if (nan(tmpfrs1) && nan(tmpfrs2)) goto inst_next;
 +	if (nan(tmpfrs2)) goto inst_next;
-+	fassignS(frd, tmpfrs2);
++	nanboxH(frd, tmpfrs2);
 +	if (nan(tmpfrs1)) goto inst_next;
 +	if (tmpfrs2 f>= tmpfrs1) goto inst_next;
-+	fassignS(frd, tmpfrs1);
++	nanboxH(frd, tmpfrs1);
 +}
 +
-+:fsqrt.h frd,frs1S,FRM is frs1S & frd & FRM & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct7=0x2e & op2024=0x0
++:fsqrt.h frd,frs1H,FRM is frs1H & frd & FRM & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct7=0x2e & op2024=0x0
 +{
-+	local tmp:4 = sqrt(frs1S);
-+	fassignS(frd, tmp);
++	local tmp:2 = sqrt(frs1H);
++	nanboxH(frd, tmp);
 +}
 +
-+:fsgnj.h frd,frs1S,frs2S is frs1S & frd & frs2S & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct3=0x0 & funct7=0x12
++:fsgnj.h frd,frs1H,frs2H is frs1H & frd & frs2H & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct3=0x0 & funct7=0x12
 +{
-+	local tmp:$(SFLEN) = frs1S;
-+	tmp[31,1] = frs2S[31,1];
-+	fassignS(frd, tmp);
++	local tmp:$(HFLEN) = frs1H;
++	tmp[15,1] = frs2H[15,1];
++	nanboxH(frd, tmp);
 +}
 +
-+:fsgnjn.h frd,frs1S,frs2S is frs1S & frd & frs2S & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct3=0x1 & funct7=0x12
++:fsgnjn.h frd,frs1H,frs2H is frs1H & frd & frs2H & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct3=0x1 & funct7=0x12
 +{
-+	local tmp:$(SFLEN) = frs1S;
-+	tmp[31,1] = !frs2S[31,1];
-+	fassignS(frd, tmp);
++	local tmp:$(HFLEN) = frs1H;
++	tmp[15,1] = !frs2H[15,1];
++	nanboxH(frd, tmp);
 +}
 +
-+:fsgnjx.h frd,frs1S,frs2S is frs1S & frd & frs2S & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct3=0x2 & funct7=0x12
++:fsgnjx.h frd,frs1H,frs2H is frs1H & frd & frs2H & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct3=0x2 & funct7=0x12
 +{
-+	local tmp:$(SFLEN) = frs1S;
-+	tmp[31,1] = tmp[31,1] ^ frs2S[31,1];
-+	fassignS(frd, tmp);
++	local tmp:$(HFLEN) = frs1H;
++	tmp[15,1] = tmp[15,1] ^ frs2H[15,1];
++	nanboxH(frd, tmp);
 +}
 +
-+:fmv.h frd,frs1S is frd & frs1S & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct3=0x0 & funct7=0x12 & fr1519=fr2024
++:fmv.h frd,frs1H is frd & frs1H & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct3=0x0 & funct7=0x12 & fr1519=fr2024
 +{
-+	fassignS(frd, frs1S);
++	frd = copybitsH(frs1H);
 +}
 +
-+:fneg.h frd,frs1S is frs1S & frd & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct3=0x1 & funct7=0x12 & op1519=op2024
++:fneg.h frd,frs1H is frs1H & frd & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct3=0x1 & funct7=0x12 & op1519=op2024
 +{
-+	local tmp:4 = f- frs1S;
-+	fassignS(frd, tmp);
++	local tmp:2 = f- frs1H;
++	nanboxH(frd, tmp);
 +}
 +
-+:fabs.h frd,frs1S is frd & frs1S & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct3=0x2 & funct7=0x12 & op1519=op2024
++:fabs.h frd,frs1H is frd & frs1H & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct3=0x2 & funct7=0x12 & op1519=op2024
 +{
-+	local tmp:4 = abs(frs1S);
-+	fassignS(frd, tmp);
++	local tmp:2 = abs(frs1H);
++	nanboxH(frd, tmp);
 +}
 +
 +:fmadd.h frd,frs1S,frs2S,frs3S,FRM is frs1S & frd & frs2S & FRM & frs3S & op0001=0x3 & op0204=0x0 & op0506=0x2 & op2526=0x2
 +{
 +	local tmp:4 = (frs1S f* frs2S) f+ frs3S;
-+	fassignS(frd, tmp);
++	nanboxH(frd, tmp);
 +}
 +
 +:fnmadd.h frd,frs1S,frs2S,frs3S,FRM is frs1S & frd & frs2S & FRM & frs3S & op0001=0x3 & op0204=0x3 & op0506=0x2 & op2526=0x2
 +{
 +	local tmp:4 = (f- (frs1S f* frs2S)) f- frs3S;
-+	fassignS(frd, tmp);
++	nanboxH(frd, tmp);
 +}
 +
 +:fmsub.h frd,frs1S,frs2S,frs3S,FRM is frs1S & frd & frs2S & FRM & frs3S & op0001=0x3 & op0204=0x1 & op0506=0x2 & op2526=0x2
 +{
 +	local tmp:4 = (frs1S f* frs2S) f- frs3S;
-+	fassignS(frd, tmp);
++	nanboxH(frd, tmp);
 +}
 +
 +:fnmsub.h frd,frs1S,frs2S,frs3S,FRM is frs1S & frd & frs2S & FRM & frs3S & op0001=0x3 & op0204=0x2 & op0506=0x2 & op2526=0x2
 +{
 +	local tmp:4 = (f- (frs1S f* frs2S)) f+ frs3S;
-+	fassignS(frd, tmp);
++	nanboxH(frd, tmp);
 +}
 +
-+:fcvt.w.h rdW,frs1S,FRM is frs1S & FRM & rdW & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct7=0x62 & op2024=0x0
++:fcvt.w.h rd,frs1H,FRM is frs1H & FRM & rd & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct7=0x62 & op2024=0x0
 +{
-+	rdW = trunc(frs1S);
++	local tmp:$(WXLEN) = trunc(frs1H);
++	rd = sext(tmp);
 +}
 +
-+:fcvt.wu.h rdW,frs1S,FRM is frs1S & FRM & rdW & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct7=0x62 & op2024=0x1
++:fcvt.wu.h rd,frs1H,FRM is frs1H & FRM & rd & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct7=0x62 & op2024=0x1
 +{
-+	rdW = trunc(frs1S);
++	local tmp:$(WXLEN) = trunc(frs1H);
++	rd = sext(tmp);
 +}
 +
-+:fcvt.h.w rdW,frs1S,FRM is frs1S & FRM & rdW & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct7=0x6a & op2024=0x0
++define pcodeop trunc_h;
++:fcvt.h.w frd,rs1,FRM is rs1 & FRM & frd & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct7=0x6a & op2024=0x0
 +{
-+	rdW = frs1S;
++	frd = trunc_h(rs1);
 +}
 +
-+:fcvt.h.wu rdW,frs1S,FRM is frs1S & FRM & rdW & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct7=0x6a & op2024=0x1
++define pcodeop trunc_hu;
++:fcvt.h.wu frd,rs1,FRM is rs1 & FRM & frd & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct7=0x6a & op2024=0x1
 +{
-+	rdW = frs1S;
++	frd = trunc_hu(rs1);
 +}
 +
-+:fcvt.l.h rdW,frs1S,FRM is frs1S & FRM & rdW & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct7=0x62 & op2024=0x02
++:fcvt.l.h rd,frs1H,FRM is frs1H & FRM & rd & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct7=0x62 & op2024=0x02
 +{
-+	rdW = trunc(frs1S);
++	local tmp:$(WXLEN) = trunc(frs1H);
++	rd = sext(tmp);
 +}
 +
-+:fcvt.lu.h rdW,frs1S,FRM is frs1S & FRM & rdW & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct7=0x62 & op2024=0x03
++:fcvt.lu.h rd,frs1H,FRM is frs1H & FRM & rd & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct7=0x62 & op2024=0x03
 +{
-+	rdW = trunc(frs1S);
++	local tmp:$(WXLEN) = trunc(frs1H);
++	rd = sext(tmp);
 +}
 +
-+:fcvt.h.l rdW,frs1S,FRM is frs1S & FRM & rdW & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct7=0x6a & op2024=0x02
++:fcvt.h.l rd,frs1H,FRM is frs1H & FRM & rd & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct7=0x6a & op2024=0x02
 +{
-+	rdW = frs1S;
++	local tmp:$(WXLEN) = trunc(frs1H);
++	rd = sext(tmp);
 +}
 +
-+:fcvt.h.lu rdW,frs1S,FRM is frs1S & FRM & rdW & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct7=0x6a & op2024=0x03
++:fcvt.h.lu rd,frs1H,FRM is frs1H & FRM & rd & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct7=0x6a & op2024=0x03
 +{
-+	rdW = frs1S;
++	local tmp:$(WXLEN) = trunc(frs1H);
++	rd = sext(tmp);
 +}
 +
 +# the fmv instructions copy bits unchanged, without integer to float conversion
 +define pcodeop fmv_x_h;
-+:fmv.x.h rdW,frs1S is frs1S & rdW & op0001=0x3 & op0204=0x4 & op0506=0x2 & op2024=0x0 & funct3=0x0 & funct7=0x72 {
-+    rdW=fmv_x_h(frs1S);
++:fmv.x.h rd,frs1H is frs1H & rd & op0001=0x3 & op0204=0x4 & op0506=0x2 & op2024=0x0 & funct3=0x0 & funct7=0x72 {
++    rd=copybitsH(frs1H);
 +}
 +
 +define pcodeop fmv_h_x;
 +:fmv.h.x frd,rs1 is rs1 & frd & op0001=0x3 & op0204=0x4 & op0506=0x2 & op2024=0x0 & funct3=0x0 & funct7=0x7a {
-+    frd=fmv_h_x(rs1);
++    frd=copybitsH(rs1);
 +}
 +
 +#TODO: figure out the right way to test assignments like this.
-+:fcvt.s.h frd,frs1S is frd & frs1S & op0001=0x3 & op0204=0x4 & op0506=0x2 & op2024=0x2 & funct7=0x20 {
-+	fassignS(frd, frs1S);
++:fcvt.s.h frd,frs1H is frd & frs1H & op0001=0x3 & op0204=0x4 & op0506=0x2 & op2024=0x2 & funct7=0x20 {
++	fassignS(frd, frs1H);
 +}
 +
-+:fcvt.d.h frd,frs1S is frd & frs1S & op0001=0x3 & op0204=0x4 & op0506=0x2 & op2024=0x2 & funct7=0x21 {
-+	fassignS(frd, frs1S);
++:fcvt.d.h frd,frs1H is frd & frs1H & op0001=0x3 & op0204=0x4 & op0506=0x2 & op2024=0x2 & funct7=0x21 {
++	fassignS(frd, frs1H);
 +}
 +
-+:fcvt.q.h frd,frs1S is frd & frs1S & op0001=0x3 & op0204=0x4 & op0506=0x2 & op2024=0x2 & funct7=0x23 {
-+	fassignS(frd, frs1S);
++:fcvt.q.h frd,frs1H is frd & frs1H & op0001=0x3 & op0204=0x4 & op0506=0x2 & op2024=0x2 & funct7=0x23 {
++	fassignS(frd, frs1H);
 +}
 +
-+:fcvt.h.s frd,frs1S,FRM is frd & frs1S & FRM & op0001=0x3 & op0204=0x4 & op0506=0x2 & op2024=0x0 & funct7=0x22 {
-+    fassignS(frd, frs1S);
++:fcvt.h.s frd,frs1H,FRM is frd & frs1H & FRM & op0001=0x3 & op0204=0x4 & op0506=0x2 & op2024=0x0 & funct7=0x22 {
++    fassignS(frd, frs1H);
 +}
 +
-+:fcvt.h.d frd,frs1S,FRM is frd & frs1S & FRM & op0001=0x3 & op0204=0x4 & op0506=0x2 & op2024=0x1 & funct7=0x22 {
-+    fassignS(frd, frs1S);
++:fcvt.h.d frd,frs1H,FRM is frd & frs1H & FRM & op0001=0x3 & op0204=0x4 & op0506=0x2 & op2024=0x1 & funct7=0x22 {
++    nanboxH(frd, frs1H);
 +}
 +
-+:fcvt.h.q frd,frs1S,FRM is frd & frs1S & FRM & op0001=0x3 & op0204=0x4 & op0506=0x2 & op2024=0x3 & funct7=0x22 {
-+    fassignS(frd, frs1S);
++:fcvt.h.q frd,frs1H,FRM is frd & frs1H & FRM & op0001=0x3 & op0204=0x4 & op0506=0x2 & op2024=0x3 & funct7=0x22 {
++    fassignS(frd, frs1H);
 +}
 +
-+:fclass.h rd,frs1S is frs1S & rd & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct3=0x1 & funct7=0x72 & op2024=0x0
++# TODO: fcvt.q.h and fcvt.h.q
++
++define pcodeop fclass_h;
++:fclass.h rd,frs1H is frs1H & rd & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct3=0x1 & funct7=0x72 & op2024=0x0
 +{
 +	#TODO
 +	# rd = 0;
@@ -7853,22 +7996,24 @@ index 0000000000..f8e0c69a4b
 +	# rd[7, 1] = 0; #TODO  + inf
 +	# rd[8, 1] = 0; #TODO  snan
 +	# rd[9, 1] = 0; #TODO  qnan
++	rd = fclass_h(frs1H);
 +}
 +
-+:feq.h rd,frs1S,frs2S is frs2S & frs1S & rd & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct3=0x2 & funct7=0x52
++:feq.h rd,frs1H,frs2H is frs2H & frs1H & rd & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct3=0x2 & funct7=0x52
 +{
-+	rd = zext(frs1S f== frs2S);
++	rd = zext(frs1H f== frs2H);
 +}
 +
-+:fle.h rd,frs1S,frs2S is frs2S & frs1S & rd & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct3=0x0 & funct7=0x52
++:fle.h rd,frs1H,frs2H is frs2H & frs1H & rd & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct3=0x0 & funct7=0x52
 +{
-+	rd = zext(frs1S f<= frs2S);
++	rd = zext(frs1H f<= frs2H);
 +}
 +
-+:flt.h rd,frs1S,frs2S is frs2S & frs1S & rd & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct3=0x1 & funct7=0x52
++:flt.h rd,frs1H,frs2H is frs2H & frs1H & rd & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct3=0x1 & funct7=0x52
 +{
-+	rd = zext(frs1S f< frs2S);
++	rd = zext(frs1H f< frs2H);
 +}
+\ No newline at end of file
 diff --git a/Ghidra/Processors/RISCV/data/languages/riscv.zknd.sinc b/Ghidra/Processors/RISCV/data/languages/riscv.zknd.sinc
 new file mode 100644
 index 0000000000..50f8272282
