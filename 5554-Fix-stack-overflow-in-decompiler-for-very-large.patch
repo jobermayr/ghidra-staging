@@ -11,10 +11,10 @@ Add map of already computed offsets to avoid stack overflow on very large functi
  2 files changed, 22 insertions(+), 12 deletions(-)
 
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/varmap.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/varmap.cc
-index 8aac8f1913..5a87c8da57 100644
+index 1317e93fae..a896b249b0 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/varmap.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/varmap.cc
-@@ -601,7 +601,7 @@ void AliasChecker::gatherInternal(void) const
+@@ -667,7 +667,7 @@ void AliasChecker::gatherInternal(void) const
  
    gatherAdditiveBase(spacebase,addBase);
    for(vector<AddBase>::iterator iter=addBase.begin();iter!=addBase.end();++iter) {
@@ -23,7 +23,7 @@ index 8aac8f1913..5a87c8da57 100644
      offset = AddrSpace::addressToByte(offset,space->getWordSize()); // Convert to byte offset
      alias.push_back(offset);
      if (direction == 1) {
-@@ -631,6 +631,7 @@ void AliasChecker::gather(const Funcdata *f,AddrSpace *spc,bool defer)
+@@ -697,6 +697,7 @@ void AliasChecker::gather(const Funcdata *f,AddrSpace *spc,bool defer)
    calculated = false;		// Defer calculation
    addBase.clear();
    alias.clear();
@@ -31,7 +31,7 @@ index 8aac8f1913..5a87c8da57 100644
    direction = space->stackGrowsNegative() ? 1 : -1;		// direction == 1 for normal negative stack growth
    deriveBoundaries(fd->getFuncProto());
    if (!defer)
-@@ -748,7 +749,7 @@ void AliasChecker::gatherAdditiveBase(Varnode *startvn,vector<AddBase> &addbase)
+@@ -814,7 +815,7 @@ void AliasChecker::gatherAdditiveBase(Varnode *startvn,vector<AddBase> &addbase)
  /// the syntax tree rooted at \b vn, backwards, only through additive operations.
  /// \param vn is the given Varnode to gather off of
  /// \return the resulting sub-sum
@@ -40,7 +40,7 @@ index 8aac8f1913..5a87c8da57 100644
  
  {
    uintb retval;
-@@ -757,35 +758,42 @@ uintb AliasChecker::gatherOffset(Varnode *vn)
+@@ -823,38 +824,45 @@ uintb AliasChecker::gatherOffset(Varnode *vn)
    if (vn->isConstant()) return vn->getOffset();
    PcodeOp *def = vn->getDef();
    if (def == (PcodeOp *)0) return 0;
@@ -71,12 +71,15 @@ index 8aac8f1913..5a87c8da57 100644
      othervn = def->getIn(2);
 -    retval = gatherOffset(def->getIn(0));
 +    retval = gatherOffset(def->getIn(0), offsets);
-     // We need to treat PTRADD exactly as if it were encoded as an ADD and MULT
-     // Because a plain MULT truncates the ADD tree
-     // We only follow getIn(1) if the PTRADD multiply is by 1
-     if (othervn->isConstant() && (othervn->getOffset()==1))
--      retval = retval + gatherOffset(def->getIn(1));
-+      retval = retval + gatherOffset(def->getIn(1), offsets);
+     if (def->getIn(1)->isConstant())
+       retval = retval + def->getIn(1)->getOffset() * othervn->getOffset();
+     else if (othervn->getOffset()==1) {
+       // We need to treat PTRADD exactly as if it were encoded as an ADD and MULT
+       // Because a plain MULT truncates the ADD tree
+       // We only follow getIn(1) if the PTRADD multiply is by 1
+-     retval = retval + gatherOffset(def->getIn(1));
++     retval = retval + gatherOffset(def->getIn(1), offsets);
+     }
      break;
    case CPUI_SEGMENTOP:
 -    retval = gatherOffset(def->getIn(2));
@@ -93,7 +96,7 @@ index 8aac8f1913..5a87c8da57 100644
  
  /// \param spc is the address space being analyzed
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/varmap.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/varmap.hh
-index 6d065b693b..bab0b5d0eb 100644
+index 5143b24b18..dbb2a95b82 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/varmap.hh
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/varmap.hh
 @@ -20,6 +20,7 @@
@@ -104,7 +107,7 @@ index 6d065b693b..bab0b5d0eb 100644
  
  namespace ghidra {
  
-@@ -140,6 +141,7 @@ private:
+@@ -147,6 +148,7 @@ private:
    AddrSpace *space;		///< AddressSpace in which to search
    mutable vector<AddBase> addBase; ///< Collection of pointers into the AddressSpace
    mutable vector<uintb> alias;	///< List of aliased addresses (as offsets)
@@ -112,7 +115,7 @@ index 6d065b693b..bab0b5d0eb 100644
    mutable bool calculated;	///< Have aliases been calculated
    uintb localExtreme;		///< Largest possible offset for a local variable
    uintb localBoundary;		///< Boundary offset separating locals and parameters
-@@ -155,7 +157,7 @@ public:
+@@ -162,7 +164,7 @@ public:
    const vector<AddBase> &getAddBase(void) const { return addBase; }	///< Get the collection of pointer Varnodes
    const vector<uintb> &getAlias(void) const { return alias; }		///< Get the list of alias starting offsets
    static void gatherAdditiveBase(Varnode *startvn,vector<AddBase> &addbase);
