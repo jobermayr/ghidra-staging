@@ -7,14 +7,14 @@ Building decomp_dbg and sleigh_dbg can now easily enabled via 'gradle -Pdebug' s
 
 Fixes: #5296
 ---
- .../Features/Decompiler/buildNatives.gradle   | 453 +++++++++++-------
- 1 file changed, 287 insertions(+), 166 deletions(-)
+ .../Features/Decompiler/buildNatives.gradle   | 469 +++++++++++-------
+ 1 file changed, 303 insertions(+), 166 deletions(-)
 
 diff --git a/Ghidra/Features/Decompiler/buildNatives.gradle b/Ghidra/Features/Decompiler/buildNatives.gradle
-index bc50d9d307..03de17562b 100644
+index bc50d9d307..71e2a74527 100644
 --- a/Ghidra/Features/Decompiler/buildNatives.gradle
 +++ b/Ghidra/Features/Decompiler/buildNatives.gradle
-@@ -22,20 +22,181 @@ if (findProject(':Generic') == null) {
+@@ -22,20 +22,182 @@ if (findProject(':Generic') == null) {
  	apply from: "../../../GPL/nativeBuildProperties.gradle"
  }
  
@@ -29,7 +29,6 @@ index bc50d9d307..03de17562b 100644
 +def core_files = [
 +	"address.cc",
 +	"float.cc",
-+	"globalcontext.cc",
 +	"marshal.cc",
 +	"opcodes.cc",
 +	"pcoderaw.cc",
@@ -63,7 +62,6 @@ index bc50d9d307..03de17562b 100644
 +	"funcdata_block.cc",
 +	"funcdata_op.cc",
 +	"funcdata_varnode.cc",
-+	"globalcontext.cc",
 +	"graph.cc",
 +	"heritage.cc",
 +	"jumptable.cc",
@@ -106,6 +104,7 @@ index bc50d9d307..03de17562b 100644
 +	"ghidra_context.cc",
 +	"ghidra_process.cc",
 +	"ghidra_translate.cc",
++	"globalcontext.cc",
 +	"inject_ghidra.cc",
 +	"loadimage_ghidra.cc",
 +	"signature_ghidra.cc",
@@ -160,8 +159,7 @@ index bc50d9d307..03de17562b 100644
 +]
 +
 +/**
-+ * Try to find libbfd*.so for linking decomp_dbg
-+ * Linking against libbfd.a doesn't work on openSUSE
++ * Try to find libbfd*.so or a static libbfd.a for linking decomp_dbg
 + */
 +def linkBFDUnix = {
 +	def stdout = new ByteArrayOutputStream()
@@ -187,8 +185,11 @@ index bc50d9d307..03de17562b 100644
 +
  /**
   * Define the "native build model" for building the decompiler executables.
++ * Options:
++ * -PsysZlib	Build against system zlib (ignored for Windows)
++ * -Pdebug	Build debug interfaces (not for Windows)
++ * -Plto	Enable Link Time Optimization (Gcc and Clang; not for debug interfaces)
   */
-+
  model {
 -	// Define the source files that are compiled and linked to become the decompiler.
 -	// The decompiler source is a bit weird in that all the cpp and headers all live in
@@ -203,7 +204,7 @@ index bc50d9d307..03de17562b 100644
  			// these tell gradle for which platforms to build a decompiler executable.
  			targetPlatform "win_x86_64"
  			targetPlatform "linux_x86_64"
-@@ -46,103 +207,22 @@ model {
+@@ -46,103 +208,26 @@ model {
  			targetPlatform "freebsd_arm_64"
  			sources {
  				cpp {
@@ -315,12 +316,16 @@ index bc50d9d307..03de17562b 100644
 +			binaries.all { b ->
 +				if (b.toolChain in Gcc || b.toolChain in Clang) {
 +					b.cppCompiler.args "-O2"
++					if (project.hasProperty('lto')) {
++						b.cppCompiler.args "-flto"
++						b.linker.args "-flto"
++					}
 +				}
 +			}
  		} // end decompile
  
  		sleigh(NativeExecutableSpec) {
-@@ -155,85 +235,137 @@ model {
+@@ -155,85 +240,148 @@ model {
  			targetPlatform "freebsd_arm_64"
  			sources {
  				cpp {
@@ -371,25 +376,34 @@ index bc50d9d307..03de17562b 100644
 -						srcDir "src/decompile/zlib"
 -						include "*.c"
 +				}
-+				if (isCurrentWindows()) {
++				if (isCurrentWindows() || !project.hasProperty('sysZlib')) {
 +					c {
 +						source {
 +							srcDir "src/decompile/zlib"
 +							include "*.c"
 +						}
++					}
++				}
++			}
++			binaries.all { b ->
++				if (b.toolChain in Gcc || b.toolChain in Clang) {
++					b.cppCompiler.args "-O2"
++					if (project.hasProperty('sysZlib')) {
++						b.linker.args "-lz"
++					}
++					if (project.hasProperty('lto')) {
++						b.cppCompiler.args "-flto"
++						if (!project.hasProperty('sysZlib')) {
++							b.cCompiler.args "-flto"
++						}
++						b.linker.args "-flto"
  					}
  				}
 -			} // end sources (sleigh)
 -			
 -			binaries {
 -				all{ b ->
-+			}
-+			binaries.all { b ->
-+				if (b.toolChain in Gcc || b.toolChain in Clang) {
-+					b.cppCompiler.args "-O2"
-+					b.linker.args "-lz"
-+				}
-+				if (!project.hasProperty('sysZlib')) {
++				if (isCurrentWindows() || !project.hasProperty('sysZlib')) {
  					b.cppCompiler.define "LOCAL_ZLIB"
  					b.cCompiler.define "NO_GZIP"
  				}
@@ -454,7 +468,7 @@ index bc50d9d307..03de17562b 100644
 +							srcDir "src/decompile/cpp"
 +						}
 +					}
-+					if (isCurrentWindows()) {
++					if (isCurrentWindows() || !project.hasProperty('sysZlib')) {
 +						c {
 +							source {
 +								srcDir "src/decompile/zlib"
@@ -466,14 +480,16 @@ index bc50d9d307..03de17562b 100644
 +				binaries.all { b ->
 +					if (b.toolChain in Gcc || b.toolChain in Clang) {
 +						b.cppCompiler.args "-g"
-+						b.linker.args "-lz"
++						if (project.hasProperty('sysZlib')) {
++							b.linker.args "-lz"
++						}
 +					}
 +					else if (b.toolChain in VisualCpp) {
 +						b.cppCompiler.args "/Zi"
 +						b.cppCompiler.args "/FS"
 +						b.linker.args "/DEBUG"
 +					}
-+					if (!project.hasProperty('sysZlib')) {
++					if (isCurrentWindows() || !project.hasProperty('sysZlib')) {
 +						b.cppCompiler.define "LOCAL_ZLIB"
 +					}
 +					b.cppCompiler.define "YYDEBUG"
@@ -510,7 +526,7 @@ index bc50d9d307..03de17562b 100644
  				if (b.targetPlatform.operatingSystem.windows) {
  					b.cppCompiler.define "WINDOWS"
  					b.cppCompiler.define "_WINDOWS"
-@@ -251,17 +383,6 @@ model {
+@@ -251,17 +399,6 @@ model {
  				b.cCompiler.define "_CRT_NONSTDC_NO_DEPRECATE"
  				b.cCompiler.define "ZLIB_WINAPI"
  			}
