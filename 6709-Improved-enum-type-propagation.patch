@@ -6,17 +6,19 @@ Subject: [PATCH] 6709: Improved enum type propagation
 improved enum type propagation
 
 fix for improved enum matching of complements
+
+fix potential crash in improved enum matching
 ---
  .../src/decompile/cpp/coreaction.cc           |  10 +-
  .../cpp/include/ghidra/ruleaction.hh          |  11 ++
  .../src/decompile/cpp/include/ghidra/type.hh  |   3 +-
  .../decompile/cpp/include/ghidra/varnode.hh   |   5 +-
  .../Decompiler/src/decompile/cpp/printc.cc    |  19 ++-
- .../src/decompile/cpp/ruleaction.cc           | 111 ++++++++++++++
- .../Decompiler/src/decompile/cpp/type.cc      | 144 +++++++++---------
+ .../src/decompile/cpp/ruleaction.cc           | 111 +++++++++++++
+ .../Decompiler/src/decompile/cpp/type.cc      | 148 +++++++++---------
  .../Decompiler/src/decompile/cpp/typeop.cc    |  12 +-
  .../Decompiler/src/decompile/cpp/varnode.cc   |   1 +
- 9 files changed, 231 insertions(+), 85 deletions(-)
+ 9 files changed, 235 insertions(+), 85 deletions(-)
 
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
 index 8e3a243fd9..ec3589038f 100644
@@ -47,10 +49,10 @@ index 8e3a243fd9..ec3589038f 100644
  	actprop2->addRule( new RuleLoadVarnode("stackvars") );
  	actprop2->addRule( new RuleStoreVarnode("stackvars") );
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/ruleaction.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/ruleaction.hh
-index 4ebc3661b5..4425a82dce 100644
+index dbfaa4729a..749294d99c 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/ruleaction.hh
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/ruleaction.hh
-@@ -1690,5 +1690,16 @@ public:
+@@ -1691,5 +1691,16 @@ public:
    virtual int4 applyOp(PcodeOp *op,Funcdata &data);
  };
  
@@ -156,10 +158,10 @@ index 73fe313565..5e8177efed 100644
    else {
      push_integer(val,ct->getSize(),false,tag,vn,op);
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc
-index b6f5cf3db6..73cb423f21 100644
+index 44aac00e3e..410054033f 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc
-@@ -10879,4 +10879,115 @@ int4 RuleOrCompare::applyOp(PcodeOp *op,Funcdata &data)
+@@ -10898,4 +10898,115 @@ int4 RuleOrCompare::applyOp(PcodeOp *op,Funcdata &data)
    return 1;
  }
  
@@ -276,7 +278,7 @@ index b6f5cf3db6..73cb423f21 100644
 +
  } // End namespace ghidra
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/type.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/type.cc
-index 419f429fc1..a8c6787f4c 100644
+index 419f429fc1..958d397deb 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/type.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/type.cc
 @@ -1265,7 +1265,6 @@ TypeEnum::TypeEnum(const TypeEnum &op) : TypeBase(op)
@@ -351,7 +353,7 @@ index 419f429fc1..a8c6787f4c 100644
  }
  
  /// Given a specific value of the enumeration, calculate the named representation of that value.
-@@ -1338,39 +1285,86 @@ void TypeEnum::setNameMap(const map<uintb,string> &nmap)
+@@ -1338,39 +1285,90 @@ void TypeEnum::setNameMap(const map<uintb,string> &nmap)
  /// If no representation is possible, no names will be returned.
  /// \param val is the value to find the representation for
  /// \param valnames will hold the returned list of names
@@ -397,48 +399,52 @@ index 419f429fc1..a8c6787f4c 100644
 +    } else {
 +      uintb valRemainingBits = val;
 +      map<uintb, string>::const_iterator iterBegin = namemap.begin();
-+      for (--iter; ; ) {  // iterate backwards from end to start (from highest value to lowest)
-+	const uintb& key = iter->first;
-+	if (key == 0) break;                    // the zero is handled specially in the code above and this element is probably the last one in the enum so we just break
-+	const uintb& maskedKey = key & valRemainingBits;
-+	const uintb valRemainingBitsTemp = valRemainingBits - maskedKey;
-+	if (valRemainingBitsTemp >= key) {  // the valRemainingBits's most significant bit is not contained in the key.
-+	  // None of the remaining enum elements are going to contain that bit, since they're lower than the key,
-+	  // so we can exit now
-+	  break;
++      if (iter != iterBegin) {  // can't decrement begin iterator
++	for (--iter; ; ) {  // iterate backwards from end to start (from highest value to lowest)
++	  const uintb& key = iter->first;
++	  if (key == 0) break;                    // the zero is handled specially in the code above and this element is probably the last one in the enum so we just break
++	  const uintb& maskedKey = key & valRemainingBits;
++	  const uintb valRemainingBitsTemp = valRemainingBits - maskedKey;
++	  if (valRemainingBitsTemp >= key) {  // the valRemainingBits's most significant bit is not contained in the key.
++	    // None of the remaining enum elements are going to contain that bit, since they're lower than the key,
++	    // so we can exit now
++	    break;
++	  }
++	  if (maskedKey == key) {                     // if all bits of the enum value are contained in valRemainingBits
++	    valnames.push_back( (*iter).second );
++	    valRemainingBits = valRemainingBitsTemp;  // remove used bits and continue next search only for the bits that remain
++	    if (valRemainingBits == 0) {              // no more bits remain, we found all of them in the enum
++	      break;
++	    }
++	    iter = namemap.lower_bound(valRemainingBits); // this will return a non-end iterator, because
++	    // we removed the highest bit from the val
++	    // and the current key contained that bit, so at most
++	    // this should return the current key again
++	    if (iter->first == valRemainingBits) {  // the iterator->first matches valRemainingBits exactly
++	      valnames.push_back((*iter).second);
++	      valRemainingBits = 0;
++	      break;
++	    } else if (iter == iterBegin) {  // can't decrement begin iterator
++	      break;
++	    } else {
++	      --iter;
++	      continue;
++	    }
++	  }
++	  if (iter == iterBegin) break;
++	  --iter;
  	}
-+	if (maskedKey == key) {                     // if all bits of the enum value are contained in valRemainingBits
-+	  valnames.push_back( (*iter).second );
-+	  valRemainingBits = valRemainingBitsTemp;  // remove used bits and continue next search only for the bits that remain
-+	  if (valRemainingBits == 0) {              // no more bits remain, we found all of them in the enum
-+	    break;
-+	  }
-+	  iter = namemap.lower_bound(valRemainingBits); // this will return a non-end iterator, because
-+	  // we removed the highest bit from the val
-+	  // and the current key contained that bit, so at most
-+	  // this should return the current key again
-+	  if (iter->first == valRemainingBits) {  // the iterator->first matches valRemainingBits exactly
-+	    valnames.push_back((*iter).second);
-+	    valRemainingBits = 0;
-+	    break;
-+	  } else {
-+	    --iter;
-+	    continue;
-+	  }
-+	}
-+	if (iter == iterBegin) break;
-+	--iter;
        }
 +      allmatch = (valRemainingBits == 0);  // if not all bits were found then we can't make a representation
-+    }
+     }
+-    if (allmatch)			// If we have a complete representation
 +    if (count == 1 && !valnamesAttempt.empty() && (             // If we have a previous successful attempt doing a non-~ representation
 +      allmatch && valnamesAttempt.size() < valnames.size()  // And this attempt is successful but yields more enum elements than the other one
 +      || !allmatch)) {                                      // Or this attempt is just not successful
 +      valnames.clear();                                         // Return the previous attempt
 +      valnames.insert(valnames.begin(), valnamesAttempt.begin(), valnamesAttempt.end());
 +      return false;                                             // Representing the non-complement (original) value
-     }
--    if (allmatch)			// If we have a complete representation
++    }
 +    if (allmatch                                           // If we have a complete representation
 +      && count == 0 && (valnames.size() >= size * 8 / 2 // But it seems to include most of the enum's elements (if each was a single bit flag)
 +	|| isShift32)) {                // Or when the val was <<32 before being passed, because when that happens
