@@ -4,20 +4,24 @@ Date: Wed, 10 Jul 2024 17:55:36 +0300
 Subject: [PATCH] 6709: Improved enum type propagation
 
 improved enum type propagation
+
+change placement of RulePropagateEnums to it gets called later/less often, fix CPUI_STORE in the rule
+
+remove redundant elses in RulePropagateEnums
 ---
  .../src/decompile/cpp/coreaction.cc           |  10 +-
  .../cpp/include/ghidra/ruleaction.hh          |  11 ++
  .../src/decompile/cpp/include/ghidra/type.hh  |   3 +-
  .../decompile/cpp/include/ghidra/varnode.hh   |   5 +-
  .../Decompiler/src/decompile/cpp/printc.cc    |  19 ++-
- .../src/decompile/cpp/ruleaction.cc           | 111 +++++++++++++
+ .../src/decompile/cpp/ruleaction.cc           | 117 ++++++++++++++
  .../Decompiler/src/decompile/cpp/type.cc      | 148 +++++++++---------
  .../Decompiler/src/decompile/cpp/typeop.cc    |  12 +-
  .../Decompiler/src/decompile/cpp/varnode.cc   |   1 +
- 9 files changed, 235 insertions(+), 85 deletions(-)
+ 9 files changed, 241 insertions(+), 85 deletions(-)
 
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
-index 8e3a243fd9..ec3589038f 100644
+index 8e3a243fd9..b4cb51bcc7 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
 @@ -2670,9 +2670,12 @@ int4 ActionSetCasts::castInput(PcodeOp *op,int4 slot,Funcdata &data,CastStrategy
@@ -36,22 +40,23 @@ index 8e3a243fd9..ec3589038f 100644
    }
    else if (ct->getMetatype() == TYPE_PTR && testStructOffset0(ct, vn->getHighTypeReadFacing(op), castStrategy)) {
      // Insert a PTRSUB(vn,#0) instead of a CAST
-@@ -5593,6 +5596,7 @@ void ActionDatabase::universalAction(Architecture *conf)
- 	actprop2->addRule( new RulePushPtr("typerecovery") );
- 	actprop2->addRule( new RuleStructOffset0("typerecovery") );
- 	actprop2->addRule( new RulePtrArith("typerecovery") );
-+	actprop2->addRule( new RulePropagateEnums("typerecovery") );
- 	//	actprop2->addRule( new RuleIndirectConcat("analysis") );
- 	actprop2->addRule( new RuleLoadVarnode("stackvars") );
- 	actprop2->addRule( new RuleStoreVarnode("stackvars") );
+@@ -5633,6 +5636,7 @@ void ActionDatabase::universalAction(Architecture *conf)
+     actcleanup->addRule( new RuleSplitLoad("splitpointer") );
+     actcleanup->addRule( new RuleSplitStore("splitpointer") );
+     actcleanup->addRule( new RuleStringSequence("constsequence"));
++    actcleanup->addRule( new RulePropagateEnums("typerecovery") );
+   }
+   act->addAction( actcleanup );
+ 
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/ruleaction.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/ruleaction.hh
-index dbfaa4729a..749294d99c 100644
+index dbfaa4729a..f3007a7060 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/ruleaction.hh
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/ruleaction.hh
-@@ -1691,5 +1691,16 @@ public:
+@@ -1690,6 +1690,17 @@ public:
+   virtual void getOpList(vector<uint4> &oplist) const;
    virtual int4 applyOp(PcodeOp *op,Funcdata &data);
  };
- 
++  
 +class RulePropagateEnums : public Rule {
 +public:
 +  RulePropagateEnums(const string& g) : Rule(g, 0, "propagateenums") {}	///< Constructor
@@ -62,7 +67,7 @@ index dbfaa4729a..749294d99c 100644
 +  virtual void getOpList(vector<uint4>& oplist) const;
 +  virtual int4 applyOp(PcodeOp* op, Funcdata& data);
 +};
-+
+ 
  } // End namespace ghidra
  #endif
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/type.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/type.hh
@@ -154,10 +159,10 @@ index 73fe313565..5e8177efed 100644
    else {
      push_integer(val,ct->getSize(),false,tag,vn,op);
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc
-index 44aac00e3e..410054033f 100644
+index 44aac00e3e..907bff0370 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc
-@@ -10898,4 +10898,115 @@ int4 RuleOrCompare::applyOp(PcodeOp *op,Funcdata &data)
+@@ -10898,4 +10898,121 @@ int4 RuleOrCompare::applyOp(PcodeOp *op,Funcdata &data)
    return 1;
  }
  
@@ -178,14 +183,20 @@ index 44aac00e3e..410054033f 100644
 +  if (!data.hasTypeRecoveryStarted()) return 0;
 +
 +  Varnode* constant = op->getIn(1);
-+  if (!constant->isConstant() || constant->getType()->isEnumType()) {
++  if (op->code() == CPUI_STORE) {
++    constant = op->getIn(2);
++  }
++  if (!constant->isConstant() || constant->getType()->isEnumType() || constant->isSpacebase() || constant->isTypeLock()) {
 +    return 0;
 +  }
-+  PcodeOp* def = op->getIn(0)->getDef();
-+  if (!def) {
-+    Varnode* opOut = op->getOut();
-+    if (opOut) {
-+      def = opOut->loneDescend();
++  PcodeOp* def = op;
++  if (op->code() != CPUI_STORE) {
++    def = op->getIn(0)->getDef();
++    if (!def) {
++      Varnode* opOut = op->getOut();
++      if (opOut) {
++	def = opOut->loneDescend();
++      }
 +    }
 +  }
 +  if (!def) return 0;
