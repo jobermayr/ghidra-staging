@@ -1,0 +1,43 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Alan Tse <alandtse@gmail.com>
+Date: Mon, 22 Jul 2024 00:44:04 -0700
+Subject: [PATCH] 6744: Fix PDB parsing of recoverable malformed datatypes
+
+Fix parsing of recoverable malformed datatypes
+
+MSVC sometimes generates pdbs where there is an implied datatype such as
+pointers `*` or arrays `[16]`. While the actual datatype is unknown,
+Ghidra has undefined to cover this use case.
+
+This avoids an error on PDB import which would have a cryptic message:
+"Symbol list must contain at least one symbol name!" without any info
+on what caused the issue.
+---
+ .../app/util/bin/format/pdb/PdbDataTypeParser.java    | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+
+diff --git a/Ghidra/Features/PDB/src/main/java/ghidra/app/util/bin/format/pdb/PdbDataTypeParser.java b/Ghidra/Features/PDB/src/main/java/ghidra/app/util/bin/format/pdb/PdbDataTypeParser.java
+index 958c90c891..f9e6f3445d 100644
+--- a/Ghidra/Features/PDB/src/main/java/ghidra/app/util/bin/format/pdb/PdbDataTypeParser.java
++++ b/Ghidra/Features/PDB/src/main/java/ghidra/app/util/bin/format/pdb/PdbDataTypeParser.java
+@@ -184,6 +184,17 @@ class PdbDataTypeParser {
+ 
+ 		String dataTypeName = datatype;
+ 
++		// Handle potential malformed datatypes where some datatype is implied
++		// *
++		// **
++		// [16]
++		if (dataTypeName.startsWith("*") || dataTypeName.startsWith("[")) {
++			// prepend undefined since intent is some datatype
++			Msg.warn(this, "dataTypeName \"" + dataTypeName +
++				"\" references a pointer or array without a declared datatype; assuming undefined");
++			dataTypeName = "undefined" + dataTypeName;
++		}
++
+ 		// Example type representations:
+ 		// char *[2][3]     pointer(array(array(char,3),2))
+ 		// char *[2][3] *   pointer(array(array(pointer(char),3),2))
+-- 
+2.45.1
+
