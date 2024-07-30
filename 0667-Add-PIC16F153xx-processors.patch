@@ -9,15 +9,15 @@ Add PIC processor support for the PIC16F153xx range.
  .gitignore                                    |   1 +
  Ghidra/Processors/PIC/certification.manifest  |   4 +
  .../Processors/PIC/data/languages/pic16.ldefs |  12 +
- .../Processors/PIC/data/languages/pic16.sinc  |   4 +-
+ .../Processors/PIC/data/languages/pic16.sinc  |   2 +-
  .../data/languages/pic16_instructions.sinc    |  67 ++-
  .../PIC/data/languages/pic16f.cspec           |   2 -
- .../PIC/data/languages/pic16f.pspec           | 113 ++++-
+ .../PIC/data/languages/pic16f.pspec           |   2 -
  .../PIC/data/languages/pic16f153xx.cspec      | 165 +++++++
  .../PIC/data/languages/pic16f153xx.pspec      | 466 ++++++++++++++++++
  .../PIC/data/languages/pic16f153xx.slaspec    |   6 +
  .../PIC/data/manuals/PIC-16F153xx.idx         |  51 ++
- 11 files changed, 855 insertions(+), 36 deletions(-)
+ 11 files changed, 753 insertions(+), 25 deletions(-)
  create mode 100644 Ghidra/Processors/PIC/data/languages/pic16f153xx.cspec
  create mode 100644 Ghidra/Processors/PIC/data/languages/pic16f153xx.pspec
  create mode 100644 Ghidra/Processors/PIC/data/languages/pic16f153xx.slaspec
@@ -58,10 +58,10 @@ index e60fb77053..e30f12ed83 100644
  data/manuals/PIC-18.idx||GHIDRA||||END|
  data/manuals/PIC24.idx||GHIDRA||||END|
 diff --git a/Ghidra/Processors/PIC/data/languages/pic16.ldefs b/Ghidra/Processors/PIC/data/languages/pic16.ldefs
-index af82b20edb..2b3570f637 100644
+index 94d988f255..72476078f9 100644
 --- a/Ghidra/Processors/PIC/data/languages/pic16.ldefs
 +++ b/Ghidra/Processors/PIC/data/languages/pic16.ldefs
-@@ -28,4 +28,16 @@
+@@ -27,4 +27,16 @@
      <compiler name="default" spec="pic16f.cspec" id="default"/>
      <external_name tool="IDA-PRO" name="pic16fxx"/>
    </language>
@@ -79,10 +79,10 @@ index af82b20edb..2b3570f637 100644
 +  </language>
  </language_definitions>
 diff --git a/Ghidra/Processors/PIC/data/languages/pic16.sinc b/Ghidra/Processors/PIC/data/languages/pic16.sinc
-index d7144dae17..4b7376a9a4 100644
+index 68207af119..41c88b16b1 100644
 --- a/Ghidra/Processors/PIC/data/languages/pic16.sinc
 +++ b/Ghidra/Processors/PIC/data/languages/pic16.sinc
-@@ -30,7 +30,7 @@ define alignment=2;
+@@ -8,7 +8,7 @@ define alignment=2;
  # Instruction Memory (ROM-based)
  define space CODE type=ram_space wordsize=2 size=2 default;
  
@@ -91,17 +91,8 @@ index d7144dae17..4b7376a9a4 100644
  # or 32-banks of 255 bytes each for PIC_16F.
  # Bank selection occurs using STATUS register bits RP0 & RP1
  define space DATA type=ram_space size=2; 
-@@ -52,8 +52,6 @@ define register offset=0x0003 size=1 [ W SkipNext ];
- # Status bit registers (these do not really exist and must get reflected into the STATUS byte register)
- @if PROCESSOR == "PIC_16"
- define register offset=0x0007 size=1 [ IRP RP ];
--@elif PROCESSOR == "PIC_16F"
--define register offset=0x0007 size=1 [ IRP RP ];
- @endif
- 
- @define C  "STATUS[0,1]"
 diff --git a/Ghidra/Processors/PIC/data/languages/pic16_instructions.sinc b/Ghidra/Processors/PIC/data/languages/pic16_instructions.sinc
-index 4bec48f478..c755fa43dc 100644
+index 4d31346ed3..0a3fc67f75 100644
 --- a/Ghidra/Processors/PIC/data/languages/pic16_instructions.sinc
 +++ b/Ghidra/Processors/PIC/data/languages/pic16_instructions.sinc
 @@ -6,6 +6,7 @@
@@ -112,27 +103,27 @@ index 4bec48f478..c755fa43dc 100644
  	op14 =	(0,13)
  	op12 =  (2,13)
  	op11 =	(3,13)
-@@ -236,15 +237,15 @@ destREG: "1"		is d=1 & f7=0x02 & fregCore				{ export fregCore; } # PCL (special
+@@ -243,15 +244,15 @@ destREG: "1"		is d=1 & f7=0x02			{ export PCL; } # PCL (special behavior reqd)
  D: "w"		is d=0										{ }
  D: "f"		is d=1										{ }
  
 -# Absolute address generated from k11 and PCLATH<4:3>
 +# Absolute address generated from k11 and PCLATH<6:3>
  absAddr11: k11	is k11									{
--	addr:2 = ((zext(PCLATH) & 0x78) << 8) + k11;
+-	addr:2 = ((zext(PCLATH) & 0x18) << 8) | k11;
 -	export addr; 
-+	local addr:2 = ((zext(PCLATH) & 0x78) << 8) + k11;
++	local addr:2 = ((zext(PCLATH) & 0x18) << 8) | k11;
 +	export *[const]:2 addr;
  }
  
  @if PROCESSOR == "PIC_16F"
  
--# Absolute address generated from k11 and PCLATH<4:3>
+-# Relative address
 +# Relative address generated from sk9
  relAddr9: addr	is sk9	[ addr = inst_next + sk9; ]								{
  	export *[CODE]:2 addr;
  }
-@@ -254,7 +255,6 @@ relAddr9: addr	is sk9	[ addr = inst_next + sk9; ]								{
+@@ -261,7 +262,6 @@ relAddr9: addr	is sk9	[ addr = inst_next + sk9; ]								{
  # Immediate Data (Literal operation)
  imm8: "#"k8	is k8										{ export *[const]:1 k8; }
  
@@ -140,7 +131,7 @@ index 4bec48f478..c755fa43dc 100644
  # Immediate Data (Literal operation)
  imm7: "#"k7	is k7										{ export *[const]:1 k7; }
  
-@@ -264,8 +264,6 @@ imm6: "#"k6	is k6										{ export *[const]:1 k6; }
+@@ -271,8 +271,6 @@ imm6: "#"k6	is k6										{ export *[const]:1 k6; }
  # Immediate Data (Literal operation)
  imm5: "#"k5	is k5										{ export *[const]:1 k5; }
  
@@ -149,7 +140,7 @@ index 4bec48f478..c755fa43dc 100644
  # Bit identifier
  bit: "#"b3		is b3									{ export *[const]:1 b3; }
  
-@@ -275,9 +273,15 @@ trisREG: "5"	is l5=5												{ local trl:2 = 0x89; export *[DATA]:1 trl; } #
+@@ -282,9 +280,15 @@ trisREG: "5"	is l5=5												{ local trl:2 = 0x89; export *[DATA]:1 trl; } #
  trisREG: "6"	is l5=6												{ local trl:2 = 0x187; export *[DATA]:1 trl; } # TRISB
  trisREG: "7"	is l5=7												{ local trl:2 = 0x188; export *[DATA]:1 trl; } # TRISC
  @elif PROCESSOR == "PIC_16F"
@@ -168,7 +159,7 @@ index 4bec48f478..c755fa43dc 100644
  @endif
  
  :^instruction is possibleSkip=1 & instruction [ possibleSkip=0; ] {
-@@ -322,7 +326,7 @@ trisREG: "7"	is l5=7												{ local trl:2 = 0x10E; export *[DATA]:1 trl; } #
+@@ -329,7 +333,7 @@ trisREG: "7"	is l5=7												{ local trl:2 = 0x10E; export *[DATA]:1 trl; } #
  :ADDWF PC, D		is op6=0x07 & D & d=1 & f7=0x02 & PC	{
  	#  --00 0111 dfff ffff
  	#  0000 0111 1000 0010  ->  ADDWF PCL, w, ACCESS
@@ -177,7 +168,7 @@ index 4bec48f478..c755fa43dc 100644
  	PCLATH = addr(1);
  	tmp:1 = addr:1;
  	setAddFlags(tmp, W);
-@@ -352,7 +356,7 @@ trisREG: "7"	is l5=7												{ local trl:2 = 0x10E; export *[DATA]:1 trl; } #
+@@ -359,7 +363,7 @@ trisREG: "7"	is l5=7												{ local trl:2 = 0x10E; export *[DATA]:1 trl; } #
  :ADDWFC PC, D		is op6=0x3D & D & d=1 & f7=0x02 & PC	{
  	#  --00 0111 dfff ffff
  	#  0000 0111 1000 0010  ->  ADDWF PCL, w, ACCESS
@@ -186,7 +177,7 @@ index 4bec48f478..c755fa43dc 100644
  	PCLATH = addr(1);
  	val:1 = addr:1;
  	
-@@ -431,7 +435,7 @@ trisREG: "7"	is l5=7												{ local trl:2 = 0x10E; export *[DATA]:1 trl; } #
+@@ -438,7 +442,7 @@ trisREG: "7"	is l5=7												{ local trl:2 = 0x10E; export *[DATA]:1 trl; } #
  	$(Z) = 0;
  }
  
@@ -195,7 +186,7 @@ index 4bec48f478..c755fa43dc 100644
  :BCF STATUS, "RP0"			is op4=0x4 & b3=5 & f7=0x3 & STATUS & bit							{
  	#  --01 00bb bfff ffff
  	#  0001 0010 1000 0011	->	BCF STATUS, #RP0
-@@ -457,6 +461,7 @@ trisREG: "7"	is l5=7												{ local trl:2 = 0x10E; export *[DATA]:1 trl; } #
+@@ -464,6 +468,7 @@ trisREG: "7"	is l5=7												{ local trl:2 = 0x10E; export *[DATA]:1 trl; } #
  	local bitmask = ~(1 << bit);
  	STATUS = STATUS & bitmask;
  }
@@ -203,7 +194,7 @@ index 4bec48f478..c755fa43dc 100644
  
  :BSF srcREG, bit			is op4=0x5 & bit & srcREG							{
  	#  --01 01bb bfff ffff
-@@ -489,6 +494,7 @@ trisREG: "7"	is l5=7												{ local trl:2 = 0x10E; export *[DATA]:1 trl; } #
+@@ -496,6 +501,7 @@ trisREG: "7"	is l5=7												{ local trl:2 = 0x10E; export *[DATA]:1 trl; } #
  	$(Z) = 1;
  }
  
@@ -211,7 +202,7 @@ index 4bec48f478..c755fa43dc 100644
  :BSF STATUS, "RP0"			is op4=0x5 & b3=5 & f7=0x3 & STATUS & bit							{
  	#  --01 01bb bfff ffff
  	#  0001 0110 1000 0011	->	BSF STATUS, #RP0
-@@ -513,6 +519,7 @@ trisREG: "7"	is l5=7												{ local trl:2 = 0x10E; export *[DATA]:1 trl; } #
+@@ -520,6 +526,7 @@ trisREG: "7"	is l5=7												{ local trl:2 = 0x10E; export *[DATA]:1 trl; } #
  	local bitmask = 1 << bit;
  	STATUS = STATUS | bitmask;
  }
@@ -219,7 +210,7 @@ index 4bec48f478..c755fa43dc 100644
  
  :BTFSC srcREG, bit		is op4=0x6 & bit & srcREG [ possibleSkip = 1; globalset(inst_next,possibleSkip); ] {
  	#  --01 10bb bfff ffff
-@@ -626,12 +633,13 @@ trisREG: "7"	is l5=7												{ local trl:2 = 0x10E; export *[DATA]:1 trl; } #
+@@ -633,12 +640,13 @@ trisREG: "7"	is l5=7												{ local trl:2 = 0x10E; export *[DATA]:1 trl; } #
  	call [absAddr11];
  }
  
@@ -237,7 +228,7 @@ index 4bec48f478..c755fa43dc 100644
  :CLRF srcREG				is op6=0x01 & d=1 & srcREG						{
  	#  --00 0001 1fff ffff
  	#  0000 0001 1000 0000	->	CLRF INDF
-@@ -640,6 +648,7 @@ trisREG: "7"	is l5=7												{ local trl:2 = 0x10E; export *[DATA]:1 trl; } #
+@@ -647,6 +655,7 @@ trisREG: "7"	is l5=7												{ local trl:2 = 0x10E; export *[DATA]:1 trl; } #
  	$(Z) = 1;
  }
  
@@ -245,7 +236,7 @@ index 4bec48f478..c755fa43dc 100644
  :CLRF STATUS				is op6=0x01 & d=1 & f7=0x3 & STATUS						{
  	#  --00 0001 1fff ffff
  	#  0000 0001 1000 0011	->	CLRF STATUS
-@@ -650,6 +659,16 @@ trisREG: "7"	is l5=7												{ local trl:2 = 0x10E; export *[DATA]:1 trl; } #
+@@ -657,6 +666,16 @@ trisREG: "7"	is l5=7												{ local trl:2 = 0x10E; export *[DATA]:1 trl; } #
  	$(DC) = 0;
  	$(C) = 0;
  }
@@ -262,7 +253,7 @@ index 4bec48f478..c755fa43dc 100644
  
  :CLRW					is op12=0b000001000000 & mm			{
  	#  --00 0001 0xxx xxxx
-@@ -789,18 +808,26 @@ srcFSRk: sk6"["fsrk"]" is fsrk & sk6 {
+@@ -796,18 +815,26 @@ srcFSRk: sk6"["fsrk"]" is fsrk & sk6 {
  	srcFSRk = W;
  }
  
@@ -285,7 +276,7 @@ index 4bec48f478..c755fa43dc 100644
  }
  
 -:MOVLP imm7				is op7=0x63 & imm7 {
--	PCLATH = imm7;
+-	PCLATH = imm7 & 0x1F;
 -}
 +@endif
 +
@@ -306,128 +297,10 @@ index 5ec51e0526..ebcea9ed52 100644
          <register name="PCL"/>
          <register name="PCLATH"/>
 diff --git a/Ghidra/Processors/PIC/data/languages/pic16f.pspec b/Ghidra/Processors/PIC/data/languages/pic16f.pspec
-index 44a15b649d..e02565f1de 100644
+index a821ddbec2..3579b6290d 100644
 --- a/Ghidra/Processors/PIC/data/languages/pic16f.pspec
 +++ b/Ghidra/Processors/PIC/data/languages/pic16f.pspec
-@@ -4,15 +4,108 @@
-   <programcounter register="PC"/>
-   <data_space space="DATA"/>
-   <context_data>
--  	<context_set space="CODE">
--  		<set name="doPseudo" val="0"/>
--  	</context_set>
--  	<tracked_set space="CODE">
--  		<set name="BSR" val="0"/>
--  	</tracked_set>
--  	<tracked_set space="CODE" first="0x0" last="0x1ff">
--  	  	<set name="PCLATH" val="0"/>
--  	</tracked_set>
-+    <context_set space="CODE">
-+      <set name="doPseudo" val="0"/>
-+    </context_set>
-+    <tracked_set space="CODE">
-+      <set name="BSR" val="0"/>
-+    </tracked_set>
-+    <tracked_set space="CODE" first="0x0000" last="0x01ff">
-+      <set name="PCLATH" val="0x00"/>
-+    </tracked_set>
-+    <tracked_set space="CODE" first="0x0200" last="0x03ff">
-+      <set name="PCLATH" val="0x01"/>
-+    </tracked_set>
-+    <tracked_set space="CODE" first="0x0400" last="0x05ff">
-+      <set name="PCLATH" val="0x02"/>
-+    </tracked_set>
-+    <tracked_set space="CODE" first="0x0600" last="0x07ff">
-+      <set name="PCLATH" val="0x03"/>
-+    </tracked_set>
-+    <tracked_set space="CODE" first="0x0800" last="0x09ff">
-+      <set name="PCLATH" val="0x04"/>
-+    </tracked_set>
-+    <tracked_set space="CODE" first="0x0a00" last="0x0bff">
-+      <set name="PCLATH" val="0x05"/>
-+    </tracked_set>
-+    <tracked_set space="CODE" first="0x0c00" last="0x0dff">
-+      <set name="PCLATH" val="0x06"/>
-+    </tracked_set>
-+    <tracked_set space="CODE" first="0x0e00" last="0x0fff">
-+      <set name="PCLATH" val="0x07"/>
-+    </tracked_set>
-+    <tracked_set space="CODE" first="0x1000" last="0x11ff">
-+      <set name="PCLATH" val="0x08"/>
-+    </tracked_set>
-+    <tracked_set space="CODE" first="0x1200" last="0x13ff">
-+      <set name="PCLATH" val="0x09"/>
-+    </tracked_set>
-+    <tracked_set space="CODE" first="0x1400" last="0x15ff">
-+      <set name="PCLATH" val="0x0a"/>
-+    </tracked_set>
-+    <tracked_set space="CODE" first="0x1600" last="0x17ff">
-+      <set name="PCLATH" val="0x0b"/>
-+    </tracked_set>
-+    <tracked_set space="CODE" first="0x1800" last="0x19ff">
-+      <set name="PCLATH" val="0x0c"/>
-+    </tracked_set>
-+    <tracked_set space="CODE" first="0x1a00" last="0x1bff">
-+      <set name="PCLATH" val="0x0d"/>
-+    </tracked_set>
-+    <tracked_set space="CODE" first="0x1c00" last="0x1dff">
-+      <set name="PCLATH" val="0x0e"/>
-+    </tracked_set>
-+    <tracked_set space="CODE" first="0x1e00" last="0x1fff">
-+      <set name="PCLATH" val="0x0f"/>
-+    </tracked_set>
-+    <tracked_set space="CODE" first="0x2000" last="0x21ff">
-+      <set name="PCLATH" val="0x10"/>
-+    </tracked_set>
-+    <tracked_set space="CODE" first="0x2200" last="0x23ff">
-+      <set name="PCLATH" val="0x11"/>
-+    </tracked_set>
-+    <tracked_set space="CODE" first="0x2400" last="0x25ff">
-+      <set name="PCLATH" val="0x12"/>
-+    </tracked_set>
-+    <tracked_set space="CODE" first="0x2600" last="0x27ff">
-+      <set name="PCLATH" val="0x13"/>
-+    </tracked_set>
-+    <tracked_set space="CODE" first="0x2800" last="0x29ff">
-+      <set name="PCLATH" val="0x14"/>
-+    </tracked_set>
-+    <tracked_set space="CODE" first="0x2a00" last="0x2bff">
-+      <set name="PCLATH" val="0x15"/>
-+    </tracked_set>
-+    <tracked_set space="CODE" first="0x2c00" last="0x2dff">
-+      <set name="PCLATH" val="0x16"/>
-+    </tracked_set>
-+    <tracked_set space="CODE" first="0x2e00" last="0x2fff">
-+      <set name="PCLATH" val="0x17"/>
-+    </tracked_set>
-+    <tracked_set space="CODE" first="0x3000" last="0x31ff">
-+      <set name="PCLATH" val="0x18"/>
-+    </tracked_set>
-+    <tracked_set space="CODE" first="0x3200" last="0x33ff">
-+      <set name="PCLATH" val="0x19"/>
-+    </tracked_set>
-+    <tracked_set space="CODE" first="0x3400" last="0x35ff">
-+      <set name="PCLATH" val="0x1a"/>
-+    </tracked_set>
-+    <tracked_set space="CODE" first="0x3600" last="0x37ff">
-+      <set name="PCLATH" val="0x1b"/>
-+    </tracked_set>
-+    <tracked_set space="CODE" first="0x3800" last="0x39ff">
-+      <set name="PCLATH" val="0x1c"/>
-+    </tracked_set>
-+    <tracked_set space="CODE" first="0x3a00" last="0x3bff">
-+      <set name="PCLATH" val="0x1d"/>
-+    </tracked_set>
-+    <tracked_set space="CODE" first="0x3c00" last="0x3dff">
-+      <set name="PCLATH" val="0x1e"/>
-+    </tracked_set>
-+    <tracked_set space="CODE" first="0x3e00" last="0x3fff">
-+      <set name="PCLATH" val="0x1f"/>
-+    </tracked_set>
-   </context_data>
-   <volatile outputop="write_sfr" inputop="read_sfr">
-     <range space="DATA" first="0xb" last="0x1f"/>
-@@ -28,8 +121,6 @@
+@@ -121,8 +121,6 @@
    </volatile>
    <register_data>
      <register name="STATUS" group="STATUS"/>
