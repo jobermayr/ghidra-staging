@@ -1,0 +1,62 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Emerson Pinter <e@pinter.dev>
+Date: Mon, 19 Aug 2024 22:27:30 -0300
+Subject: [PATCH] 6834: feat: cache vfunctions list
+
+The vfunctions are collected and compared in two loops against all the
+recoveredClasses, this takes time if the binary have many classes. This
+commit makes the vfunctions list and the vftable address to be stored
+in a map, making the vfunctions list and create happen only once.
+---
+ .../classrecovery/RecoveredClassHelper.java   | 22 ++++++++++++-------
+ 1 file changed, 14 insertions(+), 8 deletions(-)
+
+diff --git a/Ghidra/Features/Decompiler/ghidra_scripts/classrecovery/RecoveredClassHelper.java b/Ghidra/Features/Decompiler/ghidra_scripts/classrecovery/RecoveredClassHelper.java
+index b0c18fc79b..27937dde7b 100644
+--- a/Ghidra/Features/Decompiler/ghidra_scripts/classrecovery/RecoveredClassHelper.java
++++ b/Ghidra/Features/Decompiler/ghidra_scripts/classrecovery/RecoveredClassHelper.java
+@@ -137,6 +137,7 @@ public class RecoveredClassHelper {
+ 	protected final boolean createBookmarks;
+ 	protected final boolean useShortTemplates;
+ 	protected final boolean nameVfunctions;
++	public HashMap<Address, Set<Function>> allVfunctions = new HashMap<>();
+ 
+ 	public RecoveredClassHelper(Program program, ServiceProvider serviceProvider,
+ 			FlatProgramAPI api, boolean createBookmarks, boolean useShortTemplates,
+@@ -482,20 +483,25 @@ public class RecoveredClassHelper {
+ 		return functionToLoadPcodeOps.get(function);
+ 	}
+ 
+-	public Set<Function> getAllVfunctions(List<Address> vftableAddresses)
+-			throws CancelledException {
+-
+-		Set<Function> allVfunctionsSet = new HashSet<Function>();
+-
++	public Set<Function> getAllVfunctions(List<Address> vftableAddresses) throws CancelledException {
+ 		if (vftableAddresses.isEmpty()) {
+-			return allVfunctionsSet;
++			return Collections.emptySet();
+ 		}
++
++		Set<Function> vfunctionSet = new HashSet<>();
+ 		for (Address vftableAddress : vftableAddresses) {
+ 			monitor.checkCancelled();
+-			allVfunctionsSet.addAll(getVfunctions(vftableAddress));
++			if (!allVfunctions.containsKey(vftableAddress)) {
++				List<Function> funcList = getVfunctions(vftableAddress);
++				if (funcList == null) {
++					funcList = new ArrayList<>();
++				}
++				allVfunctions.put(vftableAddress, new HashSet<>(funcList));
++			}
++			vfunctionSet.addAll(allVfunctions.get(vftableAddress));
+ 		}
+ 
+-		return allVfunctionsSet;
++		return vfunctionSet;
+ 	}
+ 
+ 	public Set<Function> getAllClassFunctionsWithVtableRef(List<Address> vftables)
+-- 
+2.45.1
+
