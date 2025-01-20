@@ -5,16 +5,16 @@ Subject: [PATCH] 5908: HCS12 processor: new Analyzer plugin for automatic
  PPAGE register setting
 
 ---
- .../core/analysis/HCS12PPageAnalyzer.java     | 109 ++++++++++++++++++
- 1 file changed, 109 insertions(+)
+ .../core/analysis/HCS12PPageAnalyzer.java     | 123 ++++++++++++++++++
+ 1 file changed, 123 insertions(+)
  create mode 100644 Ghidra/Processors/HCS12/src/main/java/ghidra/app/plugin/core/analysis/HCS12PPageAnalyzer.java
 
 diff --git a/Ghidra/Processors/HCS12/src/main/java/ghidra/app/plugin/core/analysis/HCS12PPageAnalyzer.java b/Ghidra/Processors/HCS12/src/main/java/ghidra/app/plugin/core/analysis/HCS12PPageAnalyzer.java
 new file mode 100644
-index 0000000000..4a53c6fc7a
+index 0000000000..a72e2d5f28
 --- /dev/null
 +++ b/Ghidra/Processors/HCS12/src/main/java/ghidra/app/plugin/core/analysis/HCS12PPageAnalyzer.java
-@@ -0,0 +1,109 @@
+@@ -0,0 +1,123 @@
 +/* ###
 + * IP: GHIDRA
 + *
@@ -59,6 +59,8 @@ index 0000000000..4a53c6fc7a
 +	private static final String DESCRIPTION = "Sets the correct value for PPAGE reg for a whole flash area (at addresses 0x40'0000 .. 0x7F'FFFF)";
 +
 +	Register ppageReg = null;
++	boolean coreHCS12 = false;
++	boolean coreHCS12X = false;
 +
 +	public HCS12PPageAnalyzer() {
 +		super(NAME, DESCRIPTION, AnalyzerType.BYTE_ANALYZER);
@@ -72,22 +74,34 @@ index 0000000000..4a53c6fc7a
 +	public boolean canAnalyze(Program program) {
 +		// Only analyze HCS-12 / HCS-12X Programs
 +		Processor processor = program.getLanguage().getProcessor();
-+		boolean canDo = "HCS-12".equals(processor.toString()) ||
-+						"HCS-12X".equals(processor.toString());
++		coreHCS12 = "HCS-12".equals(processor.toString());
++		coreHCS12X = "HCS-12X".equals(processor.toString());
 +
-+		if (canDo)
++		if (coreHCS12 || coreHCS12X)
++		{
 +			ppageReg = program.getRegister("PPAGE");
-+
-+		return canDo;
++			return true;
++		}
++		else
++			return false;
 +	}
 +
 +	@Override
 +	public boolean added(Program program, AddressSetView set, TaskMonitor monitor, MessageLog log)
 +			throws CancelledException {
 +
++		// HCS12X
 +		// Flash Global addresses: 0x40'0000 .. 0x7F'FFFF (4MB)
 +		// Flash Logical addresses: 0xC000 .. 0xFFFF (16kB)
 +		// GlobalAddress = 0x40'0000 + (PPAGE << 14) + (LogicalAddress & 0x3FFF)
++		// PPAGE max = 0xFF
++
++		// HCS12
++		// GlobalAddress = (PPAGE << 14) + (LogicalAddress & 0x3FFF)
++		// PPAGE max = 0x3F
++
++		int flashOffset = coreHCS12X ? 0x400000 : 0;
++		int ppageMax = coreHCS12X ? 0xFF : 0x3F;
 +
 +		for (AddressRange addrRange : set.getAddressRanges())
 +		{
@@ -95,9 +109,9 @@ index 0000000000..4a53c6fc7a
 +			if (!rangeStart.isLoadedMemoryAddress())
 +				continue;
 +
-+			for (int ppage = 0; ppage <= 0xff; ppage++)
++			for (int ppage = 0; ppage <= ppageMax; ppage++)
 +			{
-+				Address pageStart = rangeStart.getNewAddress(0x400000 + (ppage << 14));
++				Address pageStart = rangeStart.getNewAddress(flashOffset + (ppage << 14));
 +				Address pageEnd = pageStart.add(0x3fff);
 +
 +				AddressRange page = addrRange.intersectRange(pageStart, pageEnd);

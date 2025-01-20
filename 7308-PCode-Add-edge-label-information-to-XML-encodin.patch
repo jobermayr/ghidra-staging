@@ -1,0 +1,145 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: inetbowser <inetbowser@tuta.io>
+Date: Fri, 20 Dec 2024 16:40:24 +0100
+Subject: [PATCH] 7308: PCode: Add edge label information to XML encoding and
+ expose it in Ghidra.
+
+feat: Add edge label information to XML encoding and expose it in Ghidra.
+---
+ .../Decompiler/src/decompile/cpp/block.cc       |  5 +++--
+ .../ghidra/program/model/pcode/AttributeId.java |  4 +++-
+ .../ghidra/program/model/pcode/PcodeBlock.java  | 17 +++++++++++++----
+ 3 files changed, 19 insertions(+), 7 deletions(-)
+
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/block.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/block.cc
+index aca7bd4e4d..aa61f65927 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/block.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/block.cc
+@@ -24,6 +24,7 @@ AttributeId ATTRIB_DEPTH = AttributeId("depth",76);
+ AttributeId ATTRIB_END = AttributeId("end",77);
+ AttributeId ATTRIB_OPCODE = AttributeId("opcode",78);
+ AttributeId ATTRIB_REV = AttributeId("rev",79);
++AttributeId ATTRIB_EDGE_LABEL = AttributeId("edgelabel",152);
+ 
+ ElementId ELEM_BHEAD = ElementId("bhead",102);
+ ElementId ELEM_BLOCK = ElementId("block",103);
+@@ -36,9 +37,9 @@ void BlockEdge::encode(Encoder &encoder) const
+ 
+ {
+   encoder.openElement(ELEM_EDGE);
+-  // We are not saving label currently
+   encoder.writeSignedInteger(ATTRIB_END, point->getIndex());	// Reference to other end of edge
+   encoder.writeSignedInteger(ATTRIB_REV, reverse_index);	// Position within other blocks edgelist
++  encoder.writeUnsignedInteger(ATTRIB_EDGE_LABEL, label);
+   encoder.closeElement(ELEM_EDGE);
+ }
+ 
+@@ -49,12 +50,12 @@ void BlockEdge::decode(Decoder &decoder,BlockMap &resolver)
+ 
+ {
+   uint4 elemId = decoder.openElement(ELEM_EDGE);
+-  label = 0;		// Tag does not currently contain info about label
+   int4 endIndex = decoder.readSignedInteger(ATTRIB_END);
+   point = resolver.findLevelBlock(endIndex);
+   if (point == (FlowBlock *)0)
+     throw LowlevelError("Bad serialized edge in block graph");
+   reverse_index = decoder.readSignedInteger(ATTRIB_REV);
++  label = decoder.readUnsignedInteger(ATTRIB_EDGE_LABEL);
+   decoder.closeElement(elemId);
+ }
+ 
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/AttributeId.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/AttributeId.java
+index 71264e88d0..a908c6ccf9 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/AttributeId.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/AttributeId.java
+@@ -245,6 +245,8 @@ public record AttributeId(String name, int id) {
+ 	public static final AttributeId ATTRIB_STACKSPILL = new AttributeId("stackspill", 150);
+ 
+ 	public static final AttributeId ATTRIB_ISRIGHTTOLEFT = new AttributeId("isrighttoleft", 151);
++	// edge
++	public static final AttributeId ATTRIB_EDGE_LABEL = new AttributeId("edgelabel", 152);
+ 
+-	public static final AttributeId ATTRIB_UNKNOWN = new AttributeId("XMLunknown", 152);
++	public static final AttributeId ATTRIB_UNKNOWN = new AttributeId("XMLunknown", 153);
+ }
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/PcodeBlock.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/PcodeBlock.java
+index f89c69fc3d..9ed0bb790b 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/PcodeBlock.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/PcodeBlock.java
+@@ -164,6 +164,7 @@ public class PcodeBlock {
+ 			encoder.writeSignedInteger(ATTRIB_END, point.getIndex());
+ 			// Position within other blocks edgelist
+ 			encoder.writeSignedInteger(ATTRIB_REV, reverse_index);
++			encoder.writeUnsignedInteger(ATTRIB_EDGE_LABEL, label);
+ 			encoder.closeElement(ELEM_EDGE);
+ 		}
+ 
+@@ -175,26 +176,26 @@ public class PcodeBlock {
+ 		 */
+ 		public void decode(Decoder decoder, BlockMap resolver) throws DecoderException {
+ 			int el = decoder.openElement(ELEM_EDGE);
+-			label = 0;		// Tag does not currently contain info about label
+ 			int endIndex = (int) decoder.readSignedInteger(ATTRIB_END);
+ 			point = resolver.findLevelBlock(endIndex);
+ 			if (point == null) {
+ 				throw new DecoderException("Bad serialized edge in block graph");
+ 			}
+ 			reverse_index = (int) decoder.readSignedInteger(ATTRIB_REV);
++			label = (int) decoder.readUnsignedInteger(ATTRIB_EDGE_LABEL);
+ 			decoder.closeElement(el);
+ 		}
+ 
+ 		public void decode(Decoder decoder, ArrayList<? extends PcodeBlock> blockList)
+ 				throws DecoderException {
+ 			int el = decoder.openElement(ELEM_EDGE);
+-			label = 0;		// Tag does not currently contain info about label
+ 			int endIndex = (int) decoder.readSignedInteger(ATTRIB_END);
+ 			point = blockList.get(endIndex);
+ 			if (point == null) {
+ 				throw new DecoderException("Bad serialized edge in block list");
+ 			}
+ 			reverse_index = (int) decoder.readSignedInteger(ATTRIB_REV);
++			label = (int) decoder.readUnsignedInteger(ATTRIB_EDGE_LABEL);
+ 			decoder.closeElement(el);
+ 		}
+ 
+@@ -262,7 +263,7 @@ public class PcodeBlock {
+ 		while (inEdge.point.outofthis.size() <= inEdge.reverse_index) {
+ 			inEdge.point.outofthis.add(null);
+ 		}
+-		BlockEdge outEdge = new BlockEdge(this, 0, intothis.size() - 1);
++		BlockEdge outEdge = new BlockEdge(this, inEdge.label, intothis.size() - 1);
+ 		inEdge.point.outofthis.set(inEdge.reverse_index, outEdge);
+ 	}
+ 
+@@ -280,7 +281,7 @@ public class PcodeBlock {
+ 		while (inEdge.point.outofthis.size() <= inEdge.reverse_index) {
+ 			inEdge.point.outofthis.add(null);
+ 		}
+-		BlockEdge outEdge = new BlockEdge(this, 0, intothis.size() - 1);
++		BlockEdge outEdge = new BlockEdge(this, inEdge.label, intothis.size() - 1);
+ 		inEdge.point.outofthis.set(inEdge.reverse_index, outEdge);
+ 	}
+ 
+@@ -288,10 +289,18 @@ public class PcodeBlock {
+ 		return intothis.get(i).point;
+ 	}
+ 
++	public int getInEdgeLabel(int i) {
++		return intothis.get(i).label;
++	}
++
+ 	public PcodeBlock getOut(int i) {
+ 		return outofthis.get(i).point;
+ 	}
+ 
++	public int getOutEdgeLabel(int i) {
++		return outofthis.get(i).label;
++	}
++
+ 	/**
+ 	 * Get reverse index of the i-th outgoing block. I.e this.getOut(i).getIn(reverse_index) == this
+ 	 * @param i is the outgoing block to request reverse index from
+-- 
+2.45.1
+

@@ -1,0 +1,225 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Alexey Esaulenko <esaulenka@gmail.com>
+Date: Sun, 29 Dec 2024 16:32:32 +0400
+Subject: [PATCH] 7331: Tricore: add a FCALL calling convention
+
+Tricore: add support for FCALL routines
+
+Tricore FCALL set calling convention automatically
+---
+ .../tricore/data/languages/tricore.cspec      |  79 ++++++++++++
+ .../core/analysis/TricoreFCallAnalyzer.java   | 112 ++++++++++++++++++
+ 2 files changed, 191 insertions(+)
+ create mode 100644 Ghidra/Processors/tricore/src/main/java/ghidra/app/plugin/core/analysis/TricoreFCallAnalyzer.java
+
+diff --git a/Ghidra/Processors/tricore/data/languages/tricore.cspec b/Ghidra/Processors/tricore/data/languages/tricore.cspec
+index a9c69243fe..ec4038e581 100644
+--- a/Ghidra/Processors/tricore/data/languages/tricore.cspec
++++ b/Ghidra/Processors/tricore/data/languages/tricore.cspec
+@@ -124,6 +124,85 @@
+          the correct return storage location when there are multiple return location types
+     -->
+     
++    <!-- The same as __stdcall, but with a different stackshift to support FCALL / FRET opcodes -->
++    <prototype name="__fastcall" extrapop="4" stackshift="4">
++      <input>
++          <pentry minsize="4" maxsize="4" storage="hiddenret">
++              <register name="a4"/>
++          </pentry>
++          <pentry minsize="4" maxsize="4" metatype="ptr">   <!-- This is the first pointer -->
++              <register name="a4"/>
++          </pentry>
++          <pentry minsize="4" maxsize="4" metatype="ptr">
++              <register name="a5"/>
++          </pentry>
++          <pentry minsize="4" maxsize="4" metatype="ptr">
++              <register name="a6"/>
++          </pentry>
++          <pentry minsize="4" maxsize="4" metatype="ptr">
++              <register name="a7"/>
++          </pentry>
++          <pentry minsize="1" maxsize="4" extension="inttype">   <!-- This is the first non pointer -->
++              <register name="d4"/>
++          </pentry>
++          <pentry minsize="1" maxsize="4" extension="inttype">
++              <register name="d5"/>
++          </pentry>
++          <pentry minsize="5" maxsize="8">    <!-- This is the first >4 byte non pointer -->
++              <register name="e4"/>
++          </pentry>
++          <pentry minsize="1" maxsize="4" extension="inttype">
++              <register name="d6"/>
++          </pentry>
++          <pentry minsize="1" maxsize="4" extension="inttype">
++              <register name="d7"/>
++          </pentry>
++          <pentry minsize="5" maxsize="8">
++              <register name="e6"/>
++          </pentry>
++          <pentry minsize="1" maxsize="500" align="4">
++              <addr offset="0" space="stack"/>
++          </pentry>
++          <rule>
++             <datatype name="struct" minsize="17"/>
++             <convert_to_ptr/>
++          </rule>
++      </input>
++
++      <output>
++        <pentry minsize="4" maxsize="4" metatype="ptr">
++          <register name="a2"/>
++        </pentry>
++        <pentry minsize="1" maxsize="4" extension="inttype">
++          <register name="d2"/>
++        </pentry>
++        <pentry minsize="5" maxsize="8">
++          <register name="e2"/>
++        </pentry>
++      </output>
++      <unaffected>
++		<register name="d8"/>
++		<register name="d9"/>
++		<register name="d10"/>
++		<register name="d11"/>
++		<register name="d12"/>
++		<register name="d13"/>
++		<register name="d14"/>
++		<register name="d15"/>
++		<register name="a0"/>
++		<register name="a1"/>
++		<register name="a8"/>
++		<register name="a9"/>
++		<register name="a10"/>
++		<register name="a11"/>
++		<register name="a12"/>
++		<register name="a13"/>
++		<register name="a14"/>
++		<register name="a15"/>
++      </unaffected>
++    </prototype>
++
++
+   <callotherfixup targetop="saveCallerState">
+      <pcode>
+       <input name="fcx"/>
+diff --git a/Ghidra/Processors/tricore/src/main/java/ghidra/app/plugin/core/analysis/TricoreFCallAnalyzer.java b/Ghidra/Processors/tricore/src/main/java/ghidra/app/plugin/core/analysis/TricoreFCallAnalyzer.java
+new file mode 100644
+index 0000000000..791fa4ca4d
+--- /dev/null
++++ b/Ghidra/Processors/tricore/src/main/java/ghidra/app/plugin/core/analysis/TricoreFCallAnalyzer.java
+@@ -0,0 +1,112 @@
++/* ###
++ * IP: GHIDRA
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package ghidra.app.plugin.core.analysis;
++
++import java.math.BigInteger;
++
++import ghidra.app.services.AbstractAnalyzer;
++import ghidra.app.services.AnalysisPriority;
++import ghidra.app.services.AnalyzerType;
++import ghidra.app.util.importer.MessageLog;
++import ghidra.program.model.address.AddressSetView;
++import ghidra.program.model.lang.Processor;
++import ghidra.program.model.lang.Register;
++import ghidra.program.model.lang.RegisterValue;
++import ghidra.program.model.listing.Function;
++import ghidra.program.model.listing.FunctionIterator;
++import ghidra.program.model.listing.Instruction;
++import ghidra.program.model.listing.InstructionIterator;
++import ghidra.program.model.listing.Program;
++import ghidra.program.model.symbol.SourceType;
++import ghidra.util.Msg;
++import ghidra.util.exception.CancelledException;
++import ghidra.util.exception.InvalidInputException;
++import ghidra.util.task.TaskMonitor;
++
++public class TricoreFCallAnalyzer extends AbstractAnalyzer {
++
++	private static final String NAME = "Tricore FCall Analyzer";
++	private static final String DESCRIPTION = "Analyzes Tricore programs to find routines called by FCALL opcode. This analyzer looks at the type of return used for the function to identify the calling convention.";
++
++	public TricoreFCallAnalyzer() {
++		super(NAME, DESCRIPTION, AnalyzerType.FUNCTION_ANALYZER);
++		setPriority(AnalysisPriority.FUNCTION_ANALYSIS);
++		setDefaultEnablement(true);
++	}
++
++	@Override
++	public boolean canAnalyze(Program program) {
++		// Only analyze Tricore Programs
++		Processor processor = program.getLanguage().getProcessor();
++
++		boolean canDo = processor.equals(Processor.findOrPossiblyCreateProcessor("tricore"));
++		return canDo;
++	}
++
++	void checkReturn(Program program, Instruction instr) {
++		String mnemonic = instr.getMnemonicString().toLowerCase();
++
++		if (instr == null || !instr.getFlowType().isTerminal()) {
++			return;
++		}
++		if (mnemonic.equals("fret")) {
++			setPrototypeModel(program, instr, "__fastcall");
++			return;
++		}
++	}
++
++	private void setPrototypeModel(Program program, Instruction instr, String convention) {
++		if (convention == null) {
++			return;
++		}
++
++		Function func = program.getFunctionManager().getFunctionContaining(instr.getMinAddress());
++		if (func == null) {
++			return;
++		}
++
++		if (func.getSignatureSource() != SourceType.DEFAULT) {
++			return;
++		}
++
++		try {
++			func.setCallingConvention(convention);
++		} catch (InvalidInputException e) {
++			Msg.error(this, "Unexpected Exception: " + e.getMessage(), e);
++		}
++	}
++
++	@Override
++	public boolean added(Program program, AddressSetView set, TaskMonitor monitor, MessageLog log)
++			throws CancelledException {
++
++		// get all functions within the set
++		FunctionIterator functions = program.getFunctionManager().getFunctions(set, true);
++		for (Function function : functions) {
++
++			// for each function body, search instructions
++			AddressSetView body = function.getBody();
++			InstructionIterator instructions = program.getListing().getInstructions(body, true);
++			for (Instruction instr : instructions) {
++				if (instr.getFlowType().isTerminal()) {
++					checkReturn(program, instr);
++				}
++			}
++		}
++		return true;
++	}
++
++}
+-- 
+2.45.1
+

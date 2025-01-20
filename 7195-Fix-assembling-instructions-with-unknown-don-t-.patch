@@ -1,0 +1,764 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Peter Lucia <133892712+plucia-mitre@users.noreply.github.com>
+Date: Fri, 15 Nov 2024 12:26:13 -0500
+Subject: [PATCH] 7195: Fix assembling instructions with unknown/don't care
+ context bits
+
+Without this change, if unspecified context bits are provided to the assembler they are defaulted to 0 and the resulting context is used to filter for valid assembly instructions. After this change unspecified bits are kept as unspecified through the assembly process possibly providing more valid assembly results.
+
+Update test cases to reflect unspecified context during assembly
+
+Implement input context scraping in Wildcard assembler to handle unspecified context bits
+
+Initial implementation of requested changes
+---
+ .../ghidra/asm/wild/WildSleighAssembler.java  |  42 +++-
+ .../asm/wild/WildSleighAssemblerBuilder.java  |  10 +-
+ .../DefaultWildAssemblyResolvedPatterns.java  |   7 +
+ .../asm/wild/WildSleighAssemblerTest.java     | 208 +++++++++++++++++-
+ .../sleigh/sem/AssemblyPatternBlock.java      |  79 +++++++
+ .../sleigh/sem/AssemblyResolvedPatterns.java  |   8 +
+ .../sem/DefaultAssemblyResolvedPatterns.java  |  19 ++
+ .../languages/sleigh/InputContextScraper.java | 134 +++++++++++
+ .../processors/sleigh/ContextCommit.java      |   7 +
+ 9 files changed, 499 insertions(+), 15 deletions(-)
+ create mode 100644 Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/languages/sleigh/InputContextScraper.java
+
+diff --git a/Ghidra/Features/WildcardAssembler/src/main/java/ghidra/asm/wild/WildSleighAssembler.java b/Ghidra/Features/WildcardAssembler/src/main/java/ghidra/asm/wild/WildSleighAssembler.java
+index 1569d18b4f..07fd062a82 100644
+--- a/Ghidra/Features/WildcardAssembler/src/main/java/ghidra/asm/wild/WildSleighAssembler.java
++++ b/Ghidra/Features/WildcardAssembler/src/main/java/ghidra/asm/wild/WildSleighAssembler.java
+@@ -15,12 +15,16 @@
+  */
+ package ghidra.asm.wild;
+ 
++import java.util.Set;
++
+ import ghidra.app.plugin.assembler.AssemblySelector;
+ import ghidra.app.plugin.assembler.sleigh.AbstractSleighAssembler;
++import ghidra.app.plugin.assembler.sleigh.parse.AssemblyParseResult;
+ import ghidra.app.plugin.assembler.sleigh.parse.AssemblyParser;
+ import ghidra.app.plugin.assembler.sleigh.sem.*;
+ import ghidra.app.plugin.assembler.sleigh.tree.AssemblyParseBranch;
+ import ghidra.app.plugin.processors.sleigh.SleighLanguage;
++import ghidra.asm.wild.sem.DefaultWildAssemblyResolvedPatterns;
+ import ghidra.asm.wild.sem.WildAssemblyResolvedPatterns;
+ import ghidra.asm.wild.sem.WildAssemblyTreeResolver;
+ import ghidra.program.model.address.Address;
+@@ -33,19 +37,24 @@ import ghidra.program.model.listing.Program;
+  * Construct these using {@link WildSleighAssemblerBuilder}. 
+  */
+ public class WildSleighAssembler extends AbstractSleighAssembler<WildAssemblyResolvedPatterns> {
++	protected final Set<AssemblyPatternBlock> inputContexts;
+ 
+ 	protected WildSleighAssembler(
+ 			AbstractAssemblyResolutionFactory<WildAssemblyResolvedPatterns, ?> factory,
+ 			AssemblySelector selector, SleighLanguage lang, AssemblyParser parser,
+-			AssemblyDefaultContext defaultContext, AssemblyContextGraph ctxGraph) {
++			AssemblyDefaultContext defaultContext, Set<AssemblyPatternBlock> inputContexts,
++			AssemblyContextGraph ctxGraph) {
+ 		super(factory, selector, lang, parser, defaultContext, ctxGraph);
++		this.inputContexts = inputContexts;
+ 	}
+ 
+ 	protected WildSleighAssembler(
+ 			AbstractAssemblyResolutionFactory<WildAssemblyResolvedPatterns, ?> factory,
+ 			AssemblySelector selector, Program program, AssemblyParser parser,
+-			AssemblyDefaultContext defaultContext, AssemblyContextGraph ctxGraph) {
++			AssemblyDefaultContext defaultContext, Set<AssemblyPatternBlock> inputContexts,
++			AssemblyContextGraph ctxGraph) {
+ 		super(factory, selector, program, parser, defaultContext, ctxGraph);
++		this.inputContexts = inputContexts;
+ 	}
+ 
+ 	@Override
+@@ -53,4 +62,33 @@ public class WildSleighAssembler extends AbstractSleighAssembler<WildAssemblyRes
+ 			AssemblyPatternBlock ctx) {
+ 		return new WildAssemblyTreeResolver(factory, lang, at, tree, ctx, ctxGraph);
+ 	}
++
++	@Override
++	public AssemblyResolutionResults resolveTree(
++			AssemblyParseResult parse, Address at, AssemblyPatternBlock ctx) {
++
++		AssemblyResolutionResults allResults = new AssemblyResolutionResults();
++
++		if (inputContexts.isEmpty()) {
++			absorbWithContext(allResults, super.resolveTree(parse, at, ctx), ctx);
++			return allResults;
++		}
++
++		for (AssemblyPatternBlock inputCtx : inputContexts) {
++			AssemblyPatternBlock combinedCtx = inputCtx.assign(ctx);
++			absorbWithContext(allResults, super.resolveTree(parse, at, combinedCtx), combinedCtx);
++		}
++		return allResults;
++	}
++
++	protected static void absorbWithContext(AssemblyResolutionResults allResults,
++			AssemblyResolutionResults results, AssemblyPatternBlock ctx) {
++		// Unspecified context bits are destroyed during assembly; restore them
++		for (AssemblyResolution res : results) {
++			allResults.add(switch (res) {
++				case DefaultWildAssemblyResolvedPatterns rp -> rp.withContext(ctx);
++				default -> res;
++			});
++		}
++	}
+ }
+diff --git a/Ghidra/Features/WildcardAssembler/src/main/java/ghidra/asm/wild/WildSleighAssemblerBuilder.java b/Ghidra/Features/WildcardAssembler/src/main/java/ghidra/asm/wild/WildSleighAssemblerBuilder.java
+index bf862a0278..ebf59ce559 100644
+--- a/Ghidra/Features/WildcardAssembler/src/main/java/ghidra/asm/wild/WildSleighAssemblerBuilder.java
++++ b/Ghidra/Features/WildcardAssembler/src/main/java/ghidra/asm/wild/WildSleighAssemblerBuilder.java
+@@ -23,8 +23,10 @@ import ghidra.app.plugin.assembler.sleigh.SleighAssemblerBuilder;
+ import ghidra.app.plugin.assembler.sleigh.grammars.AssemblyGrammar;
+ import ghidra.app.plugin.assembler.sleigh.grammars.AssemblySentential;
+ import ghidra.app.plugin.assembler.sleigh.sem.AbstractAssemblyResolutionFactory;
++import ghidra.app.plugin.assembler.sleigh.sem.AssemblyPatternBlock;
+ import ghidra.app.plugin.assembler.sleigh.sem.AssemblyResolvedBackfill;
+ import ghidra.app.plugin.assembler.sleigh.symbol.*;
++import ghidra.app.plugin.languages.sleigh.InputContextScraper;
+ import ghidra.app.plugin.processors.sleigh.Constructor;
+ import ghidra.app.plugin.processors.sleigh.SleighLanguage;
+ import ghidra.app.plugin.processors.sleigh.pattern.DisjointPattern;
+@@ -49,6 +51,7 @@ public class WildSleighAssemblerBuilder
+ 		extends AbstractSleighAssemblerBuilder<WildAssemblyResolvedPatterns, WildSleighAssembler> {
+ 
+ 	protected final Map<AssemblySymbol, AssemblyNonTerminal> wildNTs = new HashMap<>();
++	protected final Set<AssemblyPatternBlock> inputContexts;
+ 
+ 	/**
+ 	 * Construct a builder for the given language
+@@ -62,6 +65,8 @@ public class WildSleighAssemblerBuilder
+ 	 */
+ 	public WildSleighAssemblerBuilder(SleighLanguage lang) {
+ 		super(lang);
++		InputContextScraper scraper = new InputContextScraper(lang);
++		this.inputContexts = scraper.scrapeInputContexts();
+ 	}
+ 
+ 	@Override
+@@ -139,12 +144,13 @@ public class WildSleighAssemblerBuilder
+ 
+ 	@Override
+ 	protected WildSleighAssembler newAssembler(AssemblySelector selector) {
+-		return new WildSleighAssembler(factory, selector, lang, parser, defaultContext, ctxGraph);
++		return new WildSleighAssembler(factory, selector, lang, parser, defaultContext,
++			inputContexts, ctxGraph);
+ 	}
+ 
+ 	@Override
+ 	protected WildSleighAssembler newAssembler(AssemblySelector selector, Program program) {
+ 		return new WildSleighAssembler(factory, selector, program, parser, defaultContext,
+-			ctxGraph);
++			inputContexts, ctxGraph);
+ 	}
+ }
+diff --git a/Ghidra/Features/WildcardAssembler/src/main/java/ghidra/asm/wild/sem/DefaultWildAssemblyResolvedPatterns.java b/Ghidra/Features/WildcardAssembler/src/main/java/ghidra/asm/wild/sem/DefaultWildAssemblyResolvedPatterns.java
+index 701a969d38..0d919e5d40 100644
+--- a/Ghidra/Features/WildcardAssembler/src/main/java/ghidra/asm/wild/sem/DefaultWildAssemblyResolvedPatterns.java
++++ b/Ghidra/Features/WildcardAssembler/src/main/java/ghidra/asm/wild/sem/DefaultWildAssemblyResolvedPatterns.java
+@@ -240,4 +240,11 @@ public class DefaultWildAssemblyResolvedPatterns extends DefaultAssemblyResolved
+ 		builder.opInfo = opInfo;
+ 		return builder;
+ 	}
++
++	@Override
++	protected WildAssemblyResolvedPatternsBuilder withContextBuilder(AssemblyPatternBlock ctx) {
++		var builder = cast(super.withContextBuilder(ctx));
++		builder.opInfo = opInfo;
++		return builder;
++	}
+ }
+diff --git a/Ghidra/Features/WildcardAssembler/src/test/java/ghidra/asm/wild/WildSleighAssemblerTest.java b/Ghidra/Features/WildcardAssembler/src/test/java/ghidra/asm/wild/WildSleighAssemblerTest.java
+index c314941d66..59a50fc7a7 100644
+--- a/Ghidra/Features/WildcardAssembler/src/test/java/ghidra/asm/wild/WildSleighAssemblerTest.java
++++ b/Ghidra/Features/WildcardAssembler/src/test/java/ghidra/asm/wild/WildSleighAssemblerTest.java
+@@ -16,6 +16,7 @@
+ package ghidra.asm.wild;
+ 
+ import static org.hamcrest.Matchers.hasItem;
++import static org.hamcrest.Matchers.not;
+ import static org.junit.Assert.*;
+ 
+ import java.util.*;
+@@ -73,7 +74,10 @@ public class WildSleighAssemblerTest extends AbstractGhidraHeadlessIntegrationTe
+ 		}
+ 		ProgramBuilder armProgramBuilder = new ProgramBuilder("arm_le_test", "ARM:LE:32:v8");
+ 		armProgramBuilder.setBytes(String.format("0x%08X", 0x0),
+-			"00 00 a0 e1 00 00 a0 e1 00 00 a0 e1 fb ff ff eb 00 00 a0 e1");
++			"00 00 a0 e1 00 00 a0 e1 00 00 a0 e1 fb ff ff eb 00 00 a0 e1 01 10 81 e0 49 18");
++		// This line sets the binary at addresses 0x18-0x1A to be ARM Thumb
++		armProgramBuilder.setRegisterValue("TMode", "0x18", "0x1A", 1);
++		armProgramBuilder.disassemble("0x00000000", 0x1A);
+ 		Program armProgram = armProgramBuilder.getProgram();
+ 		arm = (SleighLanguage) armProgram.getLanguage();
+ 		WildSleighAssemblerBuilder builderArm = new WildSleighAssemblerBuilder(arm);
+@@ -90,12 +94,19 @@ public class WildSleighAssemblerTest extends AbstractGhidraHeadlessIntegrationTe
+ 		// 0x00000004: nop
+ 		// 0x00000008: restore 0x1b8,ra,s0-s1
+ 		// 0x0000000c: nop
++		// 0x00000010: restore 0x38,ra,s0-s1
+ 		mipsProgramBuilder.setBytes("0x00000000",
+-			"0c 00 00 08 00 00 00 00 f0 30 64 77 00 00 00 00");
+-		// This line sets the binary at addresses 0x8-0xc to be MIPS 16 (e.g. the
++			"0c 00 00 08 00 00 00 00 f0 30 64 77 00 00 00 00 64 77");
++		// This line sets the binary at addresses 0x8-0x12 to be MIPS 16 (e.g. the
+ 		// restore instruction above)
+-		mipsProgramBuilder.setRegisterValue("ISA_MODE", "0x8", "0xc", 1);
+-		mipsProgramBuilder.disassemble("0x00000000", 0x10);
++		mipsProgramBuilder.setRegisterValue("ISA_MODE", "0x8", "0x12", 1);
++		// We're cheating (slightly), since a transient context variable should never be set globally
++		// Disables ^instruction parse phase responsible for 32-bit extensions
++		mipsProgramBuilder.setRegisterValue("ext_done", "0x10", "0x12", 1);
++		mipsProgramBuilder.disassemble("0x00000000", 0x12);
++
++		// Sets the binary at address 0x100-0x10c to be MIPS (not MIPS16)
++		mipsProgramBuilder.setRegisterValue("ISA_MODE", "0x100", "0x10c", 0);
+ 		var mipsProgram = mipsProgramBuilder.getProgram();
+ 		mips = (SleighLanguage) mipsProgram.getLanguage();
+ 		WildSleighAssemblerBuilder mipsBuilder = new WildSleighAssemblerBuilder(mips);
+@@ -423,8 +434,8 @@ public class WildSleighAssemblerTest extends AbstractGhidraHeadlessIntegrationTe
+ 			dumpResults(results);
+ 			allValidEncodings.addAll(getInstructionValuesHex(results));
+ 		}
+-
+-		assertTrue("Expect to have one valid encoding", allValidEncodings.size() == 1);
++		// In this case, wildcard assembler now returns identical encodings with different contexts
++		assertTrue("Expect to have at least one valid encoding", allValidEncodings.size() >= 1);
+ 		assertTrue("Expect to have 02:1c:41:e2 as an encoding",
+ 			allValidEncodings.contains("02:1c:41:e2"));
+ 	}
+@@ -449,14 +460,86 @@ public class WildSleighAssemblerTest extends AbstractGhidraHeadlessIntegrationTe
+ 	}
+ 
+ 	@Test
+-	public void testRestore_mips() throws Exception {
++	public void testAdd_arm() throws Exception {
++		arm();
++		Collection<AssemblyParseResult> parses = asmArm.parseLine("add r1,r1,r1");
++		AssemblyParseResult[] allResults = parses.stream()
++				.filter(p -> !p.isError())
++				.toArray(AssemblyParseResult[]::new);
++
++		var allValidEncodings = new ArrayList<String>();
++
++		// Based on the context, we should only get the 32-bit encoding(s)
++		Address addr14 = arm.getAddressFactory().getDefaultAddressSpace().getAddress(0x14);
++		for (AssemblyParseResult r : allResults) {
++			AssemblyResolutionResults results = asmArm.resolveTree(r, addr14);
++			dumpResults(results);
++			allValidEncodings.addAll(getInstructionValuesHex(results));
++		}
++
++		assertThat(allValidEncodings, hasItem("01:10:81:e0"));
++		assertThat(allValidEncodings, not(hasItem("49:18")));
++	}
++
++	@Test
++	public void testAdd_armThumb() throws Exception {
++		arm();
++		Collection<AssemblyParseResult> parses = asmArm.parseLine("add r1,r1,r1");
++		AssemblyParseResult[] allResults = parses.stream()
++				.filter(p -> !p.isError())
++				.toArray(AssemblyParseResult[]::new);
++
++		var allValidEncodings = new ArrayList<String>();
++
++		// Based on the context, we should only get the 16-bit encoding(s)
++		Address addr18 = arm.getAddressFactory().getDefaultAddressSpace().getAddress(0x18);
++		for (AssemblyParseResult r : allResults) {
++			AssemblyResolutionResults results = asmArm.resolveTree(r, addr18);
++			dumpResults(results);
++			allValidEncodings.addAll(getInstructionValuesHex(results));
++		}
++
++		assertThat(allValidEncodings, hasItem("49:18"));
++		assertThat(allValidEncodings, not(hasItem("01:10:81:e0")));
++	}
++
++	@Test
++	public void testAdd_armAll() throws Exception {
++		arm();
++		Collection<AssemblyParseResult> parses = asmArm.parseLine("add r1,r1,r1");
++		AssemblyParseResult[] allResults = parses.stream()
++				.filter(p -> !p.isError())
++				.toArray(AssemblyParseResult[]::new);
++
++		var allValidEncodings = new ArrayList<String>();
++
++		// Based on the context, we should get the 32-bit and 16-bit encodings
++		Address addr14 = arm.getAddressFactory().getDefaultAddressSpace().getAddress(0x14);
++		AssemblyPatternBlock unspecifiedCtx =
++			AssemblyPatternBlock.fromLength(arm.getContextBaseRegister().getNumBytes());
++
++		for (AssemblyParseResult r : allResults) {
++			AssemblyResolutionResults results = asmArm.resolveTree(r, addr14, unspecifiedCtx);
++			dumpResults(results);
++			allValidEncodings.addAll(getInstructionValuesHex(results));
++		}
++
++		assertThat(allValidEncodings, hasItem("01:10:81:e0"));
++		assertThat(allValidEncodings, hasItem("49:18"));
++	}
++
++	@Test
++	public void testRestoreExtended_mips16() throws Exception {
+ 		mips();
+ 		Collection<AssemblyParseResult> parses = asmMips.parseLine("restore 0x1b8,ra,s0-s1");
+ 		AssemblyParseResult[] allResults = parses.stream()
+ 				.filter(p -> !p.isError())
+ 				.toArray(AssemblyParseResult[]::new);
+ 
+-		var allValidEncodings = new ArrayList<String>();
++		var allValidEncodings = new HashSet<String>();
++
++		// The restore instruction is only valid when ISA_MODE is equal to one (MIPS16)
++		// Based on the operands, we should only get the 32-bit encodings
+ 		Address addr8 = mips.getAddressFactory().getDefaultAddressSpace().getAddress(8);
+ 
+ 		for (AssemblyParseResult r : allResults) {
+@@ -466,6 +549,56 @@ public class WildSleighAssemblerTest extends AbstractGhidraHeadlessIntegrationTe
+ 		}
+ 
+ 		assertThat(allValidEncodings, hasItem("f0:30:64:77"));
++		assertThat(allValidEncodings, not(hasItem("64:77")));
++	}
++
++	@Test
++	public void testRestore_mips16() throws Exception {
++		mips();
++		Collection<AssemblyParseResult> parses = asmMips.parseLine("restore 0x38,ra,s0-s1");
++		AssemblyParseResult[] allResults = parses.stream()
++				.filter(p -> !p.isError())
++				.toArray(AssemblyParseResult[]::new);
++
++		var allValidEncodings = new HashSet<String>();
++
++		// The restore instruction is only valid when ISA_MODE is equal to one (MIPS16)
++		// Notice ext_done is also set to one at the address we provide
++		// Based on the operands and context, we should only get the 16-bit encodings
++		Address addr10 = mips.getAddressFactory().getDefaultAddressSpace().getAddress(0x10);
++
++		for (AssemblyParseResult r : allResults) {
++			AssemblyResolutionResults results = asmMips.resolveTree(r, addr10);
++			dumpResults(results);
++			allValidEncodings.addAll(getInstructionValuesHex(results));
++		}
++
++		assertThat(allValidEncodings, hasItem("64:77"));
++		assertThat(allValidEncodings, not(hasItem("f0:0c:64:77")));
++	}
++
++	@Test
++	public void testRestoreAll_mips16() throws Exception {
++		mips();
++		Collection<AssemblyParseResult> parses = asmMips.parseLine("restore 0x38,ra,s0-s1");
++		AssemblyParseResult[] allResults = parses.stream()
++				.filter(p -> !p.isError())
++				.toArray(AssemblyParseResult[]::new);
++
++		var allValidEncodings = new HashSet<String>();
++
++		// The restore instruction is only valid when ISA_MODE is equal to one (MIPS16)
++		// Based on the operands, we should get 32-bit and 16-bit encodings
++		Address addr8 = mips.getAddressFactory().getDefaultAddressSpace().getAddress(8);
++
++		for (AssemblyParseResult r : allResults) {
++			AssemblyResolutionResults results = asmMips.resolveTree(r, addr8);
++			dumpResults(results);
++			allValidEncodings.addAll(getInstructionValuesHex(results));
++		}
++
++		assertThat(allValidEncodings, hasItem("f0:0c:64:77"));
++		assertThat(allValidEncodings, hasItem("64:77"));
+ 	}
+ 
+ 	@Test
+@@ -484,12 +617,18 @@ public class WildSleighAssemblerTest extends AbstractGhidraHeadlessIntegrationTe
+ 			allValidResults.addAll(getValidResults(results));
+ 		}
+ 
+-		// I expect at least an encoding like 0xf0306477 (see "testRestore_mips" test)
++		// I expect at least an encoding like 0x6477 (see "testRestoreAll_mips16" test)
+ 		assertFalse(allValidResults.isEmpty());
+ 	}
+ 
++	/**
++	 * Tests assembling a MIPS 'lw' instruction in MIPS (not MIPS16)
++	 *
++	 * This test is similar to {@link #testLw_mips16_32()} except it DOES constrain context such
++	 * that we do NOT get MIPS16 encodings.
++	 */
+ 	@Test
+-	public void testLw_mips() throws Exception {
++	public void testLw_mips32() throws Exception {
+ 		mips();
+ 		Collection<AssemblyParseResult> parses = asmMips.parseLine("lw `Q1`,0x0(a0)");
+ 		AssemblyParseResult[] allResults = parses.stream()
+@@ -519,6 +658,53 @@ public class WildSleighAssemblerTest extends AbstractGhidraHeadlessIntegrationTe
+ 		assertEquals(32, allValidEncodings.size());
+ 	}
+ 
++	/**
++	 * Tests assembling a MIPS 'lw' instruction in MIPS and MIPS16
++	 *
++	 * This test is similar to {@link #testLw_mips32()} except the address we assemble at has a
++	 * non-constrained context so we get both MIPS and MIPS16 encodings.
++	 */
++	@Test
++	public void testLw_mips16_32() throws Exception {
++		mips();
++		Collection<AssemblyParseResult> parses = asmMips.parseLine("lw `Q1`,0x0(a0)");
++		AssemblyParseResult[] allResults = parses.stream()
++				.filter(p -> !p.isError())
++				.toArray(AssemblyParseResult[]::new);
++
++		var allValidEncodings = new HashSet<String>();
++		// Note here, be sure to go past both the mips16 code at the start of our fake
++		// program and the mips32 at 0x100-0x10c
++		Address addr0 = mips.getAddressFactory().getDefaultAddressSpace().getAddress(0x110);
++		for (AssemblyParseResult r : allResults) {
++			AssemblyResolutionResults results = asmMips.resolveTree(r, addr0);
++			dumpResults(results);
++			allValidEncodings.addAll(getInstructionValuesHex(results));
++		}
++
++		// Build all 32 mips32 encodings (one per target register, Q1) and verify they're in
++		// the results
++		byte[] expected = NumericUtilities.convertStringToBytes("8c800000");
++		for (var i = 1; i < 32; i++) {
++			expected[1] = (byte) (0x80 + i);
++			String expectedHex = NumericUtilities.convertBytesToString(expected, ":");
++			assertTrue("Expected to have " + expectedHex + " as an encoding",
++				allValidEncodings.contains(expectedHex));
++		}
++
++		// Build all 8 mips16 encodings (one per target register, Q1) and verify they're in
++		// the results
++		expected = NumericUtilities.convertStringToBytes("9c00");
++		for (var i = 1; i < 8; i++) {
++			expected[1] = (byte) (0x20 * i);
++			String expectedHex = NumericUtilities.convertBytesToString(expected, ":");
++			assertTrue("Expected to have " + expectedHex + " as an encoding",
++				allValidEncodings.contains(expectedHex));
++		}
++
++		assertEquals(48, allValidEncodings.size());
++	}
++
+ 	@Test
+ 	public void testCall_x86() throws Exception {
+ 		x86();
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/assembler/sleigh/sem/AssemblyPatternBlock.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/assembler/sleigh/sem/AssemblyPatternBlock.java
+index 0456fc591f..edfcf9f4f9 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/assembler/sleigh/sem/AssemblyPatternBlock.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/assembler/sleigh/sem/AssemblyPatternBlock.java
+@@ -23,6 +23,7 @@ import java.util.concurrent.atomic.AtomicLong;
+ import ghidra.app.plugin.assembler.sleigh.expr.MaskedLong;
+ import ghidra.app.plugin.assembler.sleigh.expr.SolverException;
+ import ghidra.app.plugin.assembler.sleigh.util.AsmUtil;
++import ghidra.app.plugin.processors.sleigh.ContextCommit;
+ import ghidra.app.plugin.processors.sleigh.ContextOp;
+ import ghidra.app.plugin.processors.sleigh.expression.ContextField;
+ import ghidra.app.plugin.processors.sleigh.expression.TokenField;
+@@ -403,6 +404,60 @@ public class AssemblyPatternBlock implements Comparable<AssemblyPatternBlock> {
+ 		return new AssemblyPatternBlock(newOffset, newMask, newVals);
+ 	}
+ 
++	/**
++	 * Combine this pattern block with another given block
++	 *
++	 * <p>
++	 * The two blocks are combined regardless if their corresponding defined bits agree. When blocks
++	 * are combined, their bytes are aligned according to their shifts, and the defined bits are
++	 * taken from either block. If neither block defines a bit (i.e., the mask bit at that position
++	 * is 0 for both input blocks), then the output has an undefined bit in the corresponding
++	 * position. If both blocks define the bit, but they have opposite values, then the value from
++	 * <code>that</code> takes precedence.
++	 *
++	 * @see RegisterValue#combineValues(RegisterValue)
++	 *
++	 * @param that the other block
++	 * @return the new combined block
++	 */
++	public AssemblyPatternBlock assign(AssemblyPatternBlock that) {
++		int newOffset = Math.min(this.offset, that.offset);
++		int bufLen = Math.max(this.length(), that.length()) - newOffset;
++
++		byte[] newMask = new byte[bufLen];
++		byte[] newVals = new byte[bufLen];
++
++		int diff = this.offset - newOffset;
++		for (int i = 0; i < this.mask.length; i++) {
++			newMask[diff + i] = this.mask[i];
++			newVals[diff + i] = this.vals[i];
++		}
++		diff = that.offset - newOffset;
++		for (int i = 0; i < that.mask.length; i++) {
++			byte mask = that.mask[i];
++			byte clearMask = (byte) ~mask;
++			newMask[diff + i] |= mask;
++			newVals[diff + i] = (byte) ((that.vals[i] & mask) | (newVals[diff + i] & clearMask));
++		}
++		return new AssemblyPatternBlock(newOffset, newMask, newVals);
++	}
++
++	/**
++	 * Invert the mask bits of this pattern block
++	 *
++	 * @return a copy of this pattern block with mask bits inverted
++	 */
++	public AssemblyPatternBlock invertMask() {
++		int maskLen = this.mask.length;
++		byte[] newMask = new byte[maskLen];
++
++		for (int i = 0; i < maskLen; i++) {
++			newMask[i] = (byte) ~this.mask[i];
++		}
++
++		return new AssemblyPatternBlock(this.offset, newMask, this.vals);
++	}
++
+ 	@Override
+ 	public String toString() {
+ 		StringBuilder sb = new StringBuilder();
+@@ -575,6 +630,30 @@ public class AssemblyPatternBlock implements Comparable<AssemblyPatternBlock> {
+ 		return MaskedLong.fromMaskAndValue(rmsk >>> cop.getShift(), rval >>> cop.getShift());
+ 	}
+ 
++	/**
++	 * Write mask bits from context commit to mask array of block
++	 *
++	 * @implNote This is used when scraping for valid input contexts to determine which context variables
++	 *           are passed to the <code>globalset</code> directive.
++	 *
++	 * @param cc the context commit
++	 * @return the result
++	 */
++	public AssemblyPatternBlock writeContextCommitMask(ContextCommit cc) {
++		byte[] newMask = Arrays.copyOf(this.mask, this.mask.length);
++		int idx = cc.getWordIndex();
++		int imsk = cc.getMask();
++		for (int i = 3; i >= 0; i--) {
++			int index = idx * 4 + i - this.offset;
++
++			if (index < newMask.length && index >= 0) {
++				newMask[index] |= imsk;
++			}
++			imsk >>= 8;
++		}
++		return new AssemblyPatternBlock(this.offset, newMask, this.vals);
++	}
++
+ 	/**
+ 	 * Set all bits read by a given context operation to unknown
+ 	 * 
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/assembler/sleigh/sem/AssemblyResolvedPatterns.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/assembler/sleigh/sem/AssemblyResolvedPatterns.java
+index 681184eda2..5b2fecb9eb 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/assembler/sleigh/sem/AssemblyResolvedPatterns.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/assembler/sleigh/sem/AssemblyResolvedPatterns.java
+@@ -37,6 +37,14 @@ public interface AssemblyResolvedPatterns extends AssemblyResolution {
+ 	 */
+ 	AssemblyPatternBlock getContext();
+ 
++	/**
++	 * Create a copy of this resolution with a new context
++	 *
++	 * @param ctx the new context
++	 * @return the copy
++	 */
++	AssemblyResolvedPatterns withContext(AssemblyPatternBlock ctx);
++
+ 	/**
+ 	 * Get the length of the instruction encoding
+ 	 * 
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/assembler/sleigh/sem/DefaultAssemblyResolvedPatterns.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/assembler/sleigh/sem/DefaultAssemblyResolvedPatterns.java
+index 69ee5fba3f..5cfebbe76e 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/assembler/sleigh/sem/DefaultAssemblyResolvedPatterns.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/assembler/sleigh/sem/DefaultAssemblyResolvedPatterns.java
+@@ -560,6 +560,25 @@ public class DefaultAssemblyResolvedPatterns extends AbstractAssemblyResolution
+ 		return ctx;
+ 	}
+ 
++	protected AbstractAssemblyResolvedPatternsBuilder<?> withContextBuilder(
++			AssemblyPatternBlock ctx) {
++		var builder = factory.newPatternsBuilder();
++		builder.description = description;
++		builder.cons = cons;
++		builder.children = children;
++		builder.right = right;
++		builder.ins = ins;
++		builder.ctx = ctx;
++		builder.backfills = backfills;
++		builder.forbids = forbids;
++		return builder;
++	}
++
++	@Override
++	public AssemblyResolvedPatterns withContext(AssemblyPatternBlock ctx) {
++		return withContextBuilder(ctx).build();
++	}
++
+ 	@Override
+ 	public MaskedLong readInstruction(int start, int len) {
+ 		return ins.readBytes(start, len);
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/languages/sleigh/InputContextScraper.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/languages/sleigh/InputContextScraper.java
+new file mode 100644
+index 0000000000..eb95d50edc
+--- /dev/null
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/languages/sleigh/InputContextScraper.java
+@@ -0,0 +1,134 @@
++/* ###
++ * IP: GHIDRA
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package ghidra.app.plugin.languages.sleigh;
++
++import java.util.Arrays;
++import java.util.HashSet;
++import java.util.Set;
++
++import ghidra.app.plugin.assembler.sleigh.sem.AssemblyDefaultContext;
++import ghidra.app.plugin.assembler.sleigh.sem.AssemblyPatternBlock;
++import ghidra.app.plugin.processors.sleigh.Constructor;
++import ghidra.app.plugin.processors.sleigh.ContextChange;
++import ghidra.app.plugin.processors.sleigh.ContextCommit;
++import ghidra.app.plugin.processors.sleigh.SleighLanguage;
++import ghidra.app.plugin.processors.sleigh.pattern.DisjointPattern;
++import ghidra.app.plugin.processors.sleigh.symbol.SubtableSymbol;
++
++/**
++ * A class for scraping input contexts from a SLEIGH language to get all of the valid input contexts
++ * that affect constructor selection
++ *
++ */
++public class InputContextScraper {
++	private final SleighLanguage language;
++
++	public InputContextScraper(SleighLanguage language) {
++		this.language = language;
++	}
++
++	/**
++	 * Get set of all valid input contexts that affect constructor selection.
++	 *
++	 * <ol>
++	 * <li>Start with mask of the language's default context
++	 * <li>Scrape language for <code>globalset</code> context variables and OR their masks into our
++	 * mask
++	 * <li>Flip bits of our mask to get mask of context variables not used as input
++	 * (local/transient)
++	 * <li>Check constructor constraints and use mask to get values of relevant input context
++	 * variables
++	 * </ol>
++	 */
++	public Set<AssemblyPatternBlock> scrapeInputContexts() {
++		// We don't care about the actual default values, just if a context variable HAS a default
++		// value. It's possible for a local context variable to be set in the default context, but
++		// doing so is questionable. It could be an input context variable in that case, so to
++		// account for it, we start with the default context mask. Doing so ensures those variables
++		// are included
++		AssemblyPatternBlock defaultCtx = new AssemblyDefaultContext(language).getDefault();
++
++		// Erase the values for posterity; we don't care about them at this point
++		Arrays.fill(defaultCtx.getVals(), (byte) 0);
++
++		GlobalSetScraper globalSetScraper = new GlobalSetScraper(defaultCtx);
++		SleighLanguages.traverseConstructors(language, globalSetScraper);
++
++		AssemblyPatternBlock nonInputCtxMask = globalSetScraper.getContextMask().invertMask();
++
++		ConstraintScraper constraintScraper =
++			new ConstraintScraper(nonInputCtxMask, language.getContextBaseRegister().getNumBytes());
++		SleighLanguages.traverseConstructors(language, constraintScraper);
++
++		return constraintScraper.getInputContexts();
++	}
++
++	private static class GlobalSetScraper implements ConstructorEntryVisitor {
++		private AssemblyPatternBlock contextMask;
++
++		GlobalSetScraper(AssemblyPatternBlock contextMask) {
++			this.contextMask = contextMask;
++		}
++
++		public AssemblyPatternBlock getContextMask() {
++			return contextMask;
++		}
++
++		@Override
++		public int visit(SubtableSymbol subtable, DisjointPattern pattern, Constructor cons) {
++			for (ContextChange chg : cons.getContextChanges()) {
++				if (chg instanceof ContextCommit cc) {
++					contextMask = contextMask.writeContextCommitMask(cc);
++				}
++			}
++			return CONTINUE;
++		}
++	}
++
++	private static class ConstraintScraper implements ConstructorEntryVisitor {
++		private final AssemblyPatternBlock nonInputMask;
++		private final AssemblyPatternBlock blankContext;
++		private final Set<AssemblyPatternBlock> inputContexts;
++
++		ConstraintScraper(AssemblyPatternBlock mask, int contextRegLen) {
++			nonInputMask = mask;
++			blankContext = AssemblyPatternBlock.fromLength(contextRegLen);
++			inputContexts = new HashSet<>();
++		}
++
++		public Set<AssemblyPatternBlock> getInputContexts() {
++			return inputContexts;
++		}
++
++		@Override
++		public int visit(SubtableSymbol subtable, DisjointPattern pattern, Constructor cons) {
++			AssemblyPatternBlock contextConstraint =
++				AssemblyPatternBlock.fromPattern(pattern, pattern.getLength(true), true);
++
++			if (contextConstraint.getMask().length > 0) {
++				// Combine constraint with blank context to ensure generated context has no shifts
++				AssemblyPatternBlock inputCtx =
++					blankContext.combine(contextConstraint).maskOut(nonInputMask);
++
++				// Filter out entirely undefined context
++				if (inputCtx.getSpecificity() > 0) {
++					inputContexts.add(inputCtx);
++				}
++			}
++			return CONTINUE;
++		}
++	}
++}
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/processors/sleigh/ContextCommit.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/processors/sleigh/ContextCommit.java
+index c24f3680c8..83f3f405c1 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/processors/sleigh/ContextCommit.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/processors/sleigh/ContextCommit.java
+@@ -51,4 +51,11 @@ public class ContextCommit implements ContextChange {
+ 		decoder.closeElement(el);
+ 	}
+ 
++	public int getWordIndex() {
++		return num;
++	}
++
++	public int getMask() {
++		return mask;
++	}
+ }
+-- 
+2.45.1
+

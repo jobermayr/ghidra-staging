@@ -1,0 +1,381 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Andras Gemes <andrasgemes@outlook.com>
+Date: Wed, 23 Oct 2024 21:00:38 +0200
+Subject: [PATCH] 7085: BSim: Update PostgreSQL (15.10->17.0) and add migrate
+ commands
+
+---
+ Ghidra/Features/BSim/Module.manifest          |   2 +-
+ Ghidra/Features/BSim/build.gradle             |   2 +-
+ .../topics/BSim/CommandLineReference.html     |  18 +++
+ .../topics/BSim/DatabaseConfiguration.html    |   8 +-
+ .../bsim/query/BSimControlLaunchable.java     | 121 ++++++++++++++++++
+ Ghidra/Features/BSim/support/make-postgres.sh |  10 +-
+ gradle/support/fetchDependencies.gradle       |   6 +-
+ 7 files changed, 153 insertions(+), 14 deletions(-)
+
+diff --git a/Ghidra/Features/BSim/Module.manifest b/Ghidra/Features/BSim/Module.manifest
+index 46e50f5669..029c696197 100755
+--- a/Ghidra/Features/BSim/Module.manifest
++++ b/Ghidra/Features/BSim/Module.manifest
+@@ -1,5 +1,5 @@
+ ##MODULE IP: Oxygen Icons - LGPL 3.0
+-MODULE FILE LICENSE: postgresql-15.10.tar.gz Postgresql License
++MODULE FILE LICENSE: postgresql-17.0.tar.gz Postgresql License
+ MODULE FILE LICENSE: lib/postgresql-42.7.3.jar PostgresqlJDBC License
+ MODULE FILE LICENSE: lib/commons-dbcp2-2.9.0.jar Apache License 2.0
+ MODULE FILE LICENSE: lib/commons-pool2-2.11.1.jar Apache License 2.0
+diff --git a/Ghidra/Features/BSim/build.gradle b/Ghidra/Features/BSim/build.gradle
+index a33346aab3..1870edcfd4 100755
+--- a/Ghidra/Features/BSim/build.gradle
++++ b/Ghidra/Features/BSim/build.gradle
+@@ -26,7 +26,7 @@ import java.nio.file.Files
+ import org.gradle.util.GUtil
+ 
+ // NOTE: fetchDependencies.gradle must be updated if postgresql version changes
+-def postgresql_distro = "postgresql-15.10.tar.gz"
++def postgresql_distro = "postgresql-17.0.tar.gz"
+ 
+ dependencies {
+ 	api project(":Decompiler")
+diff --git a/Ghidra/Features/BSim/src/main/help/help/topics/BSim/CommandLineReference.html b/Ghidra/Features/BSim/src/main/help/help/topics/BSim/CommandLineReference.html
+index 05f90dafc7..c8aee631fd 100644
+--- a/Ghidra/Features/BSim/src/main/help/help/topics/BSim/CommandLineReference.html
++++ b/Ghidra/Features/BSim/src/main/help/help/topics/BSim/CommandLineReference.html
+@@ -47,6 +47,8 @@
+     bsim_ctl resetpassword   &lt;username&gt;
+     bsim_ctl changeauth      &lt;/datadir-path&gt; [--auth|-a&nbsp;pki|password|trust] [--noLocalAuth] [--cafile&nbsp;&lt;/cacert-path&gt;] [--dn&nbsp;"&lt;distinguished-name&gt;"]
+     bsim_ctl changeprivilege &lt;username&gt; admin|user
++    bsim_ctl dumpall         &lt;/dumpfile-path&gt;
++    bsim_ctl restore         &lt;/dumpfile-path&gt;
+     
+     Global Options:
+         --port|-p&nbsp;&lt;portnum&gt;
+@@ -223,6 +225,22 @@
+                 running.</P>
+               </DD>
+ 
++              <DT><SPAN class="term"><SPAN class=
++                "bold"><STRONG>dumpall</STRONG></SPAN></SPAN></DT>
++
++                <DD>
++                  <P>Dumps all PostgreSQL databases into a specified file. A dump file must be
++                  specified, and the PostgreSQL server must be running.</P>
++                </DD>
++
++              <DT><SPAN class="term"><SPAN class=
++                "bold"><STRONG>restore</STRONG></SPAN></SPAN></DT>
++
++                <DD>
++                  <P>Restores all PostgreSQL databases from a specified file. A dump file must be
++                  specified, and the PostgreSQL server must be running.</P>
++                </DD>
++
+               <DT><SPAN class="term"><SPAN class="bold"><STRONG>--Global
+               Options--</STRONG></SPAN></SPAN></DT>
+ 
+diff --git a/Ghidra/Features/BSim/src/main/help/help/topics/BSim/DatabaseConfiguration.html b/Ghidra/Features/BSim/src/main/help/help/topics/BSim/DatabaseConfiguration.html
+index c1d26b8d19..e1fee90015 100644
+--- a/Ghidra/Features/BSim/src/main/help/help/topics/BSim/DatabaseConfiguration.html
++++ b/Ghidra/Features/BSim/src/main/help/help/topics/BSim/DatabaseConfiguration.html
+@@ -107,13 +107,13 @@
+               in the module directory <CODE>Ghidra/Features/BSim/support</CODE> that builds both the PostgreSQL
+               server and the BSim extension from source and prepares the installation for use with
+               Ghidra.  If not already included in the Ghidra installation, the source distribution
+-              file, currently <CODE>postgresql-15.10.tar.gz</CODE>, can be obtained from the PostgreSQL
++              file, currently <CODE>postgresql-17.0.tar.gz</CODE>, can be obtained from the PostgreSQL
+               website at </P>
+ 	    
+             <DIV class="informalexample">
+               <TABLE border="0" summary="Simple list" class="simplelist">
+                 <TR>
+-                  <TD><CODE class="computeroutput">https://www.postgresql.org/ftp/source/v15.10
++                  <TD><CODE class="computeroutput">https://www.postgresql.org/ftp/source/v17.0
+ 		  </CODE></TD>
+                 </TR>
+               </TABLE>
+@@ -122,12 +122,12 @@
+ 	    <P>The steps to build the PostgreSQL server with the BSim extension then are:</P>
+ 
+ 	    <P>1) If not already present, place the PostgreSQL source distribution file
+-	      <CODE>postgresql-15.10.tar.gz</CODE> in the Ghidra installation at</P>
++	      <CODE>postgresql-17.0.tar.gz</CODE> in the Ghidra installation at</P>
+ 
+             <DIV class="informalexample">
+               <TABLE border="0" summary="Simple list" class="simplelist">
+                 <TR>
+-                  <TD><CODE class="computeroutput">$(ROOT)/Ghidra/Features/BSim/support/postgresql-15.10.tar.gz
++                  <TD><CODE class="computeroutput">$(ROOT)/Ghidra/Features/BSim/support/postgresql-17.0.tar.gz
+ 		  </CODE></TD>
+                 </TR>
+               </TABLE>
+diff --git a/Ghidra/Features/BSim/src/main/java/ghidra/features/bsim/query/BSimControlLaunchable.java b/Ghidra/Features/BSim/src/main/java/ghidra/features/bsim/query/BSimControlLaunchable.java
+index 71c22d0119..d004834a73 100644
+--- a/Ghidra/Features/BSim/src/main/java/ghidra/features/bsim/query/BSimControlLaunchable.java
++++ b/Ghidra/Features/BSim/src/main/java/ghidra/features/bsim/query/BSimControlLaunchable.java
+@@ -58,6 +58,8 @@ public class BSimControlLaunchable implements GhidraLaunchable {
+ 	public final static String COMMAND_ADDUSER = "adduser";
+ 	public final static String COMMAND_DROPUSER = "dropuser";
+ 	public final static String COMMAND_CHANGEAUTH = "changeauth";
++	public final static String COMMAND_DUMPALL = "dumpall";
++	public final static String COMMAND_RESTORE = "restore";
+ 
+ 	// Options that require a value argument
+ 	public static final String CAFILE_OPTION = "--cafile";
+@@ -100,6 +102,8 @@ public class BSimControlLaunchable implements GhidraLaunchable {
+ 	private static final Set<String> DROPUSER_OPTIONS = Set.of();
+ 	private static final Set<String> CHANGEAUTH_OPTIONS = Set.of(
+ 		AUTH_OPTION, DN_OPTION, NO_LOCAL_AUTH_OPTION, CAFILE_OPTION);
++	private static final Set<String> DUMPALL_OPTIONS = Set.of();
++	private static final Set<String> RESTORE_OPTIONS = Set.of();
+ 
+ 	//@formatter:on
+ 	private static final Map<String, Set<String>> ALLOWED_OPTION_MAP = new HashMap<>();
+@@ -112,6 +116,8 @@ public class BSimControlLaunchable implements GhidraLaunchable {
+ 		ALLOWED_OPTION_MAP.put(COMMAND_ADDUSER, ADDUSER_OPTIONS);
+ 		ALLOWED_OPTION_MAP.put(COMMAND_DROPUSER, DROPUSER_OPTIONS);
+ 		ALLOWED_OPTION_MAP.put(COMMAND_CHANGEAUTH, CHANGEAUTH_OPTIONS);
++		ALLOWED_OPTION_MAP.put(COMMAND_DUMPALL, DUMPALL_OPTIONS);
++		ALLOWED_OPTION_MAP.put(COMMAND_RESTORE, RESTORE_OPTIONS);
+ 	}
+ 
+ 	private final static String POSTGRES = "postgresql";
+@@ -135,8 +141,11 @@ public class BSimControlLaunchable implements GhidraLaunchable {
+ 	private GhidraApplicationLayout layout;
+ 
+ 	private File dataDirectory;			// Directory containing postgres datafiles
++	private File dumpFile;				// Path to database dump file
+ 	private File postgresRoot;			// Directory containing postgres software
+ 	private File postgresControl;		// "pg_ctl" utility within postgres software
++	private File postgresDumpAll;		// "pg_dumpall" utility within postgres software
++	private File postgresPsql;			// "psql" utility within postgres software
+ 	private File certAuthorityFile;		// Certificate authority file provided by the user
+ 	private String certParameter;		// Path to certificate provided by user
+ 	private String distinguishedName;	// Certificate distinguished name provided by the user
+@@ -166,8 +175,11 @@ public class BSimControlLaunchable implements GhidraLaunchable {
+ 
+ 	private void clearParams() {
+ 		dataDirectory = null;
++		dumpFile = null;
+ 		postgresRoot = null;
+ 		postgresControl = null;
++		postgresDumpAll = null;
++		postgresPsql = null;
+ 		certAuthorityFile = null;
+ 		certParameter = null;
+ 		distinguishedName = null;
+@@ -221,6 +233,12 @@ public class BSimControlLaunchable implements GhidraLaunchable {
+ 			case COMMAND_CHANGEAUTH:
+ 				scanDataDirectory(params, slot++);
+ 				break;
++			case COMMAND_DUMPALL:
++				scanDumpFile(params, slot++);
++				break;
++			case COMMAND_RESTORE:
++				scanDumpFile(params, slot++);
++				break;
+ 			case COMMAND_CHANGE_PRIVILEGE:
+ 				scanUsername(params, slot++);
+ 				scanPrivilege(params, slot++);
+@@ -782,6 +800,14 @@ public class BSimControlLaunchable implements GhidraLaunchable {
+ 			if (!postgresControl.isFile()) {
+ 				throw new IOException("PostgreSQL pg_ctl command not found: " + postgresControl);
+ 			}
++			postgresDumpAll = new File(postgresRoot, "bin/pg_dumpall");
++			if (!postgresDumpAll.isFile()) {
++				throw new IOException("PostgreSQL pg_dumpall command not found: " + postgresDumpAll);
++			}
++			postgresPsql = new File(postgresRoot, "bin/psql");
++			if (!postgresPsql.isFile()) {
++				throw new IOException("PostgreSQL psql command not found: " + postgresPsql);
++			}
+ 			setupPostgresSharedLibrary();
+ 		}
+ 		catch (OSFileNotFoundException e) {
+@@ -989,6 +1015,19 @@ public class BSimControlLaunchable implements GhidraLaunchable {
+ 		}
+ 	}
+ 
++	/**
++	 * Scan the PostgreSQL dump file from the command-line
++	 * @param params are the command-line arguments
++	 * @param slot is the position to retrieve the dump file argument
++	 * @throws IllegalArgumentException if the dump file is invalid
++	 */
++	private void scanDumpFile(String [] params, int slot) throws IllegalArgumentException {
++		if (params.length <= slot) {
++			throw new IllegalArgumentException("Missing dump file");
++		}
++		dumpFile = new File(params[slot]);
++	}
++
+ 	/**
+ 	 * Start a PostgreSQL server, configured for BSim, on the local host.
+ 	 * If the data directory is already populated, the server process is simply restarted.
+@@ -1042,6 +1081,80 @@ public class BSimControlLaunchable implements GhidraLaunchable {
+ 		}
+ 	}
+ 
++	/**
++	 * Dumps all PostgreSQL databases from the local host into a specified file.
++	 * Authentication may be necessary, either via password or certificate.
++	 *
++	 * @throws IOException if the postgres databases can not be dumped
++	 * @throws InterruptedException if the process fails during the run
++	 * @throws GeneralSecurityException if the authentication fails
++	 */
++	private void dumpAllCommand()
++			throws IOException, InterruptedException, GeneralSecurityException {
++		discoverPostgresInstall();
++
++		if (localAuthentication == AUTHENTICATION_PKI && certParameter == null) {
++			throw new GeneralSecurityException(
++				"Path to certificate necessary to dump databases (--cert /path/to/cert)");
++		}
++
++		List<String> command = new ArrayList<String>();
++		command.add(postgresDumpAll.getAbsolutePath());
++		command.add("-f");
++		command.add(dumpFile.getAbsolutePath());
++		command.add("-U");
++		command.add(connectingUserName);
++		command.add("-h");
++		command.add("localhost");
++		if ((port != -1) && (port != 5432)) {	// Non-default port
++			command.add("-p");
++			command.add(Integer.toString(port));
++		}
++		int res = runCommand(null, command, loadLibraryVar, loadLibraryValue);
++		if (res != 0) {
++			throw new IOException("Could not dump databases");
++		}
++		System.out.println("Databases dumped to " + dumpFile.getAbsolutePath());
++	}
++
++	/**
++	 * Restore all PostgreSQL databases to the local host from a specified file.
++	 * Authentication may be necessary, either via password or certificate.
++	 *
++	 * @throws IOException if the postgres databases can not be restored
++	 * @throws InterruptedException if the process fails during the run
++	 * @throws GeneralSecurityException if the authentication fails
++	 */
++	private void restoreCommand()
++			throws IOException, InterruptedException, GeneralSecurityException {
++		discoverPostgresInstall();
++
++		if (localAuthentication == AUTHENTICATION_PKI && certParameter == null) {
++			throw new GeneralSecurityException(
++				"Path to certificate necessary to restore databases (--cert /path/to/cert)");
++		}
++
++		List<String> command = new ArrayList<String>();
++		command.add(postgresPsql.getAbsolutePath());
++		command.add("-f");
++		command.add(dumpFile.getAbsolutePath());
++		command.add("-U");
++		command.add(connectingUserName);
++		command.add("-h");
++		command.add("localhost");
++		command.add("-d");
++		command.add("postgres");			// psql requires a database, and 'postgres' is always available
++		if ((port != -1) && (port != 5432)) {	// Non-default port
++			command.add("-p");
++			command.add(Integer.toString(port));
++		}
++		int res = runCommand(null, command, loadLibraryVar, loadLibraryValue);
++		if (res != 0) {
++			throw new IOException("Could not restore databases");
++		}
++		System.out.println("Databases restored from " + dumpFile.getAbsolutePath());
++	}
++
+ 	/**
+ 	 * Stop the running PostgreSQL processes on the local host. No authentication is required to shutdown
+ 	 * the server.  User must be the process owner.
+@@ -1440,6 +1553,12 @@ public class BSimControlLaunchable implements GhidraLaunchable {
+ 				case COMMAND_CHANGEAUTH:
+ 					changeAuthCommand();
+ 					break;
++				case COMMAND_DUMPALL:
++					dumpAllCommand();
++					break;
++				case COMMAND_RESTORE:
++					restoreCommand();
++					break;
+ 				case COMMAND_RESET_PASSWORD:
+ 					passwordCommand();
+ 					break;
+@@ -1472,6 +1591,8 @@ public class BSimControlLaunchable implements GhidraLaunchable {
+ 			"                changeauth </datadir-path> [--auth|-a pki|password|trust] [--noLocalAuth] [--cafile \"</cacert-path>\"] [--dn \"<distinguished-name>\"]\n" +
+ 			"                resetpassword   <username>\n" +
+ 			"                changeprivilege <username> admin|user\n" + 
++			"                dumpall    </dumpfile-path>\n" +
++			"                restore    </dumpfile-path>\n" +
+ 			"\n" + 
+ 			"Global options:\n" +
+ 			"   --port|-p <portnum>\n" + 
+diff --git a/Ghidra/Features/BSim/support/make-postgres.sh b/Ghidra/Features/BSim/support/make-postgres.sh
+index dd33ea2ef9..7ac4c5b822 100755
+--- a/Ghidra/Features/BSim/support/make-postgres.sh
++++ b/Ghidra/Features/BSim/support/make-postgres.sh
+@@ -18,11 +18,11 @@
+ # This script builds the postgresql server and BSim extension within a
+ # GHIDRA installation.
+ #
+-# The PostgreSQL source distribution file postgresql-15.10.tar.gz must
++# The PostgreSQL source distribution file postgresql-17.0.tar.gz must
+ # be placed in the BSim module directory prior to running this script.
+ # This file can be downloaded directly from the PostgreSQL website at:
+ #
+-#   https://www.postgresql.org/ftp/source/v15.10
++#   https://www.postgresql.org/ftp/source/v17.0
+ #
+ # Within development environments, this script will first check the
+ # ghidra.bin repo for this source file.
+@@ -31,14 +31,14 @@
+ # (POSTGRES_CONFIG_OPTIONS) may be adjusted if required (e.g., build
+ # without openssl use, etc.). 
+ #
+-# See https://www.postgresql.org/docs/15/install-procedure.html
++# See https://www.postgresql.org/docs/17/install-procedure.html
+ # for supported postgresql config options.
+ #
+ # Additional software may need to be installed in order to perform the 
+ # postgresql build.  Please refer to the following web page for 
+ # software dependencies:
+ #
+-#   https://www.postgresql.org/docs/15/install-requirements.html
++#   https://www.postgresql.org/docs/17/install-requirements.html
+ #
+ # Or for Linux specific package dependencies, see:
+ #
+@@ -46,7 +46,7 @@
+ #
+ #
+ 
+-POSTGRES=postgresql-15.10
++POSTGRES=postgresql-17.0
+ POSTGRES_GZ=${POSTGRES}.tar.gz
+ POSTGRES_CONFIG_OPTIONS="--disable-rpath --with-openssl"
+ 
+diff --git a/gradle/support/fetchDependencies.gradle b/gradle/support/fetchDependencies.gradle
+index 9faaa50adb..e446848a75 100644
+--- a/gradle/support/fetchDependencies.gradle
++++ b/gradle/support/fetchDependencies.gradle
+@@ -80,9 +80,9 @@ ext.deps = [
+ 		destination: file("${DEPS_DIR}/GhidraServer")
+ 	],
+ 	[
+-		name: "postgresql-15.10.tar.gz",
+-		url: "https://ftp.postgresql.org/pub/source/v15.10/postgresql-15.10.tar.gz",
+-		sha256: "173366605259a83dc189c4327ff4c37254afed65b4f866cbd8a5ef2ea449e8f3",
++		name: "postgresql-17.0.tar.gz",
++		url: "https://ftp.postgresql.org/pub/source/v17.0/postgresql-17.0.tar.gz",
++		sha256: "bf81c0c5161e456a886ede5f1f4133f43af000637e377156a02e7e83569081ad",
+ 		destination: file("${DEPS_DIR}/BSim")
+ 	],
+ 	[
+-- 
+2.45.1
+

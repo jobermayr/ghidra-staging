@@ -28,10 +28,13 @@ Add pcodeTest for little-endian variant
 Fix divr and divsr instructions
 
 Add baseline v3
+
+https://github.com/osy/ghidra/tree/tim/add_nds32_processor
+* [NDS32] Update to work with latest API
 ---
  Ghidra/Processors/NDS32/Module.manifest       |    0
- Ghidra/Processors/NDS32/build.gradle          |   15 +
- .../Processors/NDS32/certification.manifest   |   17 +
+ Ghidra/Processors/NDS32/build.gradle          |   14 +
+ .../Processors/NDS32/certification.manifest   |   16 +
  .../Processors/NDS32/data/buildLanguage.xml   |   50 +
  .../Processors/NDS32/data/languages/lsmw.sinc |  576 +++++++++
  .../NDS32/data/languages/nds32.cspec          |  104 ++
@@ -45,9 +48,9 @@ Add baseline v3
  .../NDS32/data/patterns/nds32_patterns.xml    |   13 +
  .../data/patterns/patternconstraints.xml      |    5 +
  Ghidra/Processors/NDS32/data/sleighArgs.txt   |    6 +
- .../plugin/core/analysis/NDS32Analyzer.java   |  187 +++
- .../NDS32_ElfRelocationConstants.java         |   74 ++
- .../NDS32_ElfRelocationHandler.java           |  116 ++
+ .../plugin/core/analysis/NDS32Analyzer.java   |  193 +++
+ .../NDS32_ElfRelocationHandler.java           |  101 ++
+ .../relocation/NDS32_ElfRelocationType.java   |   85 ++
  .../processors/NDS32_LE_O0_EmulatorTest.java  |   41 +
  .../processors/NDS32_LE_O3_EmulatorTest.java  |   41 +
  21 files changed, 2392 insertions(+)
@@ -68,8 +71,8 @@ Add baseline v3
  create mode 100644 Ghidra/Processors/NDS32/data/patterns/patternconstraints.xml
  create mode 100644 Ghidra/Processors/NDS32/data/sleighArgs.txt
  create mode 100644 Ghidra/Processors/NDS32/src/main/java/ghidra/app/plugin/core/analysis/NDS32Analyzer.java
- create mode 100644 Ghidra/Processors/NDS32/src/main/java/ghidra/app/util/bin/format/elf/relocation/NDS32_ElfRelocationConstants.java
  create mode 100644 Ghidra/Processors/NDS32/src/main/java/ghidra/app/util/bin/format/elf/relocation/NDS32_ElfRelocationHandler.java
+ create mode 100644 Ghidra/Processors/NDS32/src/main/java/ghidra/app/util/bin/format/elf/relocation/NDS32_ElfRelocationType.java
  create mode 100644 Ghidra/Processors/NDS32/src/test.processors/java/ghidra/test/processors/NDS32_LE_O0_EmulatorTest.java
  create mode 100644 Ghidra/Processors/NDS32/src/test.processors/java/ghidra/test/processors/NDS32_LE_O3_EmulatorTest.java
 
@@ -78,10 +81,10 @@ new file mode 100644
 index 0000000000..e69de29bb2
 diff --git a/Ghidra/Processors/NDS32/build.gradle b/Ghidra/Processors/NDS32/build.gradle
 new file mode 100644
-index 0000000000..4df69b4630
+index 0000000000..6674075139
 --- /dev/null
 +++ b/Ghidra/Processors/NDS32/build.gradle
-@@ -0,0 +1,15 @@
+@@ -0,0 +1,14 @@
 +apply from: "$rootProject.projectDir/gradle/distributableGhidraModule.gradle"
 +apply from: "$rootProject.projectDir/gradle/javaProject.gradle"
 +apply from: "$rootProject.projectDir/gradle/jacocoProject.gradle"
@@ -93,17 +96,15 @@ index 0000000000..4df69b4630
 +
 +dependencies {
 +	api project(':Base')
-+	//compile project(':Base')
 +	// Temporary dependency so that pcodeTests can use the Decompiler switch recovery
-+	//compile project(':Decompiler')
++	api project(':Decompiler')
 +}
 diff --git a/Ghidra/Processors/NDS32/certification.manifest b/Ghidra/Processors/NDS32/certification.manifest
 new file mode 100644
-index 0000000000..ceadc1d06d
+index 0000000000..80cbfdf3c8
 --- /dev/null
 +++ b/Ghidra/Processors/NDS32/certification.manifest
-@@ -0,0 +1,17 @@
-+##VERSION: 2.0
+@@ -0,0 +1,16 @@
 +Module.manifest||GHIDRA||||END|
 +build.gradle||GHIDRA||||END|
 +data/buildLanguage.xml||GHIDRA||||END|
@@ -2102,10 +2103,10 @@ index 0000000000..ce06926358
 \ No newline at end of file
 diff --git a/Ghidra/Processors/NDS32/src/main/java/ghidra/app/plugin/core/analysis/NDS32Analyzer.java b/Ghidra/Processors/NDS32/src/main/java/ghidra/app/plugin/core/analysis/NDS32Analyzer.java
 new file mode 100644
-index 0000000000..74c3824c25
+index 0000000000..666ce6ba58
 --- /dev/null
 +++ b/Ghidra/Processors/NDS32/src/main/java/ghidra/app/plugin/core/analysis/NDS32Analyzer.java
-@@ -0,0 +1,187 @@
+@@ -0,0 +1,193 @@
 +package ghidra.app.plugin.core.analysis;
 +
 +import java.math.BigInteger;
@@ -2247,7 +2248,7 @@ index 0000000000..74c3824c25
 +			}
 +		}
 +
-+		ContextEvaluator eval = new ConstantPropagationContextEvaluator(monitor, trustWriteMemOption) {
++		ConstantPropagationContextEvaluator eval = new ConstantPropagationContextEvaluator(monitor, trustWriteMemOption) {
 +			@Override
 +			public boolean evaluateDestination(VarnodeContext context, Instruction instruction) {
 +				FlowType flowtype = instruction.getFlowType();
@@ -2265,6 +2266,12 @@ index 0000000000..74c3824c25
 +				return false;
 +			}
 +		};
++
++		eval.setTrustWritableMemory(trustWriteMemOption)
++		    .setMinSpeculativeOffset(minSpeculativeRefAddress)
++		    .setMaxSpeculativeOffset(maxSpeculativeRefAddress)
++		    .setMinStoreLoadOffset(minStoreLoadRefAddress)
++		    .setCreateComplexDataFromPointers(createComplexDataFromPointers);
 +
 +		AddressSet resultSet = symEval.flowConstants(flowStart, null, eval, true, monitor);
 +
@@ -2293,92 +2300,12 @@ index 0000000000..74c3824c25
 +		 */
 +	}
 +}
-diff --git a/Ghidra/Processors/NDS32/src/main/java/ghidra/app/util/bin/format/elf/relocation/NDS32_ElfRelocationConstants.java b/Ghidra/Processors/NDS32/src/main/java/ghidra/app/util/bin/format/elf/relocation/NDS32_ElfRelocationConstants.java
-new file mode 100644
-index 0000000000..7aaf363cfe
---- /dev/null
-+++ b/Ghidra/Processors/NDS32/src/main/java/ghidra/app/util/bin/format/elf/relocation/NDS32_ElfRelocationConstants.java
-@@ -0,0 +1,74 @@
-+/* ###
-+ * IP: GHIDRA
-+ *
-+ * Licensed under the Apache License, Version 2.0 (the "License");
-+ * you may not use this file except in compliance with the License.
-+ * You may obtain a copy of the License at
-+ *
-+ *      http://www.apache.org/licenses/LICENSE-2.0
-+ *
-+ * Unless required by applicable law or agreed to in writing, software
-+ * distributed under the License is distributed on an "AS IS" BASIS,
-+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-+ * See the License for the specific language governing permissions and
-+ * limitations under the License.
-+ */
-+package ghidra.app.util.bin.format.elf.relocation;
-+
-+public class NDS32_ElfRelocationConstants {
-+	public static final int R_NDS32_NONE = 0;
-+	public static final int R_NDS32_16_RELA = 19;
-+	public static final int R_NDS32_32_RELA = 20;
-+	public static final int R_NDS32_9_PCREL_RELA = 22;
-+	public static final int R_NDS32_15_PCREL_RELA = 23;
-+	public static final int R_NDS32_17_PCREL_RELA = 24;
-+	public static final int R_NDS32_25_PCREL_RELA = 25;
-+	public static final int R_NDS32_HI20_RELA = 26;
-+	public static final int R_NDS32_LO12S3_RELA = 27;
-+	public static final int R_NDS32_LO12S2_RELA = 28;
-+	public static final int R_NDS32_LO12S1_RELA = 29;
-+	public static final int R_NDS32_LO12S0_RELA = 30;
-+	public static final int R_NDS32_SDA15S3_RELA = 31;
-+	public static final int R_NDS32_SDA15S2_RELA = 32;
-+	public static final int R_NDS32_SDA15S1_RELA = 33;
-+	public static final int R_NDS32_SDA15S0_RELA = 34;
-+	public static final int R_NDS32_GOT20 = 37;
-+	public static final int R_NDS32_25_PLTREL = 38;
-+	public static final int R_NDS32_COPY = 39;
-+	public static final int R_NDS32_GLOB_DAT = 40;
-+	public static final int R_NDS32_JMP_SLOT = 41;
-+	public static final int R_NDS32_RELATIVE = 42;
-+	public static final int R_NDS32_GOTOFF = 43;
-+	public static final int R_NDS32_GOTPC20 = 44;
-+	public static final int R_NDS32_GOT_HI20 = 45;
-+	public static final int R_NDS32_GOT_LO12 = 46;
-+	public static final int R_NDS32_GOTPC_HI20 = 47;
-+	public static final int R_NDS32_GOTPC_LO12 = 48;
-+	public static final int R_NDS32_GOTOFF_HI20 = 49;
-+	public static final int R_NDS32_GOTOFF_LO12 = 50;
-+	public static final int R_NDS32_INSN16 = 51;
-+	public static final int R_NDS32_LABEL = 52;
-+	public static final int R_NDS32_LONGCALL1 = 53;
-+	public static final int R_NDS32_LONGCALL2 = 54;
-+	public static final int R_NDS32_LONGCALL3 = 55;
-+	public static final int R_NDS32_LONGJUMP1 = 56;
-+	public static final int R_NDS32_LONGJUMP2 = 57;
-+	public static final int R_NDS32_LONGJUMP3 = 58;
-+	public static final int R_NDS32_LOADSTORE = 59;
-+	public static final int R_NDS32_9_FIXED_RELA = 60;
-+	public static final int R_NDS32_15_FIXED_RELA = 61;
-+	public static final int R_NDS32_17_FIXED_RELA = 62;
-+	public static final int R_NDS32_25_FIXED_RELA = 63;
-+	public static final int R_NDS32_PLTREL_HI20 = 64;
-+	public static final int R_NDS32_PLTREL_LO12 = 65;
-+	public static final int R_NDS32_PLT_GOTREL_HI20 = 66;
-+	public static final int R_NDS32_PLT_GOTREL_LO12 = 67;
-+	public static final int R_NDS32_LO12S0_ORI_RELA = 72;
-+	public static final int R_NDS32_DWARF2_OP1_RELA = 77;
-+	public static final int R_NDS32_DWARF2_OP2_RELA = 78;
-+	public static final int R_NDS32_DWARF2_LEB_RELA = 79;
-+	public static final int R_NDS32_WORD_9_PCREL_RELA = 94;
-+	public static final int R_NDS32_LONGCALL4 = 107;
-+	public static final int R_NDS32_RELA_NOP_MIX = 192;
-+	public static final int R_NDS32_RELA_NOP_MAX = 255;
-+}
 diff --git a/Ghidra/Processors/NDS32/src/main/java/ghidra/app/util/bin/format/elf/relocation/NDS32_ElfRelocationHandler.java b/Ghidra/Processors/NDS32/src/main/java/ghidra/app/util/bin/format/elf/relocation/NDS32_ElfRelocationHandler.java
 new file mode 100644
-index 0000000000..1dd825a845
+index 0000000000..4b044248a1
 --- /dev/null
 +++ b/Ghidra/Processors/NDS32/src/main/java/ghidra/app/util/bin/format/elf/relocation/NDS32_ElfRelocationHandler.java
-@@ -0,0 +1,116 @@
+@@ -0,0 +1,101 @@
 +/* ###
 + * IP: GHIDRA
 + *
@@ -2409,11 +2336,17 @@ index 0000000000..1dd825a845
 +import ghidra.program.model.listing.Program;
 +import ghidra.program.model.mem.Memory;
 +import ghidra.program.model.mem.MemoryAccessException;
-+import ghidra.program.model.reloc.RelocationResult;
 +import ghidra.program.model.reloc.Relocation.Status;
-+import ghidra.util.exception.NotFoundException;
++import ghidra.program.model.reloc.RelocationResult;
 +
-+public class NDS32_ElfRelocationHandler extends ElfRelocationHandler {
++public class NDS32_ElfRelocationHandler
++		extends AbstractElfRelocationHandler<NDS32_ElfRelocationType, ElfRelocationContext<?>> {
++	/**
++	 * Constructor
++	 */
++	public NDS32_ElfRelocationHandler() {
++		super(NDS32_ElfRelocationType.class);
++	}
 +
 +	@Override
 +	public boolean canRelocate(ElfHeader elf) {
@@ -2421,14 +2354,10 @@ index 0000000000..1dd825a845
 +	}
 +
 +	@Override
-+	public NDS32_ElfRelocationContext createRelocationContext(ElfLoadHelper loadHelper,
-+			Map<ElfSymbol, Address> symbolMap) {
-+		return new NDS32_ElfRelocationContext(this, loadHelper, symbolMap);
-+	}
-+
-+	@Override
-+	public RelocationResult relocate(ElfRelocationContext elfRelocationContext, ElfRelocation relocation, Address relocationAddress)
-+			throws MemoryAccessException, NotFoundException {
++	protected RelocationResult relocate(ElfRelocationContext<?> elfRelocationContext,
++			ElfRelocation relocation, NDS32_ElfRelocationType type, Address relocationAddress,
++			ElfSymbol sym, Address symbolAddr, long symbolValue, String symbolName)
++			throws MemoryAccessException {
 +		ElfHeader elf = elfRelocationContext.getElfHeader();
 +
 +		if (elf.e_machine() != ElfConstants.EM_NDS32) {
@@ -2439,23 +2368,15 @@ index 0000000000..1dd825a845
 +			return RelocationResult.FAILURE;
 +		}
 +
-+		NDS32_ElfRelocationContext nds32RelocationContext =
-+				(NDS32_ElfRelocationContext) elfRelocationContext;
-+
-+		int type = relocation.getType();
-+		int symbolIndex = relocation.getSymbolIndex();
-+		return doRelocate(nds32RelocationContext, type, symbolIndex, relocation, relocationAddress);
++		return doRelocate(elfRelocationContext, type, symbolValue, symbolName, relocation, relocationAddress);
 +	}
 +
-+	private RelocationResult doRelocate(NDS32_ElfRelocationContext nds32RelocationContext, int relocType,
-+			int symbolIndex, ElfRelocation relocation, Address relocationAddress)
-+			throws MemoryAccessException, NotFoundException, AddressOutOfBoundsException {
-+		Program program = nds32RelocationContext.getProgram();
++	private RelocationResult doRelocate(ElfRelocationContext<?> elfRelocationContext, NDS32_ElfRelocationType type,
++			long symbolValue, String symbolName, ElfRelocation relocation, Address relocationAddress)
++			throws MemoryAccessException, AddressOutOfBoundsException {
++		Program program = elfRelocationContext.getProgram();
 +		Memory memory = program.getMemory();
-+		MessageLog log = nds32RelocationContext.getLog();
-+		ElfSymbol elfSymbol = nds32RelocationContext.getSymbol(symbolIndex);
-+		long symbolValue = nds32RelocationContext.getSymbolValue(elfSymbol);
-+		String symbolName = elfSymbol.getNameAsString();
++		MessageLog log = elfRelocationContext.getLog();
 +
 +		// Read instruction as big endian
 +		int oldValue = memory.getInt(relocationAddress, true);
@@ -2467,32 +2388,114 @@ index 0000000000..1dd825a845
 +
 +		int value = 0;
 +		int newValue = 0;
-+		int byteLength = 4; // most relocations affect 4-bytes (change if different)
 +
-+		switch(relocType) {
-+		case NDS32_ElfRelocationConstants.R_NDS32_HI20_RELA:
++		switch (type) {
++		case R_NDS32_HI20_RELA:
 +			value = (int)(symbolValue + addend);
 +			newValue = (oldValue & 0xfff00000) | (value >> 12);
 +			memory.setInt(relocationAddress, newValue, true);
 +			break;
-+		case NDS32_ElfRelocationConstants.R_NDS32_LO12S0_RELA:
++		case R_NDS32_LO12S0_RELA:
 +			value = (int)(symbolValue + addend);
 +			newValue = (oldValue & 0xfffff000) | (value & 0xfff);
 +			memory.setInt(relocationAddress, newValue, true);
 +			break;
 +		default:
-+			markAsUnhandled(program, relocationAddress, relocType, symbolIndex, symbolName, log);
++			markAsUnhandled(program, relocationAddress, type, relocation.getSymbolIndex(), symbolName, log);
 +			return RelocationResult.UNSUPPORTED;
 +		}
-+		return new RelocationResult(Status.APPLIED, byteLength);
++		return new RelocationResult(Status.APPLIED, 4);
++	}
++}
+diff --git a/Ghidra/Processors/NDS32/src/main/java/ghidra/app/util/bin/format/elf/relocation/NDS32_ElfRelocationType.java b/Ghidra/Processors/NDS32/src/main/java/ghidra/app/util/bin/format/elf/relocation/NDS32_ElfRelocationType.java
+new file mode 100644
+index 0000000000..3a615defbf
+--- /dev/null
++++ b/Ghidra/Processors/NDS32/src/main/java/ghidra/app/util/bin/format/elf/relocation/NDS32_ElfRelocationType.java
+@@ -0,0 +1,85 @@
++/* ###
++ * IP: GHIDRA
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package ghidra.app.util.bin.format.elf.relocation;
++
++public enum NDS32_ElfRelocationType implements ElfRelocationType {
++	R_NDS32_NONE(0),
++	R_NDS32_16_RELA(19),
++	R_NDS32_32_RELA(20),
++	R_NDS32_9_PCREL_RELA(22),
++	R_NDS32_15_PCREL_RELA(23),
++	R_NDS32_17_PCREL_RELA(24),
++	R_NDS32_25_PCREL_RELA(25),
++	R_NDS32_HI20_RELA(26),
++	R_NDS32_LO12S3_RELA(27),
++	R_NDS32_LO12S2_RELA(28),
++	R_NDS32_LO12S1_RELA(29),
++	R_NDS32_LO12S0_RELA(30),
++	R_NDS32_SDA15S3_RELA(31),
++	R_NDS32_SDA15S2_RELA(32),
++	R_NDS32_SDA15S1_RELA(33),
++	R_NDS32_SDA15S0_RELA(34),
++	R_NDS32_GOT20(37),
++	R_NDS32_25_PLTREL(38),
++	R_NDS32_COPY(39),
++	R_NDS32_GLOB_DAT(40),
++	R_NDS32_JMP_SLOT(41),
++	R_NDS32_RELATIVE(42),
++	R_NDS32_GOTOFF(43),
++	R_NDS32_GOTPC20(44),
++	R_NDS32_GOT_HI20(45),
++	R_NDS32_GOT_LO12(46),
++	R_NDS32_GOTPC_HI20(47),
++	R_NDS32_GOTPC_LO12(48),
++	R_NDS32_GOTOFF_HI20(49),
++	R_NDS32_GOTOFF_LO12(50),
++	R_NDS32_INSN16(51),
++	R_NDS32_LABEL(52),
++	R_NDS32_LONGCALL1(53),
++	R_NDS32_LONGCALL2(54),
++	R_NDS32_LONGCALL3(55),
++	R_NDS32_LONGJUMP1(56),
++	R_NDS32_LONGJUMP2(57),
++	R_NDS32_LONGJUMP3(58),
++	R_NDS32_LOADSTORE(59),
++	R_NDS32_9_FIXED_RELA(60),
++	R_NDS32_15_FIXED_RELA(61),
++	R_NDS32_17_FIXED_RELA(62),
++	R_NDS32_25_FIXED_RELA(63),
++	R_NDS32_PLTREL_HI20(64),
++	R_NDS32_PLTREL_LO12(65),
++	R_NDS32_PLT_GOTREL_HI20(66),
++	R_NDS32_PLT_GOTREL_LO12(67),
++	R_NDS32_LO12S0_ORI_RELA(72),
++	R_NDS32_DWARF2_OP1_RELA(77),
++	R_NDS32_DWARF2_OP2_RELA(78),
++	R_NDS32_DWARF2_LEB_RELA(79),
++	R_NDS32_WORD_9_PCREL_RELA(94),
++	R_NDS32_LONGCALL4(107),
++	R_NDS32_RELA_NOP_MIX(192),
++	R_NDS32_RELA_NOP_MAX(255);
++
++	public final int typeId;
++
++	private NDS32_ElfRelocationType(int typeId) {
++		this.typeId = typeId;
 +	}
 +
-+	private static class NDS32_ElfRelocationContext extends ElfRelocationContext {
-+
-+		protected NDS32_ElfRelocationContext(ElfRelocationHandler handler, ElfLoadHelper loadHelper,
-+				Map<ElfSymbol, Address> symbolMap) {
-+			super(handler, loadHelper, symbolMap);
-+		}
++	@Override
++	public int typeId() {
++		return typeId;
 +	}
 +}
 diff --git a/Ghidra/Processors/NDS32/src/test.processors/java/ghidra/test/processors/NDS32_LE_O0_EmulatorTest.java b/Ghidra/Processors/NDS32/src/test.processors/java/ghidra/test/processors/NDS32_LE_O0_EmulatorTest.java

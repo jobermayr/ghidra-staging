@@ -1,0 +1,242 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Andras Gemes <gemesa@protonmail.com>
+Date: Mon, 25 Nov 2024 20:55:47 +0100
+Subject: [PATCH] 7228: FunctionID: Add option to disable namespace stripping
+
+---
+ .../CreateMultipleLibraries.java              |  6 +++++-
+ .../ghidra/feature/fid/plugin/IngestTask.java |  6 +++++-
+ .../feature/fid/plugin/PopulateFidDialog.java | 13 +++++++++++-
+ .../feature/fid/service/FidService.java       |  6 ++++--
+ .../fid/service/FidServiceLibraryIngest.java  | 20 +++++++++++++------
+ 5 files changed, 40 insertions(+), 11 deletions(-)
+
+diff --git a/Ghidra/Features/FunctionID/ghidra_scripts/CreateMultipleLibraries.java b/Ghidra/Features/FunctionID/ghidra_scripts/CreateMultipleLibraries.java
+index f26a48e342..f330fae302 100644
+--- a/Ghidra/Features/FunctionID/ghidra_scripts/CreateMultipleLibraries.java
++++ b/Ghidra/Features/FunctionID/ghidra_scripts/CreateMultipleLibraries.java
+@@ -58,6 +58,7 @@ public class CreateMultipleLibraries extends GhidraScript {
+ 	private File commonSymbolsFile = null;
+ 	private List<String> commonSymbols = null;
+ 	private LanguageID languageID = null;
++	private boolean disableNamespaceStripping = false;
+ 
+ 	private MyFidPopulateResultReporter reporter = null;
+ 
+@@ -280,7 +281,7 @@ public class CreateMultipleLibraries extends GhidraScript {
+ 
+ 			FidPopulateResult result = service.createNewLibraryFromPrograms(fidDb,
+ 				currentLibraryName, currentLibraryVersion, currentLibraryVariant, programs, null,
+-				languageID, null, commonSymbols, TaskMonitor.DUMMY);
++				languageID, null, commonSymbols, disableNamespaceStripping, TaskMonitor.DUMMY);
+ 			reporter.report(result);
+ 		}
+ 		catch (CancelledException e) {
+@@ -370,6 +371,9 @@ public class CreateMultipleLibraries extends GhidraScript {
+ 		String lang = askString("Enter LanguageID To Process", "Language ID: ");
+ 		languageID = new LanguageID(lang);
+ 
++		disableNamespaceStripping =
++			askYesNo("Disable namespace stripping", "Do you want to disable namespace stripping?");
++
+ 		parseSymbols();
+ 		reporter = new MyFidPopulateResultReporter();
+ 		fidDb = fidFile.getFidDB(true);
+diff --git a/Ghidra/Features/FunctionID/src/main/java/ghidra/feature/fid/plugin/IngestTask.java b/Ghidra/Features/FunctionID/src/main/java/ghidra/feature/fid/plugin/IngestTask.java
+index c3a0eeb9c7..cc67ee7e74 100644
+--- a/Ghidra/Features/FunctionID/src/main/java/ghidra/feature/fid/plugin/IngestTask.java
++++ b/Ghidra/Features/FunctionID/src/main/java/ghidra/feature/fid/plugin/IngestTask.java
+@@ -45,10 +45,12 @@ public class IngestTask extends Task {
+ 	private File commonSymbolsFile;
+ 	private FidService fidService;
+ 	private FidPopulateResultReporter reporter;
++	private boolean disableNamespaceStripping;
+ 
+ 	public IngestTask(String title, FidFile fidFile, LibraryRecord libraryRecord,
+ 			DomainFolder folder, String libraryFamilyName, String libraryVersion,
+-			String libraryVariant, String languageId, File commonSymbolsFile, FidService fidService,
++			String libraryVariant, String languageId, File commonSymbolsFile,
++			boolean disableNamespaceStripping, FidService fidService,
+ 			FidPopulateResultReporter reporter) {
+ 		super(title, true, false, false, false);
+ 		this.fidFile = fidFile;
+@@ -61,6 +63,7 @@ public class IngestTask extends Task {
+ 		this.fidService = fidService;
+ 		this.reporter = reporter;
+ 		this.languageId = new LanguageID(languageId);
++		this.disableNamespaceStripping = disableNamespaceStripping;
+ 	}
+ 
+ 	@Override
+@@ -95,6 +98,7 @@ public class IngestTask extends Task {
+ 			FidPopulateResult result = fidService.createNewLibraryFromPrograms(fidDb,
+ 				libraryFamilyName, libraryVersion, libraryVariant, programs, null, languageId,
+ 				libraryRecord == null ? null : Arrays.asList(libraryRecord), commonSymbols,
++				disableNamespaceStripping,
+ 				monitor);
+ 			reporter.report(result);
+ 			fidDb.saveDatabase("Saving", monitor);
+diff --git a/Ghidra/Features/FunctionID/src/main/java/ghidra/feature/fid/plugin/PopulateFidDialog.java b/Ghidra/Features/FunctionID/src/main/java/ghidra/feature/fid/plugin/PopulateFidDialog.java
+index a515c0de17..7902990508 100644
+--- a/Ghidra/Features/FunctionID/src/main/java/ghidra/feature/fid/plugin/PopulateFidDialog.java
++++ b/Ghidra/Features/FunctionID/src/main/java/ghidra/feature/fid/plugin/PopulateFidDialog.java
+@@ -63,6 +63,7 @@ public class PopulateFidDialog extends DialogComponentProvider {
+ 	private FidService fidService;
+ 	private JTextField languageIdField;
+ 	private JTextField symbolsFileTextField;
++	private JCheckBox namespaceStrippingCheckBox;
+ 
+ 	protected PopulateFidDialog(PluginTool tool, FidService fidService) {
+ 		super("Populate Fid Database");
+@@ -87,14 +88,19 @@ public class PopulateFidDialog extends DialogComponentProvider {
+ 		DomainFolder folder = getDomainFolder();
+ 		String languageFilter = languageIdField.getText().trim();
+ 		File commonSymbolsFile = getCommonSymbolsFile();
++		boolean disableNamespaceStripping = getNamespaceOption();
+ 
+ 		Task task = new IngestTask("Populate Library Task", fidFile, libraryRecord, folder,
+ 			libraryFamilyName, libraryVersion, libraryVariant, languageFilter, commonSymbolsFile,
+-			fidService, new DefaultFidPopulateResultReporter());
++			disableNamespaceStripping, fidService, new DefaultFidPopulateResultReporter());
+ 		close();
+ 		tool.execute(task);
+ 	}
+ 
++	private boolean getNamespaceOption() {
++		return namespaceStrippingCheckBox.isSelected();
++	}
++
+ 	private File getCommonSymbolsFile() {
+ 		String symbolsFilePath = symbolsFileTextField.getText().trim();
+ 		if (symbolsFilePath.isEmpty()) {
+@@ -144,6 +150,11 @@ public class PopulateFidDialog extends DialogComponentProvider {
+ 		panel.add(new GLabel("Common Symbols File: ", SwingConstants.RIGHT));
+ 		panel.add(buildSymbolsFileField(), jLabel);
+ 
++		panel.add(new GLabel("Disable namespace stripping (experimental)", SwingConstants.RIGHT));
++		namespaceStrippingCheckBox = new JCheckBox();
++		namespaceStrippingCheckBox.addActionListener(e -> updateOkEnablement());
++		panel.add(namespaceStrippingCheckBox);
++
+ 		return panel;
+ 	}
+ 
+diff --git a/Ghidra/Features/FunctionID/src/main/java/ghidra/feature/fid/service/FidService.java b/Ghidra/Features/FunctionID/src/main/java/ghidra/feature/fid/service/FidService.java
+index 0cf56125df..1c17085953 100644
+--- a/Ghidra/Features/FunctionID/src/main/java/ghidra/feature/fid/service/FidService.java
++++ b/Ghidra/Features/FunctionID/src/main/java/ghidra/feature/fid/service/FidService.java
+@@ -182,6 +182,7 @@ public class FidService {
+ 	 * @param linkLibraries libraries to search for (internally) unresolved symbols
+ 	 * @param commonSymbols is a list of symbols for which relationships are not generated
+ 	 * @param monitor a task monitor
++	 * @param disableNamespaceStripping boolean to disable namespace stripping
+ 	 * @throws MemoryAccessException if bytes are unavailable for a function body
+ 	 * @throws VersionException if any program cannot be opened without an upgrade
+ 	 * @throws CancelledException if the user cancels
+@@ -191,12 +192,13 @@ public class FidService {
+ 	public FidPopulateResult createNewLibraryFromPrograms(FidDB fidDb, String libraryFamilyName,
+ 			String libraryVersion, String libraryVariant, List<DomainFile> programDomainFiles,
+ 			Predicate<Pair<Function, FidHashQuad>> functionFilter, LanguageID languageId,
+-			List<LibraryRecord> linkLibraries, List<String> commonSymbols, TaskMonitor monitor)
++			List<LibraryRecord> linkLibraries, List<String> commonSymbols,
++			boolean disableNamespaceStripping, TaskMonitor monitor)
+ 			throws MemoryAccessException, VersionException, CancelledException,
+ 			IllegalStateException, IOException {
+ 		FidServiceLibraryIngest ingest = new FidServiceLibraryIngest(fidDb, this, libraryFamilyName,
+ 			libraryVersion, libraryVariant, programDomainFiles, functionFilter, languageId,
+-			linkLibraries, monitor);
++			linkLibraries, monitor, disableNamespaceStripping);
+ 		ingest.markCommonChildReferences(commonSymbols);
+ 		return ingest.create();
+ 	}
+diff --git a/Ghidra/Features/FunctionID/src/main/java/ghidra/feature/fid/service/FidServiceLibraryIngest.java b/Ghidra/Features/FunctionID/src/main/java/ghidra/feature/fid/service/FidServiceLibraryIngest.java
+index fa8e7eb605..cca3d6d47b 100644
+--- a/Ghidra/Features/FunctionID/src/main/java/ghidra/feature/fid/service/FidServiceLibraryIngest.java
++++ b/Ghidra/Features/FunctionID/src/main/java/ghidra/feature/fid/service/FidServiceLibraryIngest.java
+@@ -49,6 +49,7 @@ class FidServiceLibraryIngest {
+ 	private Predicate<Pair<Function, FidHashQuad>> functionFilter;
+ 	private LanguageID languageId; // Language for everything in this library
+ 	private List<LibraryRecord> linkLibraries;
++	private boolean disableNamespaceStripping;
+ 	private TaskMonitor monitor;
+ 
+ 	private LibraryRecord library = null; // Database record of the library we are creating
+@@ -176,11 +177,13 @@ class FidServiceLibraryIngest {
+ 	 * @param languageId the Ghidra language id to filter programs by
+ 	 * @param linkLibraries the list of libraries to use for unresolved symbols
+ 	 * @param monitor a task monitor
++	 * @param disableNamespaceStripping boolean to disable namespace stripping
+ 	 */
+ 	public FidServiceLibraryIngest(FidDB fidDb, FidService service, String libraryFamilyName,
+ 			String libraryVersion, String libraryVariant, List<DomainFile> programFiles,
+ 			Predicate<Pair<Function, FidHashQuad>> functionFilter, LanguageID languageId,
+-			List<LibraryRecord> linkLibraries, TaskMonitor monitor) {
++			List<LibraryRecord> linkLibraries, TaskMonitor monitor,
++			boolean disableNamespaceStripping) {
+ 		this.fidDb = fidDb;
+ 		this.service = service;
+ 		this.libraryFamilyName = libraryFamilyName;
+@@ -191,6 +194,7 @@ class FidServiceLibraryIngest {
+ 		this.languageId = languageId;
+ 		this.linkLibraries = linkLibraries;
+ 		this.monitor = monitor;
++		this.disableNamespaceStripping = disableNamespaceStripping;
+ 		if (languageId == null) {
+ 			throw new IllegalArgumentException("LanugageID can't be null"); // null used to be allowed, so add special check
+ 		}
+@@ -240,7 +244,7 @@ class FidServiceLibraryIngest {
+ 					result = new FidPopulateResult(library);
+ 				}
+ 
+-				populateLibraryFromProgram(program);
++				populateLibraryFromProgram(program, disableNamespaceStripping);
+ 			}
+ 			finally {
+ 				if (program != null) {
+@@ -261,16 +265,18 @@ class FidServiceLibraryIngest {
+ 	 * Processes a single program, adding it to the library.
+ 	 * @param result the populate result
+ 	 * @param program the program
++	 * @param disableNamespaceStripping boolean to disable namespace stripping
+ 	 * @throws CancelledException if the user cancels
+ 	 */
+-	private void populateLibraryFromProgram(Program program) throws CancelledException {
++	private void populateLibraryFromProgram(Program program, boolean disableNamespaceStripping)
++			throws CancelledException {
+ 
+ 		FidHasher hasher = service.getHasher(program);
+ 		ArrayList<Function> theFunctions = new ArrayList<>();
+ 		Map<Function, FunctionRow> recordMap = new HashMap<>();
+ 
+ 		// 1) hash all the functions, create function rows for them
+-		hashAllTheFunctions(program, hasher, theFunctions, recordMap);
++		hashAllTheFunctions(program, hasher, theFunctions, recordMap, disableNamespaceStripping);
+ 
+ 		// 3) add all the forward (child) call relatives
+ 		for (Entry<Function, FunctionRow> entry : recordMap.entrySet()) {
+@@ -328,10 +334,12 @@ class FidServiceLibraryIngest {
+ 	 * @param hasher the FID hasher
+ 	 * @param theFunctions the functions
+ 	 * @param recordMap the map of function to function records
++	 * @param disableNamespaceStripping boolean to disable namespace stripping
+ 	 * @throws CancelledException if the user cancels
+ 	 */
+ 	private void hashAllTheFunctions(Program program, FidHasher hasher,
+-			ArrayList<Function> theFunctions, Map<Function, FunctionRow> recordMap)
++			ArrayList<Function> theFunctions, Map<Function, FunctionRow> recordMap,
++			boolean disableNamespaceStripping)
+ 			throws CancelledException {
+ 		DomainFile domainFile = program.getDomainFile();
+ 		FunctionManager functionManager = program.getFunctionManager();
+@@ -351,7 +359,7 @@ class FidServiceLibraryIngest {
+ 				exclude(domainFile, function, FidPopulateResult.Disposition.NO_DEFINED_SYMBOL);
+ 			}
+ 			else {
+-				name = function.getSymbol().getName();
++				name = function.getSymbol().getName(disableNamespaceStripping);
+ 			}
+ 
+ 			FidHashQuad hashQuad = null;
+-- 
+2.45.1
+

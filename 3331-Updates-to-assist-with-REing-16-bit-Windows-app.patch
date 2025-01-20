@@ -63,6 +63,14 @@ Resolved new isEquivalent interface.
 Reconciled updates in LibrarySymbolTable and corrected spelling of 'forward' in LibraryExport
 
 In merging the previous commit, I missed that I'd commented out the loop that was updated, so this fixes it!!!
+
+Replace DBConstants class with OpenMode and READ_ONLY with IMMUTABLE.
+
+Fix merge conflict on 'LibraryLookupTable.java'.
+
+Fix C++ Pascal style parameter allocation
+
+Corrected merge of C.jj & implemented new DockingAction's to CreateLPUnionStructAction.
 ---
  Ghidra/Features/Base/certification.manifest   |    1 +
  .../Base/data/FunctionNames.properties        | 2308 +++++++++++++++++
@@ -74,17 +82,17 @@ In merging the previous commit, I missed that I'd commented out the loop that wa
  .../ghidra_scripts/_SetSSRegForAllFuncs.java  |  112 +
  .../function/ApplyFunctionSignatureCmd.java   |    2 +-
  .../SegmentedCallingConventionAnalyzer.java   |   21 +-
- .../actions/CreateLPUnionStructAction.java    |  325 +++
- .../core/function/editor/FunctionData.java    |    2 +-
+ .../actions/CreateLPUnionStructAction.java    |  326 +++
+ .../function/editor/FunctionEditorModel.java  |    6 +-
  .../app/util/cparser/C/Declaration.java       |   80 +-
  .../app/util/opinion/LibraryExport.java       |   85 +
- .../app/util/opinion/LibraryLookupTable.java  |   16 +-
+ .../app/util/opinion/LibraryLookupTable.java  |    8 +-
  .../app/util/opinion/LibrarySymbolTable.java  |   79 +-
  .../ghidra/app/util/opinion/NeLoader.java     |    9 +-
- .../javacc/ghidra/app/util/cparser/C/C.jj     |  180 +-
+ .../javacc/ghidra/app/util/cparser/C/C.jj     |  175 +-
  .../EditFunctionSignatureDialogTest.java      |   33 +
- .../Decompiler/src/decompile/cpp/fspec.cc     |   85 +-
- .../Decompiler/src/decompile/cpp/fspec.hh     |   10 +-
+ .../Decompiler/src/decompile/cpp/fspec.cc     |   89 +-
+ .../Decompiler/src/decompile/cpp/fspec.hh     |   12 +-
  .../Decompiler/src/decompile/cpp/marshal.cc   |    2 +-
  .../src/decompile/cpp/modelrules.cc           |    2 +-
  .../data/languages/compiler_spec.rxg          |    1 +
@@ -104,16 +112,16 @@ In merging the previous commit, I missed that I'd commented out the loop that wa
  .../model/data/OffsetCodePointerDataType.java |  100 +
  .../program/model/data/PointerDataType.java   |    6 +-
  .../data/SegmentCodePointerDataType.java      |  101 +
- .../program/model/lang/ParamListStandard.java |   22 +-
+ .../program/model/lang/ParamListStandard.java |   18 +-
  .../model/lang/ParamListStandardOut.java      |   10 +-
- .../program/model/lang/PrototypeModel.java    |   88 +-
+ .../program/model/lang/PrototypeModel.java    |   84 +-
  .../lang/protorules/ConvertToPointer.java     |    3 +-
  .../model/listing/FunctionSignature.java      |    6 +
  .../program/model/pcode/AttributeId.java      |    4 +-
  .../model/TestDoubleFunctionSignature.java    |    6 +
  .../program/model/data/StubDataType.java      |   10 +
  .../x86/data/languages/x86-16.cspec           |  288 +-
- 49 files changed, 6109 insertions(+), 126 deletions(-)
+ 49 files changed, 6106 insertions(+), 119 deletions(-)
  create mode 100644 Ghidra/Features/Base/data/FunctionNames.properties
  create mode 100644 Ghidra/Features/Base/ghidra_scripts/FixPascalCallingConvention.java
  create mode 100644 Ghidra/Features/Base/ghidra_scripts/FixWin16LibraryFunctionNames.java
@@ -133,10 +141,10 @@ In merging the previous commit, I missed that I'd commented out the loop that wa
  create mode 100644 Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/data/SegmentCodePointerDataType.java
 
 diff --git a/Ghidra/Features/Base/certification.manifest b/Ghidra/Features/Base/certification.manifest
-index fb07662ff9..a9d2653c36 100644
+index d154734c73..08064a878d 100644
 --- a/Ghidra/Features/Base/certification.manifest
 +++ b/Ghidra/Features/Base/certification.manifest
-@@ -55,6 +55,7 @@ data/symbols/win16/toolhelp.exports||GHIDRA||||END|
+@@ -59,6 +59,7 @@ data/symbols/win16/toolhelp.exports||GHIDRA||||END|
  data/symbols/win16/user.exports||GHIDRA||||END|
  data/symbols/win16/ver.exports||GHIDRA||||END|
  data/symbols/win16/win87em.exports||GHIDRA||||END|
@@ -4069,10 +4077,10 @@ index 526a266aec..4f3817e62f 100644
  						Msg.error(this, "Unexpected Exception: " + e.getMessage(), e);
 diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/datamgr/actions/CreateLPUnionStructAction.java b/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/datamgr/actions/CreateLPUnionStructAction.java
 new file mode 100644
-index 0000000000..076573c157
+index 0000000000..16ac2c52bc
 --- /dev/null
 +++ b/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/datamgr/actions/CreateLPUnionStructAction.java
-@@ -0,0 +1,325 @@
+@@ -0,0 +1,326 @@
 +/* ###
 + * IP: GHIDRA
 + *
@@ -4396,21 +4404,33 @@ index 0000000000..076573c157
 +	@Override
 +	public void restored(DataTypeManager dataTypeManager) {
 +		// TODO Auto-generated method stub
++
 +	}
 +}
-diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/function/editor/FunctionData.java b/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/function/editor/FunctionData.java
-index a66dc66688..6c73b7bd39 100644
---- a/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/function/editor/FunctionData.java
-+++ b/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/function/editor/FunctionData.java
-@@ -308,7 +308,7 @@ class FunctionData extends FunctionDataView {
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/function/editor/FunctionEditorModel.java b/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/function/editor/FunctionEditorModel.java
+index 8cb92e5acb..8b82c2d4aa 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/function/editor/FunctionEditorModel.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/function/editor/FunctionEditorModel.java
+@@ -260,7 +260,7 @@ public class FunctionEditorModel {
+ 	}
  
- 	void removeExplicitThisParameter() {
- 		if (!allowCustomStorage &&
--			CompilerSpec.CALLING_CONVENTION_thiscall.equals(callingConventionName)) {
-+			callingConventionName.startsWith(CompilerSpec.CALLING_CONVENTION_thiscall)) {
- 			int thisIndex = findExplicitThisParameter();
- 			if (thisIndex >= 0) {
- 				parameters.remove(thisIndex); // remove explicit 'this' parameter
+ 	/**
+-	 * Mark all storage conflicts identified by 
++	 * Mark all storage conflicts identified by
+ 	 * {@link VariableUtilities#checkVariableConflict(List, Variable, VariableStorage, VariableConflictHandler)}
+ 	 * @param conflicts parameters whose storage conflicts
+ 	 * @return return false to indicate conflicts have not been resolved and additional checks
+@@ -1040,8 +1040,8 @@ public class FunctionEditorModel {
+ 	}
+ 
+ 	/**
+-	 * Sets the change state of the model to unchanged. Normally, the model sets the modelChanged 
+-	 * variable to true every time something is changed. This provides a way to for applications 
++	 * Sets the change state of the model to unchanged. Normally, the model sets the modelChanged
++	 * variable to true every time something is changed. This provides a way to for applications
+ 	 * to make some initial changes but make the dialog think that nothing has changed.
+ 	 */
+ 	public void setModelUnchanged() {
 diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/cparser/C/Declaration.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/cparser/C/Declaration.java
 index a93b06e43b..15335dadac 100644
 --- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/cparser/C/Declaration.java
@@ -4621,21 +4641,9 @@ index 0000000000..c73aaf4b65
 +
 +}
 diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/opinion/LibraryLookupTable.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/opinion/LibraryLookupTable.java
-index 1eaa8f695a..fac9ac0933 100644
+index 13cc9933c1..ad56b05d6c 100644
 --- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/opinion/LibraryLookupTable.java
 +++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/opinion/LibraryLookupTable.java
-@@ -4,9 +4,9 @@
-  * Licensed under the Apache License, Version 2.0 (the "License");
-  * you may not use this file except in compliance with the License.
-  * You may obtain a copy of the License at
-- * 
-+ *
-  *      http://www.apache.org/licenses/LICENSE-2.0
-- * 
-+ *
-  * Unless required by applicable law or agreed to in writing, software
-  * distributed under the License is distributed on an "AS IS" BASIS,
-  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 @@ -181,7 +181,7 @@ public class LibraryLookupTable {
  
  	/**
@@ -4645,7 +4653,7 @@ index 1eaa8f695a..fac9ac0933 100644
  	 * @param dllName The DLL name (including extension)
  	 * @param size The architecture size of the DLL (e.g., 32 or 64).
  	 * @return LibrarySymbolTable associated with dllName
-@@ -195,21 +195,21 @@ public class LibraryLookupTable {
+@@ -195,9 +195,9 @@ public class LibraryLookupTable {
  	 * Get the symbol table associated with the DLL name.  If not previously
  	 * generated for the given dllName, it will be constructed from a .exports
  	 * file found within the 'symbols' resource area.  If a .exports file
@@ -4657,14 +4665,8 @@ index 1eaa8f695a..fac9ac0933 100644
  	 * resource area is located within the directory
  	 * <pre>
  	 *   Ghidra/Features/Base/data/symbols/[win32|win64]
- 	 * </pre>
--	 * Alternatively, a user specific resource directory may be used which 
--	 * is located at 
-+	 * Alternatively, a user specific resource directory may be used which
-+	 * is located at
- 	 * <pre>
- 	 *   &lt;USER_HOME&gt;/.ghidra/&lt;.ghidraVersion&gt;/symbols/[win32|win64]
- 	 * </pre>
+@@ -209,7 +209,7 @@ public class LibraryLookupTable {
+ 	 * }</pre>
  	 * The cacheMap is a static cache which always returns the same
  	 * instance for a given DLL name.
 -	 * 
@@ -4827,10 +4829,10 @@ index 6c1a2c9209..33b953fbc2 100644
  	 * @param libraryFile library file
  	 * @return true if exports file corresponds to library file
 diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/opinion/NeLoader.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/opinion/NeLoader.java
-index 1c20444cba..2a5d50a24d 100644
+index e47352ed4e..e7152c54f4 100644
 --- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/opinion/NeLoader.java
 +++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/opinion/NeLoader.java
-@@ -426,6 +426,7 @@ public class NeLoader extends AbstractOrdinalSupportLoader {
+@@ -433,6 +433,7 @@ public class NeLoader extends AbstractOrdinalSupportLoader {
  		ExternalManager externalManager = program.getExternalManager();
  		FunctionManager functionManager = program.getFunctionManager();
  		Namespace globalNamespace = program.getGlobalNamespace();
@@ -4838,7 +4840,7 @@ index 1c20444cba..2a5d50a24d 100644
  
  		LengthStringSet[] names = mrt.getNames();
  		String[][] mod2proclist = new String[names.length][];
-@@ -475,9 +476,15 @@ public class NeLoader extends AbstractOrdinalSupportLoader {
+@@ -482,9 +483,15 @@ public class NeLoader extends AbstractOrdinalSupportLoader {
  				try {
  					functionManager.createThunkFunction(null, globalNamespace, addr, body,
  						refFunction, SourceType.IMPORTED);
@@ -4856,7 +4858,7 @@ index 1c20444cba..2a5d50a24d 100644
  				addr = addr.addWrap(thunkBodySize);
  			}
 diff --git a/Ghidra/Features/Base/src/main/javacc/ghidra/app/util/cparser/C/C.jj b/Ghidra/Features/Base/src/main/javacc/ghidra/app/util/cparser/C/C.jj
-index 07d439d633..fa3341608e 100644
+index da9117694f..6f3d30ef81 100644
 --- a/Ghidra/Features/Base/src/main/javacc/ghidra/app/util/cparser/C/C.jj
 +++ b/Ghidra/Features/Base/src/main/javacc/ghidra/app/util/cparser/C/C.jj
 @@ -48,13 +48,16 @@
@@ -4877,7 +4879,7 @@ index 07d439d633..fa3341608e 100644
      // Methods and class variables should not be static to allow multiple parsers to be in use.
      // This is at the expense of some speed.
      STATIC= false;
-@@ -128,7 +131,7 @@ public class CParser {
+@@ -129,7 +132,7 @@ public class CParser {
      private final static String ANONYMOUS_UNION_PREFIX = "_union_";
      private final static String ANONYMOUS_FUNC_PREFIX = "_func_";
          
@@ -4886,7 +4888,7 @@ index 07d439d633..fa3341608e 100644
      private Stack<Boolean> typedefParsingStack = new Stack<Boolean>();
  
      // Stack for putting defined data types on
-@@ -155,7 +158,7 @@ public class CParser {
+@@ -156,7 +159,7 @@ public class CParser {
      private CategoryPath getCurrentCategoryPath() {
          return getCategory(currentCategoryName);
      }
@@ -4895,7 +4897,7 @@ index 07d439d633..fa3341608e 100644
      private CategoryPath getCurrentCategoryPath(String subCatName) {
          return getCategory(currentCategoryName).extend(subCatName);
      }
-@@ -261,10 +264,10 @@ public class CParser {
+@@ -262,10 +265,10 @@ public class CParser {
              }
          }
  
@@ -4909,7 +4911,7 @@ index 07d439d633..fa3341608e 100644
          
          // check the BuiltinTypeManager
          BuiltInDataTypeManager builtInMgr = BuiltInDataTypeManager.getDataTypeManager();
-@@ -461,7 +464,7 @@ public class CParser {
+@@ -462,7 +465,7 @@ public class CParser {
                              }
                      }
                      try {
@@ -4918,7 +4920,7 @@ index 07d439d633..fa3341608e 100644
                      } catch (InvalidNameException e) {
                          // This should not happen
                          e.printStackTrace();
-@@ -470,7 +473,7 @@ public class CParser {
+@@ -471,7 +474,7 @@ public class CParser {
                          e.printStackTrace();
                      }
                      comp = (Composite) addDef(composites, nameStr, comp);
@@ -4927,17 +4929,7 @@ index 07d439d633..fa3341608e 100644
  
              return comp;
      }
-@@ -666,6 +669,9 @@ public class CParser {
-                     case CDECL:
-                             funcDT.setGenericCallingConvention(GenericCallingConvention.cdecl);
-                             break;
-+                    case PASCAL:
-+                            funcDT.setGenericCallingConvention(GenericCallingConvention.pascal);
-+                            break;
-                     case STDCALL:
-                             funcDT.setGenericCallingConvention(GenericCallingConvention.stdcall);
-                             break;
-@@ -976,25 +982,31 @@ public class CParser {
+@@ -995,25 +998,31 @@ public class CParser {
  
          // Run the parser
      public static void main(String args[]) {
@@ -4975,9 +4967,21 @@ index 07d439d633..fa3341608e 100644
                  return;
              }
  
-@@ -1166,6 +1178,14 @@ TOKEN :
+@@ -1193,9 +1202,9 @@ TOKEN :
      |
      <CDECL : ( [ "_" ] )+ "cdecl"> 
+     |
+-    <STDCALL : ( [ "_" ] )+ "stdcall"> 
++    <STDCALL : ( [ "_" ] )+ "stdcall">
+     |
+-    <FASTCALL : ( [ "_" ] )+ "fastcall"> 
++    <FASTCALL : ( [ "_" ] )+ "fastcall">
+     |
+     <VECTORCALL : ( [ "_" ] )+ "vectorcall"> 
+     |
+@@ -1203,6 +1212,14 @@ TOKEN :
+     |
+     <PASCALCALL : ( [ "_" ] )+ "pascal">
      |
 +    <BASEDSPEC : ( [ "_" ] )+ "based">
 +    |
@@ -4987,38 +4991,24 @@ index 07d439d633..fa3341608e 100644
 +    |
 +    <OFFSET : ( [ "_" ] )+ "offset">
 +    |
-     <DECLSPEC : "__declspec">
-     |
-     <PRAGMA : "#" "pragma"> {parenNesting=-1; SwitchTo(PRAGMALINE); }
-@@ -1174,9 +1194,11 @@ TOKEN :
-     | 
-     <READABLETO : "__readableTo">
-     |
--    <STDCALL : ( [ "_" ] )+ "stdcall"> 
-+    <PASCAL : ( [ "_" ] )+ "pascal">
-+    |
-+    <STDCALL : ( [ "_" ] )+ "stdcall">
-     |
--    <FASTCALL : ( [ "_" ] )+ "fastcall"> 
-+    <FASTCALL : ( [ "_" ] )+ "fastcall">
-     |
      <NORETURN : "_Noreturn" >
      |
-@@ -1236,9 +1258,11 @@ TOKEN :
+     <ALIGNAS : "_Alignas" >
+@@ -1261,9 +1278,11 @@ TOKEN :
      |
      <GOTO : "goto"> 
      |
 -    <NEAR : "__near"> 
 +    <NEAR : ( [ "_" ] )* "near">
++    |
++    <FAR : ( [ "_" ] )* "far">
      |
 -    <FAR : "__far"> 
-+    <FAR : ( [ "_" ] )* "far">
-+    |
 +    <HUGE : ( [ "_" ] )* "huge">
      |
      <FOR : "for"> 
      |
-@@ -1259,7 +1283,7 @@ TOKEN :
+@@ -1284,7 +1303,7 @@ TOKEN :
  
  TOKEN :
  {
@@ -5027,7 +5017,7 @@ index 07d439d633..fa3341608e 100644
      |
      <#LETTER : [ "$", "A"-"Z", "_", "a"-"z" ]> 
      |
-@@ -1468,6 +1492,7 @@ void TranslationUnit() : {}
+@@ -1493,6 +1512,7 @@ void TranslationUnit() : {}
      < EOF >
      {
          //jjt         return jjtThis;
@@ -5035,7 +5025,7 @@ index 07d439d633..fa3341608e 100644
      }
  }
  
-@@ -1587,7 +1612,7 @@ Declaration DeclarationSpecifiers(Declaration specDT) : {
+@@ -1612,7 +1632,7 @@ Declaration DeclarationSpecifiers(Declaration specDT) : {
  //            LOOKAHEAD(DeclarationSpecifiers()
  //                     , { (typeDT == null ||
  //                         (!typeDT.getName().equals(getToken(1).image) && !isType(getToken(1).image))) }
@@ -5044,7 +5034,7 @@ index 07d439d633..fa3341608e 100644
              specDT = DeclarationSpecifiers(specDT)
          ]
          |
-@@ -1640,6 +1665,10 @@ Declaration BuiltInTypeSpecifier(Declaration dec) : {
+@@ -1665,6 +1685,10 @@ Declaration BuiltInTypeSpecifier(Declaration dec) : {
  }
  {
      (
@@ -5055,7 +5045,7 @@ index 07d439d633..fa3341608e 100644
          <VOID>                 { dec.setDataType(resolveInternal(VoidDataType.dataType)); }
          |
          <CHAR>                 {   dt = dec.getDataType();
-@@ -1797,8 +1826,12 @@ Declaration TypeQualifier(Declaration dec) : {}
+@@ -1822,13 +1846,15 @@ Declaration TypeQualifier(Declaration dec) : {}
        <CONST>  { dec.addQualifier(CONST); } |
        <VOLATILE> |
        <CDECL> { dec.addQualifier(CDECL); } |
@@ -5066,11 +5056,15 @@ index 07d439d633..fa3341608e 100644
 +      <HUGE> { dec.setHuge(true); } |
 +      <SEGMENT> |
 +      <OFFSET> |
-+      <PASCAL> { dec.addQualifier(PASCAL); } |
        <STDCALL> { dec.addQualifier(STDCALL); } |
        <FASTCALL> { dec.addQualifier(FASTCALL); } |
+       <VECTORCALL> { dec.addQualifier(VECTORCALL); } |
+       <RUSTCALL> { dec.addQualifier(RUSTCALL); } |
+-      <PASCALCALL> { dec.addQualifier(PASCALCALL); } |
        <NORETURN> { dec.addQualifier(NORETURN); } |
-@@ -1809,6 +1842,7 @@ Declaration TypeQualifier(Declaration dec) : {}
+       <W64> |
+       <PTR64> |
+@@ -1837,6 +1863,7 @@ Declaration TypeQualifier(Declaration dec) : {}
        <RESTRICT> |
        <EXTENSION> |
        <STATIC> |
@@ -5078,7 +5072,7 @@ index 07d439d633..fa3341608e 100644
        <PACKED> |
        <UNALIGNED> |
        ( DeclSpec(dec) )
-@@ -1871,6 +1905,25 @@ void SubIdent(Declaration dec) : {
+@@ -1899,6 +1926,25 @@ void SubIdent(Declaration dec) : {
      }
  }
  
@@ -5104,7 +5098,7 @@ index 07d439d633..fa3341608e 100644
  void DeclSpec(Declaration dec) : {
  }
  {
-@@ -2040,11 +2093,11 @@ DataType StructOrUnionSpecifier() : {
+@@ -2068,11 +2114,11 @@ DataType StructOrUnionSpecifier() : {
          sname= <IDENTIFIER> 
      )
      {
@@ -5121,7 +5115,7 @@ index 07d439d633..fa3341608e 100644
          typedefParsingStack.pop();
          return comp;
      }
-@@ -2060,25 +2113,25 @@ Composite StructOrUnion() : {
+@@ -2088,25 +2134,25 @@ Composite StructOrUnion() : {
          {
              comp =  new StructureDataType(getCurrentCategoryPath(), ANONYMOUS_STRUCT_PREFIX + cnt++, 0, dtMgr);
  
@@ -5160,7 +5154,7 @@ index 07d439d633..fa3341608e 100644
          }
      )
      {
-@@ -2322,7 +2375,7 @@ Declaration DirectDeclarator(Declaration dt, DataType container) : {
+@@ -2350,7 +2396,7 @@ Declaration DirectDeclarator(Declaration dt, DataType container) : {
      [ PragmaSpec() ]
      (
          (
@@ -5169,7 +5163,7 @@ index 07d439d633..fa3341608e 100644
              |
              "(" dec= Declarator(new Declaration(funcDT=newAnonymousFunction(funcDT)), null) ")" 
              {
-@@ -2332,27 +2385,27 @@ Declaration DirectDeclarator(Declaration dt, DataType container) : {
+@@ -2360,27 +2406,27 @@ Declaration DirectDeclarator(Declaration dt, DataType container) : {
          { lastDataType = dec.getDataType(); }
          (
              (
@@ -5213,7 +5207,7 @@ index 07d439d633..fa3341608e 100644
              }
          }
          
-@@ -2404,7 +2457,18 @@ Declaration Pointer(Declaration dec) : {}
+@@ -2432,7 +2478,18 @@ Declaration Pointer(Declaration dec) : {}
      ("*" | "&") [ dec = TypeQualifierList(dec) ] [ dec = Pointer(dec) ] 
      {
          // TODO: is this right?
@@ -5278,76 +5272,95 @@ index f9f6fda857..d60b8f3b84 100644
  	public void testParseSignature_Good() throws Exception {
  
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.cc
-index aa9000b726..3e2570766c 100644
+index 20cb9afa66..19a2a6e444 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.cc
 @@ -34,6 +34,7 @@ AttributeId ATTRIB_STACKSHIFT = AttributeId("stackshift",126);
  AttributeId ATTRIB_STRATEGY = AttributeId("strategy",127);
  AttributeId ATTRIB_THISBEFORERETPOINTER = AttributeId("thisbeforeretpointer",128);
  AttributeId ATTRIB_VOIDLOCK = AttributeId("voidlock",129);
-+AttributeId ATTRIB_ISRIGHTTOLEFT = AttributeId("isrighttoleft",150);
++AttributeId ATTRIB_ISRIGHTTOLEFT = AttributeId("isrighttoleft",151);
  
  ElementId ELEM_GROUP = ElementId("group",160);
  ElementId ELEM_INTERNALLIST = ElementId("internallist",161);
-@@ -805,17 +806,21 @@ void ParamListStandard::assignMap(const PrototypePieces &proto,TypeFactory &type
+@@ -801,7 +802,7 @@ void ParamListStandard::consumeGroups(vector<int4> &status,const ParamEntry &ele
+   }
+ }
+ 
+-void ParamListStandard::assignMap(const PrototypePieces &proto,TypeFactory &typefactory,vector<ParameterPieces> &res) const
++void ParamListStandard::assignMapRtoL(const PrototypePieces &proto,TypeFactory &typefactory,vector<ParameterPieces> &res) const
+ 
  {
    vector<int4> status(numgroup,0);
+@@ -827,6 +828,49 @@ void ParamListStandard::assignMap(const PrototypePieces &proto,TypeFactory &type
+   }
+ }
  
--  if (res.size() == 2) {	// Check for hidden parameters defined by the output list
--    Datatype *dt = res.back().type;
-+  bool hiddenparam = res.size() == 2;
-+  ParameterPieces* hiddenpiece = hiddenparam ? &res.back() : (ParameterPieces*)0;
++void ParamListStandard::assignMapLtoR(const PrototypePieces &proto,TypeFactory &typefactory,vector<ParameterPieces> &res) const
 +
-+  if (hiddenparam && proto.model->getRightToLeft()) {	// Check for hidden parameters defined by the output list
-+//  if (res.size() == 2) {	// Check for hidden parameters defined by the output list
-+    Datatype* dt = hiddenpiece->type;
-     type_class store;
--    if ((res.back().flags & ParameterPieces::hiddenretparm) != 0)
-+    if ((hiddenpiece->flags & ParameterPieces::hiddenretparm) != 0)
-       store = TYPECLASS_HIDDENRET;
-     else
-       store = metatype2typeclass(dt->getMetatype());
-     // Reserve first param for hidden return pointer
--    if (assignAddressFallback(store,dt,false,status,res.back()) == AssignAction::fail)
--      throw ParamUnassignedError("Cannot assign parameter address for " + res.back().type->getName());
--    res.back().flags |= ParameterPieces::hiddenretparm;
-+    if (assignAddressFallback(store,dt,false,status,*hiddenpiece) == AssignAction::fail)
-+      throw ParamUnassignedError("Cannot assign parameter address for " + hiddenpiece->type->getName());
-+    hiddenpiece->flags |= ParameterPieces::hiddenretparm;
-   }
-   for(int4 i=0;i<proto.intypes.size();++i) {
-     res.emplace_back();
-@@ -824,6 +829,19 @@ void ParamListStandard::assignMap(const PrototypePieces &proto,TypeFactory &type
-     if (responseCode == AssignAction::fail || responseCode == AssignAction::no_assignment)
-       throw ParamUnassignedError("Cannot assign parameter address for " + dt->getName());
-   }
++{
++  ParameterPieces* hiddenpiece = (res.size() == 2) ? &res.back() : (ParameterPieces*)0;
 +
-+  if (hiddenparam && !proto.model->getRightToLeft()) {	// Check for hidden parameters defined by the output list
-+    Datatype* dt = hiddenpiece->type;
++  vector<int4> status(numgroup,0);
++
++  // allocate storage backwards in temporary results
++  vector<ParameterPieces> tmpres;
++  for(int4 i=proto.intypes.size()-1;i>=0;--i) {
++    tmpres.emplace_back();
++    Datatype *dt = proto.intypes[i];
++    uint4 responseCode = assignAddress(dt,proto,proto.intypes.size()-1-i,typefactory,status,tmpres.back());
++    if (responseCode == AssignAction::fail || responseCode == AssignAction::no_assignment)
++      throw ParamUnassignedError("Cannot assign parameter address for " + dt->getName());
++  }
++  // add tmpres to res in reverse leaving the hiddenpiece at the end
++  res.resize(res.size() + tmpres.size());
++  reverse_copy(tmpres.begin(),tmpres.end(),res.begin()+1);
++
++  if (hiddenpiece) {	// Check for hidden parameters defined by the output list
++    Datatype *dt = hiddenpiece->type;
 +    type_class store;
 +    if ((hiddenpiece->flags & ParameterPieces::hiddenretparm) != 0)
 +      store = TYPECLASS_HIDDENRET;
 +    else
 +      store = metatype2typeclass(dt->getMetatype());
-+    // Reserve first param for hidden return pointer
-+    if (assignAddressFallback(store, dt, false, status, *hiddenpiece) == AssignAction::fail)
++    // Reserve last param for hidden return pointer
++    if (assignAddressFallback(store,dt,false,status,*hiddenpiece) == AssignAction::fail)
 +      throw ParamUnassignedError("Cannot assign parameter address for " + hiddenpiece->type->getName());
 +    hiddenpiece->flags |= ParameterPieces::hiddenretparm;
 +  }
- }
- 
++}
++
++void ParamListStandard::assignMap(const PrototypePieces &proto,TypeFactory &typefactory,vector<ParameterPieces> &res) const
++
++{
++  if (proto.model->getRightToLeft())
++    assignMapRtoL(proto, typefactory, res);
++  else
++    assignMapLtoR(proto, typefactory, res);
++}
++
  /// From among the ParamEntrys matching the given \e group, return the one that best matches
-@@ -1602,7 +1620,8 @@ void ParamListStandardOut::assignMap(const PrototypePieces &proto,TypeFactory &t
+ /// the given \e metatype attribute. If there are no ParamEntrys in the group, null is returned.
+ /// \param grp is the given \e group number
+@@ -1601,7 +1645,8 @@ void ParamListStandardOut::assignMap(const PrototypePieces &proto,TypeFactory &t
      AddrSpace *spc = spacebase;
      if (spc == (AddrSpace *)0)
        spc = typefactory.getArch()->getDefaultDataSpace();
 -    int4 pointersize = spc->getAddrSize();
-+    //int4 pointersize = spc->getAddrSize();
++//    int4 pointersize = spc->getAddrSize();
 +    int4 pointersize = proto.model->getPointerSize(spc);
      int4 wordsize = spc->getWordSize();
      Datatype *pointertp = typefactory.getTypePointer(pointersize, proto.outtype, wordsize);
      if (responseCode == AssignAction::hiddenret_specialreg_void) {
-@@ -2373,6 +2392,7 @@ ProtoModel::ProtoModel(const string &nm,const ProtoModel &op2)
+@@ -2335,6 +2380,7 @@ ProtoModel::ProtoModel(Architecture *g)
+   injectUponReturn = -1;
+   stackgrowsnegative = true;	// Normal stack parameter ordering
+   hasThis = false;
++  isRightToLeft = true;
+   isConstruct = false;
+   isPrinted = true;
+   defaultLocalRange();
+@@ -2374,6 +2420,7 @@ ProtoModel::ProtoModel(const string &nm,const ProtoModel &op2)
    if (name == "__thiscall")
      hasThis = true;
    compatModel = &op2;
@@ -5355,38 +5368,25 @@ index aa9000b726..3e2570766c 100644
  }
  
  ProtoModel::~ProtoModel(void)
-@@ -2428,8 +2448,30 @@ void ProtoModel::assignParameterStorage(const PrototypePieces &proto,vector<Para
-   else {
-     output->assignMap(proto,*glb->types,res);
+@@ -2431,21 +2478,49 @@ void ProtoModel::assignParameterStorage(const PrototypePieces &proto,vector<Para
    }
-+
-+  vector<Datatype*> typelist = proto.intypes;
-+
-+  // Deal with left-to-right (PASCAL convention) parameter ordering
-+  if (!isRightToLeft) {
-+    // swap around the datatypes to map variable storage high-to-low
-+    for (int i = 0; i < typelist.size() / 2; i++) {
-+      std::swap(typelist[typelist.size() - 1 - i], typelist[i]);
-+    }
-+  }
-+
    input->assignMap(proto,*glb->types,res);
  
-+  // Deal with left-to-right (PASCAL convention) parameter ordering
-+  if (!isRightToLeft) {
-+    int inputOffset = (res.size() - typelist.size());
-+    for (int i = 0; i < typelist.size() / 2; i++) {
-+      // swap back the datatype order
-+      std::swap(typelist[typelist.size() - 1 - i], typelist[i]);
-+      // swap back the resulting storage to be ordered correctly
-+      std::swap(res[res.size()-1 - i], res[inputOffset+i]);
-+    }
-+  }
-+
++  // the following fails with mixed sized pointers (e.g. near & far) for the 'this' & 'hiddenretparm' pieces
    if (hasThis && res.size() > 1) {
      int4 thisIndex = 1;
      if ((res[1].flags & ParameterPieces::hiddenretparm) != 0 && res.size() > 2) {
-@@ -2445,6 +2487,31 @@ void ProtoModel::assignParameterStorage(const PrototypePieces &proto,vector<Para
+       if (input->isThisBeforeRetPointer()) {
+ 					// pointer has been bumped by auto-return-storage
+-	res[1].swapMarkup(res[2]);	// must swap markup for slots 1 and 2
++        res[1].swapMarkup(res[2]);	// must swap markup for slots 1 and 2
+       }
+       else {
+-	thisIndex = 2;
++        thisIndex = 2;
+       }
+     }
+     res[thisIndex].flags |= ParameterPieces::isthis;
    }
  }
  
@@ -5400,6 +5400,8 @@ index aa9000b726..3e2570766c 100644
 +/// \brief Used to return the size of a pointer for this model prototype.
 +/// @param space is the default AddrSpace
 +/// @return size of pointer
++/*
++*/
 +int ProtoModel::getPointerSize(const AddrSpace* space) const
 +
 +{
@@ -5418,7 +5420,7 @@ index aa9000b726..3e2570766c 100644
  /// \brief Look up an effect from the given EffectRecord list
  ///
  /// If a given memory range matches an EffectRecord, return the effect type.
-@@ -2546,6 +2613,7 @@ void ProtoModel::decode(Decoder &decoder)
+@@ -2547,6 +2622,7 @@ void ProtoModel::decode(Decoder &decoder)
    extrapop = -300;
    hasThis = false;
    isConstruct = false;
@@ -5426,7 +5428,7 @@ index aa9000b726..3e2570766c 100644
    isPrinted = true;
    effectlist.clear();
    injectUponEntry = -1;
-@@ -2573,6 +2641,9 @@ void ProtoModel::decode(Decoder &decoder)
+@@ -2574,6 +2650,9 @@ void ProtoModel::decode(Decoder &decoder)
      else if (attribId == ATTRIB_CONSTRUCTOR) {
        isConstruct = decoder.readBool();
      }
@@ -5436,8 +5438,17 @@ index aa9000b726..3e2570766c 100644
      else
        throw LowlevelError("Unknown prototype attribute");
    }
+@@ -4074,7 +4153,7 @@ void FuncProto::updateInputTypes(Funcdata &data,const vector<Varnode *> &trialli
+ 	  pieces.type = vn->getHigh()->getType();
+ 	else
+ 	  pieces.type = data.getArch()->types->getBase(sz, TYPE_UNKNOWN);
+-	pieces.flags = 0;
++        pieces.flags = 0;
+       }
+       else {
+ 	pieces.addr = trial.getAddress();
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.hh
-index f110a8e6a5..2cf52a377b 100644
+index ea6d92dadd..26fd27ca22 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.hh
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.hh
 @@ -43,6 +43,7 @@ extern AttributeId ATTRIB_STACKSHIFT;	///< Marshaling attribute "stackshift"
@@ -5457,7 +5468,16 @@ index f110a8e6a5..2cf52a377b 100644
  
    /// \brief Given an unordered list of storage locations, calculate a function prototype
    ///
-@@ -759,6 +760,7 @@ class ProtoModel {
+@@ -622,6 +623,8 @@ public:
+   uint4 assignAddress(Datatype *dt,const PrototypePieces &proto,int4 pos,TypeFactory &tlst,
+ 		      vector<int4> &status,ParameterPieces &res) const;
+   virtual uint4 getType(void) const { return p_standard; }
++  virtual void assignMapRtoL(const PrototypePieces &proto,TypeFactory &typefactory,vector<ParameterPieces> &res) const;
++  virtual void assignMapLtoR(const PrototypePieces &proto,TypeFactory &typefactory,vector<ParameterPieces> &res) const;
+   virtual void assignMap(const PrototypePieces &proto,TypeFactory &typefactory,vector<ParameterPieces> &res) const;
+   virtual void fillinMap(ParamActive *active) const;
+   virtual bool checkJoin(const Address &hiaddr,int4 hisize,const Address &loaddr,int4 losize) const;
+@@ -759,6 +762,7 @@ class ProtoModel {
    bool stackgrowsnegative;	///< True if stack parameters have (normal) low address to high address ordering
    bool hasThis;			///< True if this model has a \b this parameter (auto-parameter)
    bool isConstruct;		///< True if this model is a constructor for a particular object
@@ -5465,7 +5485,7 @@ index f110a8e6a5..2cf52a377b 100644
    bool isPrinted;		///< True if this model should be printed as part of function declarations
    void defaultLocalRange(void);	///< Set the default stack range used for local variables
    void defaultParamRange(void);	///< Set the default stack range used for input parameters
-@@ -779,6 +781,7 @@ public:
+@@ -779,6 +783,7 @@ public:
    int4 getInjectUponEntry(void) const { return injectUponEntry; }	///< Get the inject \e uponentry id
    int4 getInjectUponReturn(void) const { return injectUponReturn; }	///< Get the inject \e uponreturn id
    bool isCompatible(const ProtoModel *op2) const;	///< Return \b true if other given model can be substituted for \b this
@@ -5473,7 +5493,7 @@ index f110a8e6a5..2cf52a377b 100644
  
    /// \brief Given a list of input \e trials, derive the most likely input prototype
    ///
-@@ -796,6 +799,11 @@ public:
+@@ -796,6 +801,11 @@ public:
  
    void assignParameterStorage(const PrototypePieces &proto,vector<ParameterPieces> &res,bool ignoreOutputError);
  
@@ -5486,23 +5506,23 @@ index f110a8e6a5..2cf52a377b 100644
    ///
    /// Within the conventions of this model, do the two (hi/lo) locations represent
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/marshal.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/marshal.cc
-index 9352092742..13356a6f9a 100644
+index d24e731294..7268cab2c1 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/marshal.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/marshal.cc
-@@ -1253,7 +1253,7 @@ AttributeId ATTRIB_VALUE = AttributeId("value",25);
- AttributeId ATTRIB_WORDSIZE = AttributeId("wordsize",26);
+@@ -1254,7 +1254,7 @@ AttributeId ATTRIB_WORDSIZE = AttributeId("wordsize",26);
  AttributeId ATTRIB_STORAGE = AttributeId("storage",149);
+ AttributeId ATTRIB_STACKSPILL = AttributeId("stackspill",150);
  
--AttributeId ATTRIB_UNKNOWN = AttributeId("XMLunknown",150); // Number serves as next open index
-+AttributeId ATTRIB_UNKNOWN = AttributeId("XMLunknown",151); // Number serves as next open index
+-AttributeId ATTRIB_UNKNOWN = AttributeId("XMLunknown",151); // Number serves as next open index
++AttributeId ATTRIB_UNKNOWN = AttributeId("XMLunknown",152); // Number serves as next open index
  
  ElementId ELEM_DATA = ElementId("data",1);
  ElementId ELEM_INPUT = ElementId("input",2);
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/modelrules.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/modelrules.cc
-index f92abbbb56..e9565d6f95 100644
+index 9335eb6ab9..6f52615c86 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/modelrules.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/modelrules.cc
-@@ -619,7 +619,7 @@ uint4 ConvertToPointer::assignAddress(Datatype *dt,const PrototypePieces &proto,
+@@ -628,7 +628,7 @@ uint4 ConvertToPointer::assignAddress(Datatype *dt,const PrototypePieces &proto,
    AddrSpace *spc = space;
    if (spc == (AddrSpace*)0)
      spc = tlist.getArch()->getDefaultDataSpace();
@@ -5512,10 +5532,10 @@ index f92abbbb56..e9565d6f95 100644
    // Convert the data-type to a pointer
    Datatype *pointertp = tlist.getTypePointer(pointersize,dt,wordsize);
 diff --git a/Ghidra/Framework/SoftwareModeling/data/languages/compiler_spec.rxg b/Ghidra/Framework/SoftwareModeling/data/languages/compiler_spec.rxg
-index faacc10022..c1fc6a485c 100644
+index d9a1095a3d..c2346f7993 100644
 --- a/Ghidra/Framework/SoftwareModeling/data/languages/compiler_spec.rxg
 +++ b/Ghidra/Framework/SoftwareModeling/data/languages/compiler_spec.rxg
-@@ -449,6 +449,7 @@
+@@ -457,6 +457,7 @@
      
      <optional> <attribute name="hasthis"/> </optional>
      <optional> <attribute name="constructor"/> </optional>
@@ -6184,7 +6204,7 @@ index 21aa3c398c..75235c2cf7 100644
  					displayName = dt.getDisplayName() + " *";
  				}
 diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/function/FunctionDB.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/function/FunctionDB.java
-index ace0699cd5..9dcc12602e 100644
+index 21bbe7ff53..de6f7fa065 100644
 --- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/function/FunctionDB.java
 +++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/function/FunctionDB.java
 @@ -1385,7 +1385,7 @@ public class FunctionDB extends DatabaseObject implements Function {
@@ -6461,7 +6481,7 @@ index 0000000000..26123476a4
 +
 +}
 diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/data/DataType.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/data/DataType.java
-index 95a52f7b30..6bdb237c39 100644
+index 29aaedaad8..8ad5002b7c 100644
 --- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/data/DataType.java
 +++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/data/DataType.java
 @@ -65,6 +65,10 @@ public interface DataType {
@@ -6494,7 +6514,7 @@ index 9594fbd99b..829bb57cd0 100644
  			if (name != null) {
  				sb.append(' ');
 diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/data/GenericCallingConvention.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/data/GenericCallingConvention.java
-index cecd440ecb..42fd14a9f9 100644
+index 49cd2acae6..440693adc1 100644
 --- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/data/GenericCallingConvention.java
 +++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/data/GenericCallingConvention.java
 @@ -59,7 +59,18 @@ public enum GenericCallingConvention {
@@ -6755,22 +6775,10 @@ index 0000000000..1754b028d7
 +
 +}
 diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/ParamListStandard.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/ParamListStandard.java
-index 1f06ad93fe..5162477298 100644
+index adc295ec07..bd5f19efb9 100644
 --- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/ParamListStandard.java
 +++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/ParamListStandard.java
-@@ -4,9 +4,9 @@
-  * Licensed under the Apache License, Version 2.0 (the "License");
-  * you may not use this file except in compliance with the License.
-  * You may obtain a copy of the License at
-- * 
-+ *
-  *      http://www.apache.org/licenses/LICENSE-2.0
-- * 
-+ *
-  * Unless required by applicable law or agreed to in writing, software
-  * distributed under the License is distributed on an "AS IS" BASIS,
-  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-@@ -163,8 +163,10 @@ public class ParamListStandard implements ParamList {
+@@ -170,8 +170,10 @@ public class ParamListStandard implements ParamList {
  			status[i] = 0;
  		}
  
@@ -6783,7 +6791,7 @@ index 1f06ad93fe..5162477298 100644
  			StorageClass store;
  			if (last.hiddenReturnPtr) {
  				store = StorageClass.HIDDENRET;
-@@ -190,6 +192,18 @@ public class ParamListStandard implements ParamList {
+@@ -197,6 +199,18 @@ public class ParamListStandard implements ParamList {
  				return;
  			}
  		}
@@ -6844,21 +6852,9 @@ index 35f36cfb6c..ba6610a485 100644
  			if (responseCode == AssignAction.HIDDENRET_SPECIALREG_VOID) {
  				store.type = VoidDataType.dataType;
 diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/PrototypeModel.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/PrototypeModel.java
-index 804105b28f..ade1577d94 100644
+index 8cfda0e33a..d931b92b35 100644
 --- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/PrototypeModel.java
 +++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/PrototypeModel.java
-@@ -4,9 +4,9 @@
-  * Licensed under the Apache License, Version 2.0 (the "License");
-  * you may not use this file except in compliance with the License.
-  * You may obtain a copy of the License at
-- * 
-+ *
-  *      http://www.apache.org/licenses/LICENSE-2.0
-- * 
-+ *
-  * Unless required by applicable law or agreed to in writing, software
-  * distributed under the License is distributed on an "AS IS" BASIS,
-  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 @@ -57,6 +57,7 @@ public class PrototypeModel {
  	private InputListType inputListType = InputListType.STANDARD;
  	private boolean hasThis;		// Convention has a this (auto-parameter)
@@ -6917,7 +6913,7 @@ index 804105b28f..ade1577d94 100644
  	 * @return true if this model uses p-code injections
  	 */
  	public boolean hasInjection() {
-@@ -255,6 +264,22 @@ public class PrototypeModel {
+@@ -259,6 +268,22 @@ public class PrototypeModel {
  		return null;
  	}
  
@@ -6940,7 +6936,7 @@ index 804105b28f..ade1577d94 100644
  	/**
  	 * Get the preferred parameter location for a new parameter which will appended
  	 * to the end of an existing set of params.  If existing parameters use custom
-@@ -290,7 +315,7 @@ public class PrototypeModel {
+@@ -321,7 +346,7 @@ public class PrototypeModel {
  
  		if (dataType != null) {
  			dataType = dataType.clone(program.getDataTypeManager());
@@ -6949,7 +6945,7 @@ index 804105b28f..ade1577d94 100644
  			// already assigned to parameters - this may not work well if
  			// customized storage has been used
  		}
-@@ -328,9 +353,36 @@ public class PrototypeModel {
+@@ -359,9 +384,36 @@ public class PrototypeModel {
  	 */
  	public void assignParameterStorage(PrototypePieces proto, DataTypeManager dtManager,
  			ArrayList<ParameterPieces> res, boolean addAutoParams) {
@@ -6986,9 +6982,9 @@ index 804105b28f..ade1577d94 100644
  		if (hasThis && addAutoParams && res.size() > 1) {
  			int thisIndex = 1;
  			if (res.get(1).hiddenReturnPtr && res.size() > 2) {
-@@ -354,21 +406,23 @@ public class PrototypeModel {
- 	 * these parameters.  If addAutoParams is false, the dataTypes array is assumed to already contain explicit
- 	 * entries for any of these parameters.
+@@ -389,21 +441,23 @@ public class PrototypeModel {
+ 	 * or zero-length datatypes or any subsequent parameter following such a parameter.
+ 	 * 
  	 * @param program is the Program
 -	 * @param dataTypes return/parameter datatypes (first element is always the return datatype, 
 +	 * @param dataTypes return/parameter datatypes (first element is always the return datatype,
@@ -7014,7 +7010,7 @@ index 804105b28f..ade1577d94 100644
  		}
  		PrototypePieces proto = new PrototypePieces(this, dataTypes, injectedThis);
  
-@@ -379,6 +433,7 @@ public class PrototypeModel {
+@@ -414,6 +468,7 @@ public class PrototypeModel {
  		for (int i = 0; i < finalres.length; ++i) {
  			finalres[i] = res.get(i).getVariableStorage(program);
  		}
@@ -7022,7 +7018,7 @@ index 804105b28f..ade1577d94 100644
  		return finalres;
  	}
  
-@@ -444,6 +499,9 @@ public class PrototypeModel {
+@@ -479,6 +534,9 @@ public class PrototypeModel {
  		if (isConstruct) {
  			encoder.writeBool(ATTRIB_CONSTRUCTOR, true);
  		}
@@ -7032,7 +7028,7 @@ index 804105b28f..ade1577d94 100644
  		if (inputListType != InputListType.STANDARD) {
  			encoder.writeString(ATTRIB_STRATEGY, "register");
  		}
-@@ -604,6 +662,7 @@ public class PrototypeModel {
+@@ -639,6 +697,7 @@ public class PrototypeModel {
  		stackshift = SpecXmlUtils.decodeInt(protoElement.getAttribute("stackshift"));
  		hasThis = false;
  		isConstruct = false;
@@ -7040,7 +7036,7 @@ index 804105b28f..ade1577d94 100644
  		String thisString = protoElement.getAttribute("hasthis");
  		if (thisString != null) {
  			hasThis = SpecXmlUtils.decodeBoolean(thisString);
-@@ -615,6 +674,10 @@ public class PrototypeModel {
+@@ -650,6 +709,10 @@ public class PrototypeModel {
  		if (constructString != null) {
  			isConstruct = SpecXmlUtils.decodeBoolean(constructString);
  		}
@@ -7051,7 +7047,7 @@ index 804105b28f..ade1577d94 100644
  
  		buildParamList(protoElement.getAttribute("strategy"));
  		while (parser.peek().isStart()) {
-@@ -715,7 +778,7 @@ public class PrototypeModel {
+@@ -750,7 +813,7 @@ public class PrototypeModel {
  	}
  
  	/**
@@ -7060,7 +7056,7 @@ index 804105b28f..ade1577d94 100644
  	 * @param prog is the current Program
  	 * @return a VariableStorage ojbect for each register
  	 */
-@@ -738,6 +801,9 @@ public class PrototypeModel {
+@@ -773,6 +836,9 @@ public class PrototypeModel {
  		if (extrapop != obj.extrapop || stackshift != obj.stackshift) {
  			return false;
  		}
@@ -7107,17 +7103,17 @@ index 8ae21a15db..eb5f52659c 100644
 +	public AddressModel getAddressModel();
  }
 diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/AttributeId.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/AttributeId.java
-index a229039b02..e9026e08ef 100644
+index dcb4b13113..71264e88d0 100644
 --- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/AttributeId.java
 +++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/AttributeId.java
-@@ -243,5 +243,7 @@ public record AttributeId(String name, int id) {
- // public static final AttributeId ATTRIB_ADDRESS = new AttributeId("address", 148);
+@@ -244,5 +244,7 @@ public record AttributeId(String name, int id) {
  	public static final AttributeId ATTRIB_STORAGE = new AttributeId("storage", 149);
+ 	public static final AttributeId ATTRIB_STACKSPILL = new AttributeId("stackspill", 150);
  
--	public static final AttributeId ATTRIB_UNKNOWN = new AttributeId("XMLunknown", 150);
-+	public static final AttributeId ATTRIB_ISRIGHTTOLEFT = new AttributeId("isrighttoleft", 150);
+-	public static final AttributeId ATTRIB_UNKNOWN = new AttributeId("XMLunknown", 151);
++	public static final AttributeId ATTRIB_ISRIGHTTOLEFT = new AttributeId("isrighttoleft", 151);
 +
-+	public static final AttributeId ATTRIB_UNKNOWN = new AttributeId("XMLunknown", 151);
++	public static final AttributeId ATTRIB_UNKNOWN = new AttributeId("XMLunknown", 152);
  }
 diff --git a/Ghidra/Framework/SoftwareModeling/src/test/java/ghidra/program/model/TestDoubleFunctionSignature.java b/Ghidra/Framework/SoftwareModeling/src/test/java/ghidra/program/model/TestDoubleFunctionSignature.java
 index bac52f7e74..2551eca6f9 100644

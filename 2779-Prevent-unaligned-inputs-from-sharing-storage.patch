@@ -12,7 +12,7 @@ Subject: [PATCH] 2779: Prevent unaligned inputs from sharing storage
  5 files changed, 94 insertions(+), 16 deletions(-)
 
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.cc
-index f784b80d67..9701b1f798 100644
+index da7917c4ef..9798dc4a20 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.cc
 @@ -185,6 +185,21 @@ bool ParamEntry::subsumesDefinition(const ParamEntry &op2) const
@@ -37,7 +37,7 @@ index f784b80d67..9701b1f798 100644
    if (spaceid != op2.spaceid) return false;
    if (op2.addressbase < addressbase) return false;
    if ((op2.addressbase+op2.size-1) > (addressbase+size-1)) return false;
-@@ -717,9 +732,7 @@ int4 ParamListStandard::characterizeAsParam(const Address &loc,int4 size) const
+@@ -718,9 +733,7 @@ int4 ParamListStandard::characterizeAsParam(const Address &loc,int4 size) const
  uint4 ParamListStandard::assignAddressFallback(type_class resource,Datatype *tp,bool matchExact,
  					       vector<int4> &status,ParameterPieces &param) const
  {
@@ -48,7 +48,7 @@ index f784b80d67..9701b1f798 100644
      int4 grp = curEntry.getGroup();
      if (status[grp]<0) continue;
      if (resource != curEntry.getType()) {
-@@ -729,11 +742,7 @@ uint4 ParamListStandard::assignAddressFallback(type_class resource,Datatype *tp,
+@@ -730,11 +743,7 @@ uint4 ParamListStandard::assignAddressFallback(type_class resource,Datatype *tp,
  
      param.addr = curEntry.getAddrBySlot(status[grp],tp->getAlignSize(),tp->getAlignment());
      if (param.addr.isInvalid()) continue; // If -tp- doesn't fit an invalid address is returned
@@ -61,7 +61,7 @@ index f784b80d67..9701b1f798 100644
      param.type = tp;
      param.flags = 0;
      return AssignAction::success;
-@@ -764,6 +773,36 @@ uint4 ParamListStandard::assignAddress(Datatype *dt,const PrototypePieces &proto
+@@ -765,6 +774,36 @@ uint4 ParamListStandard::assignAddress(Datatype *dt,const PrototypePieces &proto
    return assignAddressFallback(store,dt,false,status,res);
  }
  
@@ -99,7 +99,7 @@ index f784b80d67..9701b1f798 100644
  
  {
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.hh
-index 9509fe7f34..f110a8e6a5 100644
+index 59c0c04098..ea6d92dadd 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.hh
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.hh
 @@ -113,7 +113,7 @@ private:
@@ -111,10 +111,10 @@ index 9509fe7f34..f110a8e6a5 100644
    static const ParamEntry *findEntryByStorage(const list<ParamEntry> &entryList,const VarnodeData &vn);
    void resolveFirst(list<ParamEntry> &curList);	///< Mark if \b this is the first ParamEntry in its storage class
    void resolveJoin(list<ParamEntry> &curList); 	///< Make adjustments for a \e join ParamEntry
-@@ -608,6 +608,7 @@ protected:
- 		   int4 groupid,bool normalstack,bool autokill,bool splitFloat,bool grouped);
+@@ -609,6 +609,7 @@ protected:
+ 		   int4 groupid,bool normalstack,bool splitFloat,bool grouped);
    void parseGroup(Decoder &decoder,vector<EffectRecord> &effectlist,
- 		  int4 groupid,bool normalstack,bool autokill,bool splitFloat);
+ 		  int4 groupid,bool normalstack,bool splitFloat);
 +  void consumeGroups(vector<int4> &status,const ParamEntry &element) const;
  public:
    ParamListStandard(void) {}						///< Construct for use with decode()
@@ -151,10 +151,10 @@ index 53f50a12e3..7bc5ff40d7 100644
  			first = 0;
  			while (sz > 0) {
 diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/ParamListStandard.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/ParamListStandard.java
-index f03b5b74ad..1f06ad93fe 100644
+index 014b6a32b5..adc295ec07 100644
 --- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/ParamListStandard.java
 +++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/ParamListStandard.java
-@@ -29,6 +29,7 @@ import ghidra.program.model.lang.protorules.*;
+@@ -28,6 +28,7 @@ import ghidra.program.model.lang.protorules.*;
  import ghidra.program.model.listing.Program;
  import ghidra.program.model.listing.VariableStorage;
  import ghidra.program.model.pcode.Encoder;
@@ -162,7 +162,7 @@ index f03b5b74ad..1f06ad93fe 100644
  import ghidra.util.SystemUtilities;
  import ghidra.util.exception.InvalidInputException;
  import ghidra.util.xml.SpecXmlUtils;
-@@ -101,12 +102,7 @@ public class ParamListStandard implements ParamList {
+@@ -102,12 +103,7 @@ public class ParamListStandard implements ParamList {
  			if (param.address == null) {
  				continue;	// -tp- does not fit in this entry
  			}
@@ -176,7 +176,7 @@ index f03b5b74ad..1f06ad93fe 100644
  			param.type = tp;
  			return AssignAction.SUCCESS;
  		}
-@@ -483,4 +479,43 @@ public class ParamListStandard implements ParamList {
+@@ -499,4 +495,43 @@ public class ParamListStandard implements ParamList {
  	public boolean isThisBeforeRetPointer() {
  		return thisbeforeret;
  	}

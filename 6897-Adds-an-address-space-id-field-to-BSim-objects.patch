@@ -1,0 +1,1237 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Jeffrey <jeffrey.hertzog@zetier.com>
+Date: Sun, 8 Sep 2024 13:59:17 -0400
+Subject: [PATCH] 6897: Adds an address space id field to BSim objects
+
+issue 6896 add address space id field to FunctionDescription and update all related functions for BSIM
+
+add missing fix for abstract bsim apply task
+---
+ .../ghidra_scripts/LocalBSimQueryScript.java  | 38 +++++++++-----
+ .../QueryWithFiltersScript.java               |  9 ++--
+ .../search/results/BSimMatchResultsModel.java |  8 ++-
+ .../results/BSimSearchResultsProvider.java    | 10 ++--
+ .../results/apply/AbstractBSimApplyTask.java  |  6 ++-
+ .../features/bsim/query/GenSignatures.java    | 21 +++++---
+ .../client/AbstractSQLFunctionDatabase.java   | 21 ++++----
+ .../query/client/ExecutableComparison.java    |  2 +-
+ .../query/client/tables/DescriptionTable.java | 36 +++++++------
+ .../query/description/CallgraphEntry.java     |  8 +--
+ .../query/description/DescriptionManager.java | 22 ++++----
+ .../description/FunctionDescription.java      | 52 +++++++++++++++----
+ .../bsim/query/elastic/ElasticDatabase.java   | 33 ++++++++----
+ .../bsim/query/protocol/ClusterNote.java      |  4 +-
+ .../bsim/query/protocol/FunctionEntry.java    |  5 ++
+ .../bsim/query/protocol/ResponseChildren.java |  2 +-
+ .../bsim/query/protocol/ResponseUpdate.java   |  5 +-
+ .../bsim/query/protocol/SimilarityNote.java   |  4 +-
+ .../bsim/query/protocol/SimilarityResult.java |  6 ++-
+ .../protocol/SimilarityVectorResult.java      |  4 +-
+ .../BSimSearchPluginScreenShots.java          |  8 +--
+ .../bsim/gui/BSimSearchPluginTest.java        |  8 +--
+ .../client/BSimFunctionDatabaseTest.java      | 10 ++--
+ .../query/facade/TestNearestVectorResult.java |  2 +-
+ .../query/facade/TestSimilarityResult.java    | 10 ++--
+ 25 files changed, 219 insertions(+), 115 deletions(-)
+
+diff --git a/Ghidra/Features/BSim/ghidra_scripts/LocalBSimQueryScript.java b/Ghidra/Features/BSim/ghidra_scripts/LocalBSimQueryScript.java
+index 87bd14ed72..6aa36a871e 100644
+--- a/Ghidra/Features/BSim/ghidra_scripts/LocalBSimQueryScript.java
++++ b/Ghidra/Features/BSim/ghidra_scripts/LocalBSimQueryScript.java
+@@ -31,6 +31,7 @@ import ghidra.features.bsim.query.*;
+ import ghidra.features.bsim.query.client.Configuration;
+ import ghidra.features.bsim.query.description.FunctionDescription;
+ import ghidra.program.model.address.Address;
++import ghidra.program.model.address.AddressSpace;
+ import ghidra.program.model.listing.*;
+ 
+ //TODO: docs
+@@ -176,17 +177,18 @@ public class LocalBSimQueryScript extends GhidraScript {
+ 
+ 		//...but use sourceFuncAddrs to ensure that source functions are in the
+ 		//funcs set 
+-		Set<Long> sourceFuncAddrs = new HashSet<>();
++		Set<Address> sourceFuncAddrs = new HashSet<>();
+ 		for (Function func : funcs) {
+-			sourceFuncAddrs.add(func.getEntryPoint().getOffset());
++			sourceFuncAddrs.add(func.getEntryPoint());
+ 		}
+ 		Iterator<FunctionDescription> sourceDescripts =
+ 			gensig.getDescriptionManager().listAllFunctions();
+ 		VectorCompare vecCompare = new VectorCompare();
+ 		while (sourceDescripts.hasNext()) {
+ 			FunctionDescription srcDesc = sourceDescripts.next();
++			Address srcAddress = getAddress(currentProgram, srcDesc.getSpaceID(), srcDesc.getAddress());
+ 			//skip if not in selection
+-			if (!sourceFuncAddrs.contains(srcDesc.getAddress())) {
++			if (!sourceFuncAddrs.contains(srcAddress)) {
+ 				continue;
+ 			}
+ 			//skip if self-significance too small
+@@ -196,14 +198,17 @@ public class LocalBSimQueryScript extends GhidraScript {
+ 			}
+ 			Iterator<FunctionDescription> targetDescripts =
+ 				gensig.getDescriptionManager().listAllFunctions();
+-			Function srcFunc = getFunction(currentProgram, srcDesc.getAddress());
++			Function srcFunc = getFunction(currentProgram, srcDesc.getSpaceID(), srcDesc.getAddress());
+ 			while (targetDescripts.hasNext()) {
+-				//skip if target before srcFunc in address order
+-				//AND target is one of the source functions (i.e., in funcs)
+-				FunctionDescription targetDesc = targetDescripts.next();
+-				long targetAddress = targetDesc.getAddress();
++				//skip if target is one of the source functions (i.e., in funcs)
++				//AND src and target functions reside in the same Address Space
++				//AND target before srcFunc in address order
++				FunctionDescription targetDesc = targetDescripts.next();;
++				Address targetAddress = getAddress(currentProgram, targetDesc.getSpaceID(), targetDesc.getAddress());
++
+ 				if (sourceFuncAddrs.contains(targetAddress) &&
+-					targetAddress <= srcDesc.getAddress()) {
++					targetDesc.getSpaceID() == srcDesc.getSpaceID() &&
++					targetDesc.getAddress() <= srcDesc.getAddress()) {
+ 					continue;
+ 				}
+ 				//skip if self-significance too small
+@@ -215,7 +220,7 @@ public class LocalBSimQueryScript extends GhidraScript {
+ 				double sig = vectorFactory.calculateSignificance(vecCompare);
+ 				if (sig >= MATCH_CONFIDENCE_LOWER_BOUND && MATCH_SIMILARITY_LOWER_BOUND <= sim &&
+ 					sim <= MATCH_SIMILARITY_UPPER_BOUND) {
+-					Function targetFunc = getFunction(currentProgram, targetDesc.getAddress());
++					Function targetFunc = getFunction(currentProgram, targetDesc.getSpaceID(), targetDesc.getAddress());
+ 					bsimMatches.add(new LocalBSimMatch(srcFunc, targetFunc, sim, sig));
+ 				}
+ 			}
+@@ -245,7 +250,7 @@ public class LocalBSimQueryScript extends GhidraScript {
+ 			}
+ 			Iterator<FunctionDescription> targetDescripts =
+ 				targetSigs.getDescriptionManager().listAllFunctions();
+-			Function srcFunc = getFunction(sourceProgram, srcDesc.getAddress());
++			Function srcFunc = getFunction(sourceProgram, srcDesc.getSpaceID(), srcDesc.getAddress());
+ 			while (targetDescripts.hasNext()) {
+ 				FunctionDescription targetDesc = targetDescripts.next();
+ 				//skip if self-significance too small
+@@ -257,7 +262,7 @@ public class LocalBSimQueryScript extends GhidraScript {
+ 				double sig = vectorFactory.calculateSignificance(vecCompare);
+ 				if (sig >= MATCH_CONFIDENCE_LOWER_BOUND && MATCH_SIMILARITY_LOWER_BOUND <= sim &&
+ 					sim <= MATCH_SIMILARITY_UPPER_BOUND) {
+-					Function targetFunc = getFunction(targetProgram, targetDesc.getAddress());
++					Function targetFunc = getFunction(targetProgram, targetDesc.getSpaceID(), targetDesc.getAddress());
+ 					bsimMatches.add(new LocalBSimMatch(srcFunc, targetFunc, sim, sig));
+ 				}
+ 			}
+@@ -265,8 +270,13 @@ public class LocalBSimQueryScript extends GhidraScript {
+ 		return bsimMatches;
+ 	}
+ 
+-	private Function getFunction(Program program, long offset) {
+-		Address addr = program.getAddressFactory().getDefaultAddressSpace().getAddress(offset);
++	private Address getAddress(Program program, int spaceid, long offset) {
++		Address addr = program.getAddressFactory().getAddress(spaceid, offset);
++		return addr;
++	}
++
++	private Function getFunction(Program program, int spaceid, long offset) {
++		Address addr = getAddress(program, spaceid, offset);
+ 		return program.getFunctionManager().getFunctionAt(addr);
+ 	}
+ 
+diff --git a/Ghidra/Features/BSim/ghidra_scripts/QueryWithFiltersScript.java b/Ghidra/Features/BSim/ghidra_scripts/QueryWithFiltersScript.java
+index 4a474b506e..1f2673b8b0 100755
+--- a/Ghidra/Features/BSim/ghidra_scripts/QueryWithFiltersScript.java
++++ b/Ghidra/Features/BSim/ghidra_scripts/QueryWithFiltersScript.java
+@@ -30,6 +30,7 @@ import ghidra.features.bsim.query.protocol.BSimFilter;
+ import ghidra.features.bsim.query.protocol.PreFilter;
+ import ghidra.program.database.symbol.FunctionSymbol;
+ import ghidra.program.model.address.Address;
++import ghidra.program.model.address.AddressSpace;
+ import ghidra.program.model.listing.*;
+ import ghidra.program.model.symbol.SourceType;
+ import ghidra.util.exception.CancelledException;
+@@ -272,9 +273,11 @@ public class QueryWithFiltersScript extends GhidraScript {
+ 	 * @return true if the symbol is NOT an analysis source type
+ 	 */
+ 	public static boolean isNotAnalysisSourceType(Program program, FunctionDescription funcDesc) {
+-		Address address =
+-			program.getAddressFactory().getDefaultAddressSpace().getAddress(funcDesc.getAddress());
+-
++		AddressSpace space = program.getAddressFactory().getAddressSpace(funcDesc.getSpaceID());
++		if (space == null) {
++			space = program.getAddressFactory().getDefaultAddressSpace();
++		}
++		Address address = space.getAddress(funcDesc.getAddress());
+ 		Function function = program.getFunctionManager().getFunctionAt(address);
+ 		if (function == null || !function.getName().equals(funcDesc.getFunctionName())) {
+ 			return false;
+diff --git a/Ghidra/Features/BSim/src/main/java/ghidra/features/bsim/gui/search/results/BSimMatchResultsModel.java b/Ghidra/Features/BSim/src/main/java/ghidra/features/bsim/gui/search/results/BSimMatchResultsModel.java
+index 44cfde66a1..e18d9813ab 100755
+--- a/Ghidra/Features/BSim/src/main/java/ghidra/features/bsim/gui/search/results/BSimMatchResultsModel.java
++++ b/Ghidra/Features/BSim/src/main/java/ghidra/features/bsim/gui/search/results/BSimMatchResultsModel.java
+@@ -34,6 +34,7 @@ import ghidra.features.bsim.query.description.FunctionDescription;
+ import ghidra.framework.plugintool.PluginTool;
+ import ghidra.framework.plugintool.ServiceProvider;
+ import ghidra.program.model.address.Address;
++import ghidra.program.model.address.AddressSpace;
+ import ghidra.program.model.listing.Function;
+ import ghidra.program.model.listing.Program;
+ import ghidra.program.model.symbol.Namespace;
+@@ -195,8 +196,11 @@ public class BSimMatchResultsModel extends AddressBasedTableModel<BSimMatchResul
+ 	 * @return the entry point address of the function (if it exists), or just the address within the default space
+ 	 */
+ 	public static Address recoverAddress(FunctionDescription desc, Program prog) {
+-		Address address =
+-			prog.getAddressFactory().getDefaultAddressSpace().getAddress(desc.getAddress());
++		AddressSpace space = prog.getAddressFactory().getAddressSpace(desc.getSpaceID());
++		if (space == null) {
++			space = prog.getAddressFactory().getDefaultAddressSpace();
++		}
++		Address address = space.getAddress(desc.getAddress());
+ 		// Verify that we got the right function
+ 		Function func = prog.getFunctionManager().getFunctionAt(address);
+ 		if (func != null) {
+diff --git a/Ghidra/Features/BSim/src/main/java/ghidra/features/bsim/gui/search/results/BSimSearchResultsProvider.java b/Ghidra/Features/BSim/src/main/java/ghidra/features/bsim/gui/search/results/BSimSearchResultsProvider.java
+index bfd5abb2bb..e058071438 100644
+--- a/Ghidra/Features/BSim/src/main/java/ghidra/features/bsim/gui/search/results/BSimSearchResultsProvider.java
++++ b/Ghidra/Features/BSim/src/main/java/ghidra/features/bsim/gui/search/results/BSimSearchResultsProvider.java
+@@ -53,6 +53,7 @@ import ghidra.framework.plugintool.ComponentProviderAdapter;
+ import ghidra.framework.plugintool.PluginTool;
+ import ghidra.program.database.symbol.FunctionSymbol;
+ import ghidra.program.model.address.Address;
++import ghidra.program.model.address.AddressSpace;
+ import ghidra.program.model.listing.*;
+ import ghidra.util.HelpLocation;
+ import ghidra.util.Msg;
+@@ -535,9 +536,12 @@ public class BSimSearchResultsProvider extends ComponentProviderAdapter {
+ 					resultRow.getSimilarFunctionName() + ".");
+ 		}
+ 		FunctionDescription matchFunctionDescription = resultRow.getMatchFunctionDescription();
+-		long matchOffset = matchFunctionDescription.getAddress();
+-		Address matchEntryPoint =
+-			matchProgram.getAddressFactory().getDefaultAddressSpace().getAddress(matchOffset);
++
++		AddressSpace space = program.getAddressFactory().getAddressSpace(matchFunctionDescription.getSpaceID());
++		if (space == null) {
++			space = program.getAddressFactory().getDefaultAddressSpace();
++		}
++		Address matchEntryPoint = space.getAddress(matchFunctionDescription.getAddress());
+ 		FunctionManager matchFunctionManager = matchProgram.getFunctionManager();
+ 		Function matchFunction = matchFunctionManager.getFunctionAt(matchEntryPoint);
+ 		if (matchFunction == null) {
+diff --git a/Ghidra/Features/BSim/src/main/java/ghidra/features/bsim/gui/search/results/apply/AbstractBSimApplyTask.java b/Ghidra/Features/BSim/src/main/java/ghidra/features/bsim/gui/search/results/apply/AbstractBSimApplyTask.java
+index 8ee9624743..c2d8abbe6a 100755
+--- a/Ghidra/Features/BSim/src/main/java/ghidra/features/bsim/gui/search/results/apply/AbstractBSimApplyTask.java
++++ b/Ghidra/Features/BSim/src/main/java/ghidra/features/bsim/gui/search/results/apply/AbstractBSimApplyTask.java
+@@ -158,7 +158,11 @@ public abstract class AbstractBSimApplyTask extends ProgramTask {
+ 
+ 		FunctionDescription matchDescription = result.getMatchFunctionDescription();
+ 		long addressOffset = matchDescription.getAddress();
+-		AddressSpace space = remoteProgram.getAddressFactory().getDefaultAddressSpace();
++		int spaceid = matchDescription.getSpaceID();
++		AddressSpace space = remoteProgram.getAddressFactory().getAddressSpace(spaceid);
++		if (space == null) {
++			space = remoteProgram.getAddressFactory().getDefaultAddressSpace();
++		}
+ 		Address address = space.getAddress(addressOffset);
+ 		FunctionManager remoteFunctionManager = remoteProgram.getFunctionManager();
+ 		Function matchFunction = remoteFunctionManager.getFunctionAt(address);
+diff --git a/Ghidra/Features/BSim/src/main/java/ghidra/features/bsim/query/GenSignatures.java b/Ghidra/Features/BSim/src/main/java/ghidra/features/bsim/query/GenSignatures.java
+index 36cadc1826..43e8d0a340 100755
+--- a/Ghidra/Features/BSim/src/main/java/ghidra/features/bsim/query/GenSignatures.java
++++ b/Ghidra/Features/BSim/src/main/java/ghidra/features/bsim/query/GenSignatures.java
+@@ -307,6 +307,7 @@ public class GenSignatures {
+ 		}
+ 		if (hasbody) {	// Internal call
+ 			callRecord.exerec = exerec;		// Within the same executable
++			callRecord.spaceid = rootAddr.getAddressSpace().getSpaceID();
+ 			callRecord.address = rootAddr.getOffset();
+ 			callRecord.funcname = rootSymbol.getName(true);
+ 		}
+@@ -413,9 +414,11 @@ public class GenSignatures {
+ 
+ 	private synchronized void writeToManager(Function func, int[] hash, List<CallRecord> callrecs,
+ 			int flags) {
++
++        Address entryPoint = func.getEntryPoint();
+ 		FunctionDescription fdesc = manager.newFunctionDescription(func.getName(true),
+-			func.getEntryPoint().getOffset(), exerec);
+-		manager.setFunctionDescriptionFlags(fdesc, flags);
++				entryPoint.getAddressSpace().getSpaceID(), entryPoint.getOffset(), exerec);
++        manager.setFunctionDescriptionFlags(fdesc, flags);
+ 		if (hash != null) {
+ 			LSHVector vec = vectorFactory.buildVector(hash);
+ 			SignatureRecord sigrec = manager.newSignature(vec, 0);
+@@ -423,7 +426,7 @@ public class GenSignatures {
+ 		}
+ 		for (CallRecord callRecord : callrecs) {
+ 			FunctionDescription destfunc = manager.newFunctionDescription(callRecord.funcname,
+-				callRecord.address, callRecord.exerec);
++				callRecord.spaceid, callRecord.address, callRecord.exerec);
+ 			manager.makeCallgraphLink(fdesc, destfunc, 0);
+ 		}
+ 	}
+@@ -439,8 +442,9 @@ public class GenSignatures {
+ 			Function func = functions.next();
+ 			String name = func.getName(true);
+ 			long address = func.getEntryPoint().getOffset();
++			int spaceid = func.getEntryPoint().getAddressSpace().getSpaceID();
+ 			try {
+-				desc = manager.findFunction(name, address, exerec);
++				desc = manager.findFunction(name, spaceid, address, exerec);
+ 			}
+ 			catch (LSHException e) {		// This exception is thrown if the manager does not contain a function of this name
+ 				continue;					// Basically we skip the function in this case
+@@ -524,9 +528,11 @@ public class GenSignatures {
+ 				continue;
+ 			}
+ 			int flags = recoverAttributes(func);
++			Address entryPoint = func.getEntryPoint();
+ 			FunctionDescription fdesc = manager.newFunctionDescription(func.getName(true),
+-				func.getEntryPoint().getOffset(), exerec);
++				entryPoint.getAddressSpace().getSpaceID(), entryPoint.getOffset(), exerec);
+ 			manager.setFunctionDescriptionFlags(fdesc, flags);
++
+ 		}
+ 	}
+ 
+@@ -629,13 +635,14 @@ public class GenSignatures {
+ 
+ 	/**
+ 	 * Info for resolving a call to a unique function in the database.
+-	 * For normal functions you need the triple (executable, function name, address)
++	 * For normal functions you need the triple (executable, function name, spaceid, address)
+ 	 * For calls to library (external) functions, only the library executable
+ 	 * and the function name are needed, and the address is filled in with -1
+ 	 */
+ 	private static class CallRecord {
+ 		public ExecutableRecord exerec;
+ 		public String funcname;
++		public int spaceid;
+ 		public long address;
+ 	}
+ 
+@@ -685,7 +692,7 @@ public class GenSignatures {
+ 				return;
+ 			}
+ 			FunctionDescription fdesc =
+-				manager.containsDescription(func.getName(true), entryPoint.getOffset(), exerec);
++				manager.containsDescription(func.getName(true), entryPoint, exerec);
+ 			if (fdesc != null && fdesc.getSignatureRecord() != null) {	// Is signature for this function already present
+ 				return;
+ 			}
+diff --git a/Ghidra/Features/BSim/src/main/java/ghidra/features/bsim/query/client/AbstractSQLFunctionDatabase.java b/Ghidra/Features/BSim/src/main/java/ghidra/features/bsim/query/client/AbstractSQLFunctionDatabase.java
+index daaccebac0..30564e44bf 100644
+--- a/Ghidra/Features/BSim/src/main/java/ghidra/features/bsim/query/client/AbstractSQLFunctionDatabase.java
++++ b/Ghidra/Features/BSim/src/main/java/ghidra/features/bsim/query/client/AbstractSQLFunctionDatabase.java
+@@ -593,7 +593,7 @@ public abstract class AbstractSQLFunctionDatabase<VF extends LSHVectorFactory>
+ 				continue;
+ 			}
+ 			DescriptionRow row = descTable.queryFuncNameAddr(erec.getRowId().getLong(),
+-				func.getFunctionName(), func.getAddress());
++				func.getFunctionName(), func.getSpaceID(), func.getAddress());
+ 			if (row == null) {
+ 				newfuncs = true;
+ 				continue;
+@@ -720,14 +720,14 @@ public abstract class AbstractSQLFunctionDatabase<VF extends LSHVectorFactory>
+ 			List<FunctionDescription> funclist = new ArrayList<FunctionDescription>();
+ 			queryAllFunc(funclist, erec_db, dbmanage, 0);
+ 
+-			// Create a map from address to executables
+-			Map<Long, FunctionDescription> addrmap =
++			// Create a map from address spaces, to address offsets, to executables
++			Map<Integer, TreeMap<Long, FunctionDescription>> spacemap =
+ 				FunctionDescription.createAddressToFunctionMap(funclist.iterator());
+ 
+ 			// Match new functions to old functions via the address
+ 			List<FunctionDescription.Update> updatelist;
+ 			updatelist =
+-				FunctionDescription.generateUpdates(manage.listFunctions(erec), addrmap, badfunc);
++				FunctionDescription.generateUpdates(manage.listFunctions(erec), spacemap, badfunc);
+ 
+ 			if (!has_exe_update && updatelist.isEmpty()) {
+ 				return 0; // All updates are in place already
+@@ -936,7 +936,7 @@ public abstract class AbstractSQLFunctionDatabase<VF extends LSHVectorFactory>
+ 			throw new LSHException("Could not resolve filter specifying executable: " + exename);
+ 		}
+ 
+-		DescriptionRow descRow = descTable.queryFuncNameAddr(row.rowid, functionname, -1);
++		DescriptionRow descRow = descTable.queryFuncNameAddr(row.rowid, functionname, 0, -1);
+ 		if (descRow == null) {
+ 			throw new LSHException(
+ 				"Could not resolve filter specifying function: [" + exename + "]" + functionname);
+@@ -1442,16 +1442,17 @@ public abstract class AbstractSQLFunctionDatabase<VF extends LSHVectorFactory>
+ 	 * @param manager - container for record
+ 	 * @param erec - previously queried ExecutableRecord
+ 	 * @param funcname - name of function to query for
++	 * @param spaceid - id of the address space of the function
+ 	 * @param address - address of function to query for
+ 	 * @param sigs - true if signature of function should also be returned
+ 	 * @return the resulting FunctionDescription or null
+ 	 * @throws SQLException if there is an error issuing the query
+ 	 */
+ 	private FunctionDescription queryByNameAddress(DescriptionManager manager,
+-			ExecutableRecord erec, String funcname, long address, boolean sigs)
++			ExecutableRecord erec, String funcname, int spaceid, long address, boolean sigs)
+ 			throws SQLException {
+ 		DescriptionRow row =
+-			descTable.queryFuncNameAddr(erec.getRowId().getLong(), funcname, address);
++			descTable.queryFuncNameAddr(erec.getRowId().getLong(), funcname, spaceid, address);
+ 		FunctionDescription func = DescriptionTable.convertDescriptionRow(row, erec, manager, null);
+ 		if (sigs) {
+ 			queryAssociatedSignature(func, manager, null);
+@@ -1698,7 +1699,7 @@ public abstract class AbstractSQLFunctionDatabase<VF extends LSHVectorFactory>
+ 			}
+ 			else {
+ 				funcA = queryByNameAddress(resManage, erec, pairInput.funcA.funcName,
+-					pairInput.funcA.address, true);
++					pairInput.funcA.spaceid, pairInput.funcA.address, true);
+ 				if (funcA == null) {
+ 					accumulator.missedFunc += 1;
+ 				}
+@@ -1710,7 +1711,7 @@ public abstract class AbstractSQLFunctionDatabase<VF extends LSHVectorFactory>
+ 			}
+ 			else {
+ 				funcB = queryByNameAddress(resManage, erec, pairInput.funcB.funcName,
+-					pairInput.funcB.address, true);
++					pairInput.funcB.spaceid, pairInput.funcB.address, true);
+ 				if (funcB == null) {
+ 					accumulator.missedFunc += 1;
+ 				}
+@@ -2083,7 +2084,7 @@ public abstract class AbstractSQLFunctionDatabase<VF extends LSHVectorFactory>
+ 		}
+ 		for (FunctionEntry entry : query.functionKeys) {
+ 			FunctionDescription func =
+-				queryByNameAddress(response.manage, exe, entry.funcName, entry.address, true);
++				queryByNameAddress(response.manage, exe, entry.funcName, entry.spaceid, entry.address, true);
+ 			if (func == null) {
+ 				throw new LSHException("Could not find function: " + entry.funcName);
+ 			}
+diff --git a/Ghidra/Features/BSim/src/main/java/ghidra/features/bsim/query/client/ExecutableComparison.java b/Ghidra/Features/BSim/src/main/java/ghidra/features/bsim/query/client/ExecutableComparison.java
+index 785cb263e6..19438ba7fa 100755
+--- a/Ghidra/Features/BSim/src/main/java/ghidra/features/bsim/query/client/ExecutableComparison.java
++++ b/Ghidra/Features/BSim/src/main/java/ghidra/features/bsim/query/client/ExecutableComparison.java
+@@ -247,7 +247,7 @@ public class ExecutableComparison {
+ 		ExecutableRecord exeRecord = query.manage.newExecutableRecord(
+ 			"bbbbaaaabbbbaaaabbbbaaaabbbbaaaa", null, null, null, null, null, null, null);
+ 		FunctionDescription function =
+-			query.manage.newFunctionDescription("tmp", 0x1000L, exeRecord);
++			query.manage.newFunctionDescription("tmp", 344, 0x1000L, exeRecord);
+ 		SignatureRecord signature = query.manage.newSignature(vector, 1);
+ 		query.manage.attachSignature(function, signature);
+ 
+diff --git a/Ghidra/Features/BSim/src/main/java/ghidra/features/bsim/query/client/tables/DescriptionTable.java b/Ghidra/Features/BSim/src/main/java/ghidra/features/bsim/query/client/tables/DescriptionTable.java
+index f9de7621b5..40d6a979ad 100755
+--- a/Ghidra/Features/BSim/src/main/java/ghidra/features/bsim/query/client/tables/DescriptionTable.java
++++ b/Ghidra/Features/BSim/src/main/java/ghidra/features/bsim/query/client/tables/DescriptionTable.java
+@@ -28,17 +28,17 @@ import ghidra.features.bsim.query.description.*;
+ 
+ /**
+  * This is the SQL table "desctable", which holds one row for each function ingested into the database.
+- * A row (DescriptionRow) consists of basic meta-data about the function: name, address, executable
++ * A row (DescriptionRow) consists of basic meta-data about the function: name, spaceid, address, executable
+  */
+ public class DescriptionTable extends SQLComplexTable {
+ 
+ 	//@formatter:off
+ 	private static final String INSERT_STMT =
+-		"INSERT INTO desctable (id,name_func,id_exe,id_signature,flags,addr) VALUES(DEFAULT,?,?,?,?,?)";
++		"INSERT INTO desctable (id,name_func,id_exe,id_signature,flags,spaceid,addr) VALUES(DEFAULT,?,?,?,?,?,?)";
+ 	private static final String SELECT_BY_SIGNATURE_ID_STMT =
+ 		"SELECT ALL * FROM  desctable WHERE id_signature = "; // used as simple Statement w/ appended param
+ 	private static final String SELECT_BY_FUNC_NAMEADDR_STMT =
+-		"SELECT ALL * FROM  desctable WHERE name_func = ? AND addr = ? AND id_exe = ?";
++		"SELECT ALL * FROM  desctable WHERE name_func = ? AND spaceid = ? AND addr = ? AND id_exe = ?";
+ 	private static final String SELECT_BY_FUNC_NAME_STMT =
+ 		"SELECT ALL * FROM  desctable WHERE name_func = ? AND id_exe = ?";
+ 	//@formatter:on
+@@ -48,6 +48,7 @@ public class DescriptionTable extends SQLComplexTable {
+ 		public String func_name;		// Name of the function
+ 		public long id_exe;				// Row id of the executable (within exetable) containing function
+ 		public long id_sig;				// Row id of the feature vector (within vectortable) describing function
++		public int spaceid;				// The Address Space ID of the function
+ 		public long addr;				// The (starting) address of the function
+ 		public int flags;				// bit vector describing tags that are active for this function
+ 	}
+@@ -85,9 +86,9 @@ public class DescriptionTable extends SQLComplexTable {
+ 	@Override
+ 	public void create(Statement st) throws SQLException {
+ 		st.executeUpdate("CREATE TABLE  desctable" +
+-			" (id BIGSERIAL PRIMARY KEY,name_func TEXT,id_exe INTEGER,id_signature BIGINT,flags INTEGER,addr BIGINT)");
++			" (id BIGSERIAL PRIMARY KEY,name_func TEXT,id_exe INTEGER,id_signature BIGINT,flags INTEGER,spaceid INTEGER,addr BIGINT)");
+ 		st.executeUpdate("CREATE INDEX sigindex ON desctable (id_signature)");
+-		st.executeUpdate("CREATE INDEX exefuncindex ON desctable (id_exe,name_func,addr)");
++		st.executeUpdate("CREATE INDEX exefuncindex ON desctable (id_exe,name_func,spaceid,addr)");
+ 	}
+ 
+ 	@Override
+@@ -197,7 +198,7 @@ public class DescriptionTable extends SQLComplexTable {
+ 	public static FunctionDescription convertDescriptionRow(DescriptionRow descRow,
+ 		ExecutableRecord exeRecord, DescriptionManager descManager, SignatureRecord sigRecord) {
+ 		FunctionDescription fres =
+-			descManager.newFunctionDescription(descRow.func_name, descRow.addr, exeRecord);
++			descManager.newFunctionDescription(descRow.func_name, descRow.spaceid, descRow.addr, exeRecord);
+ 		descManager.setFunctionDescriptionId(fres, new RowKeySQL(descRow.rowid));
+ 		descManager.setFunctionDescriptionFlags(fres, descRow.flags);
+ 		descManager.setSignatureId(fres, descRow.id_sig);
+@@ -220,7 +221,9 @@ public class DescriptionTable extends SQLComplexTable {
+ 		descRow.id_exe = resultSet.getInt(3);
+ 		descRow.id_sig = resultSet.getLong(4);
+ 		descRow.flags = resultSet.getInt(5);
+-		descRow.addr = resultSet.getLong(6);
++		descRow.spaceid = resultSet.getInt(6);
++		descRow.addr = resultSet.getLong(7);
++
+ 	}
+ 
+ 	/**
+@@ -279,7 +282,8 @@ public class DescriptionTable extends SQLComplexTable {
+ 		s.setInt(2, (int) func.getExecutableRecord().getRowId().getLong());
+ 		s.setLong(3, vecid);
+ 		s.setInt(4, func.getFlags());
+-		s.setLong(5, func.getAddress());
++		s.setInt(5, func.getSpaceID());
++		s.setLong(6, func.getAddress());
+ 		s.executeUpdate();
+ 
+ 		try (ResultSet rs = s.getGeneratedKeys()) {
+@@ -340,7 +344,7 @@ public class DescriptionTable extends SQLComplexTable {
+ 			selectWithFilterWhereClause = whereClause;
+ 			StringBuffer buf = new StringBuffer();
+ 			buf.append(
+-				"SELECT desctable.id,desctable.name_func,desctable.id_exe,desctable.id_signature,desctable.flags,desctable.addr FROM desctable");
++				"SELECT desctable.id,desctable.name_func,desctable.id_exe,desctable.id_signature,desctable.flags,desctable.spaceid,desctable.addr FROM desctable");
+ 			buf.append(tableClause);
+ 			buf.append(" WHERE desctable.id_signature = ? ");
+ 			buf.append(whereClause);
+@@ -383,21 +387,23 @@ public class DescriptionTable extends SQLComplexTable {
+ 
+ 	/**
+ 	 * Query the description table for the row describing a single function.
+-	 * A function is uniquely identified by: its name, address, and the executable it is in 
++	 * A function is uniquely identified by: its name, its address (address space + offset), and the executable it is in
+ 	 * @param executableId is the row id (of exetable) of the executable containing the function
+ 	 * @param functionName is the name of the function
+-	 * @param functionAddress is the address of the function
++	 * @param spaceID is the address space ID of the function address
++	 * @param functionAddress is the address offset of the function
+ 	 * @return the corresponding row of the table, or null
+ 	 * @throws SQLException if there is an error creating or executing the query
+ 	 */
+ 	public DescriptionRow queryFuncNameAddr(long executableId, String functionName,
+-		long functionAddress) throws SQLException {
++		int spaceID, long functionAddress) throws SQLException {
+ 		PreparedStatement s = selectByFuncAddrAndExeStatement
+ 			.prepareIfNeeded(() -> db.prepareStatement(SELECT_BY_FUNC_NAMEADDR_STMT));
+ 		s.setString(1, functionName);
+-		s.setLong(2, functionAddress);
+-		s.setInt(3, (int) executableId);
+-		s.setFetchSize(3);	// Should only every be at most 1
++		s.setInt(2, spaceID);
++		s.setLong(3, functionAddress);
++		s.setInt(4, (int) executableId);
++		s.setFetchSize(4);	// Should only every be at most 1
+ 
+ 		DescriptionRow resultRow = null;
+ 		try (ResultSet rs = s.executeQuery()) {
+diff --git a/Ghidra/Features/BSim/src/main/java/ghidra/features/bsim/query/description/CallgraphEntry.java b/Ghidra/Features/BSim/src/main/java/ghidra/features/bsim/query/description/CallgraphEntry.java
+index 0c81126a68..0f3d06ff0b 100755
+--- a/Ghidra/Features/BSim/src/main/java/ghidra/features/bsim/query/description/CallgraphEntry.java
++++ b/Ghidra/Features/BSim/src/main/java/ghidra/features/bsim/query/description/CallgraphEntry.java
+@@ -40,6 +40,7 @@ public class CallgraphEntry implements Comparable<CallgraphEntry> {
+ 		StringBuilder buf = new StringBuilder();
+ 		buf.append("<call");
+ 		SpecXmlUtils.xmlEscapeAttribute(buf, "dest", dest.getFunctionName());
++		SpecXmlUtils.encodeSignedIntegerAttribute(buf, "spaceid", dest.getSpaceID());
+ 		if (dest.getAddress() != -1) {
+ 			SpecXmlUtils.encodeUnsignedIntegerAttribute(buf, "addr", dest.getAddress());
+ 		}
+@@ -78,6 +79,7 @@ public class CallgraphEntry implements Comparable<CallgraphEntry> {
+ 		XmlElement el = parser.start("call");
+ 		String destnm = el.getAttribute("dest");
+ 		long address = -1;			// Default if no "addr" attribute present
++		int spaceid = SpecXmlUtils.decodeInt(el.getAttribute("addr"));
+ 		String addrString = el.getAttribute("addr");
+ 		if (addrString != null) {
+ 			address = SpecXmlUtils.decodeLong(addrString);
+@@ -107,18 +109,18 @@ public class CallgraphEntry implements Comparable<CallgraphEntry> {
+ 			} while(parser.peek().isStart());
+ 			if (md5 == null) {
+ 				ExecutableRecord destexe = man.newExecutableLibrary(dest_enm,dest_arch,null);
+-				FunctionDescription destfunc = man.newFunctionDescription(destnm, address, destexe);
++				FunctionDescription destfunc = man.newFunctionDescription(destnm, spaceid, address, destexe);
+ 				man.makeCallgraphLink(src, destfunc, val);
+ 			}
+ 			else {
+ 				ExecutableRecord destexe = man.newExecutableRecord(md5, dest_enm, dest_cnm, dest_arch, null, srcexe.getRepository(), srcexe.getPath(), null);
+-				FunctionDescription destfunc = man.newFunctionDescription(destnm, address, destexe);
++				FunctionDescription destfunc = man.newFunctionDescription(destnm, spaceid, address, destexe);
+ 				man.makeCallgraphLink(src, destfunc, val);
+ 			}
+ 		}
+ 		else {	// Assume dest is in same executable as src
+ 			FunctionDescription destfunc =
+-				man.newFunctionDescription(destnm, address, src.getExecutableRecord());
++				man.newFunctionDescription(destnm, spaceid, address, src.getExecutableRecord());
+ 			man.makeCallgraphLink(src, destfunc, val);
+ 		}
+ 		parser.end();
+diff --git a/Ghidra/Features/BSim/src/main/java/ghidra/features/bsim/query/description/DescriptionManager.java b/Ghidra/Features/BSim/src/main/java/ghidra/features/bsim/query/description/DescriptionManager.java
+index c6ad517abd..e3d70b0d12 100755
+--- a/Ghidra/Features/BSim/src/main/java/ghidra/features/bsim/query/description/DescriptionManager.java
++++ b/Ghidra/Features/BSim/src/main/java/ghidra/features/bsim/query/description/DescriptionManager.java
+@@ -24,6 +24,7 @@ import org.apache.commons.lang3.StringUtils;
+ import generic.lsh.vector.LSHVector;
+ import generic.lsh.vector.LSHVectorFactory;
+ import ghidra.features.bsim.query.LSHException;
++import ghidra.program.model.address.Address;
+ import ghidra.util.xml.SpecXmlUtils;
+ import ghidra.xml.XmlElement;
+ import ghidra.xml.XmlPullParser;
+@@ -196,11 +197,12 @@ public class DescriptionManager {
+ 	 * @param fnm is the name of the new function
+ 	 * @param address is the address (offset) of the function
+ 	 * @param erec is the executable containing the function
++	 * @param spaceid the id of the address space containing the function
+ 	 * @return the new FunctionDescription
+ 	 */
+-	public FunctionDescription newFunctionDescription(String fnm, long address,
++	public FunctionDescription newFunctionDescription(String fnm, int spaceid, long address,
+ 			ExecutableRecord erec) {
+-		FunctionDescription newfunc = new FunctionDescription(erec, fnm, address);
++		FunctionDescription newfunc = new FunctionDescription(erec, fnm, spaceid, address);
+ 		if (!funcrec.add(newfunc)) {
+ 			newfunc = funcrec.floor(newfunc);
+ 		}
+@@ -311,7 +313,7 @@ public class DescriptionManager {
+ 			throws LSHException {
+ 		ExecutableRecord erec = transferExecutable(fdesc.getExecutableRecord());
+ 		FunctionDescription res =
+-			newFunctionDescription(fdesc.getFunctionName(), fdesc.getAddress(), erec);
++			newFunctionDescription(fdesc.getFunctionName(),fdesc.getSpaceID(), fdesc.getAddress(), erec);
+ 		res.setVectorId(fdesc.getVectorId());
+ 		res.setFlags(fdesc.getFlags());
+ 		SignatureRecord srec = fdesc.getSignatureRecord();
+@@ -436,9 +438,9 @@ public class DescriptionManager {
+ 	 * @return the FunctionDescription
+ 	 * @throws LSHException if a matching function does not exist
+ 	 */
+-	public FunctionDescription findFunction(String fname, long address, ExecutableRecord exe)
++	public FunctionDescription findFunction(String fname, int spaceid, long address, ExecutableRecord exe)
+ 			throws LSHException {
+-		FunctionDescription fdesc = new FunctionDescription(exe, fname, address);
++		FunctionDescription fdesc = new FunctionDescription(exe, fname, spaceid, address);
+ 
+ 		FunctionDescription res = funcrec.floor(fdesc);
+ 		if (res == null || (!res.equals(fdesc))) {
+@@ -455,7 +457,7 @@ public class DescriptionManager {
+ 	 * @return a FunctionDescription or null 
+ 	 */
+ 	public FunctionDescription findFunctionByName(String fname, ExecutableRecord exe) {
+-		FunctionDescription fdesc = new FunctionDescription(exe, fname, 0);
++		FunctionDescription fdesc = new FunctionDescription(exe, fname, 0, 0);
+ 		FunctionDescription res = funcrec.ceiling(fdesc);
+ 		if (res == null || !fname.equals(res.getFunctionName()) ||
+ 			!res.getExecutableRecord().equals(exe)) {
+@@ -472,9 +474,9 @@ public class DescriptionManager {
+ 	 * @param exe - the executable (possibly) containing the function
+ 	 * @return a FunctionDescription or null
+ 	 */
+-	public FunctionDescription containsDescription(String fname, long address,
++	public FunctionDescription containsDescription(String fname, Address address,
+ 			ExecutableRecord exe) {
+-		FunctionDescription fdesc = new FunctionDescription(exe, fname, address);
++		FunctionDescription fdesc = new FunctionDescription(exe, fname, address.getAddressSpace().getSpaceID(), address.getOffset());
+ 		FunctionDescription res = funcrec.floor(fdesc);
+ 		if (res == null || (!res.equals(fdesc))) {
+ 			return null;
+@@ -493,7 +495,7 @@ public class DescriptionManager {
+ 		if (startexe == null) {
+ 			return null;
+ 		}
+-		FunctionDescription startfunc = new FunctionDescription(startexe, "", 0);
++		FunctionDescription startfunc = new FunctionDescription(startexe, "", 0, 0);
+ 		startfunc = funcrec.ceiling(startfunc);
+ 		if (startfunc == null) { // No functions in exe or after
+ 			startfunc = funcrec.last();
+@@ -501,7 +503,7 @@ public class DescriptionManager {
+ 		}
+ 		FunctionDescription endfunc = null;
+ 		if (endexe != null) {
+-			endfunc = new FunctionDescription(endexe, "", 0);
++			endfunc = new FunctionDescription(endexe, "", 0, 0);
+ 			endfunc = funcrec.ceiling(endfunc);
+ 		}
+ 		if (endfunc == null) {
+diff --git a/Ghidra/Features/BSim/src/main/java/ghidra/features/bsim/query/description/FunctionDescription.java b/Ghidra/Features/BSim/src/main/java/ghidra/features/bsim/query/description/FunctionDescription.java
+index 7dcfb80253..7137cd2b44 100755
+--- a/Ghidra/Features/BSim/src/main/java/ghidra/features/bsim/query/description/FunctionDescription.java
++++ b/Ghidra/Features/BSim/src/main/java/ghidra/features/bsim/query/description/FunctionDescription.java
+@@ -28,6 +28,7 @@ public class FunctionDescription implements Comparable<FunctionDescription> {
+ 	private final ExecutableRecord exerec;
+ 	private final String function_name; // Name of the function (unique within the executable)
+ 	private final long address; // Address offset of this function within its executable or -1 for a library function 
++	private final int spaceid; // ID of the address space that contains this function
+ 	private SignatureRecord sigrec;
+ 	private List<CallgraphEntry> callrec;
+ 	private RowKey id; // table id of this description
+@@ -40,13 +41,14 @@ public class FunctionDescription implements Comparable<FunctionDescription> {
+ 		public boolean flags; // Do we update the flags
+ 	}
+ 
+-	public FunctionDescription(ExecutableRecord ex, String name, long addr) {
++	public FunctionDescription(ExecutableRecord ex, String name, int space_id, long addr) {
+ 		exerec = ex;
+ 		function_name = name;
+ 		sigrec = null;
+ 		id = null;
+ 		vectorid = 0;
+ 		address = addr;
++		spaceid = space_id;
+ 		flags = 0;
+ 		callrec = null;
+ 	}
+@@ -102,6 +104,10 @@ public class FunctionDescription implements Comparable<FunctionDescription> {
+ 		return address;
+ 	}
+ 
++	public int getSpaceID() {
++		return spaceid;
++	}
++
+ 	public int getFlags() {
+ 		return flags;
+ 	}
+@@ -117,6 +123,10 @@ public class FunctionDescription implements Comparable<FunctionDescription> {
+ 		if (comp != 0) {
+ 			return false;
+ 		}
++		comp = Integer.compare(spaceid, o.spaceid);
++		if (comp != 0) {
++			return false;
++		}
+ 		comp = Long.compareUnsigned(address, o.address);
+ 		return (comp == 0);
+ 	}
+@@ -126,6 +136,8 @@ public class FunctionDescription implements Comparable<FunctionDescription> {
+ 		int val = (int) (address >> 32) + exerec.hashCode();
+ 		val *= 151;
+ 		val ^= function_name.hashCode();
++		val *= 73;
++		val ^= spaceid;
+ 		val *= 13;
+ 		val ^= (int) address;
+ 		return val;
+@@ -146,6 +158,10 @@ public class FunctionDescription implements Comparable<FunctionDescription> {
+ 		if (comp != 0) {
+ 			return comp;
+ 		}
++		comp = Integer.compare(spaceid, o.spaceid);
++		if (comp != 0) {
++			return comp;
++		}
+ 		comp = Long.compareUnsigned(address, o.address);
+ 		return comp;
+ 	}
+@@ -186,6 +202,7 @@ public class FunctionDescription implements Comparable<FunctionDescription> {
+ 		fwrite.append("<fdesc name=\"");
+ 		SpecXmlUtils.xmlEscapeWriter(fwrite, function_name);
+ 		if (address != -1) {
++			fwrite.append("\" spaceid=\"").append(Integer.toString(spaceid));
+ 			fwrite.append("\" addr=\"0x").append(Long.toHexString(address));
+ 		}
+ 		if ((sigrec != null) && (sigrec.getCount() > 0)) {
+@@ -230,16 +247,21 @@ public class FunctionDescription implements Comparable<FunctionDescription> {
+ 		int count = 0;
+ 		XmlElement el = parser.start("fdesc");
+ 		String fname = el.getAttribute("name");
++		String spaceidString = el.getAttribute("spaceid");
+ 		String addrString = el.getAttribute("addr");
+ 		String sigdupstr = el.getAttribute("sigdup");
+ 		long address = -1;			// Default value if no attribute present
++		int spaceid = 0;
+ 		if (addrString != null) {
+ 			address = SpecXmlUtils.decodeLong(addrString);
+ 		}
++		if (spaceidString != null) {
++			spaceid = SpecXmlUtils.decodeInt(spaceidString);
++		}
+ 		if (sigdupstr != null) {
+ 			count = SpecXmlUtils.decodeInt(sigdupstr);
+ 		}
+-		FunctionDescription fdesc = man.newFunctionDescription(fname, address, erec);
++		FunctionDescription fdesc = man.newFunctionDescription(fname, spaceid, address, erec);
+ 		if (parser.peek().isStart()) {
+ 			if (parser.peek().getName().equals("lshcosine")) {
+ 				SignatureRecord.restoreXml(parser, vectorFactory, man, fdesc, count);
+@@ -261,34 +283,41 @@ public class FunctionDescription implements Comparable<FunctionDescription> {
+ 	}
+ 
+ 	/**
+-	 * Create a map from addresses to functions
++	 * Create a map from address space id's to maps of offsets to function descriptions
+ 	 * @param iter is the list of functions to map
+ 	 * @return the Map
+ 	 */
+-	public static Map<Long, FunctionDescription> createAddressToFunctionMap(
++	public static Map<Integer, TreeMap<Long, FunctionDescription>> createAddressToFunctionMap(
+ 			Iterator<FunctionDescription> iter) {
+-		TreeMap<Long, FunctionDescription> addrmap = new TreeMap<Long, FunctionDescription>();
++		TreeMap<Integer, TreeMap<Long, FunctionDescription>> spacemap = new TreeMap<>();
+ 		while (iter.hasNext()) {
+ 			FunctionDescription func = iter.next();
+ 			long addr = func.getAddress();
+ 			if (addr == -1) {
+ 				continue;
+ 			}
+-			addrmap.put(addr, func);
++			Integer spaceid = (Integer)func.getSpaceID();
++			if (spacemap.containsKey(spaceid)) {
++				spacemap.get(spaceid).put(addr, func);
++			} else {
++				TreeMap<Long, FunctionDescription> addrmap = new TreeMap<Long, FunctionDescription>();
++				addrmap.put(addr,func);
++				spacemap.put(spaceid, addrmap);
++			}
+ 		}
+-		return addrmap;
++		return spacemap;
+ 	}
+ 
+ 	/**
+ 	 * Match new functions to old functions via the address, test if there is an update between the two functions,
+ 	 * generate an update record if there is, return the list of updates
+ 	 * @param iter is the list of NEW functions
+-	 * @param addrMap is a map from address to OLD functions
++	 * @param spacemap is a map from address space id's to addresses from that space to OLD functions
+ 	 * @param badList is a container for new functions that could not be mapped to old
+ 	 * @return the list of Update records
+ 	 */
+ 	public static List<Update> generateUpdates(Iterator<FunctionDescription> iter,
+-			Map<Long, FunctionDescription> addrMap, List<FunctionDescription> badList) {
++			Map<Integer, TreeMap<Long, FunctionDescription>> spaceMap, List<FunctionDescription> badList) {
+ 		List<FunctionDescription.Update> updateList = new ArrayList<FunctionDescription.Update>();
+ 		Update curupdate = new Update();
+ 		while (iter.hasNext()) {
+@@ -297,6 +326,11 @@ public class FunctionDescription implements Comparable<FunctionDescription> {
+ 			if (addr == -1) {
+ 				continue;
+ 			}
++			Integer spaceid = (Integer)newfunc.getSpaceID();
++			if(!spaceMap.containsKey(spaceid)) {
++				continue;
++			}
++			TreeMap<Long, FunctionDescription> addrMap = spaceMap.get(spaceid);
+ 			FunctionDescription oldfunc = addrMap.get(addr);
+ 			if (oldfunc == null) {
+ 				badList.add(newfunc); // Keep track of functions with update info which we couldn't find
+diff --git a/Ghidra/Features/BSim/src/main/java/ghidra/features/bsim/query/elastic/ElasticDatabase.java b/Ghidra/Features/BSim/src/main/java/ghidra/features/bsim/query/elastic/ElasticDatabase.java
+index 5a2810c2c4..7a59d79542 100755
+--- a/Ghidra/Features/BSim/src/main/java/ghidra/features/bsim/query/elastic/ElasticDatabase.java
++++ b/Ghidra/Features/BSim/src/main/java/ghidra/features/bsim/query/elastic/ElasticDatabase.java
+@@ -275,6 +275,7 @@ public class ElasticDatabase implements FunctionDatabase {
+ 			builder.append("\", \"id_signature\": \"");
+ 			Base64Lite.encodeLongBase64(builder, vecid);
+ 			builder.append("\", \"flags\": ").append(desc.getFlags());
++			builder.append(", \"spaceid\": ").append(desc.getSpaceID());
+ 			builder.append(", \"addr\": ").append(desc.getAddress());
+ 			if (info.trackcallgraph) {
+ 				List<String> vals = generateChildIds(manager, desc);
+@@ -369,11 +370,12 @@ public class ElasticDatabase implements FunctionDatabase {
+ 	 * most 1 document should be returned
+ 	 * @param exeId is the document id of the executable to match
+ 	 * @param functionName is the name of the function to match
++	 * @param spaceid is the id of the address space of the function
+ 	 * @param address is the address of the function to match
+ 	 * @return the JSON function document or null if none match
+ 	 * @throws ElasticException for communication problems with the server
+ 	 */
+-	private JsonObject queryFuncNameAddress(String exeId, String functionName, long address)
++	private JsonObject queryFuncNameAddress(String exeId, String functionName, int spaceid, long address)
+ 			throws ElasticException {
+ 		StringBuilder buffer = new StringBuilder();
+ 		buffer.append("{ \"_source\": { \"excludes\": [ \"childid\" ] }");
+@@ -385,6 +387,10 @@ public class ElasticDatabase implements FunctionDatabase {
+ 		buffer.append(escape(functionName));
+ 		buffer.append("\"},");
+ 		buffer.append("        \"term\": {");
++		buffer.append("           \"spaceid\": ").append(spaceid);
++		buffer.append("} },");
++		buffer.append("\"},");
++		buffer.append("        \"term\": {");
+ 		buffer.append("           \"addr\": ").append(address);
+ 		buffer.append("} },");
+ 		buffer.append("      \"filter\": {");
+@@ -1067,17 +1073,18 @@ public class ElasticDatabase implements FunctionDatabase {
+ 	 * @param manager is the container for the FunctionDescription
+ 	 * @param exeRecord is the given executable
+ 	 * @param functionName is the function name
++	 * @param spaceid is ID of the address space of the function
+ 	 * @param address is the function address
+ 	 * @param fillInSignatures is true if the SignatureRecord should be filled in
+ 	 * @return the recovered FunctionDescription or null if not found
+ 	 * @throws ElasticException for communication problems with the server
+ 	 */
+ 	private FunctionDescription queryByNameAddress(DescriptionManager manager,
+-			ExecutableRecord exeRecord, String functionName, long address, boolean fillInSignatures)
++			ExecutableRecord exeRecord, String functionName, int spaceid, long address, boolean fillInSignatures)
+ 			throws ElasticException {
+ 		RowKeyElastic eKey = (RowKeyElastic) exeRecord.getRowId();
+ 		String exeId = eKey.generateExeIdString();
+-		JsonObject doc = queryFuncNameAddress(exeId, functionName, address);
++		JsonObject doc = queryFuncNameAddress(exeId, functionName, spaceid, address);
+ 		if (doc == null) {
+ 			return null;
+ 		}
+@@ -1374,13 +1381,13 @@ public class ElasticDatabase implements FunctionDatabase {
+ 		List<FunctionDescription> funclist = new ArrayList<>();
+ 		queryAllFunc(funclist, erec_db, exeId, dbmanage, 0);
+ 
+-		// Create a map from address to executables
+-		Map<Long, FunctionDescription> addrmap =
+-			FunctionDescription.createAddressToFunctionMap(funclist.iterator());
++		// Create a map from address spaces, to address offsets, to executables
++		Map<Integer, TreeMap<Long, FunctionDescription>> spacemap =
++				FunctionDescription.createAddressToFunctionMap(funclist.iterator());
+ 
+ 		// Match new functions to old functions via the address
+ 		List<FunctionDescription.Update> updatelist;
+-		updatelist = FunctionDescription.generateUpdates(manager.listFunctions(exeRecord), addrmap,
++		updatelist = FunctionDescription.generateUpdates(manager.listFunctions(exeRecord), spacemap,
+ 			badFunctions);
+ 
+ 		if (!has_exe_update && updatelist.isEmpty()) {
+@@ -1507,10 +1514,11 @@ public class ElasticDatabase implements FunctionDatabase {
+ 		RowKey rowid = RowKeyElastic.parseFunctionId(hit.get("_id").getAsString());
+ 		JsonObject source = (JsonObject) hit.get("_source");
+ 		String func_name = source.get("name_func").getAsString();
++		int spaceid = (int) source.get("spaceid").getAsLong();
+ 		long addr = source.get("addr").getAsLong();
+ 		int flags = (int) source.get("flags").getAsLong();
+ 		long id_sig = Base64Lite.decodeLongBase64(source.get("id_signature").getAsString());
+-		FunctionDescription fres = manager.newFunctionDescription(func_name, addr, exeRecord);
++		FunctionDescription fres = manager.newFunctionDescription(func_name, spaceid, addr, exeRecord);
+ 		manager.setFunctionDescriptionId(fres, rowid);
+ 		manager.setFunctionDescriptionFlags(fres, flags);
+ 		manager.setSignatureId(fres, id_sig);
+@@ -2034,6 +2042,9 @@ public class ElasticDatabase implements FunctionDatabase {
+ 		builder.append("      \"flags\": { ");
+ 		builder.append("        \"type\": \"integer\", ");
+ 		builder.append("        \"index\": false }, ");
++		builder.append("      \"spaceid\": { ");
++		builder.append("        \"type\": \"integer\", ");
++		builder.append("        \"doc_values\": false }, ");
+ 		builder.append("      \"addr\": { ");
+ 		builder.append("        \"type\": \"long\", ");
+ 		builder.append("        \"doc_values\": false }, ");
+@@ -3100,7 +3111,7 @@ public class ElasticDatabase implements FunctionDatabase {
+ 			}
+ 			else {
+ 				funcA = queryByNameAddress(resManage, erec, pairInput.funcA.funcName,
+-					pairInput.funcA.address, true);
++					pairInput.funcA.spaceid, pairInput.funcA.address, true);
+ 				if (funcA == null) {
+ 					missedFunc += 1;
+ 				}
+@@ -3112,7 +3123,7 @@ public class ElasticDatabase implements FunctionDatabase {
+ 			}
+ 			else {
+ 				funcB = queryByNameAddress(resManage, erec, pairInput.funcB.funcName,
+-					pairInput.funcB.address, true);
++					pairInput.funcA.spaceid, pairInput.funcB.address, true);
+ 				if (funcB == null) {
+ 					missedFunc += 1;
+ 				}
+@@ -3551,7 +3562,7 @@ public class ElasticDatabase implements FunctionDatabase {
+ 		}
+ 		for (FunctionEntry entry : query.functionKeys) {
+ 			FunctionDescription func =
+-				queryByNameAddress(response.manage, exe, entry.funcName, entry.address, true);
++				queryByNameAddress(response.manage, exe, entry.funcName, entry.spaceid, entry.address, true);
+ 			if (func == null) {
+ 				throw new LSHException("Could not find function: " + entry.funcName);
+ 			}
+diff --git a/Ghidra/Features/BSim/src/main/java/ghidra/features/bsim/query/protocol/ClusterNote.java b/Ghidra/Features/BSim/src/main/java/ghidra/features/bsim/query/protocol/ClusterNote.java
+index 20f91291d7..bb67824a4a 100755
+--- a/Ghidra/Features/BSim/src/main/java/ghidra/features/bsim/query/protocol/ClusterNote.java
++++ b/Ghidra/Features/BSim/src/main/java/ghidra/features/bsim/query/protocol/ClusterNote.java
+@@ -50,6 +50,7 @@ public class ClusterNote {
+ 		buf.append("<note");
+ 		SpecXmlUtils.encodeUnsignedIntegerAttribute(buf, "id", func.getExecutableRecord().getXrefIndex());
+ 		SpecXmlUtils.xmlEscapeAttribute(buf, "name", func.getFunctionName());
++		SpecXmlUtils.encodeUnsignedIntegerAttribute(buf, "spaceid", func.getSpaceID());
+ 		SpecXmlUtils.encodeUnsignedIntegerAttribute(buf, "addr", func.getAddress());
+ 		buf.append(">\n");
+ 		buf.append(" <setsize>").append(SpecXmlUtils.encodeSignedInteger(setsize)).append("</setsize>\n");
+@@ -63,8 +64,9 @@ public class ClusterNote {
+ 		XmlElement el = parser.start("note");
+ 		int id = SpecXmlUtils.decodeInt(el.getAttribute("id"));
+ 		ExecutableRecord exe = xrefMap.get(id);
++		int spaceid = SpecXmlUtils.decodeInt(el.getAttribute("spaceid"));
+ 		long address = SpecXmlUtils.decodeLong(el.getAttribute("addr"));
+-		func = manage.findFunction(el.getAttribute("name"), address, exe);
++		func = manage.findFunction(el.getAttribute("name"), spaceid, address, exe);
+ 		parser.start("setsize");
+ 		setsize = SpecXmlUtils.decodeInt(parser.end().getText());
+ 		parser.start("sim");
+diff --git a/Ghidra/Features/BSim/src/main/java/ghidra/features/bsim/query/protocol/FunctionEntry.java b/Ghidra/Features/BSim/src/main/java/ghidra/features/bsim/query/protocol/FunctionEntry.java
+index 49bf806db3..e4cfdec92e 100755
+--- a/Ghidra/Features/BSim/src/main/java/ghidra/features/bsim/query/protocol/FunctionEntry.java
++++ b/Ghidra/Features/BSim/src/main/java/ghidra/features/bsim/query/protocol/FunctionEntry.java
+@@ -29,6 +29,7 @@ import ghidra.xml.XmlPullParser;
+  */
+ public class FunctionEntry {
+ 	public String funcName;			// Name of the function within the executable
++	public int spaceid;			// id of the Address Space of the function
+ 	public long address;			// Address of the function
+ 
+ 	private FunctionEntry() {
+@@ -37,12 +38,15 @@ public class FunctionEntry {
+ 	
+ 	public FunctionEntry(FunctionDescription desc) {
+ 		funcName = desc.getFunctionName();
++		spaceid = desc.getSpaceID();
+ 		address = desc.getAddress();
+ 	}
+ 
+ 	public void saveXml(Writer writer) throws IOException {
+ 		writer.append("<fentry name=\"");
+ 		SpecXmlUtils.xmlEscapeWriter(writer, funcName);
++		writer.append("\" spaceid=\"");
++		writer.append(Long.toString(spaceid));
+ 		writer.append("\" addr=\"0x");
+ 		writer.append(Long.toHexString(address));
+ 		writer.append("\"/>\n");
+@@ -52,6 +56,7 @@ public class FunctionEntry {
+ 		FunctionEntry functionEntry = new FunctionEntry();
+ 		XmlElement startEl = parser.start("fentry");
+ 		functionEntry.funcName = startEl.getAttribute("name");
++		functionEntry.spaceid = SpecXmlUtils.decodeInt(startEl.getAttribute("spaceid"));
+ 		functionEntry.address = SpecXmlUtils.decodeLong(startEl.getAttribute("addr"));
+ 		parser.end(startEl);
+ 		return functionEntry;
+diff --git a/Ghidra/Features/BSim/src/main/java/ghidra/features/bsim/query/protocol/ResponseChildren.java b/Ghidra/Features/BSim/src/main/java/ghidra/features/bsim/query/protocol/ResponseChildren.java
+index 0a34e0cc95..2b9e5f94ae 100755
+--- a/Ghidra/Features/BSim/src/main/java/ghidra/features/bsim/query/protocol/ResponseChildren.java
++++ b/Ghidra/Features/BSim/src/main/java/ghidra/features/bsim/query/protocol/ResponseChildren.java
+@@ -69,7 +69,7 @@ public class ResponseChildren extends QueryResponseRecord {
+ 
+ 		ExecutableRecord exe = manage.findExecutable(md5string);
+ 		for (FunctionEntry entry : qchild.functionKeys) {
+-			correspond.add(manage.findFunction(entry.funcName, entry.address, exe));
++			correspond.add(manage.findFunction(entry.funcName, entry.spaceid, entry.address, exe));
+ 		}
+ 		parser.end();
+ 	}
+diff --git a/Ghidra/Features/BSim/src/main/java/ghidra/features/bsim/query/protocol/ResponseUpdate.java b/Ghidra/Features/BSim/src/main/java/ghidra/features/bsim/query/protocol/ResponseUpdate.java
+index cc1d66a402..edc9bad7b8 100755
+--- a/Ghidra/Features/BSim/src/main/java/ghidra/features/bsim/query/protocol/ResponseUpdate.java
++++ b/Ghidra/Features/BSim/src/main/java/ghidra/features/bsim/query/protocol/ResponseUpdate.java
+@@ -68,6 +68,8 @@ public class ResponseUpdate extends QueryResponseRecord {
+ 				SpecXmlUtils.encodeUnsignedInteger(func.getExecutableRecord().getXrefIndex()));
+ 			fwrite.append("\" name=\"");
+ 			SpecXmlUtils.xmlEscapeWriter(fwrite, func.getFunctionName());
++			fwrite.append("\" spaceid=\"");
++			fwrite.append(SpecXmlUtils.encodeSignedInteger(func.getSpaceID()));
+ 			fwrite.append("\" addr=\"");
+ 			fwrite.append(SpecXmlUtils.encodeUnsignedInteger(func.getAddress()));
+ 			fwrite.append("\">\n");
+@@ -91,10 +93,11 @@ public class ResponseUpdate extends QueryResponseRecord {
+ 			}
+ 			else if (el.getName().equals("badfunc")) {
+ 				int id = SpecXmlUtils.decodeInt(el.getAttribute("id"));
++				int spaceid = SpecXmlUtils.decodeInt(el.getAttribute("spaceid"));
+ 				long address = SpecXmlUtils.decodeLong(el.getAttribute("addr"));
+ 				ExecutableRecord exe = exeMap.get(id);
+ 				FunctionDescription func =
+-					manage.findFunction(el.getAttribute("name"), address, exe);
++					manage.findFunction(el.getAttribute("name"), spaceid, address, exe);
+ 				badfunc.add(func);
+ 			}
+ 			parser.end();
+diff --git a/Ghidra/Features/BSim/src/main/java/ghidra/features/bsim/query/protocol/SimilarityNote.java b/Ghidra/Features/BSim/src/main/java/ghidra/features/bsim/query/protocol/SimilarityNote.java
+index 4183ce5cab..bd8b28eb92 100755
+--- a/Ghidra/Features/BSim/src/main/java/ghidra/features/bsim/query/protocol/SimilarityNote.java
++++ b/Ghidra/Features/BSim/src/main/java/ghidra/features/bsim/query/protocol/SimilarityNote.java
+@@ -63,6 +63,7 @@ public class SimilarityNote implements Comparable<SimilarityNote> {
+ 		buf.append("<note");
+ 		SpecXmlUtils.encodeUnsignedIntegerAttribute(buf, "id", func.getExecutableRecord().getXrefIndex());
+ 		SpecXmlUtils.xmlEscapeAttribute(buf, "name", func.getFunctionName());
++		SpecXmlUtils.encodeSignedIntegerAttribute(buf, "spaceid", func.getSpaceID());
+ 		SpecXmlUtils.encodeUnsignedIntegerAttribute(buf, "addr", func.getAddress());
+ 		buf.append(">\n");
+ 		buf.append(" <sim>").append(Double.toString(sim)).append("</sim>\n");
+@@ -75,8 +76,9 @@ public class SimilarityNote implements Comparable<SimilarityNote> {
+ 		XmlElement el = parser.start("note");
+ 		int id = SpecXmlUtils.decodeInt(el.getAttribute("id"));
+ 		ExecutableRecord exe = exeMap.get(id);
++		int spaceid = SpecXmlUtils.decodeInt(el.getAttribute("spaceid"));
+ 		long address = SpecXmlUtils.decodeLong(el.getAttribute("addr"));
+-		func = manage.findFunction(el.getAttribute("name"), address, exe);
++		func = manage.findFunction(el.getAttribute("name"), spaceid, address, exe);
+ 		parser.start("sim");
+ 		sim = Double.parseDouble(parser.end().getText());
+ 		parser.start("sig");
+diff --git a/Ghidra/Features/BSim/src/main/java/ghidra/features/bsim/query/protocol/SimilarityResult.java b/Ghidra/Features/BSim/src/main/java/ghidra/features/bsim/query/protocol/SimilarityResult.java
+index 9e630a9a58..4cc91911da 100755
+--- a/Ghidra/Features/BSim/src/main/java/ghidra/features/bsim/query/protocol/SimilarityResult.java
++++ b/Ghidra/Features/BSim/src/main/java/ghidra/features/bsim/query/protocol/SimilarityResult.java
+@@ -78,7 +78,7 @@ public class SimilarityResult implements Iterable<SimilarityNote> {
+ 		DescriptionManager rmanage, boolean transsig) throws LSHException {
+ 		ExecutableRecord erec = qmanage.findExecutable(op2.basefunc.getExecutableRecord().getMd5());
+ 		basefunc =
+-			qmanage.findFunction(op2.basefunc.getFunctionName(), op2.basefunc.getAddress(), erec);
++			qmanage.findFunction(op2.basefunc.getFunctionName(), op2.basefunc.getSpaceID(), op2.basefunc.getAddress(), erec);
+ 		totalcount = op2.totalcount;
+ 		notes = new ArrayList<SimilarityNote>();
+ 		for (SimilarityNote item : op2.notes) {
+@@ -94,6 +94,7 @@ public class SimilarityResult implements Iterable<SimilarityNote> {
+ 		SpecXmlUtils.encodeUnsignedIntegerAttribute(buf, "id",
+ 			basefunc.getExecutableRecord().getXrefIndex());
+ 		SpecXmlUtils.xmlEscapeAttribute(buf, "name", basefunc.getFunctionName());
++		SpecXmlUtils.encodeSignedIntegerAttribute(buf, "spaceid", basefunc.getSpaceID());
+ 		SpecXmlUtils.encodeUnsignedIntegerAttribute(buf, "addr", basefunc.getAddress());
+ 		SpecXmlUtils.encodeUnsignedIntegerAttribute(buf, "total", totalcount);
+ 		buf.append(">\n");
+@@ -113,8 +114,9 @@ public class SimilarityResult implements Iterable<SimilarityNote> {
+ 		XmlElement el = parser.start("simres");
+ 		int id = SpecXmlUtils.decodeInt(el.getAttribute("id"));
+ 		ExecutableRecord exe = qMap.get(id);
++		int spaceid = SpecXmlUtils.decodeInt(el.getAttribute("spaceid"));
+ 		long address = SpecXmlUtils.decodeLong(el.getAttribute("addr"));
+-		basefunc = qmanage.findFunction(el.getAttribute("name"), address, exe);
++		basefunc = qmanage.findFunction(el.getAttribute("name"), spaceid, address, exe);
+ 		totalcount = SpecXmlUtils.decodeInt(el.getAttribute("total"));
+ 		while (parser.peek().isStart()) {
+ 			SimilarityNote newnote = new SimilarityNote();
+diff --git a/Ghidra/Features/BSim/src/main/java/ghidra/features/bsim/query/protocol/SimilarityVectorResult.java b/Ghidra/Features/BSim/src/main/java/ghidra/features/bsim/query/protocol/SimilarityVectorResult.java
+index 126fd825b2..0367a8ef6f 100755
+--- a/Ghidra/Features/BSim/src/main/java/ghidra/features/bsim/query/protocol/SimilarityVectorResult.java
++++ b/Ghidra/Features/BSim/src/main/java/ghidra/features/bsim/query/protocol/SimilarityVectorResult.java
+@@ -81,6 +81,7 @@ public class SimilarityVectorResult {
+ 		SpecXmlUtils.encodeUnsignedIntegerAttribute(buf, "id",
+ 			basefunc.getExecutableRecord().getXrefIndex());
+ 		SpecXmlUtils.xmlEscapeAttribute(buf, "name", basefunc.getFunctionName());
++		SpecXmlUtils.encodeSignedIntegerAttribute(buf, "spaceid", basefunc.getSpaceID());
+ 		SpecXmlUtils.encodeUnsignedIntegerAttribute(buf, "addr", basefunc.getAddress());
+ 		buf.append(">\n");
+ 		write.append(buf.toString());
+@@ -97,8 +98,9 @@ public class SimilarityVectorResult {
+ 		XmlElement el = parser.start("simvecres");
+ 		int id = SpecXmlUtils.decodeInt(el.getAttribute("id"));
+ 		ExecutableRecord exe = exeMap.get(id);
++		int spaceid = SpecXmlUtils.decodeInt(el.getAttribute("spaceid"));
+ 		long address = SpecXmlUtils.decodeLong(el.getAttribute("addr"));
+-		basefunc = qmanage.findFunction(el.getAttribute("name"), address, exe);
++		basefunc = qmanage.findFunction(el.getAttribute("name"), spaceid, address, exe);
+ 		totalcount = 0;
+ 		while (parser.peek().isStart()) {
+ 			VectorResult newnote = new VectorResult();
+diff --git a/Ghidra/Features/BSim/src/screen/java/help/screenshot/BSimSearchPluginScreenShots.java b/Ghidra/Features/BSim/src/screen/java/help/screenshot/BSimSearchPluginScreenShots.java
+index 82b4c616b5..2a628874f4 100755
+--- a/Ghidra/Features/BSim/src/screen/java/help/screenshot/BSimSearchPluginScreenShots.java
++++ b/Ghidra/Features/BSim/src/screen/java/help/screenshot/BSimSearchPluginScreenShots.java
+@@ -270,13 +270,13 @@ public class BSimSearchPluginScreenShots extends GhidraScreenShotGenerator {
+ 		// create some canned data
+ 		ResponseNearest response = new ResponseNearest(null);
+ 		response.result.add(new TestSimilarityResult("queryFunction", "exec1", "matchFunction1",
+-			0x01001100, 0.9d, 15.0d));
++			0, 0x01001100, 0.9d, 15.0d));
+ 		response.result.add(new TestSimilarityResult("queryFunction", "exec2", "matchFunction2",
+-			0x01001100, 0.9d, 15.0d));
++			0, 0x01001100, 0.9d, 15.0d));
+ 		response.result.add(new TestSimilarityResult("queryFunction", "exec1", "matchFunction3",
+-			0x01001100, 0.9d, 15.0d));
++			0, 0x01001100, 0.9d, 15.0d));
+ 		response.result.add(new TestSimilarityResult("queryFunction", "exec1", "matchFunction4",
+-			0x01001100, 0.9d, 15.0d));
++			0, 0x01001100, 0.9d, 15.0d));
+ 
+ 		database.setQueryResponse(response); // set a valid response to be returned on query
+ 		database.setCanInitialize(true); // initialize may be called--this is OK
+diff --git a/Ghidra/Features/BSim/src/test.slow/java/ghidra/features/bsim/gui/BSimSearchPluginTest.java b/Ghidra/Features/BSim/src/test.slow/java/ghidra/features/bsim/gui/BSimSearchPluginTest.java
+index 3f40419dcd..c26b218bce 100755
+--- a/Ghidra/Features/BSim/src/test.slow/java/ghidra/features/bsim/gui/BSimSearchPluginTest.java
++++ b/Ghidra/Features/BSim/src/test.slow/java/ghidra/features/bsim/gui/BSimSearchPluginTest.java
+@@ -132,13 +132,13 @@ public class BSimSearchPluginTest extends AbstractBSimPluginTest {
+ 		// create some canned data
+ 		ResponseNearest response = new ResponseNearest(null);
+ 		response.result.add(new TestSimilarityResult("queryFunction", "exec1", "matchFunction1",
+-			01001100, 0.9d, 15.0d));
++			0, 01001100, 0.9d, 15.0d));
+ 		response.result.add(new TestSimilarityResult("queryFunction", "exec2", "matchFunction2",
+-			01001100, 0.9d, 15.0d));
++			0, 01001100, 0.9d, 15.0d));
+ 		response.result.add(new TestSimilarityResult("queryFunction", "exec1", "matchFunction3",
+-			01001100, 0.9d, 15.0d));
++			0, 01001100, 0.9d, 15.0d));
+ 		response.result.add(new TestSimilarityResult("queryFunction", "exec1", "matchFunction4",
+-			01001100, 0.9d, 15.0d));
++			0, 01001100, 0.9d, 15.0d));
+ 
+ 		database.setQueryResponse(response); // set a valid response to be returned on query
+ 		database.setCanInitialize(true); // initialize may be called--this is OK
+diff --git a/Ghidra/Features/BSim/src/test/java/ghidra/features/bsim/query/client/BSimFunctionDatabaseTest.java b/Ghidra/Features/BSim/src/test/java/ghidra/features/bsim/query/client/BSimFunctionDatabaseTest.java
+index 8688318374..b6ae2dde49 100755
+--- a/Ghidra/Features/BSim/src/test/java/ghidra/features/bsim/query/client/BSimFunctionDatabaseTest.java
++++ b/Ghidra/Features/BSim/src/test/java/ghidra/features/bsim/query/client/BSimFunctionDatabaseTest.java
+@@ -73,11 +73,11 @@ public class BSimFunctionDatabaseTest extends AbstractGhidraHeadlessIntegrationT
+ 			// Create a list of function descriptions; we'll loop over all of these, 
+ 			// trying to query each one in turn.
+ 			List<FunctionDescription> descs = new ArrayList<>();
+-			FunctionDescription desc1 = new FunctionDescription(erec, "d1", 0x10100);
+-			FunctionDescription desc2 = new FunctionDescription(erec, "d2", 0x10200);
+-			FunctionDescription desc3 = new FunctionDescription(erec, "d3", 0x10300);
+-			FunctionDescription desc4 = new FunctionDescription(erec, "d4", 0x10400);
+-			FunctionDescription desc5 = new FunctionDescription(erec, "d5", 0x10500);
++			FunctionDescription desc1 = new FunctionDescription(erec, "d1", 0, 0x10100);
++			FunctionDescription desc2 = new FunctionDescription(erec, "d2", 0, 0x10200);
++			FunctionDescription desc3 = new FunctionDescription(erec, "d3", 0, 0x10300);
++			FunctionDescription desc4 = new FunctionDescription(erec, "d4", 0, 0x10400);
++			FunctionDescription desc5 = new FunctionDescription(erec, "d5", 0, 0x10500);
+ 
+ 			// Now create 2 different LSH vectors. Make them slightly different so 
+ 			// we should treat them as distinct vectors. (Note that we already have tests
+diff --git a/Ghidra/Features/BSim/src/test/java/ghidra/features/bsim/query/facade/TestNearestVectorResult.java b/Ghidra/Features/BSim/src/test/java/ghidra/features/bsim/query/facade/TestNearestVectorResult.java
+index 2ae399c0b1..6fa3d02b03 100644
+--- a/Ghidra/Features/BSim/src/test/java/ghidra/features/bsim/query/facade/TestNearestVectorResult.java
++++ b/Ghidra/Features/BSim/src/test/java/ghidra/features/bsim/query/facade/TestNearestVectorResult.java
+@@ -41,7 +41,7 @@ public class TestNearestVectorResult extends SimilarityVectorResult {
+ 			new ExecutableRecord(hash, executableName, "gcc", "x86", new Date(), null, null, null);
+ 
+ 		FunctionDescription description =
+-			new FunctionDescription(executableRecord, queryFunctionName, 0x10000);
++			new FunctionDescription(executableRecord, queryFunctionName, 0, 0x10000);
+ 		description.setSignatureRecord(new SignatureRecord(new TestLSHVector()));
+ 		return description;
+ 	}
+diff --git a/Ghidra/Features/BSim/src/test/java/ghidra/features/bsim/query/facade/TestSimilarityResult.java b/Ghidra/Features/BSim/src/test/java/ghidra/features/bsim/query/facade/TestSimilarityResult.java
+index 30ae1dddc5..f82a8495db 100755
+--- a/Ghidra/Features/BSim/src/test/java/ghidra/features/bsim/query/facade/TestSimilarityResult.java
++++ b/Ghidra/Features/BSim/src/test/java/ghidra/features/bsim/query/facade/TestSimilarityResult.java
+@@ -28,20 +28,20 @@ public class TestSimilarityResult extends SimilarityResult {
+ //	protected static Random random = new Random();
+ 
+ 	public TestSimilarityResult(String queryFunctionName, String executableName,
+-			String matchFunction, long address, double significance, double confidence) {
+-		super(createFunctionDescription(queryFunctionName, executableName, address));
+-		addNote(createFunctionDescription(matchFunction, executableName, address), significance,
++			String matchFunction, int spaceid, long address, double significance, double confidence) {
++		super(createFunctionDescription(queryFunctionName, executableName, spaceid, address));
++		addNote(createFunctionDescription(matchFunction, executableName, spaceid, address), significance,
+ 			confidence);
+ 	}
+ 
+ 	protected static FunctionDescription createFunctionDescription(String queryFunctionName,
+-			String executableName, long address) {
++			String executableName, int spaceid, long address) {
+ 		String hash = getMd5(executableName);
+ 		ExecutableRecord executableRecord =
+ 			new ExecutableRecord(hash, executableName, "gcc", "x86", new Date(), null, null, null);
+ 
+ 		FunctionDescription description =
+-			new FunctionDescription(executableRecord, queryFunctionName, address);
++			new FunctionDescription(executableRecord, queryFunctionName, spaceid, address);
+ 		return description;
+ 	}
+ 
+-- 
+2.45.1
+
