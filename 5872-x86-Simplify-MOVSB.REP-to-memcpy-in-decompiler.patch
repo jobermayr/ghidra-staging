@@ -4,11 +4,11 @@ Date: Tue, 10 Oct 2023 19:05:17 +0200
 Subject: [PATCH] 5872: x86: Simplify MOVSB.REP to memcpy in decompiler
 
 ---
- Ghidra/Processors/x86/data/languages/ia.sinc | 36 ++++++++++++++++++--
- 1 file changed, 34 insertions(+), 2 deletions(-)
+ Ghidra/Processors/x86/data/languages/ia.sinc | 114 ++++++++++++++++++-
+ 1 file changed, 109 insertions(+), 5 deletions(-)
 
 diff --git a/Ghidra/Processors/x86/data/languages/ia.sinc b/Ghidra/Processors/x86/data/languages/ia.sinc
-index 387227e733..22cabaa8f7 100644
+index 387227e733..b14b95907a 100644
 --- a/Ghidra/Processors/x86/data/languages/ia.sinc
 +++ b/Ghidra/Processors/x86/data/languages/ia.sinc
 @@ -1464,6 +1464,7 @@ rep: ".REP" is ((repprefx=1 & repneprefx=0)|(repprefx=0 & repneprefx=1)) & addrs
@@ -19,32 +19,111 @@ index 387227e733..22cabaa8f7 100644
  
  reptail:	is ((repprefx=1 & repneprefx=0)|(repprefx=0 & repneprefx=1))			{ goto inst_start; }
  reptail:	is repprefx=0 & repneprefx=0			{ }
-@@ -3977,7 +3978,23 @@ define pcodeop swap_bytes;
+@@ -3977,11 +3978,99 @@ define pcodeop swap_bytes;
  :MOVNTI Mem,Reg64       is $(LONGMODE_ON) & vexMode=0 & opsize = 2; byte=0xf; byte=0xc3; Mem & Reg64 ...     { *Mem = Reg64; }
  @endif
  
 -:MOVSB^rep^reptail eseDI1,dseSI1    is vexMode=0 & rep & reptail & byte=0xa4 & eseDI1 & dseSI1          { build rep; build eseDI1; build dseSI1; eseDI1 = dseSI1; build reptail; }
+-:MOVSW^rep^reptail eseDI2,dseSI2    is vexMode=0 & rep & reptail & opsize=0 & byte=0xa5 & eseDI2 & dseSI2   { build rep; build eseDI2; build dseSI2; eseDI2 = dseSI2; build reptail; }
+-:MOVSD^rep^reptail eseDI4,dseSI4    is vexMode=0 & rep & reptail & opsize=1 & byte=0xa5 & eseDI4 & dseSI4   { build rep; build eseDI4; build dseSI4; eseDI4 = dseSI4; build reptail; }
 +:MOVSB^rep^reptail eseDI1,dseSI1    is vexMode=0 & rep & reptail & repprefx=0 & byte=0xa4 & eseDI1 & dseSI1          { build rep; build eseDI1; build dseSI1; eseDI1 = dseSI1; build reptail; }
 +define pcodeop memcpy;
 +:MOVSB^repx DI,SI	is vexMode=0 & addrsize=0 & repx & repprefx=1 & byte=0xa4 & DI & SI
 +{
 +  memcpy(DI, SI, CX);
++  DI = DI + CX;
++  SI = SI + CX;
 +}
-+:MOVSB^repx EDI,ESI      is vexMode=0 & addrsize=1 & repx & repprefx=1 & byte=0xa4 & EDI & ESI
++:MOVSB^repx EDI,ESI     is vexMode=0 & addrsize=1 & repx & repprefx=1 & byte=0xa4 & EDI & ESI
 +{
 +  memcpy(EDI, ESI, ECX);
++  EDI = EDI + ECX;
++  ESI = ESI + ECX;
 +}
-+@ifdef IA64
+ @ifdef IA64
+-:MOVSQ^rep^reptail eseDI8,dseSI8    is $(LONGMODE_ON) & vexMode=0 & rep & reptail & opsize=2 & byte=0xa5 & eseDI8 & dseSI8   { build rep; build eseDI8; build dseSI8; eseDI8 = dseSI8; build reptail; }
 +:MOVSB^repx RDI,RSI	is vexMode=0 & addrsize=2 & repx & repprefx=1 & byte=0xa4 & RDI & RSI
 +{
 +  memcpy(RDI, RSI, ECX);
++  local tmp:8 = zext(ECX);
++  RDI = RDI + tmp;
++  RSI = RSI + tmp;
 +}
 +@endif
 +
- :MOVSW^rep^reptail eseDI2,dseSI2    is vexMode=0 & rep & reptail & opsize=0 & byte=0xa5 & eseDI2 & dseSI2   { build rep; build eseDI2; build dseSI2; eseDI2 = dseSI2; build reptail; }
- :MOVSD^rep^reptail eseDI4,dseSI4    is vexMode=0 & rep & reptail & opsize=1 & byte=0xa5 & eseDI4 & dseSI4   { build rep; build eseDI4; build dseSI4; eseDI4 = dseSI4; build reptail; }
- @ifdef IA64
-@@ -4642,7 +4659,22 @@ define pcodeop stac;
++:MOVSW^rep^reptail eseDI2,dseSI2    is vexMode=0 & rep & reptail & repprefx=0 & opsize=0 & byte=0xa5 & eseDI2 & dseSI2   { build rep; build eseDI2; build dseSI2; eseDI2 = dseSI2; build reptail; }
++:MOVSW^repx DI,SI    is vexMode=0 & addrsize=0 & repx & repprefx=1 & opsize=0 & byte=0xa5 & DI & SI
++{
++  local tmp = CX * 2;
++  memcpy(DI, SI, tmp);
++  DI = DI + tmp;
++  SI = SI + tmp;
++}
++:MOVSW^repx EDI,ESI    is vexMode=0 & addrsize=1 & repx & repprefx=1 & opsize=0 & byte=0xa5 & EDI & ESI
++{
++  local tmp = ECX * 2;
++  memcpy(EDI, ESI, tmp);
++  EDI = EDI + tmp;
++  ESI = ESI + tmp;
++}
++@ifdef IA64
++:MOVSW^repx RDI,RSI    is vexMode=0 & addrsize=2 & repx & repprefx=1 & opsize=0 & byte=0xa5 & RDI & RSI
++{
++  local tmp:8 = zext(ECX) * 2;
++  memcpy(RDI, RSI, tmp);
++  RDI = RDI + tmp;
++  RSI = RSI + tmp;
++}
++@endif
++:MOVSD^rep^reptail eseDI4,dseSI4    is vexMode=0 & rep & reptail & repprefx=0 & opsize=1 & byte=0xa5 & eseDI4 & dseSI4   { build rep; build eseDI4; build dseSI4; eseDI4 = dseSI4; build reptail; }
++:MOVSD^repx DI,SI    is vexMode=0 & addrsize=0 & repx & repprefx=1 & opsize=1 & byte=0xa5 & DI & SI
++{
++  local tmp = CX * 4;
++  memcpy(DI, SI, tmp);
++  DI = DI + tmp;
++  SI = SI + tmp;
++}
++:MOVSD^repx EDI,ESI    is vexMode=0 & addrsize=1 & repx & repprefx=1 & opsize=1 & byte=0xa5 & EDI & ESI
++{
++  local tmp = ECX * 4;
++  memcpy(EDI, ESI, tmp);
++  EDI = EDI + tmp;
++  ESI = ESI + tmp;
++}
++@ifdef IA64
++:MOVSD^repx RDI,RSI    is vexMode=0 & addrsize=2 & repx & repprefx=1 & opsize=1 & byte=0xa5 & RDI & RSI
++{
++  local tmp:8 = zext(ECX) * 4;
++  memcpy(RDI, RSI, tmp);
++  RDI = RDI + tmp;
++  RSI = RSI + tmp;
++}
++:MOVSQ^rep^reptail eseDI8,dseSI8    is $(LONGMODE_ON) & vexMode=0 & rep & reptail & repprefx=0 & opsize=2 & byte=0xa5 & eseDI8 & dseSI8   { build rep; build eseDI8; build dseSI8; eseDI8 = dseSI8; build reptail; }
++:MOVSQ^repx DI,SI    is $(LONGMODE_ON) & vexMode=0 & addrsize=0 & repx & repprefx=1 & opsize=2 & byte=0xa5 & DI & SI
++{
++  local tmp = CX * 8;
++  memcpy(DI, SI, tmp);
++  DI = DI + tmp;
++  SI = SI + tmp;
++}
++:MOVSQ^repx EDI,ESI    is $(LONGMODE_ON) & vexMode=0 & addrsize=1 & repx & repprefx=1 & opsize=2 & byte=0xa5 & EDI & ESI
++{
++  local tmp = ECX * 8;
++  memcpy(EDI, ESI, tmp);
++  EDI = EDI + tmp;
++  ESI = ESI + tmp;
++}
++:MOVSQ^repx RDI,RSI    is $(LONGMODE_ON) & vexMode=0 & addrsize=2 & repx & repprefx=1 & opsize=2 & byte=0xa5 & RDI & RSI
++{
++  local tmp:8 = zext(ECX) * 8;
++  memcpy(RDI, RSI, tmp);
++  RDI = RDI + tmp;
++  RSI = RSI + tmp;
++}
+ @endif
+ 
+ :MOVSX Reg16,spec_rm8    is vexMode=0 & opsize=0 & byte=0xf; byte=0xbe; spec_rm8 & Reg16 ...  { Reg16 = sext(spec_rm8); }
+@@ -4642,7 +4731,22 @@ define pcodeop stac;
  
  :STMXCSR m32        is vexMode=0 & byte=0xf; byte=0xae; ( mod != 0b11 & reg_opcode=3 ) ... & m32 { m32 = MXCSR; }
  
