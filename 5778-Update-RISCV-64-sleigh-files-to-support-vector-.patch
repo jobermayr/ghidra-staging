@@ -79,12 +79,17 @@ Add two riscv64 decompiler tests, update isa_ext docs to current Fedora release
 
 Add initial support for RISCV extension zfa in the disassembly view.
 The associated semantics are only suggestive of the action taken by these instructions
+
+* Correct guards to allow builds on RISCV platforms without double precision FP
+
+* Document RISCV datatests
+* Remove unneeded fp register definition
 ---
  .../Decompiler/certification.manifest         |    1 +
  .../datatests/riscv_isaext_memcpy.xml         |   30 +
  .../src/decompile/unittests/riscv_isaext.cc   |   90 +
  .../Processors/RISCV/certification.manifest   |   17 +
- .../data/languages/Readme_isa_extensions.md   |  158 +
+ .../data/languages/Readme_isa_extensions.md   |  184 +
  .../RISCV/data/languages/riscv.custom.sinc    |    2 +-
  .../data/languages/riscv.ilp32d_thead.slaspec |   31 +
  .../RISCV/data/languages/riscv.instr.sinc     |   17 +-
@@ -105,8 +110,8 @@ The associated semantics are only suggestive of the action taken by these instru
  .../RISCV/data/languages/riscv.table.sinc     |   34 +-
  .../RISCV/data/languages/riscv.xthead.sinc    |  712 +++
  .../RISCV/data/languages/riscv.zcb.sinc       |   71 +
- .../RISCV/data/languages/riscv.zfa.sinc       |  925 ++++
- .../RISCV/data/languages/riscv.zfh.sinc       |  289 ++
+ .../RISCV/data/languages/riscv.zfa.sinc       |  933 ++++
+ .../RISCV/data/languages/riscv.zfh.sinc       |  288 ++
  .../RISCV/data/languages/riscv.zknd.sinc      |   21 +
  .../RISCV/data/languages/riscv.zkne.sinc      |    7 +
  .../RISCV/data/languages/riscv.zknh.sinc      |   55 +
@@ -117,7 +122,7 @@ The associated semantics are only suggestive of the action taken by these instru
  .../RISCV/data/languages/riscv.zvkng.sinc     |   55 +
  .../RISCV/data/languages/riscv.zvksg.sinc     |   19 +
  gradle/support/ip.gradle                      |    2 +
- 37 files changed, 6663 insertions(+), 797 deletions(-)
+ 37 files changed, 6696 insertions(+), 797 deletions(-)
  create mode 100644 Ghidra/Features/Decompiler/src/decompile/datatests/riscv_isaext_memcpy.xml
  create mode 100644 Ghidra/Features/Decompiler/src/decompile/unittests/riscv_isaext.cc
  create mode 100644 Ghidra/Processors/RISCV/data/languages/Readme_isa_extensions.md
@@ -329,10 +334,10 @@ index 53b21f900f..1472943b92 100644
  data/languages/riscv32.dwarf||GHIDRA||||END|
 diff --git a/Ghidra/Processors/RISCV/data/languages/Readme_isa_extensions.md b/Ghidra/Processors/RISCV/data/languages/Readme_isa_extensions.md
 new file mode 100644
-index 0000000000..8d6cb33c0b
+index 0000000000..931bd90b9d
 --- /dev/null
 +++ b/Ghidra/Processors/RISCV/data/languages/Readme_isa_extensions.md
-@@ -0,0 +1,158 @@
+@@ -0,0 +1,184 @@
 +# RISCV Instruction Set Extensions
 +
 +> The RISCV instruction set is relatively easy to extend with new instructions.  These extensions present Ghidra with many design and implementation challenges.
@@ -491,6 +496,33 @@ index 0000000000..8d6cb33c0b
 +tests to verify the supported RISCV processor/language definitions are loaded and key user pcode operations are defined.
 +The `datatests` directory holds binary instruction snippets to be decompiled, along with key strings as they must
 +appear in the decompiler view.
++
++Basic combinations of RISCV architecture, extensions, and generated code are listed below.
++
++
++| Language | Data Test | Architecture | Notes |
++| ------------------ | --------- | ---------- | ----- |
++| RISCV:LE:64:RV64GC | `riscv_isaext_memcpy` | rv64gcv | Minimal test of 64 bit vectorized memcpy |
++
++Pre-commit testing should include something like:
++
++```console
++$ cd Ghidra/Features/Decompiler/src/decompile/cpp
++$ make ghidra_test_dbg
++$ ./ghidra_test_dbg datatests riscv_isaext_memcpy.xml
++
++Success -- vsetvli
++Success -- vle8
++Success -- vse8
++
++Total tests applied = 3
++Total passing tests = 3
++```
++
++>TODO: The sleigh language `RISCV:LE:64:RV64GC` needs a better name, as it
++>      includes many standard-tracked extensions beyond those explicitly named
++>      by the `GC` suffix.
+\ No newline at end of file
 diff --git a/Ghidra/Processors/RISCV/data/languages/riscv.custom.sinc b/Ghidra/Processors/RISCV/data/languages/riscv.custom.sinc
 index 75a6ff7a24..deb5891af8 100644
 --- a/Ghidra/Processors/RISCV/data/languages/riscv.custom.sinc
@@ -7984,10 +8016,10 @@ index 0000000000..1d04755a08
 \ No newline at end of file
 diff --git a/Ghidra/Processors/RISCV/data/languages/riscv.zfa.sinc b/Ghidra/Processors/RISCV/data/languages/riscv.zfa.sinc
 new file mode 100644
-index 0000000000..490a96806c
+index 0000000000..2218281a16
 --- /dev/null
 +++ b/Ghidra/Processors/RISCV/data/languages/riscv.zfa.sinc
-@@ -0,0 +1,925 @@
+@@ -0,0 +1,933 @@
 +# zfa additional floating point instructions - Ref https://github.com/riscv/riscv-isa-manual/blob/main/src/zfa.adoc
 +# Warning: the semantics sections are suggestive of the operation and not intended to be accurate.  With quad and
 +# half-precision floating point operations present, the naming here of floating point registers is inconsistent.
@@ -8798,7 +8830,7 @@ index 0000000000..490a96806c
 +    frd=fmax_m(frs1S,frs2S);
 +}
 +
-+@if ((FPSIZE == "64") || (FPSIZE == "128"))
++@if (FPSIZE == "128")
 +:fminm.q frd,frs1D,frs2D is frs1D & frd & frs2D & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct3=0x2 & funct7=0x17
 +{
 +    frd=fmin_m(frs1D,frs2D);
@@ -8808,22 +8840,24 @@ index 0000000000..490a96806c
 +{
 +    frd=fmax_m(frs1D,frs2D);
 +}
++@endif
 +
 +# rounding
 +
-+:fround.s frd,frs1D,FRM is frs1D & frd & FRM & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct7=0x20 & op2024=0x4
++:fround.s frd,frs1S,FRM is frs1S & frd & FRM & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct7=0x20 & op2024=0x4
 +{
-+    local tmp:4 = float2float(frs1D);
++    local tmp:4 = float2float(frs1S);
 +    frd = zext(tmp);
 +}
 +
-+:froundnx.s frd,frs1D,FRM is frs1D & frd & FRM & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct7=0x20 & op2024=0x5
++:froundnx.s frd,frs1S,FRM is frs1S & frd & FRM & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct7=0x20 & op2024=0x5
 +{
 +    # sets the inexact exception flag if the input differs from the rounded result and is not NaN
-+    local tmp:4 = float2float(frs1D);
++    local tmp:4 = float2float(frs1S);
 +    frd = zext(tmp);
 +}
 +
++@if ((FPSIZE == "64") || (FPSIZE == "128"))
 +:fround.d frd,frs1D,FRM is frs1D & frd & FRM & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct7=0x21 & op2024=0x4
 +{
 +    local tmp:4 = float2float(frs1D);
@@ -8836,20 +8870,22 @@ index 0000000000..490a96806c
 +    local tmp:4 = float2float(frs1D);
 +    frd = zext(tmp);
 +}
++@endif
 +
-+:fround.h frd,frs1D,FRM is frs1D & frd & FRM & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct7=0x22 & op2024=0x4
++:fround.h frd,frs1S,FRM is frs1S & frd & FRM & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct7=0x22 & op2024=0x4
 +{
-+    local tmp:4 = float2float(frs1D);
++    local tmp:4 = float2float(frs1S);
 +    frd = zext(tmp);
 +}
 +
-+:froundnx.h frd,frs1D,FRM is frs1D & frd & FRM & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct7=0x22 & op2024=0x5
++:froundnx.h frd,frs1S,FRM is frs1S & frd & FRM & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct7=0x22 & op2024=0x5
 +{
 +    # sets the inexact exception flag if the input differs from the rounded result and is not NaN
-+    local tmp:4 = float2float(frs1D);
++    local tmp:4 = float2float(frs1S);
 +    frd = zext(tmp);
 +}
 +
++@if (FPSIZE == "128")
 +:fround.q frd,frs1D,FRM is frs1D & frd & FRM & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct7=0x23 & op2024=0x4
 +{
 +    local tmp:4 = float2float(frs1D);
@@ -8862,7 +8898,9 @@ index 0000000000..490a96806c
 +    local tmp:4 = float2float(frs1D);
 +    frd = zext(tmp);
 +}
++@endif
 +
++@if ((FPSIZE == "64") || (FPSIZE == "128"))
 +:fcvtmod.w.d rd,frs1D,"rtz" is frs1D & op1214=1 & rd & op0001=0x3 & op0204=0x4 & op0506=0x2 & op0707=0x0  & funct7=0x61 & op2024=0x8
 +{
 +    # like FCVT.W.D  but always rounds to zero, the following doesn't do this
@@ -8887,12 +8925,12 @@ index 0000000000..490a96806c
 +{
 +        rd = zext(frs1D f<= frs2D);
 +}
-+@endif
 +
-+:fltq.d rd,frs1S,frs2S is frs2S & frs1S & rd & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct3=0x5 & funct7=0x51
++:fltq.d rd,frs1D,frs2D is frs2D & frs1D & rd & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct3=0x5 & funct7=0x51
 +{
-+        rd = zext(frs1S f== frs2S);
++        rd = zext(frs1D f== frs2D);
 +}
++@endif
 +
 +:fleq.h rd,frs1S,frs2S is frs2S & frs1S & rd & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct3=0x4 & funct7=0x52
 +{
@@ -8904,21 +8942,24 @@ index 0000000000..490a96806c
 +        rd = zext(frs1S f== frs2S);
 +}
 +
-+:fleq.q rd,frs1S,frs2S is frs2S & frs1S & rd & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct3=0x4 & funct7=0x53
++@if (FPSIZE == "128")
++:fleq.q rd,frs1D,frs2D is frs2D & frs1D & rd & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct3=0x4 & funct7=0x53
 +{
-+        rd = zext(frs1S f<= frs2S);
++        rd = zext(frs1D f<= frs2D);
 +}
 +
-+:fltq.q rd,frs1S,frs2S is frs2S & frs1S & rd & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct3=0x5 & funct7=0x53
++:fltq.q rd,frs1D,frs2D is frs2D & frs1D & rd & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct3=0x5 & funct7=0x53
 +{
-+        rd = zext(frs1S f== frs2S);
++        rd = zext(frs1D f== frs2D);
 +}
++@endif
+\ No newline at end of file
 diff --git a/Ghidra/Processors/RISCV/data/languages/riscv.zfh.sinc b/Ghidra/Processors/RISCV/data/languages/riscv.zfh.sinc
 new file mode 100644
-index 0000000000..5cf9d8a593
+index 0000000000..f168ab0f72
 --- /dev/null
 +++ b/Ghidra/Processors/RISCV/data/languages/riscv.zfh.sinc
-@@ -0,0 +1,289 @@
+@@ -0,0 +1,288 @@
 +# 16 bit floating point support
 +# Ref: https://drive.google.com/file/d/1z3tQQLm5ALsAD77PM0l0CHnapxWCeVzP/view
 +# Note:
@@ -8938,7 +8979,6 @@ index 0000000000..5cf9d8a593
 +# NaNboxed to fill the register
 +frs1H: fr1519 is fr1519 { local tmp = fr1519:$(HFLEN); export tmp; }
 +frs2H: fr2024 is fr2024 { local tmp = fr2024:$(HFLEN); export tmp; }
-+frs3H: fr2731 is fr2731 { local tmp = fr2731:$(HFLEN); export tmp; }
 +
 +macro nanboxH(dest, src){
 +@if EMULATION
