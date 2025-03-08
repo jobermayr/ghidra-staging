@@ -1,0 +1,207 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Eric Kilmer <eric.d.kilmer@gmail.com>
+Date: Thu, 6 Mar 2025 12:13:14 -0500
+Subject: [PATCH] 7883: decompiler-cpp: Verbose mode for test failures
+
+This makes it easier to view and report failing tests without using a
+debugger.
+---
+ .../src/decompile/cpp/ifacedecomp.cc          |  2 +-
+ .../cpp/include/ghidra/testfunction.hh        | 12 ++++++--
+ .../Decompiler/src/decompile/cpp/test.cc      | 10 +++++--
+ .../src/decompile/cpp/testfunction.cc         | 29 ++++++++++++++++---
+ 4 files changed, 43 insertions(+), 10 deletions(-)
+
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/ifacedecomp.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/ifacedecomp.cc
+index 1795bf8b49..638fa13a20 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/ifacedecomp.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/ifacedecomp.cc
+@@ -3397,7 +3397,7 @@ void IfcLoadTestFile::execute(istream &s)
+   if (dcp->conf != (Architecture *)0)
+     throw IfaceExecutionError("Load image already present");
+   s >> filename;
+-  dcp->testCollection = new FunctionTestCollection(status);
++  dcp->testCollection = new FunctionTestCollection(status, false);
+   dcp->testCollection->loadTest(filename);
+ #ifdef OPACTION_DEBUG
+   dcp->conf->setDebugStream(status->fileoptr);
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/testfunction.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/testfunction.hh
+index e5e52bd4dd..bf11137fb3 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/testfunction.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/testfunction.hh
+@@ -36,11 +36,16 @@ class FunctionTestProperty {
+   int4 minimumMatch;		///< Minimum number of times property is expected to match
+   int4 maximumMatch;		///< Maximum number of times property is expected to match
+   string name;			///< Name of the test, to be printed in test summaries
++  vector<string> rawPattern;	///< Raw, human-readable regex pattern(s) from test file
+   vector<std::regex> pattern;	///< Regular expression(s) to match against a line(s) of output
+   mutable uint4 patnum;	///< Index of current pattern to match against
+   mutable uint4 count;		///< Number of times regular expression has been seen
+ public:
+   string getName(void) const { return name; }	///< Get the name of the property
++  int4 getMinMatch(void) const { return minimumMatch; }	///< Get the minimum number of times the property is expected to match
++  int4 getMaxMatch(void) const { return maximumMatch; }	///< Get the maximum number of times the property is expected to match
++  uint4 getCount(void) const { return count; }	///< Get the number of times the property has matched
++  const vector<string> &getRawPattern(void) const { return rawPattern; }	///< Get the raw pattern(s)
+   void startTest(void) const;		///< Reset "state", counting number of matching lines
+   void processLine(const string &line) const;	///< Search thru \e line, update state if match found
+   bool endTest(void) const;		///< Return results of property search
+@@ -74,6 +79,7 @@ class FunctionTestCollection {
+   vector<string> commands;	///< Sequence of commands for current test
+   IfaceStatus *console;		///< Decompiler console for executing scripts
+   bool consoleOwner;		///< Set to \b true if \b this object owns the console
++  bool verbose;		///< Set to \b true to print test failures verbosely
+   mutable int4 numTestsApplied;		///< Count of tests that were executed
+   mutable int4 numTestsSucceeded;	///< Count of tests that passed
+   void clear(void);		///< Clear any previous architecture and function
+@@ -84,8 +90,8 @@ class FunctionTestCollection {
+   void passLineToTests(const string &line) const;	///< Let all tests analyze a line of the results
+   void evaluateTests(list<string> &lateStream) const;
+ public:
+-  FunctionTestCollection(ostream &s);		///< Constructor
+-  FunctionTestCollection(IfaceStatus *con);	///< Constructor with preexisting console
++  FunctionTestCollection(ostream &s, bool verbose);		///< Constructor
++  FunctionTestCollection(IfaceStatus *con, bool verbose);	///< Constructor with preexisting console
+   ~FunctionTestCollection(void);		///< Destructor
+   int4 getTestsApplied(void) const { return numTestsApplied; }	///< Get the number of tests executed
+   int4 getTestsSucceeded(void) const { return numTestsSucceeded; }	///< Get the number of tests that passed
+@@ -95,7 +101,7 @@ public:
+   void restoreXml(DocumentStorage &store,const Element *el);	///< Load tests from a \<decompilertest> tag.
+   void restoreXmlOldForm(DocumentStorage &store,const Element *el);	///< Load tests from \<binaryimage> tag.
+   void runTests(list<string> &lateStream);	///< Run the script and perform the tests
+-  static int runTestFiles(const vector<string> &testFiles,ostream &s);	///< Run tests for each listed file
++  static int runTestFiles(const vector<string> &testFiles,ostream &s,bool verbose);	///< Run tests for each listed file
+ };
+ 
+ } // End namespace ghidra
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/test.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/test.cc
+index 7f97598bda..f529ceaa4f 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/test.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/test.cc
+@@ -112,6 +112,7 @@ int main(int argc, char **argv) {
+   set<string> dataTestNames;
+   string dirname("../datatests");
+   string sleighdirname("../../../../../../..");
++  bool verbose = false;
+   while (argc > 0) {
+     string command(argv[0]);
+     if (command == "-path") {
+@@ -136,6 +137,11 @@ int main(int argc, char **argv) {
+       argv += 1;
+       argc -= 1;
+     }
++    else if (command == "-verbose") {
++      verbose = true;
++      argv += 1;
++      argc -= 1;
++    }
+     else if (command == "unittests") {
+       runUnitTests = true;
+       runDataTests = false;	// Run only unit tests
+@@ -149,7 +155,7 @@ int main(int argc, char **argv) {
+       break;
+     }
+     else {
+-      cout << "USAGE: ghidra_test [-usesleighenv] [-sleighpath <sleighdir>] [-path <datatestdir>] [[unittests|datatests] [testname1 testname2 ...]]" << endl;
++      cout << "USAGE: ghidra_test [-verbose][-usesleighenv] [-sleighpath <sleighdir>] [-path <datatestdir>] [[unittests|datatests] [testname1 testname2 ...]]" << endl;
+       return -1;
+     }
+   }
+@@ -166,7 +172,7 @@ int main(int argc, char **argv) {
+     vector<string> testFiles;
+     gatherDataTests(dirname,dataTestNames,testFiles);
+     cout << endl << endl;
+-    int errors = FunctionTestCollection::runTestFiles(testFiles,cout);
++    int errors = FunctionTestCollection::runTestFiles(testFiles,cout,verbose);
+     failedTests = add_exit_code(failedTests, errors);
+   }
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/testfunction.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/testfunction.cc
+index cf8bd76a4a..57c2890cbf 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/testfunction.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/testfunction.cc
+@@ -71,6 +71,7 @@ void FunctionTestProperty::restoreXml(const Element *el)
+      n = nextpos - pos;			// Create a line regex upto newline char
+      nextpos += 1;			// Skip newline when creating next line regex
+    }
++   rawPattern.push_back(line.substr(pos, n));
+    pattern.emplace_back(line.substr(pos, n));	// Add a regex to list of lines to match
+    pos = nextpos;
+   } while(pos != string::npos);
+@@ -208,12 +209,23 @@ void FunctionTestCollection::evaluateTests(list<string> &lateStream) const
+     else {
+       *console->optr << "FAIL -- " << (*iter).getName() << endl;
+       lateStream.push_back((*iter).getName());
++      if (verbose) {
++        const auto &test = *iter;
++        *console->optr << "Found " << test.getCount() << " matches, but expected ";
++        *console->optr << test.getMinMatch() << " to " << test.getMaxMatch();
++        *console->optr << " matches of pattern(s):\n";
++        const auto &patterns = test.getRawPattern();
++        for (size_t i = 0; i < patterns.size(); i++) {
++          *console->optr << "\t'" << patterns[i] << "'\n";
++        }
++      }
+     }
+   }
+ }
+ 
+ /// \param s is the stream where output is sent during tests
+-FunctionTestCollection::FunctionTestCollection(ostream &s)
++/// \param verbose is a flag whether to print test failures verbosely
++FunctionTestCollection::FunctionTestCollection(ostream &s, bool verbose)
+ 
+ {
+   console = new ConsoleCommands(s,commands);
+@@ -222,9 +234,10 @@ FunctionTestCollection::FunctionTestCollection(ostream &s)
+   console->setErrorIsDone(true);
+   numTestsApplied = 0;
+   numTestsSucceeded = 0;
++  this->verbose = verbose;
+ }
+ 
+-FunctionTestCollection::FunctionTestCollection(IfaceStatus *con)
++FunctionTestCollection::FunctionTestCollection(IfaceStatus *con, bool verbose)
+ 
+ {
+   console = con;
+@@ -232,6 +245,7 @@ FunctionTestCollection::FunctionTestCollection(IfaceStatus *con)
+   dcp = (IfaceDecompData *)console->getData("decompile");
+   numTestsApplied = 0;
+   numTestsSucceeded = 0;
++  this->verbose = verbose;
+ }
+ 
+ FunctionTestCollection::~FunctionTestCollection(void)
+@@ -347,19 +361,26 @@ void FunctionTestCollection::runTests(list<string> &lateStream)
+     string line = result.substr(prevpos);	// Process final line without a newline char
+     passLineToTests(line);
+   }
++  if (verbose && std::any_of(testList.begin(), testList.end(), [](const FunctionTestProperty &test) { return !test.endTest(); })) {
++    *console->optr << "Output for " << fileName << "\n";
++    *console->optr << "--------------------------------\n";
++    *console->optr << result << "\n";
++    *console->optr << "--------------------------------\n";
++  }
+   evaluateTests(lateStream);
+ }
+ 
+ /// Run through all XML files in the given list, processing each in turn.
+ /// \param testFiles is the given list of test files
+ /// \param s is the output stream to print results to
+-int FunctionTestCollection::runTestFiles(const vector<string> &testFiles,ostream &s)
++/// \param verbose is a flag whether to print test failures verbosely
++int FunctionTestCollection::runTestFiles(const vector<string> &testFiles,ostream &s,bool verbose)
+ 
+ {
+   int4 totalTestsApplied = 0;
+   int4 totalTestsSucceeded = 0;
+   list<string> failures;
+-  FunctionTestCollection testCollection(s);
++  FunctionTestCollection testCollection(s, verbose);
+   for(int4 i=0;i<testFiles.size();++i) {
+     try {
+       testCollection.clear();
+-- 
+2.45.1
+
