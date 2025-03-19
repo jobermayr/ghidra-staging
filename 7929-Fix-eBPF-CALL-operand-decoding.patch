@@ -1,0 +1,63 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Nicolas Iooss <nicolas.iooss@ledger.fr>
+Date: Tue, 18 Mar 2025 22:24:23 +0100
+Subject: [PATCH] 7929: Fix eBPF CALL operand decoding
+
+The operand of the CALL instruction missed multiplying the immediate
+value by 8. Without this, calls are not decoded correctly.
+
+Such a CALL instruction can be emitted when compiling this simple
+`single_call.c` program:
+
+    static int one(void) {
+        return 1;
+    }
+
+    int call_one(void) {
+        return one();
+    }
+
+with:
+
+    clang -O0 -target bpf -c single_call.c -o single_call.ebpf
+
+Disassembling with LLVM shows:
+
+    $ llvm-objdump -d single_call.ebpf
+    single_call.ebpf:	file format elf64-bpf
+
+    Disassembly of section .text:
+
+    0000000000000000 <call_one>:
+           0:	85 10 00 00 01 00 00 00	call 1
+           1:	95 00 00 00 00 00 00 00	exit
+
+    0000000000000010 <one>:
+           2:	b7 00 00 00 01 00 00 00	r0 = 1
+           3:	95 00 00 00 00 00 00 00	exit
+
+The first instruction ("call 1") calls the function located at 0x10 (at
+index `2:` in the listing). Ghidra considered the call to target
+address 9 instead (as `inst_next = 8` and `imm = 1`). Fix this by
+multiplying `imm` by 8 when encountering a `disp32` operand (which is
+only used by instruction `CALL`).
+---
+ Ghidra/Processors/eBPF/data/languages/eBPF.sinc | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/Ghidra/Processors/eBPF/data/languages/eBPF.sinc b/Ghidra/Processors/eBPF/data/languages/eBPF.sinc
+index f41b39840e..8333e9da03 100644
+--- a/Ghidra/Processors/eBPF/data/languages/eBPF.sinc
++++ b/Ghidra/Processors/eBPF/data/languages/eBPF.sinc
+@@ -350,7 +350,7 @@ SysCall:  imm is imm { export *[syscall]:1 imm; }
+     call SysCall;
+ }
+ 
+-disp32: reloc is imm [ reloc = inst_next + imm; ] { export *:4 reloc; }
++disp32: reloc is imm [ reloc = inst_next + imm * 8; ] { export *:4 reloc; }
+ 
+ :CALL disp32 is imm & src=1 & op_alu_jmp_opcode=0x8 & op_alu_jmp_source=0 & op_insn_class=0x5 & disp32 {
+     call disp32;
+-- 
+2.45.1
+
