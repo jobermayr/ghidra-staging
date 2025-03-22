@@ -4,12 +4,12 @@ Date: Tue, 10 Oct 2023 19:05:17 +0200
 Subject: [PATCH] 5872: x86: Simplify MOVSB.REP to memcpy in decompiler
 
 ---
- Ghidra/Processors/x86/data/languages/ia.sinc  | 167 ++++++++++++++++--
- .../x86/data/languages/lockable.sinc          |  51 +++++-
- 2 files changed, 198 insertions(+), 20 deletions(-)
+ Ghidra/Processors/x86/data/languages/ia.sinc  | 312 +++++++++++++++++-
+ .../x86/data/languages/lockable.sinc          |  51 ++-
+ 2 files changed, 342 insertions(+), 21 deletions(-)
 
 diff --git a/Ghidra/Processors/x86/data/languages/ia.sinc b/Ghidra/Processors/x86/data/languages/ia.sinc
-index fa45e140b1..09214d15e1 100644
+index fa45e140b1..32a09e1cbb 100644
 --- a/Ghidra/Processors/x86/data/languages/ia.sinc
 +++ b/Ghidra/Processors/x86/data/languages/ia.sinc
 @@ -1356,19 +1356,19 @@ dseSI2: seg16^SI    is addrsize=0 & seg16 & SI  { tmp:4 = segment(seg16,SI); SI
@@ -62,7 +62,159 @@ index fa45e140b1..09214d15e1 100644
  
  reptail:	is ((repprefx=1 & repneprefx=0)|(repprefx=0 & repneprefx=1))			{ goto inst_start; }
  reptail:	is repprefx=0 & repneprefx=0			{ }
-@@ -3977,11 +3985,99 @@ define pcodeop swap_bytes;
+@@ -3558,7 +3566,150 @@ enterFrames: low5 is low5 { tmp:1 = low5; export tmp; }
+ 
+ :INT1           is vexMode=0 & byte=0xf1                            { tmp:1 = 0x1; intloc:$(SIZE) = swi(tmp); call [intloc]; return [0:1]; }
+ :INT3           is vexMode=0 & byte=0xcc                            { tmp:1 = 0x3; intloc:$(SIZE) = swi(tmp); call [intloc]; return [0:1]; }
+-:INT imm8       is vexMode=0 & byte=0xcd; imm8                      { tmp:1 = imm8; intloc:$(SIZE) = swi(tmp); call [intloc]; }
++
++define pcodeop ALLOCATE_MEMORY;
++define pcodeop CLOSE_HANDLE;
++define pcodeop COMMIT_FILE;
++define pcodeop CREATE_DIR;
++define pcodeop CREATE_HANDLE;
++define pcodeop DELETE_FILE;
++define pcodeop END_PROCESS;
++define pcodeop FIND_FIRST;
++define pcodeop FIND_NEXT;
++define pcodeop FREE_MEMORY;
++define pcodeop GET_CURRENT_DIR;
++define pcodeop GET_CURRENT_DISK;
++define pcodeop GET_DATE;
++define pcodeop GET_DOS_VERSION_NUMBER;
++define pcodeop GET_FILE_ATTRIBUTES;
++define pcodeop GET_TIME;
++define pcodeop IOCTL;
++define pcodeop LSEEK;
++define pcodeop OPEN_HANDLE;
++define pcodeop PARSE_FILENAME;
++define pcodeop READ_HANDLE;
++define pcodeop SET_BLOCK;
++define pcodeop SET_DISK_TRANSFER_AREA;
++define pcodeop WRITE_HANDLE;
++:INT imm8       is vexMode=0 & byte=0xcd; imm8
++{
++  if (AH == 0x19 || AX >> 8 == 0x19) goto <get_current_disk>;
++  if (AH == 0x1a || AX >> 8 == 0x1a) goto <set_disk_transfer_area>;
++  if (AH == 0x29 || AX >> 8 == 0x29) goto <parse_filename>;
++  if (AH == 0x2a || AX >> 8 == 0x2a) goto <get_date>;
++  if (AH == 0x2c || AX >> 8 == 0x2c) goto <get_time>;
++  if (AH == 0x30 || AX >> 8 == 0x30) goto <get_dos_version_number>;
++  if (AH == 0x39 || AX >> 8 == 0x39) goto <create_dir>;
++  if (AH == 0x3c || AX >> 8 == 0x3c) goto <create_handle>;
++  if (AH == 0x3d || AX >> 8 == 0x3d) goto <open_handle>;
++  if (AH == 0x3e || AX >> 8 == 0x3e) goto <close_handle>;
++  if (AH == 0x3f || AX >> 8 == 0x3f) goto <read_handle>;
++  if (AH == 0x40 || AX >> 8 == 0x40) goto <write_handle>;
++  if (AH == 0x41 || AX >> 8 == 0x41) goto <delete_file>;
++  if (AH == 0x42 || AX >> 8 == 0x42) goto <lseek>;
++  if (AH == 0x43 || AX >> 8 == 0x43) goto <get_file_attributes>;
++  if (AH == 0x44 || AX >> 8 == 0x44) goto <ioctl>;
++  if (AH == 0x47 || AX >> 8 == 0x47) goto <get_current_dir>;
++  if (AH == 0x48 || AX >> 8 == 0x48) goto <allocate_memory>;
++  if (AH == 0x49 || AX >> 8 == 0x49) goto <free_memory>;
++  if (AH == 0x4a || AX >> 8 == 0x4a) goto <set_block>;
++  if (AH == 0x4c || AX >> 8 == 0x4c) goto <end_process>;
++  if (AH == 0x4e || AX >> 8 == 0x4e) goto <find_first>;
++  if (AH == 0x4f || AX >> 8 == 0x4f) goto <find_next>;
++  if (AH == 0x68 || AX >> 8 == 0x68) goto <commit_file>;
++  goto <not_implemented>;
++<get_current_disk>
++  AL = GET_CURRENT_DISK();
++  goto <end>;
++<set_disk_transfer_area>
++  local tmp1a:$(SIZE) = segment(DS,DX);
++  AX = SET_DISK_TRANSFER_AREA(tmp1a);
++  goto <end>;
++<parse_filename>
++  dsesi29:$(SIZE) = segment(DS,SI);
++  esedi29:$(SIZE) = segment(ES,DI);
++  AL = PARSE_FILENAME(esedi29, dsesi29, AL);
++  goto <end>;
++<get_date>
++  GET_DATE(CX, DX);
++  goto <end>;
++<get_time>
++  AL = GET_TIME(CX, DX);
++  goto <end>;
++<get_dos_version_number>
++  AX = GET_DOS_VERSION_NUMBER(AL);
++  goto <end>;
++<create_dir>
++  local tmp39:$(SIZE) = segment(DS,DX);
++  AX = CREATE_DIR(tmp39);
++  goto <end>;
++<create_handle>
++  local tmp3c:$(SIZE) = segment(DS,DX);
++  AX = CREATE_HANDLE(tmp3c, CX);
++  goto <end>;
++<open_handle>
++  local tmp3d:$(SIZE) = segment(DS,DX);
++  AX = OPEN_HANDLE(tmp3d, AL);
++  goto <end>;
++<close_handle>
++  AX = CLOSE_HANDLE(BX);
++  goto <end>;
++<read_handle>
++  local tmp3f:$(SIZE) = segment(DS,DX);
++  AX = READ_HANDLE(BX, tmp3f, CX);
++  goto <end>;
++<write_handle>
++  local tmp40:$(SIZE) = segment(DS,DX);
++  AX = WRITE_HANDLE(BX, tmp40, CX);
++  goto <end>;
++<delete_file>
++  local tmp41:$(SIZE) = segment(DS,DX);
++  AX = DELETE_FILE(tmp41);
++  goto <end>;
++<lseek>
++  local tmp42:$(SIZE) = segment(DS,DX);
++  AX = LSEEK(BX, tmp42, AL);
++  goto <end>;
++<get_file_attributes>
++  local tmp43:$(SIZE) = segment(DS,DX);
++  CX = GET_FILE_ATTRIBUTES(tmp43);
++  goto <end>;
++<ioctl>
++  AX = IOCTL(BX, CX, DX);
++  goto <end>;
++<get_current_dir>
++  local tmp47:$(SIZE) = segment(DS,SI);
++  tmp47 = GET_CURRENT_DIR(DL);
++  goto <end>;
++<allocate_memory>
++  AX = ALLOCATE_MEMORY(BX);
++  goto <end>;
++<free_memory>
++  CF = FREE_MEMORY(ES);
++  goto <end>;
++<set_block>
++  AX = SET_BLOCK(BX, ES);
++  goto <end>;
++<end_process>
++  AL = END_PROCESS();
++  goto <end>;
++<find_first>
++  local tmp4e:$(SIZE) = segment(DS,DX);
++  AX = FIND_FIRST(tmp4e, CX);
++  goto <end>;
++<find_next>
++  AX = FIND_NEXT(BX);
++  goto <end>;
++<commit_file>
++  AX = COMMIT_FILE(BX);
++  goto <end>;
++<not_implemented>
++  tmp:1 = imm8;
++  intloc:$(SIZE) = swi(tmp);
++  call [intloc];
++<end>
++}
++
+ :INTO           is vexMode=0 & byte=0xce & bit64=0
+ {
+   tmp:1 = 0x4;
+@@ -3977,11 +4128,99 @@ define pcodeop swap_bytes;
  :MOVNTI Mem,Reg64       is $(LONGMODE_ON) & vexMode=0 & opsize = 2; byte=0xf; byte=0xc3; Mem & Reg64 ...     { *Mem = Reg64; }
  @endif
  
@@ -71,9 +223,9 @@ index fa45e140b1..09214d15e1 100644
 -:MOVSD^rep^reptail eseDI4,dseSI4    is vexMode=0 & rep & reptail & opsize=1 & byte=0xa5 & eseDI4 & dseSI4   { build rep; build eseDI4; build dseSI4; eseDI4 = dseSI4; build reptail; }
 +:MOVSB^rep^reptail eseDI1,dseSI1    is vexMode=0 & rep & reptail & repprefx=0 & byte=0xa4 & eseDI1 & dseSI1          { build rep; build eseDI1; build dseSI1; eseDI1 = dseSI1; build reptail; }
 +define pcodeop memcpy;
-+:MOVSB^repx DI,SI	is vexMode=0 & addrsize=0 & repx & repprefx=1 & byte=0xa4 & DI & SI
++:MOVSB^repx peseDI1,dseSI1	is vexMode=0 & addrsize=0 & repx & repprefx=1 & byte=0xa4 & peseDI1 & dseSI1
 +{
-+  memcpy(DI, SI, CX);
++  memcpy(peseDI1, dseSI1, CX);
 +  DI = DI + CX;
 +  SI = SI + CX;
 +}
@@ -83,7 +235,8 @@ index fa45e140b1..09214d15e1 100644
 +  EDI = EDI + ECX;
 +  ESI = ESI + ECX;
 +}
-+@ifdef IA64
+ @ifdef IA64
+-:MOVSQ^rep^reptail eseDI8,dseSI8    is $(LONGMODE_ON) & vexMode=0 & rep & reptail & opsize=2 & byte=0xa5 & eseDI8 & dseSI8   { build rep; build eseDI8; build dseSI8; eseDI8 = dseSI8; build reptail; }
 +:MOVSB^repx RDI,RSI	is vexMode=0 & addrsize=2 & repx & repprefx=1 & byte=0xa4 & RDI & RSI
 +{
 +  memcpy(RDI, RSI, ECX);
@@ -132,8 +285,7 @@ index fa45e140b1..09214d15e1 100644
 +  EDI = EDI + tmp;
 +  ESI = ESI + tmp;
 +}
- @ifdef IA64
--:MOVSQ^rep^reptail eseDI8,dseSI8    is $(LONGMODE_ON) & vexMode=0 & rep & reptail & opsize=2 & byte=0xa5 & eseDI8 & dseSI8   { build rep; build eseDI8; build dseSI8; eseDI8 = dseSI8; build reptail; }
++@ifdef IA64
 +:MOVSD^repx RDI,RSI    is vexMode=0 & addrsize=2 & repx & repprefx=1 & opsize=1 & byte=0xa5 & RDI & RSI
 +{
 +  local tmp:8 = zext(ECX) * 4;
@@ -166,20 +318,20 @@ index fa45e140b1..09214d15e1 100644
  @endif
  
  :MOVSX Reg16,spec_rm8    is vexMode=0 & opsize=0 & byte=0xf; byte=0xbe; spec_rm8 & Reg16 ...  { Reg16 = sext(spec_rm8); }
-@@ -4474,7 +4570,11 @@ define pcodeop smm_restore_state;
+@@ -4474,7 +4713,11 @@ define pcodeop smm_restore_state;
  :SBB  Reg64,rm64       is $(LONGMODE_ON) & vexMode=0 & opsize=2 & byte=0x1b; rm64 & Reg64 ...						{ subCarryFlags( Reg64, rm64 ); resultflags(Reg64); }
  @endif
  
 -:SCASB^repe^repetail eseDI1 is vexMode=0 & repe & repetail &            byte=0xae & eseDI1  { build repe; build eseDI1; subflags(AL,eseDI1); local diff=AL-eseDI1; resultflags(diff); build repetail; }
-+define pcodeop strlen;
++define pcodeop strchr;
 +:SCASB^repe peseDI1 is vexMode=0 & repe & byte=0xae & peseDI1
 +{
-+  ECX = strlen(peseDI1);
++  CX = strchr(peseDI1, AL);
 +}
  :SCASW^repe^repetail eseDI2 is vexMode=0 & repe & repetail & opsize=0 & byte=0xaf & eseDI2  { build repe; build eseDI2; subflags(AX,eseDI2); local diff=AX-eseDI2; resultflags(diff); build repetail; }
  :SCASD^repe^repetail eseDI4 is vexMode=0 & repe & repetail & opsize=1 & byte=0xaf & eseDI4  { build repe; build eseDI4; subflags(EAX,eseDI4); local diff=EAX-eseDI4; resultflags(diff); build repetail; }
  @ifdef IA64
-@@ -4642,11 +4742,44 @@ define pcodeop stac;
+@@ -4642,11 +4885,44 @@ define pcodeop stac;
  
  :STMXCSR m32        is vexMode=0 & byte=0xf; byte=0xae; ( mod != 0b11 & reg_opcode=3 ) ... & m32 { m32 = MXCSR; }
  
@@ -196,7 +348,8 @@ index fa45e140b1..09214d15e1 100644
 +{
 +  memset(EDI, EAX, ECX);
 +}
-+@ifdef IA64
+ @ifdef IA64
+-:STOSQ^rep^reptail eseDI8   is $(LONGMODE_ON) & vexMode=0 & rep & reptail & opsize=2 & byte=0xab & eseDI8    { build rep; build eseDI8; eseDI8=RAX; build reptail; }
 +:STOSB^repx RDI,RAX   is vexMode=0 & addrsize=2 & repx & repprefx=1 & byte=0xaa & RDI & RAX
 +{
 +  memset(RDI, RAX, ECX);
@@ -216,8 +369,7 @@ index fa45e140b1..09214d15e1 100644
 +  memset(peseDI4, EAX, tmp);
 +  EDI = EDI + tmp - 4;
 +}
- @ifdef IA64
--:STOSQ^rep^reptail eseDI8   is $(LONGMODE_ON) & vexMode=0 & rep & reptail & opsize=2 & byte=0xab & eseDI8    { build rep; build eseDI8; eseDI8=RAX; build reptail; }
++@ifdef IA64
 +:STOSQ eseDI8   is $(LONGMODE_ON) & vexMode=0 & repprefx=0 & opsize=2 & byte=0xab & eseDI8    { eseDI8=RAX; }
 +:STOSQ^repx peseDI8   is $(LONGMODE_ON) & vexMode=0 & repx & repprefx=1 & opsize=2 & byte=0xab & peseDI8
 +{
