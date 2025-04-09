@@ -1,0 +1,123 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Nicolas Iooss <nicolas.iooss@ledger.fr>
+Date: Thu, 3 Apr 2025 16:48:48 +0200
+Subject: [PATCH] 7979: Fix eBPF zero-extend load instructions
+
+When a loading less than 8 bytes to a register, the value is supposed to
+be zero-extended. This is what the eBPF execution engine in the Linux
+kernel does, in
+https://web.git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/kernel/bpf/core.c?h=v6.14#n2113
+This is also what is specified in RFC 9669 which standardised BPF ISA:
+https://www.rfc-editor.org/rfc/rfc9669.html#name-regular-load-and-store-oper
+
+Add the missing `zext` calls in the semantic section of instructions
+LDXW, LDXH and LDXB. While at it, add them to other load instructions.
+
+For information, the issue can be seen when analyzing this C program:
+
+    unsigned int div_by_1000(unsigned int value) {
+        return value / 1000;
+    }
+
+Compiling it with clang gives:
+
+    $ clang -O0 -target bpf -c division.c -o division.ebpf
+    $ bpf-objdump -rd division.ebpf
+    division.ebpf:     file format elf64-bpfle
+
+    Disassembly of section .text:
+
+    0000000000000000 <div_by_1000>:
+       0:    63 1a fc ff 00 00 00 00     stxw [%fp+-4],%r1
+       8:    61 a0 fc ff 00 00 00 00     ldxw %r0,[%fp+-4]
+      10:    37 00 00 00 e8 03 00 00     div %r0,0x3e8
+      18:    95 00 00 00 00 00 00 00     exit
+
+Ghidra decompiles this program as:
+
+    ulonglong div_by_1000(uint param_1)
+    {
+      undefined4 in_stack_00000000;
+      return CONCAT44(in_stack_00000000,param_1) / 1000;
+    }
+
+This `in_stack_00000000` comes from the way the parameter is loaded from
+the stack. The listing shows the following disassembly and p-code
+operations:
+
+    ram:00100008 61 a0 fc ff 00       LDXW       R0,[R10 + -0x4=>Stack[-0x4]]
+                 00 00 00
+                            $U3e00:8 = INT_ADD R10, -4:8
+                            R0 = LOAD ram($U3e00:8)
+
+This shows the value is indeed loaded from 8 bytes at `$U3e00:8` instead
+of 4.
+
+After adding `zext` calls, Ghidra decodes the same instruction as:
+
+    ram:00100008 61 a0 fc ff 00       LDXW       R0,[R10 + -0x4=>local_4]
+                 00 00 00
+                            $U4100:8 = INT_ADD R10, -4:8
+                            $U4180:4 = LOAD ram($U4100:8)
+                            R0 = INT_ZEXT $U4180:4
+
+This only loads 4 bytes from the stack, as expected.
+Moreover the decompilation view is now correct:
+
+    ulonglong div_by_1000(uint param_1)
+    {
+      return (ulonglong)param_1 / 1000;
+    }
+---
+ .../Processors/eBPF/data/languages/eBPF.sinc  | 24 +++++++++----------
+ 1 file changed, 12 insertions(+), 12 deletions(-)
+
+diff --git a/Ghidra/Processors/eBPF/data/languages/eBPF.sinc b/Ghidra/Processors/eBPF/data/languages/eBPF.sinc
+index 4d5966f3ca..9f0c789f82 100644
+--- a/Ghidra/Processors/eBPF/data/languages/eBPF.sinc
++++ b/Ghidra/Processors/eBPF/data/languages/eBPF.sinc
+@@ -152,29 +152,29 @@ DST4: dst is dst { local tmp:4 = dst:4; export tmp; }
+ 
+ :LDDW dst, imm  is imm & src=1 & dst & op_ld_st_mode=0x0 & op_ld_st_size=0x3 & op_insn_class=0x0; imm2 { dst = *:8 imm:8; }
+ 
+-:LDABSW dst, imm  is imm & dst & op_ld_st_mode=0x1 & op_ld_st_size=0x0 & op_insn_class=0x0 { dst=*:4 imm:8; }
++:LDABSW dst, imm  is imm & dst & op_ld_st_mode=0x1 & op_ld_st_size=0x0 & op_insn_class=0x0 { dst = zext(*:4 imm:8); }
+ 
+-:LDABSH dst, imm  is imm & dst & op_ld_st_mode=0x1 & op_ld_st_size=0x1 & op_insn_class=0x0 { dst=*:2 imm:8; }
++:LDABSH dst, imm  is imm & dst & op_ld_st_mode=0x1 & op_ld_st_size=0x1 & op_insn_class=0x0 { dst = zext(*:2 imm:8); }
+ 
+-:LDABSB dst, imm  is imm & dst &  op_ld_st_mode=0x1 & op_ld_st_size=0x2 & op_insn_class=0x0 { dst=*:1 imm:8; }
++:LDABSB dst, imm  is imm & dst &  op_ld_st_mode=0x1 & op_ld_st_size=0x2 & op_insn_class=0x0 { dst = zext(*:1 imm:8); }
+ 
+-:LDABSDW dst, imm  is imm & dst & op_ld_st_mode=0x1 & op_ld_st_size=0x3 & op_insn_class=0x0 { dst=*:8 imm:8; }
++:LDABSDW dst, imm  is imm & dst & op_ld_st_mode=0x1 & op_ld_st_size=0x3 & op_insn_class=0x0 { dst = *:8 imm:8; }
+ 
+-:LDINDW src, dst, imm  is imm & src & dst & op_ld_st_mode=0x2 & op_ld_st_size=0x0 & op_insn_class=0x0  { dst=*:4 (src + imm); }
++:LDINDW src, dst, imm  is imm & src & dst & op_ld_st_mode=0x2 & op_ld_st_size=0x0 & op_insn_class=0x0  { dst = zext(*:4 (src + imm)); }
+ 
+-:LDINDH src, dst, imm  is imm & src & dst & op_ld_st_mode=0x2 & op_ld_st_size=0x1 & op_insn_class=0x0 { dst=*:2 (src + imm); }
++:LDINDH src, dst, imm  is imm & src & dst & op_ld_st_mode=0x2 & op_ld_st_size=0x1 & op_insn_class=0x0 { dst = zext(*:2 (src + imm)); }
+ 
+-:LDINDB src, dst, imm  is imm & src & dst & op_ld_st_mode=0x2 & op_ld_st_size=0x2 & op_insn_class=0x0 { dst=*:1 (src + imm); }
++:LDINDB src, dst, imm  is imm & src & dst & op_ld_st_mode=0x2 & op_ld_st_size=0x2 & op_insn_class=0x0 { dst = zext(*:1 (src + imm)); }
+ 
+-:LDINDDW src, dst, imm  is imm & src & dst & op_ld_st_mode=0x2 & op_ld_st_size=0x3 & op_insn_class=0x0 { dst=*:8 (src + imm); }
++:LDINDDW src, dst, imm  is imm & src & dst & op_ld_st_mode=0x2 & op_ld_st_size=0x3 & op_insn_class=0x0 { dst = *:8 (src + imm); }
+ 
+-:LDXW dst, [src + off]  is off & src & dst & op_ld_st_mode=0x3 & op_ld_st_size=0x0 & op_insn_class=0x1 { dst=*:4 (src + off); }
++:LDXW dst, [src + off]  is off & src & dst & op_ld_st_mode=0x3 & op_ld_st_size=0x0 & op_insn_class=0x1 { dst = zext(*:4 (src + off)); }
+ 
+-:LDXH dst, [src + off]  is off & src & dst & op_ld_st_mode=0x3 & op_ld_st_size=0x1 & op_insn_class=0x1 { dst=*:2 (src + off); }
++:LDXH dst, [src + off]  is off & src & dst & op_ld_st_mode=0x3 & op_ld_st_size=0x1 & op_insn_class=0x1 { dst = zext(*:2 (src + off)); }
+ 
+-:LDXB dst, [src + off]  is off & src & dst & op_ld_st_mode=0x3 & op_ld_st_size=0x2 & op_insn_class=0x1 { dst=*:1 (src + off); }
++:LDXB dst, [src + off]  is off & src & dst & op_ld_st_mode=0x3 & op_ld_st_size=0x2 & op_insn_class=0x1 { dst = zext(*:1 (src + off)); }
+ 
+-:LDXDW dst, [src + off]  is off & src & dst & op_ld_st_mode=0x3 & op_ld_st_size=0x3 & op_insn_class=0x1 { dst=*:8 (src + off); }
++:LDXDW dst, [src + off]  is off & src & dst & op_ld_st_mode=0x3 & op_ld_st_size=0x3 & op_insn_class=0x1 { dst = *:8 (src + off); }
+ 
+ :STW [dst + off], imm  is imm & off & dst & op_ld_st_mode=0x3 & op_ld_st_size=0x0 & op_insn_class=0x2 { *:4 (dst + off)=imm:4; }
+ 
+-- 
+2.45.1
+

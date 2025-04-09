@@ -1,0 +1,144 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Nicolas Iooss <nicolas.iooss@ledger.fr>
+Date: Tue, 1 Apr 2025 22:24:44 +0200
+Subject: [PATCH] 7972: Add eBPF instruction CALLX for indirect calls
+
+When clang encounters indirect calls in eBPF programs, it emits a call
+instruction with a register parameter (`BPF_X`) instead of an immediate
+value (`BPF_K`). This encoding (`BPF_JMP | BPF_CALL | BPF_X = 0x8d`) is
+decoded by llvm-objdump as `callx`.
+
+For example, here is a simple C program with an indirect call:
+
+    extern void (*ptr_to_some_function)(void);
+    void call_ptr_to_some_function(void) {
+        ptr_to_some_function();
+    }
+
+Compiling and disassembling it gives with clang 14.0 (and LLVM 14.0):
+
+    $ clang -O2 -target bpf -c indirect_call.c -o indirect_call.ebpf
+    $ llvm-objdump -rd indirect_call.ebpf
+
+    indirect_call.ebpf:  file format elf64-bpf
+
+    Disassembly of section .text:
+
+    0000000000000000 <call_ptr_to_some_function>:
+           0:  18 01 00 00 00 00 00 00 00 00 00 00 00 00 00 00  r1 = 0 ll
+                    0000000000000000:  R_BPF_64_64  ptr_to_some_function
+           2:  79 11 00 00 00 00 00 00  r1 = *(u64 *)(r1 + 0)
+           3:  8d 00 00 00 01 00 00 00  callx r1
+           4:  95 00 00 00 00 00 00 00  exit
+
+Contrary to usual eBPF instructions, `callx`'s register operand is
+encoded in the immediate field. This encoding is actually specific to
+LLVM (and clang). GCC used the destination register to store the target
+register.
+
+LLVM 19.1 was modified to use GCC's encoding:
+https://github.com/llvm/llvm-project/pull/81546 ("BPF: Change callx insn
+encoding"). For example, in an Alpine Linux 3.21 system:
+
+    $ clang -target bpf --version
+    Alpine clang version 19.1.4
+    Target: bpf
+    Thread model: posix
+    InstalledDir: /usr/lib/llvm19/bin
+
+    $ clang -O2 -target bpf -c indirect_call.c -o indirect_call.ebpf
+    $ llvm-objdump -rd indirect_call.ebpf
+
+    indirect_call.ebpf:  file format elf64-bpf
+
+    Disassembly of section .text:
+
+    0000000000000000 <call_ptr_to_some_function>:
+           0:  18 01 00 00 00 00 00 00 00 00 00 00 00 00 00 00  r1 = 0x0 ll
+                    0000000000000000:  R_BPF_64_64  ptr_to_some_function
+           2:  79 11 00 00 00 00 00 00  r1 = *(u64 *)(r1 + 0x0)
+           3:  8d 01 00 00 00 00 00 00  callx r1
+           4:  95 00 00 00 00 00 00 00  exit
+
+The instruction is now encoded `8d 01 00...`.
+
+For reference, here are similar commands using GCC showing it is using
+the same encoding (here, compiler option `-mxbpf` is required to enable
+several features including indirect calls, cf.
+https://gcc.gnu.org/onlinedocs/gcc-12.4.0/gcc/eBPF-Options.html ).
+
+    $ bpf-gcc --version
+    bpf-gcc (12-20220319-1ubuntu1+2) 12.0.1 20220319 (experimental) [master r12-7719-g8ca61ad148f]
+
+    $ bpf-gcc -O2 -c indirect_call.c -o indirect_call.ebpf -mxbpf
+    $ bpf-objdump -mxbpf -rd indirect_call.ebpf
+
+    indirect_call_gcc-12.ebpf:     file format elf64-bpfle
+
+    Disassembly of section .text:
+
+    0000000000000000 <call_ptr_to_some_function>:
+       0:  18 00 00 00 00 00 00 00   lddw %r0,0
+       8:  00 00 00 00 00 00 00 00
+          0: R_BPF_INSN_64  ptr_to_some_function
+      10:  79 01 00 00 00 00 00 00   ldxdw %r1,[%r0+0]
+      18:  8d 01 00 00 00 00 00 00   call %r1
+      20:  95 00 00 00 00 00 00 00   exit
+
+Add both `callx` instruction encodings to eBPF processor.
+
+By the way, the eBPF Verifier used by Linux kernel currently forbids
+indirect calls (it fails when `BPF_SRC(insn->code) != BPF_K`, in
+https://web.git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/kernel/bpf/verifier.c?h=v6.14#n19141
+). But other deployments of eBPF may already support this feature.
+---
+ .../Processors/eBPF/data/languages/eBPF.sinc  | 20 ++++++++++++++++++-
+ 1 file changed, 19 insertions(+), 1 deletion(-)
+
+diff --git a/Ghidra/Processors/eBPF/data/languages/eBPF.sinc b/Ghidra/Processors/eBPF/data/languages/eBPF.sinc
+index 8333e9da03..4d5966f3ca 100644
+--- a/Ghidra/Processors/eBPF/data/languages/eBPF.sinc
++++ b/Ghidra/Processors/eBPF/data/languages/eBPF.sinc
+@@ -14,7 +14,9 @@ define register offset=0 size=8 [ R0  R1  R2  R3  R4  R5  R6  R7  R8  R9  R10  P
+ 
+ # Instruction encoding: Insop:8, dst_reg:4, src_reg:4, off:16, imm:32 - from lsb to msb
+ define token instr(64)
++    llvm_imm_callx_zero=(36, 63)
+     imm=(32, 63) signed
++    llvm_reg_callx=(32, 35) # special encoding for callx instruction emitted by LLVM
+     off=(16, 31) signed
+     src=(12, 15)
+     dst=(8, 11)
+@@ -31,7 +33,7 @@ define token immtoken(64)
+ ;
+ 
+ #To operate with registers
+-attach variables [ src dst ] [  R0  R1  R2  R3  R4  R5  R6  R7  R8  R9  R10  _  _  _  _  _  ];
++attach variables [ src dst llvm_reg_callx ] [  R0  R1  R2  R3  R4  R5  R6  R7  R8  R9  R10  _  _  _  _  _  ];
+ 
+ #Arithmetic instructions
+ #BPF_ALU64
+@@ -356,4 +358,20 @@ disp32: reloc is imm [ reloc = inst_next + imm * 8; ] { export *:4 reloc; }
+     call disp32;
+ }
+ 
++# GCC encoding and LLVM 19.1+ encoding
++:CALLX dst is op_alu_jmp_opcode=0x8 & op_alu_jmp_source=1 & op_insn_class=0x5 & src=0 & imm=0 & dst {
++    call [dst];
++}
++
++# LLVM encoding used until LLVM 19.1
++# Introduced in https://github.com/llvm/llvm-project/commit/9a67245d881f4cf89fd8f897ae2cd0bccec49496
++# Modified in https://github.com/llvm/llvm-project/commit/c43ad6c0fddac0bbed5e881801dd2bc2f9eeba2d
++:CALLX llvm_reg_callx is op_alu_jmp_opcode=0x8 & op_alu_jmp_source=1 & op_insn_class=0x5 & dst=0 & src=0 & llvm_imm_callx_zero=0 & llvm_reg_callx {
++    call [llvm_reg_callx];
++}
++# Both CALLX encodings are matched when both dst and imm are zero
++:CALLX R0 is op_alu_jmp_opcode=0x8 & op_alu_jmp_source=1 & op_insn_class=0x5 & dst=0 & src=0 & imm=0 & R0 {
++    call [R0];
++}
++
+ :EXIT is op_alu_jmp_opcode=0x9 & op_alu_jmp_source=0 & op_insn_class=0x5 { return [*:8 R10]; }
+-- 
+2.45.1
+
