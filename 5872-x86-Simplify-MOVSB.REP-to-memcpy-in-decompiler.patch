@@ -9,10 +9,10 @@ Subject: [PATCH] 5872: x86: Simplify MOVSB.REP to memcpy in decompiler
  2 files changed, 443 insertions(+), 33 deletions(-)
 
 diff --git a/Ghidra/Processors/x86/data/languages/ia.sinc b/Ghidra/Processors/x86/data/languages/ia.sinc
-index fa45e140b1..9a9e3c205c 100644
+index ec28cdf943..fbc27d340c 100644
 --- a/Ghidra/Processors/x86/data/languages/ia.sinc
 +++ b/Ghidra/Processors/x86/data/languages/ia.sinc
-@@ -1350,25 +1350,25 @@ moffs64: segWide^[imm32]  is addrsize=1 & highseg=1 & segWide & imm32   { tmp:8
+@@ -1348,25 +1348,25 @@ moffs64: segWide^[imm32]  is addrsize=1 & highseg=1 & segWide & imm32   { tmp:8
  # TODO: segment register offset in 64bit might not be right
  
  # String memory access
@@ -54,7 +54,7 @@ index fa45e140b1..9a9e3c205c 100644
  
  dseSI1: RSI   is addrsize=2 & RSI { local tmp = RSI; RSI = RSI + 1-2*zext(DF); export *:1 tmp; }
  dseSI2: RSI   is addrsize=2 & RSI { local tmp = RSI; RSI = RSI + 2-4*zext(DF); export *:2 tmp; }
-@@ -1380,6 +1380,17 @@ eseDI4: RDI   is addrsize=2 & RDI    { local tmp = RDI; RDI=RDI+4-8*zext(DF); ex
+@@ -1378,6 +1378,17 @@ eseDI4: RDI   is addrsize=2 & RDI    { local tmp = RDI; RDI=RDI+4-8*zext(DF); ex
  eseDI8: RDI   is addrsize=2 & RDI    { local tmp = RDI; RDI=RDI+8-16*zext(DF); export *:8 tmp; }
  @endif
  
@@ -72,7 +72,7 @@ index fa45e140b1..9a9e3c205c 100644
  rm8: Rmr8   is mod=3 & Rmr8     { export Rmr8; }
  rm8: "byte ptr" Mem    is  Mem             { export *:1 Mem; }
  
-@@ -1464,6 +1475,8 @@ rep: ".REP" is ((repprefx=1 & repneprefx=0)|(repprefx=0 & repneprefx=1)) & addrs
+@@ -1450,6 +1461,8 @@ rep: ".REP" is ((repprefx=1 & repneprefx=0)|(repprefx=0 & repneprefx=1)) & addrs
  rep: ".REP" is ((repprefx=1 & repneprefx=0)|(repprefx=0 & repneprefx=1)) & addrsize=2  { if (RCX==0) goto inst_next; RCX=RCX-1; }
  @endif
  rep:        is repprefx=0 & repneprefx=0			{ }
@@ -81,7 +81,7 @@ index fa45e140b1..9a9e3c205c 100644
  
  reptail:	is ((repprefx=1 & repneprefx=0)|(repprefx=0 & repneprefx=1))			{ goto inst_start; }
  reptail:	is repprefx=0 & repneprefx=0			{ }
-@@ -3558,7 +3571,204 @@ enterFrames: low5 is low5 { tmp:1 = low5; export tmp; }
+@@ -3544,7 +3557,204 @@ enterFrames: low5 is low5 { tmp:1 = low5; export tmp; }
  
  :INT1           is vexMode=0 & byte=0xf1                            { tmp:1 = 0x1; intloc:$(SIZE) = swi(tmp); call [intloc]; return [0:1]; }
  :INT3           is vexMode=0 & byte=0xcc                            { tmp:1 = 0x3; intloc:$(SIZE) = swi(tmp); call [intloc]; return [0:1]; }
@@ -287,7 +287,7 @@ index fa45e140b1..9a9e3c205c 100644
  :INTO           is vexMode=0 & byte=0xce & bit64=0
  {
    tmp:1 = 0x4;
-@@ -3755,11 +3965,39 @@ define pcodeop LocalDescriptorTableRegister;
+@@ -3741,11 +3951,39 @@ define pcodeop LocalDescriptorTableRegister;
  }
  @endif
  
@@ -331,7 +331,7 @@ index fa45e140b1..9a9e3c205c 100644
  @endif
  
  :LOOP   rel8        is vexMode=0 & addrsize=0 & byte=0xE2; rel8             { CX = CX -1; if (CX!=0) goto rel8; }
-@@ -3977,11 +4215,91 @@ define pcodeop swap_bytes;
+@@ -3963,11 +4201,91 @@ define pcodeop swap_bytes;
  :MOVNTI Mem,Reg64       is $(LONGMODE_ON) & vexMode=0 & opsize = 2; byte=0xf; byte=0xc3; Mem & Reg64 ...     { *Mem = Reg64; }
  @endif
  
@@ -426,8 +426,8 @@ index fa45e140b1..9a9e3c205c 100644
 +}
  @endif
  
- :MOVSX Reg16,spec_rm8    is vexMode=0 & opsize=0 & byte=0xf; byte=0xbe; spec_rm8 & Reg16 ...  { Reg16 = sext(spec_rm8); }
-@@ -4474,7 +4792,11 @@ define pcodeop smm_restore_state;
+ :MOVSX Reg16,rm8    is vexMode=0 & opsize=0 & byte=0xf; byte=0xbe; rm8 & Reg16 ...  { Reg16 = sext(rm8); }
+@@ -4460,7 +4778,11 @@ define pcodeop smm_restore_state;
  :SBB  Reg64,rm64       is $(LONGMODE_ON) & vexMode=0 & opsize=2 & byte=0x1b; rm64 & Reg64 ...						{ subCarryFlags( Reg64, rm64 ); resultflags(Reg64); }
  @endif
  
@@ -440,7 +440,7 @@ index fa45e140b1..9a9e3c205c 100644
  :SCASW^repe^repetail eseDI2 is vexMode=0 & repe & repetail & opsize=0 & byte=0xaf & eseDI2  { build repe; build eseDI2; subflags(AX,eseDI2); local diff=AX-eseDI2; resultflags(diff); build repetail; }
  :SCASD^repe^repetail eseDI4 is vexMode=0 & repe & repetail & opsize=1 & byte=0xaf & eseDI4  { build repe; build eseDI4; subflags(EAX,eseDI4); local diff=EAX-eseDI4; resultflags(diff); build repetail; }
  @ifdef IA64
-@@ -4642,11 +4964,54 @@ define pcodeop stac;
+@@ -4628,11 +4950,54 @@ define pcodeop stac;
  
  :STMXCSR m32        is vexMode=0 & byte=0xf; byte=0xae; ( mod != 0b11 & reg_opcode=3 ) ... & m32 { m32 = MXCSR; }
  
@@ -500,7 +500,7 @@ index fa45e140b1..9a9e3c205c 100644
  
  :STR rm16       is vexMode=0 & byte=0xf; byte=0x0; rm16 & reg_opcode=1 ... { rm16 = TaskRegister(); }
 diff --git a/Ghidra/Processors/x86/data/languages/lockable.sinc b/Ghidra/Processors/x86/data/languages/lockable.sinc
-index 6b10ee5284..fa18061698 100644
+index 52a28a2ff0..5a66ac5947 100644
 --- a/Ghidra/Processors/x86/data/languages/lockable.sinc
 +++ b/Ghidra/Processors/x86/data/languages/lockable.sinc
 @@ -735,6 +735,14 @@ define pcodeop InterlockedIncrement64;
@@ -562,7 +562,7 @@ index 6b10ee5284..fa18061698 100644
 +@endif
 +
 +
- :SUB^lockx  spec_m8,imm8     is vexMode=0 & lockx & unlock & $(BYTE_80_82); spec_m8 & reg_opcode=5 ...; imm8     
+ :SUB^lockx  m8,imm8     is vexMode=0 & lockx & unlock & $(BYTE_80_82); m8 & reg_opcode=5 ...; imm8     
  {
      build lockx;
 @@ -1173,9 +1221,6 @@ define pcodeop InterlockedExchangeAdd64;
