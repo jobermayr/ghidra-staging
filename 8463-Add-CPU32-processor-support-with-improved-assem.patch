@@ -1,0 +1,103 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Joshua Austill <jlaustill@gmail.com>
+Date: Sat, 23 Aug 2025 19:19:47 -0600
+Subject: [PATCH] 8463: Add CPU32 processor support with improved assembly
+ decompilation
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+This implementation provides much better assembly decompilation than the 68030 variant by adding dedicated CPU32 processor support including language definitions and specifications.
+
+🤖 Generated with [Claude Code](https://claude.ai/code)
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+---
+ .../Processors/68000/data/languages/68000.ldefs  |  2 --
+ .../Processors/68000/data/languages/68000.sinc   | 16 +++++++++++-----
+ .../68000/data/languages/CPU32.slaspec           |  1 +
+ 3 files changed, 12 insertions(+), 7 deletions(-)
+
+diff --git a/Ghidra/Processors/68000/data/languages/68000.ldefs b/Ghidra/Processors/68000/data/languages/68000.ldefs
+index 1805c810ec..e7e78aa661 100644
+--- a/Ghidra/Processors/68000/data/languages/68000.ldefs
++++ b/Ghidra/Processors/68000/data/languages/68000.ldefs
+@@ -86,7 +86,6 @@
+     <compiler name="default" spec="68000.cspec" id="default"/>
+     <external_name tool="IDA-PRO" name="CPU32"/>
+   </language>
+-
+   <language processor="68000"
+             endian="big"
+             size="32"
+@@ -146,5 +145,4 @@
+     <external_name tool="DWARF.register.mapping.file" name="68000.dwarf"/>
+     <external_name tool="qemu" name="qemu-m68k"/>
+   </language>
+-
+ </language_definitions>
+diff --git a/Ghidra/Processors/68000/data/languages/68000.sinc b/Ghidra/Processors/68000/data/languages/68000.sinc
+index 499ffaf440..c90cd372cf 100644
+--- a/Ghidra/Processors/68000/data/languages/68000.sinc
++++ b/Ghidra/Processors/68000/data/languages/68000.sinc
+@@ -179,7 +179,7 @@ define token extword (16)
+   reg12xwu = (12,15)
+   reg12xwl = (12,15)
+ @endif  
+-@ifdef CPU32 # Data register interpolation fields for TBL instructions.
++@ifdef CPU32 # Data Register Interpolation
+   tbl_dr_size  = (6,7)
+   tbl_dr_round = (10,10)
+   tbl_dr_sign  = (11,11)
+@@ -345,7 +345,13 @@ attach variables [ fldoffreg fldwdreg f_reg fcnt fkfacreg fldynreg ]    [ D0 D1
+ attach variables [ regdnw regxdnw reg9dnw regsdnw regduw regdcw regdu2w regdc2w ] [ D0w D1w D2w D3w D4w D5w D6w D7w ];
+ attach variables [ regdnb reg9dnb regsdnb regdub regdcb ]         [ D0b D1b D2b D3b D4b D5b D6b D7b ];
+ attach variables [ regda regda2 ]  [ D0 D1 D2 D3 D4 D5 D6 D7 A0 A1 A2 A3 A4 A5 A6 SP ];
++
++@ifdef CPU32
++attach variables [ regan regxan reg9an regfan regsan aregx tbl_regan ]   [ A0 A1 A2 A3 A4 A5 A6 SP ];
++@else
+ attach variables [ regan regxan reg9an regfan regsan aregx ]   [ A0 A1 A2 A3 A4 A5 A6 SP ];
++@endif
++
+ attach variables [ reganw regxanw regsanw ]        [ A0w A1w A2w A3w A4w A5w A6w A7w ];
+ attach variables [ reganb regsanb ]                [ A0b A1b A2b A3b A4b A5b A6b A7b ];
+ 
+@@ -515,7 +521,7 @@ eab: "#"^d8 is mode=7 & regan=4; d8		{ export *[const]:1 d8; }
+ 
+ # Second effective address calculation for mov
+ 
+-# NB- Extended-precsion are 12 bytes, so we need to increment or decrement the reg by 12 not 4
++# NB- Extended-precision are 12 bytes, so we need to increment or decrement the reg by 12 not 4
+ #
+   # size=extend | packed (96-bit)
+   # The fmovem.x insn needs the movemptr to be set here
+@@ -2320,11 +2326,11 @@ define pcodeop stop;
+ 
+ @ifdef CPU32
+ 
+-# TODO: tbl_mode=4 and tbl_mode=5 constructors
++#TODO: Finish TBLxx instruction implementation:
+ 
+ tbl_eal: (tbl_regan) is tbl_mode=2 & tbl_regan			{ export *:4 tbl_regan; }
+-# tbl_eal: -(tbl_regan) is tbl_mode=4 & tbl_regan			{ tbl_regan = tbl_regan - 4; export *:4 tbl_regan; }
+-# tbl_eal: (d16,tbl_regan) is tbl_mode=5 & tbl_regan; d16		{ local tmp  = tbl_regan + d16; export *:4 tmp; }
++tbl_eal: -(tbl_regan) is tbl_mode=4 & tbl_regan { tbl_regan = tbl_regan - 4; export *:4 tbl_regan; }
++tbl_eal: (d16,tbl_regan) is tbl_mode=5 & tbl_regan; d16 { local tmp:4 = tbl_regan + d16; export *:4 tmp; }
+ tbl_eal: (extw) is tbl_mode=6 & tbl_regan; extw		[ regtfan = tbl_regan; pcmode = 0; ] { build extw; export *:4 extw; }
+ tbl_eal: (d16,PC) is PC & tbl_mode=7 & tbl_regan=2; d16	{ tmp:4 = inst_start + 2 + d16; export *:4 tmp; }
+ tbl_eal: (extw) is tbl_mode=7 & tbl_regan=3; extw		[ pcmode=1; ] { build extw; export *:4 extw; }
+diff --git a/Ghidra/Processors/68000/data/languages/CPU32.slaspec b/Ghidra/Processors/68000/data/languages/CPU32.slaspec
+index dc2c54ab6f..6f26e05f68 100644
+--- a/Ghidra/Processors/68000/data/languages/CPU32.slaspec
++++ b/Ghidra/Processors/68000/data/languages/CPU32.slaspec
+@@ -2,5 +2,6 @@
+ 
+ @define CPU32 ""
+ @define MC68332 ""
++@define MC68336 ""
+ 
+ @include "68000.sinc"
+-- 
+2.45.1
+

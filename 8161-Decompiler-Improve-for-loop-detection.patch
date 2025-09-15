@@ -1,0 +1,47 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Luke=20Sern=C3=A9?= <luke.serne@solconmail.nl>
+Date: Thu, 15 May 2025 22:31:44 +0200
+Subject: [PATCH] 8161: Decompiler: Improve for-loop detection
+
+Decompiler: Check WhileDo overflow syntax Sometimes,
+ BlockWhileDo blocks would be marked as using overflow syntax based on the
+ unoptimised pcode, but when the pcode got optimised, the exit condition block
+ no longer was complex. Still, the decision that the block uses overflow
+ syntax is permanent, preventing for-loop recovery. This patch double-checks
+ that BlockWhileDo blocks that have the overflow flag set really still are
+ complex when attempting to recover the for loop.
+
+Decompiler: Un-overflow only 'basic' while-blocks Apparently, sometimes the condition part of a `BlockWhileDo` can be a list of basic blocks. In those cases, their overflow status would be incorrectly removed, leading to invalid C code being produced. This commit checks that the condition really is a "basic" block that is not "complex" before clearing the overflow flag on the `BlockDoWhile`.
+---
+ .../Decompiler/src/decompile/cpp/block.cc         | 15 ++++++++++++++-
+ 1 file changed, 14 insertions(+), 1 deletion(-)
+
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/block.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/block.cc
+index 07b9d637ae..6af99fb86d 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/block.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/block.cc
+@@ -3419,7 +3419,20 @@ void BlockWhileDo::finalTransform(Funcdata &data)
+ {
+   BlockGraph::finalTransform(data);
+   if (!data.getArch()->analyze_for_loops) return;
+-  if (hasOverflowSyntax()) return;
++  if (hasOverflowSyntax()) {
++    // Maybe we have since been optimised so the condition is no longer too complex...
++    FlowBlock *check = getFrontLeaf();
++    if (check == (FlowBlock *)0) return;
++    BlockBasic *cond = (BlockBasic *)check->subBlock(0);
++    // The condition needs to be a 'simple' basic block (i.e. not a list of multiple blocks, or an
++    // if-statement, or something else) and it needs to not be complex (i.e. representable in a
++    // single statement).
++    if (!(subBlock(0)->getType() == t_copy && !cond->isComplex())) return;
++
++    // Unmark this block as having overflow syntax
++    clearFlag(f_whiledo_overflow);
++    cond->negateCondition(true);
++  }
+   FlowBlock *copyBl = getFrontLeaf();
+   if (copyBl == (FlowBlock *)0) return;
+   BlockBasic *head = (BlockBasic *)copyBl->subBlock(0);
+-- 
+2.45.1
+

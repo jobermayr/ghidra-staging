@@ -1,0 +1,73 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Zhang <admin@mayuyu.io>
+Date: Mon, 16 Jun 2025 16:31:31 +0800
+Subject: [PATCH] 8260: Fix compilation failures and add new Sleigh API
+
+[Sleigh]Add API to load in-mem SLA buffer
+
+Silence Compiler Warning by fixing suffix of address masks
+---
+ .../Decompiler/src/decompile/cpp/address.cc    |  4 ++--
+ .../src/decompile/cpp/include/ghidra/sleigh.hh |  1 +
+ .../Decompiler/src/decompile/cpp/sleigh.cc     | 18 ++++++++++++++++++
+ 3 files changed, 21 insertions(+), 2 deletions(-)
+
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/address.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/address.cc
+index 53ffefe678..304c2b985f 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/address.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/address.cc
+@@ -630,8 +630,8 @@ void RangeList::decode(Decoder &decoder)
+ #ifdef UINTB4
+ uintb uintbmasks[9] = { 0, 0xff, 0xffff, 0xffffff, 0xffffffff, 0xffffffff, 0xffffffff, 0xffffffff, 0xffffffff };
+ #else
+-uintb uintbmasks[9] = { 0, 0xff, 0xffff, 0xffffff, 0xffffffff, 0xffffffffff,
+-			0xffffffffffff, 0xffffffffffffff, 0xffffffffffffffff };
++uintb uintbmasks[9] = { 0, 0xff, 0xffff, 0xffffff, 0xffffffff, 0xffffffffffULL,
++			0xffffffffffffULL, 0xffffffffffffffULL, 0xffffffffffffffffULL };
+ #endif
+ 
+ /// Treat the given \b val as a constant of \b size bytes
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/sleigh.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/sleigh.hh
+index 96aa81f319..4a2fca898b 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/sleigh.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/sleigh.hh
+@@ -175,6 +175,7 @@ public:
+   virtual ~Sleigh(void);				///< Destructor
+   void reset(LoadImage *ld,ContextDatabase *c_db);	///< Reset the engine for a new program
+   virtual void initialize(DocumentStorage &store);
++  virtual void initialize(istream& ifs);// Initialize the engine from an std::ifstream that's opened in binary mode, caller is responsible for opening and closing the stream
+   virtual void registerContext(const string &name,int4 sbit,int4 ebit);
+   virtual void setContextDefault(const string &nm,uintm val);
+   virtual void allowContextSet(bool val) const;
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/sleigh.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/sleigh.cc
+index beb3406b0f..6c4754bd69 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/sleigh.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/sleigh.cc
+@@ -577,6 +577,24 @@ void Sleigh::initialize(DocumentStorage &store)
+   discache = new DisassemblyCache(this,cache,getConstantSpace(),parser_cachesize,parser_windowsize);
+ }
+ 
++void Sleigh::initialize(istream& ifs)
++{
++  if (!isInitialized()) {	// Initialize the base if not already
++    sla::FormatDecode decoder(this);
++    decoder.ingestStream(ifs);
++    decode(decoder);
++  }
++  else
++    reregisterContext();
++  uint4 parser_cachesize = 2;
++  uint4 parser_windowsize = 32;
++  if ((maxdelayslotbytes > 1)||(unique_allocatemask != 0)) {
++    parser_cachesize = 8;
++    parser_windowsize = 256;
++  }
++  discache = new DisassemblyCache(this,cache,getConstantSpace(),parser_cachesize,parser_windowsize);
++}
++
+ /// \brief Obtain a parse tree for the instruction at the given address
+ ///
+ /// The tree may be cached from a previous access.  If the address
+-- 
+2.45.1
+

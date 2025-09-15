@@ -1,0 +1,142 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Andras Gemes <gemesa@protonmail.com>
+Date: Tue, 20 May 2025 20:56:24 +0200
+Subject: [PATCH] 8179: BSim: Add dropdatabase subcommand to bsim
+
+---
+ .../topics/BSim/CommandLineReference.html     |  9 +++++++
+ .../bsim/query/ingest/BSimLaunchable.java     | 20 ++++++++++++++++
+ .../bsim/query/ingest/BulkSignatures.java     | 24 +++++++++++++++++++
+ 3 files changed, 53 insertions(+)
+
+diff --git a/Ghidra/Features/BSim/src/main/help/help/topics/BSim/CommandLineReference.html b/Ghidra/Features/BSim/src/main/help/help/topics/BSim/CommandLineReference.html
+index 189bb89c6f..601d5e29f9 100644
+--- a/Ghidra/Features/BSim/src/main/help/help/topics/BSim/CommandLineReference.html
++++ b/Ghidra/Features/BSim/src/main/help/help/topics/BSim/CommandLineReference.html
+@@ -285,6 +285,7 @@
+ <PRE>
+ <CODE class&nbsp;"computeroutput">
+     bsim createdatabase  &lt;bsimURL&gt; &lt;config_template&gt; [--name|-n&nbsp;"&lt;name&gt;"] [--owner|-o&nbsp;"&lt;owner&gt;"] [--description|-d&nbsp;"&lt;text&gt;"] [--nocallgraph]
++    bsim dropdatabase    &lt;bsimURL&gt;
+     bsim setmetadata     &lt;bsimURL&gt; [--name|-n&nbsp;"&lt;name&gt;"] [--owner|-o&nbsp;"&lt;owner&gt;"] [--description|-d&nbsp;"&lt;text&gt;"]
+     bsim getmetadata     &lt;bsimURL&gt;
+     bsim addexecategory  &lt;bsimURL&gt; &lt;category_name&gt; [--date]
+@@ -372,6 +373,14 @@
+                 relationships between ingested functions. Default is to store call relationships.</P>
+               </DD>
+ 
++              <DT><SPAN class="term"><SPAN class=
++              "bold"><STRONG>dropdatabase</STRONG></SPAN></SPAN></DT>
++
++              <DD>
++                <P>Deletes the specified repository. A BSim server URL is required. The database name
++                is taken from the path element of the URL.
++              </DD>
++
+               <DT><SPAN class="term"><SPAN class=
+               "bold"><STRONG>setmetadata</STRONG></SPAN></SPAN></DT>
+ 
+diff --git a/Ghidra/Features/BSim/src/main/java/ghidra/features/bsim/query/ingest/BSimLaunchable.java b/Ghidra/Features/BSim/src/main/java/ghidra/features/bsim/query/ingest/BSimLaunchable.java
+index 38ac030c6f..0a5bdb6bf3 100644
+--- a/Ghidra/Features/BSim/src/main/java/ghidra/features/bsim/query/ingest/BSimLaunchable.java
++++ b/Ghidra/Features/BSim/src/main/java/ghidra/features/bsim/query/ingest/BSimLaunchable.java
+@@ -59,6 +59,7 @@ public class BSimLaunchable implements GhidraLaunchable {
+ 	 * bsim commands
+ 	 */
+ 	private static final String COMMAND_CREATE_DATABASE = defineCommand("createdatabase");
++	private static final String COMMAND_DROP_DATABASE = defineCommand("dropdatabase");
+ 	private static final String COMMAND_SET_METADATA = defineCommand("setmetadata");
+ 	private static final String COMMAND_GET_METADATA = defineCommand("getmetadata");
+ 	private static final String COMMAND_ADD_EXE_CATEGORY = defineCommand("addexecategory");
+@@ -137,6 +138,7 @@ public class BSimLaunchable implements GhidraLaunchable {
+ 	// Populate ALLOWED_OPTION_MAP for each command
+ 	private static final Set<String> CREATE_DATABASE_OPTIONS = 
+ 			Set.of(NAME_OPTION, OWNER_OPTION, DESCRIPTION_OPTION, NO_CALLGRAPH_OPTION);
++	private static final Set<String> DROP_DATABASE_OPTIONS = Set.of();
+ 	private static final Set<String> COMMIT_SIGS_OPTIONS = 
+ 			Set.of(OVERRIDE_OPTION, MD5_OPTION); // url requires override param
+ 	private static final Set<String> COMMIT_UPDATES_OPTIONS = Set.of();
+@@ -167,6 +169,7 @@ public class BSimLaunchable implements GhidraLaunchable {
+ 	private static final Map<String, Set<String>> ALLOWED_OPTION_MAP = new HashMap<>();
+ 	static {
+ 		ALLOWED_OPTION_MAP.put(COMMAND_CREATE_DATABASE, CREATE_DATABASE_OPTIONS);
++		ALLOWED_OPTION_MAP.put(COMMAND_DROP_DATABASE, DROP_DATABASE_OPTIONS);
+ 		ALLOWED_OPTION_MAP.put(COMMAND_SET_METADATA, SET_METADATA_OPTIONS);
+ 		ALLOWED_OPTION_MAP.put(COMMAND_GET_METADATA, GET_METADATA_OPTIONS);
+ 		ALLOWED_OPTION_MAP.put(COMMAND_ADD_EXE_CATEGORY, ADD_EXE_CATEGORY_OPTIONS);
+@@ -400,6 +403,10 @@ public class BSimLaunchable implements GhidraLaunchable {
+ 			bsimURL = BSimClientFactory.deriveBSimURL(urlstring);
+ 			doCreateDatabase(subParams);
+ 		}
++		else if (COMMAND_DROP_DATABASE.equals(command)) {
++			bsimURL = BSimClientFactory.deriveBSimURL(urlstring);
++			doDropDatabase(subParams);
++		}
+ 		else if (COMMAND_SET_METADATA.equals(command)) {
+ 			bsimURL = BSimClientFactory.deriveBSimURL(urlstring);
+ 			doInstallMetadata(subParams);
+@@ -532,6 +539,18 @@ public class BSimLaunchable implements GhidraLaunchable {
+ 		}
+ 	}
+ 
++	/**
++	 * Drops the current BSim database.
++	 *
++	 * @param params the command-line parameters
++	 * @throws IOException if there's an error establishing the database connection
++	 */
++	private void doDropDatabase(List<String> params) throws IOException {
++		try (BulkSignatures bsim = getBulkSignatures()) {
++			bsim.dropDatabase();
++		}
++	}
++
+ 	private void doGenerateSigs(List<String> params, TaskMonitor monitor)
+ 			throws Exception, CancelledException {
+ 		// concurrent --bsim and --config option use already checked
+@@ -971,6 +990,7 @@ public class BSimLaunchable implements GhidraLaunchable {
+ 		System.err.println("\n" +
+ 			"USAGE: bsim [command]       required-args... [OPTIONS...]\n" + 
+ 			"            createdatabase  <bsimURL> <config_template> [--name|-n \"<name>\"] [--owner|-o \"<owner>\"] [--description|-d \"<text>\"] [--nocallgraph]\n" + 
++			"            dropdatabase    <bsimURL> \n" +
+ 			"            setmetadata     <bsimURL> [--name|-n \"<name>\"] [--owner|-o \"<owner>\"] [--description|-d \"<text>\"]\n" + 
+ 			"            getmetadata     <bsimURL>\n" + 
+ 			"            addexecategory  <bsimURL> <category_name> [--date]\n" + 
+diff --git a/Ghidra/Features/BSim/src/main/java/ghidra/features/bsim/query/ingest/BulkSignatures.java b/Ghidra/Features/BSim/src/main/java/ghidra/features/bsim/query/ingest/BulkSignatures.java
+index 0d04fbf43e..a53b0213fb 100755
+--- a/Ghidra/Features/BSim/src/main/java/ghidra/features/bsim/query/ingest/BulkSignatures.java
++++ b/Ghidra/Features/BSim/src/main/java/ghidra/features/bsim/query/ingest/BulkSignatures.java
+@@ -451,6 +451,30 @@ public class BulkSignatures implements AutoCloseable {
+ 		}
+ 	}
+ 
++	/**
++	 * Drops the current BSim database.
++	 *
++	 * @throws IOException if there's an error establishing the database connection
++	 */
++	public void dropDatabase() throws IOException {
++		establishQueryServerConnection(false); // Set up client configuration
++		querydb.close(); // Database can't be in use when we try to drop it
++		DropDatabase command = new DropDatabase();
++		command.databaseName = bsimServerInfo.getDBName();
++		ResponseDropDatabase response = command.execute(querydb);
++		if (response == null) {
++			throw new IOException("Unable to drop database: " + querydb.getLastError().message);
++		}
++		else {
++			if (response.dropSuccessful) {
++				Msg.info(this, "Successfully dropped database \"" + command.databaseName + "\"");
++			}
++			else {
++				Msg.error(this, "Unable to drop database: " + response.errorMessage);
++			}
++		}
++	}
++
+ 	/**
+ 	 * Adds function signatures from the specified project to the BSim database
+ 	 * @param ghidraURL ghidra repository from which to pull files for signature generation
+-- 
+2.45.1
+

@@ -1,0 +1,459 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: John Millikin <john@john-millikin.com>
+Date: Tue, 1 Jul 2025 11:33:58 +0900
+Subject: [PATCH] 8312: Decompiler support for typed pointer offsets
+
+---
+ .../src/decompile/cpp/coreaction.cc           |  1 +
+ .../decompile/cpp/include/ghidra/printc.hh    |  1 +
+ .../cpp/include/ghidra/ruleaction.hh          | 10 +++
+ .../src/decompile/cpp/include/ghidra/type.hh  | 89 ++++++++++++-------
+ .../decompile/cpp/include/ghidra/typeop.hh    |  1 +
+ .../src/decompile/cpp/modelrules.cc           |  1 +
+ .../Decompiler/src/decompile/cpp/printc.cc    | 21 +++--
+ .../src/decompile/cpp/ruleaction.cc           | 59 ++++++++++++
+ .../Decompiler/src/decompile/cpp/type.cc      | 44 ++++++++-
+ .../Decompiler/src/decompile/cpp/typeop.cc    | 16 ++++
+ 10 files changed, 206 insertions(+), 37 deletions(-)
+
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
+index cce48b9d18..718844860c 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
+@@ -5685,6 +5685,7 @@ void ActionDatabase::universalAction(Architecture *conf)
+ 	actprop2->addRule( new RulePushPtr("typerecovery") );
+ 	actprop2->addRule( new RuleStructOffset0("typerecovery") );
+ 	actprop2->addRule( new RulePtrArith("typerecovery") );
++	actprop2->addRule( new RulePtrOffsetArith("typerecovery") );
+ 	//	actprop2->addRule( new RuleIndirectConcat("analysis") );
+ 	actprop2->addRule( new RuleLoadVarnode("stackvars") );
+ 	actprop2->addRule( new RuleStoreVarnode("stackvars") );
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/printc.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/printc.hh
+index f8c65f0189..7bc77b2e82 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/printc.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/printc.hh
+@@ -146,6 +146,7 @@ public:
+   static const string KEYWORD_RETURN;	///< "return" keyword
+   static const string KEYWORD_NEW;	///< "new" keyword
+   static const string typePointerRelToken;	///< The token to print indicating PTRSUB relative to a TypePointerRel
++  static const string typePointerOffToken;	///< The token to print indicating PTRADD+PTRSUB relative to a TypePointerOff
+ protected:
+   bool option_NULL;		///< Set to \b true if we should emit NULL keyword
+   bool option_inplace_ops;	///< Set to \b true if we should use '+=' '&=' etc.
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/ruleaction.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/ruleaction.hh
+index 2acf4b6d20..6fcd7d4443 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/ruleaction.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/ruleaction.hh
+@@ -1098,6 +1098,16 @@ public:
+   virtual int4 applyOp(PcodeOp *op,Funcdata &data);
+   static int4 evaluatePointerExpression(PcodeOp *op,int4 slot);
+ };
++class RulePtrOffsetArith : public Rule {
++public:
++  RulePtrOffsetArith(const string &g) : Rule(g, 0, "ptroffsetarith") {}	///< Constructor
++  virtual Rule *clone(const ActionGroupList &grouplist) const {
++    if (!grouplist.contains(getGroup())) return (Rule *)0;
++    return new RulePtrOffsetArith(getGroup());
++  }
++  virtual void getOpList(vector<uint4> &oplist) const;
++  virtual int4 applyOp(PcodeOp *op,Funcdata &data);
++};
+ class RuleStructOffset0 : public Rule {
+ public:
+   RuleStructOffset0(const string &g) : Rule(g, 0, "structoffset0") {}	///< Constructor
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/type.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/type.hh
+index 1ec93c9e04..2209b47965 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/type.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/type.hh
+@@ -77,17 +77,18 @@ extern void print_data(ostream &s,uint1 *buffer,int4 size,const Address &baseadd
+ /// The core meta-types supported by the decompiler. These are sizeless templates
+ /// for the elements making up the type algebra.  Index is important for Datatype::base2sub array.
+ enum type_metatype {
+-  TYPE_VOID = 17,		///< Standard "void" type, absence of type
+-  TYPE_SPACEBASE = 16,		///< Placeholder for symbol/type look-up calculations
+-  TYPE_UNKNOWN = 15,		///< An unknown low-level type. Treated as an unsigned integer.
+-  TYPE_INT = 14,		///< Signed integer. Signed is considered less specific than unsigned in C
+-  TYPE_UINT = 13,		///< Unsigned integer
+-  TYPE_BOOL = 12,		///< Boolean
+-  TYPE_CODE = 11,		///< Data is actual executable code
+-  TYPE_FLOAT = 10,		///< Floating-point
+-
+-  TYPE_PTR = 9,			///< Pointer data-type
+-  TYPE_PTRREL = 8,		///< Pointer relative to another data-type (specialization of TYPE_PTR)
++  TYPE_VOID = 18,		///< Standard "void" type, absence of type
++  TYPE_SPACEBASE = 17,		///< Placeholder for symbol/type look-up calculations
++  TYPE_UNKNOWN = 16,		///< An unknown low-level type. Treated as an unsigned integer.
++  TYPE_INT = 15,		///< Signed integer. Signed is considered less specific than unsigned in C
++  TYPE_UINT = 14,		///< Unsigned integer
++  TYPE_BOOL = 13,		///< Boolean
++  TYPE_CODE = 12,		///< Data is actual executable code
++  TYPE_FLOAT = 11,		///< Floating-point
++
++  TYPE_PTR = 10,			///< Pointer data-type
++  TYPE_PTRREL = 9,		///< Pointer relative to another data-type (specialization of TYPE_PTR)
++  TYPE_PTROFF = 8,
+   TYPE_ARRAY = 7,		///< Array data-type, made up of a sequence of "element" datatype
+   TYPE_ENUM_UINT = 6,		///< Unsigned enumeration data-type (specialization of TYPE_UINT)
+   TYPE_ENUM_INT = 5,		///< Signed enumeration data-type (specialization of TYPE_INT)
+@@ -101,24 +102,26 @@ enum type_metatype {
+ /// Specializations of the core meta-types.  Each enumeration is associated with a specific #type_metatype.
+ /// Ordering is important: The lower the number, the more \b specific the data-type, affecting propagation.
+ enum sub_metatype {
+-  SUB_VOID = 23,		///< Compare as a TYPE_VOID
+-  SUB_SPACEBASE = 22,		///< Compare as a TYPE_SPACEBASE
+-  SUB_UNKNOWN = 21,		///< Compare as a TYPE_UNKNOWN
+-  SUB_PARTIALSTRUCT = 20,	///< Compare as TYPE_PARTIALSTRUCT
+-  SUB_INT_CHAR = 19,		///< Signed 1-byte character, sub-type of TYPE_INT
+-  SUB_UINT_CHAR = 18,		///< Unsigned 1-byte character, sub-type of TYPE_UINT
+-  SUB_INT_PLAIN = 17,		///< Compare as a plain TYPE_INT
+-  SUB_UINT_PLAIN = 16,		///< Compare as a plain TYPE_UINT
+-  SUB_INT_ENUM = 15,		///< Signed enum, sub-type of TYPE_INT
+-  SUB_UINT_PARTIALENUM = 14,	///< Unsigned partial enum, sub-type of TYPE_UINT
+-  SUB_UINT_ENUM = 13,		///< Unsigned enum, sub-type of TYPE_UINT
+-  SUB_INT_UNICODE = 12,		///< Signed wide character, sub-type of TYPE_INT
+-  SUB_UINT_UNICODE = 11,	///< Unsigned wide character, sub-type of TYPE_UINT
+-  SUB_BOOL = 10,		///< Compare as TYPE_BOOL
+-  SUB_CODE = 9,			///< Compare as TYPE_CODE
+-  SUB_FLOAT = 8,		///< Compare as TYPE_FLOAT
+-  SUB_PTRREL_UNK = 7,		///< Pointer to unknown field of struct, sub-type of TYPE_PTR
+-  SUB_PTR = 6,			///< Compare as TYPE_PTR
++  SUB_VOID = 25,		///< Compare as a TYPE_VOID
++  SUB_SPACEBASE = 24,		///< Compare as a TYPE_SPACEBASE
++  SUB_UNKNOWN = 23,		///< Compare as a TYPE_UNKNOWN
++  SUB_PARTIALSTRUCT = 22,	///< Compare as TYPE_PARTIALSTRUCT
++  SUB_INT_CHAR = 21,		///< Signed 1-byte character, sub-type of TYPE_INT
++  SUB_UINT_CHAR = 20,		///< Unsigned 1-byte character, sub-type of TYPE_UINT
++  SUB_INT_PLAIN = 19,		///< Compare as a plain TYPE_INT
++  SUB_UINT_PLAIN = 18,		///< Compare as a plain TYPE_UINT
++  SUB_INT_ENUM = 17,		///< Signed enum, sub-type of TYPE_INT
++  SUB_UINT_PARTIALENUM = 16,	///< Unsigned partial enum, sub-type of TYPE_UINT
++  SUB_UINT_ENUM = 15,		///< Unsigned enum, sub-type of TYPE_UINT
++  SUB_INT_UNICODE = 14,		///< Signed wide character, sub-type of TYPE_INT
++  SUB_UINT_UNICODE = 13,	///< Unsigned wide character, sub-type of TYPE_UINT
++  SUB_BOOL = 12,		///< Compare as TYPE_BOOL
++  SUB_CODE = 11,			///< Compare as TYPE_CODE
++  SUB_FLOAT = 10,		///< Compare as TYPE_FLOAT
++  SUB_PTROFF_UNK = 9,
++  SUB_PTRREL_UNK = 8,		///< Pointer to unknown field of struct, sub-type of TYPE_PTR
++  SUB_PTR = 7,			///< Compare as TYPE_PTR
++  SUB_PTROFF = 6,
+   SUB_PTRREL = 5,		///< Pointer relative to another data-type, sub-type of TYPE_PTR
+   SUB_PTR_STRUCT = 4,		///< Pointer into struct, sub-type of TYPE_PTR
+   SUB_ARRAY = 3,		///< Compare as TYPE_ARRAY
+@@ -164,7 +167,7 @@ struct DatatypeCompare;
+ /// Used for symbols, function prototypes, type propagation etc.
+ class Datatype {
+ protected:
+-  static sub_metatype base2sub[18];
++  static sub_metatype base2sub[19];
+   /// Boolean properties of datatypes
+   enum {
+     coretype = 1,		///< This is a basic type which will never be redefined
+@@ -248,6 +251,8 @@ public:
+   virtual Datatype *nearestArrayedComponentForward(int8 off,int8 *newoff,int8 *elSize) const;
+   virtual Datatype *nearestArrayedComponentBackward(int8 off,int8 *newoff,int8 *elSize) const;
+ 
++  virtual bool isPointerOff(void) const { return false; }
++
+   /// \brief Get number of bytes at the given offset that are padding
+   ///
+   /// For the given offset into \b this data-type, determine if the byte at that offset is considered
+@@ -684,6 +689,30 @@ public:
+   static Datatype *getPtrToFromParent(Datatype *base,int4 off,TypeFactory &typegrp);
+ };
+ 
++/// \brief Typed offset from BaseType to FieldType.
++///
++/// Adding a typed offset and a pointer of the offset's base type yields a new
++/// pointer of the offset's field type.
++class TypePointerOff : public TypePointer {
++protected:
++  friend class TypeFactory;
++  Datatype *ptrfrom;
++  TypePointer *plain;
++  void decode(Decoder &decoder,TypeFactory &typegrp);	///< Restore \b this pointer data-type from a stream
++  /// Internal constructor for decode
++  TypePointerOff(void) : TypePointer() { ptrfrom = (Datatype *)0; plain = (TypePointer *)0; submeta = SUB_PTROFF; }
++public:
++  /// Construct from another TypePointerOff
++  TypePointerOff(const TypePointerOff &op) : TypePointer((const TypePointer &)op) {
++    ptrfrom = op.ptrfrom; plain = op.plain; }
++
++  virtual Datatype *clone(void) const { return new TypePointerOff(*this); }
++  virtual Datatype *getStripped(void) const { return (Datatype*)0; }
++  TypePointer *getPlain(void) const { return plain; }
++  Datatype *getPtrFrom(void) const { return ptrfrom; }
++  virtual bool isPointerOff(void) const { return true; }
++};
++
+ class FuncProto;		// Forward declaration
+ class PrototypePieces;
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/typeop.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/typeop.hh
+index a6d38c9c8d..0102d4d56b 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/typeop.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/typeop.hh
+@@ -833,6 +833,7 @@ public:
+   virtual Datatype *getInputCast(const PcodeOp *op,int4 slot,const CastStrategy *castStrategy) const;
+   virtual Datatype *propagateType(Datatype *alttype,PcodeOp *op,Varnode *invn,Varnode *outvn,
+ 				  int4 inslot,int4 outslot);
++  static TypePointerOff *getPointerOffsetType(const PcodeOp *op);
+   virtual void push(PrintLanguage *lng,const PcodeOp *op,const PcodeOp *readOp) const { lng->opPtradd(op); }
+   virtual void printRaw(ostream &s,const PcodeOp *op);
+ };
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/modelrules.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/modelrules.cc
+index e541fa6aba..eb3b389ac7 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/modelrules.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/modelrules.cc
+@@ -190,6 +190,7 @@ bool PrimitiveExtractor::extract(Datatype *dt,int4 max,int4 offset)
+     case TYPE_FLOAT:
+     case TYPE_PTR:
+     case TYPE_PTRREL:
++    case TYPE_PTROFF:
+       if (primitives.size() >= max)
+ 	return false;
+       primitives.emplace_back(dt,offset);
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/printc.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/printc.cc
+index ff8f55c3a7..3d8e20deb2 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/printc.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/printc.cc
+@@ -105,6 +105,7 @@ const string PrintC::KEYWORD_DEFAULT = "default";
+ const string PrintC::KEYWORD_RETURN = "return";
+ const string PrintC::KEYWORD_NEW = "new";
+ const string PrintC::typePointerRelToken = "ADJ";
++const string PrintC::typePointerOffToken = "OFF";
+ 
+ // Constructing this registers the capability
+ PrintCCapability PrintCCapability::printCCapability;
+@@ -892,10 +893,17 @@ void PrintC::opPtradd(const PcodeOp *op)
+ {
+   bool printval = isSet(print_load_value|print_store_value);
+   uint4 m = mods & ~(print_load_value|print_store_value);
+-  if (printval)			// Use array notation if we need value
+-    pushOp(&subscript,op);
+-  else				// just a '+'
+-    pushOp(&binary_plus,op);
++  TypePointerOff *offptr = TypeOpPtradd::getPointerOffsetType(op);
++  if (offptr) {
++    pushOp(&function_call,op);
++    pushAtom(Atom(typePointerOffToken,optoken,EmitMarkup::funcname_color,op));
++    pushOp(&comma,(const PcodeOp *)0);
++  } else {
++    if (printval)                       // Use array notation if we need value
++      pushOp(&subscript,op);
++    else                                // just a '+'
++      pushOp(&binary_plus,op);
++  }
+   // implied vn's pushed on in reverse order for efficiency
+   // see PrintLanguage::pushVnImplied
+   pushVn(op->getIn(1),op,m);
+@@ -915,7 +923,10 @@ static bool isValueFlexible(const Varnode *vn)
+       opc = invn->getDef()->code();
+     }
+     if (opc == CPUI_PTRSUB) return true;
+-    if (opc == CPUI_PTRADD) return true;
++    if (opc == CPUI_PTRADD) {
++      if (TypeOpPtradd::getPointerOffsetType(def)) return false;
++      return true;
++    }
+   }
+   return false;
+ }
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc
+index a1bbba8fb3..3edbc210ad 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc
+@@ -7049,6 +7049,65 @@ int4 RulePtrArith::applyOp(PcodeOp *op,Funcdata &data)
+   return 0;
+ }
+ 
++/// \class RulePtrOffsetArith
++/// \brief Transform typed pointer offset arithetic
++///
++/// Rule for converting pointer arithmetic involving typed offset pointers.
++/// Groups of PTRADD / INT_ADD / PTRSUB that involve TypePointerOff inputs
++/// are reassociated such that PTRSUB field offsets are relative to the offset
++/// pointer target.
++void RulePtrOffsetArith::getOpList(vector<uint4> &oplist) const
++
++{
++  oplist.push_back(CPUI_INT_ADD);
++  oplist.push_back(CPUI_PTRADD);
++}
++
++int4 RulePtrOffsetArith::applyOp(PcodeOp *op,Funcdata &data)
++
++{
++  Varnode *in0 = op->getIn(0);
++  Varnode *in1 = op->getIn(1);
++  if (!in0->getDef() || in0->getDef()->code() != CPUI_PTRSUB) return 0;
++  Datatype *dt0 = in0->getType();
++  Datatype *dt1 = in1->getType();
++  if (!dt0->isPointerRel() || !dt1->isPointerOff()) return 0;
++
++  // Base pointer type must match the typed offset pointer base type
++  TypePointerRel *ptrin0 = (TypePointerRel*)dt0;
++  TypePointerOff *ptrin1 = (TypePointerOff*)dt1;
++  if (!ptrin0->getParent() || !ptrin1->getPtrFrom()) return 0;
++  if (ptrin0->getParent() != ptrin1->getPtrFrom()) return 0;
++
++  Varnode *child = in0->getDef()->getIn(0);
++  Varnode *field = in0->getDef()->getIn(1);
++
++  TypeFactory *types = data.getArch()->types;
++
++  TypePointer *base_ptr_off = (TypePointer*)in1->getType();
++  Datatype *base_struct = base_ptr_off->getPtrTo();
++  TypePointer *base_struct_ptr = types->getTypePointer(base_ptr_off->getSize(), base_struct, base_ptr_off->getWordSize());
++
++  TypePointer *child_ptr = (TypePointer*)child->getType();
++  Varnode *child_size = data.newConstant(child_ptr->getSize(), child_ptr->getPtrTo()->getSize());
++  PcodeOp *ptradd_rel = data.newOpBefore(op, CPUI_PTRADD, child, in1, child_size);
++
++  int4 field_offset = field->getOffset();
++  if (field_offset > 0) {
++    TypePointerRel *field_ptr_rel = types->getTypePointerRel(base_struct_ptr, base_struct, field_offset);
++    PcodeOp *ptrsub_field = data.newOpBefore(op, CPUI_PTRSUB, ptradd_rel->getOut(), field);
++    data.opSetOutput(ptrsub_field, op->getOut());
++    ptrsub_field->getOut()->updateType(field_ptr_rel);
++  } else {
++    data.opSetOutput(ptradd_rel, op->getOut());
++  }
++  ptradd_rel->getOut()->updateType(base_struct_ptr, true, true);
++  ptradd_rel->getOut()->setImplied();
++  data.opDestroy(op->getIn(0)->getDef());
++  data.opDestroy(op);
++  return 1;
++}
++
+ /// \class RuleStructOffset0
+ /// \brief Convert a LOAD or STORE to the first element of a structure to a PTRSUB.
+ ///
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/type.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/type.cc
+index 1c1ee9b8d2..bce2f91af3 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/type.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/type.cc
+@@ -20,9 +20,9 @@ namespace ghidra {
+ 
+ /// The base propagation ordering associated with each meta-type.
+ /// The array elements correspond to the ordering of #type_metatype.
+-sub_metatype Datatype::base2sub[18] = {
++sub_metatype Datatype::base2sub[19] = {
+     SUB_PARTIALUNION, SUB_PARTIALSTRUCT, SUB_UINT_PARTIALENUM, SUB_UNION, SUB_STRUCT, SUB_INT_ENUM, SUB_UINT_ENUM,
+-    SUB_ARRAY, SUB_PTRREL, SUB_PTR, SUB_FLOAT, SUB_CODE, SUB_BOOL, SUB_UINT_PLAIN, SUB_INT_PLAIN, SUB_UNKNOWN,
++    SUB_ARRAY, SUB_PTROFF, SUB_PTRREL, SUB_PTR, SUB_FLOAT, SUB_CODE, SUB_BOOL, SUB_UINT_PLAIN, SUB_INT_PLAIN, SUB_UNKNOWN,
+     SUB_SPACEBASE, SUB_VOID
+ };
+ 
+@@ -248,6 +248,9 @@ void metatype2string(type_metatype metatype,string &res)
+   case TYPE_PTRREL:
+     res = "ptrrel";
+     break;
++  case TYPE_PTROFF:
++    res = "ptroff";
++    break;
+   case TYPE_ARRAY:
+     res = "array";
+     break;
+@@ -310,6 +313,8 @@ type_metatype string2metatype(const string &metastring)
+       return TYPE_PTR;
+     else if (metastring=="ptrrel")
+       return TYPE_PTRREL;
++    else if (metastring=="ptroff")
++      return TYPE_PTROFF;
+     else if (metastring=="partunion")
+       return TYPE_PARTIALUNION;
+     else if (metastring=="partstruct")
+@@ -2706,6 +2711,32 @@ Datatype *TypePointerRel::getPtrToFromParent(Datatype *base,int4 off,TypeFactory
+   return base;
+ }
+ 
++void TypePointerOff::decode(Decoder &decoder,TypeFactory &typegrp)
++
++{
++//  uint4 elemId = decoder.openElement();
++  decodeBasic(decoder);
++  metatype = TYPE_PTR;		// Don't use TYPE_PTROFF internally
++  decoder.rewindAttributes();
++  for(;;) {
++    uint4 attrib = decoder.getNextAttributeId();
++    if (attrib == 0) break;
++    if (attrib == ATTRIB_WORDSIZE) {
++      wordsize = decoder.readUnsignedInteger();
++    }
++    else if (attrib == ATTRIB_SPACE) {
++      spaceid = decoder.readSpace();
++    }
++  }
++  ptrfrom = typegrp.decodeType( decoder );
++  ptrto = typegrp.decodeType( decoder );
++  submeta = SUB_PTROFF;
++  plain = typegrp.getTypePointer(size,ptrto,wordsize);
++  if (ptrto->getMetatype() == TYPE_UNKNOWN)
++    submeta = SUB_PTROFF_UNK;
++//  decoder.closeElement(elemId);
++}
++
+ /// Turn on the data-type's function prototype
+ /// \param tfact is the factory that owns \b this
+ /// \param sig is the list of names and data-types making up the prototype
+@@ -4467,6 +4498,15 @@ Datatype *TypeFactory::decodeTypeNoRef(Decoder &decoder,bool forcecore)
+       ct = findAdd(tp);
+     }
+     break;
++  case TYPE_PTROFF:
++    {
++      TypePointerOff tp;
++      tp.decode(decoder, *this);
++      if (forcecore)
++	tp.flags |= Datatype::coretype;
++      ct = findAdd(tp);
++    }
++    break;
+   case TYPE_ARRAY:
+     {
+       TypeArray ta;
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/typeop.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/typeop.cc
+index 9edf150361..93d81b537e 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/typeop.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/typeop.cc
+@@ -2359,6 +2359,10 @@ TypeOpPtradd::TypeOpPtradd(TypeFactory *t) : TypeOp(t,CPUI_PTRADD,"+")
+ Datatype *TypeOpPtradd::getInputLocal(const PcodeOp *op,int4 slot) const
+ 
+ {
++  if (slot == 1) {
++    TypePointerOff *offptr = getPointerOffsetType(op);
++    if (offptr) return offptr;
++  }
+   return tlst->getBase(op->getIn(slot)->getSize(),TYPE_INT);	// For type propagation, treat same as INT_ADD
+ }
+ 
+@@ -2371,6 +2375,8 @@ Datatype *TypeOpPtradd::getOutputLocal(const PcodeOp *op) const
+ Datatype *TypeOpPtradd::getOutputToken(const PcodeOp *op,CastStrategy *castStrategy) const
+ 
+ {
++  TypePointerOff *offptr = getPointerOffsetType(op);
++  if (offptr) return offptr->getPlain();
+   return op->getIn(0)->getHighTypeReadFacing(op);		// Cast to the input data-type
+ }
+ 
+@@ -2401,6 +2407,16 @@ Datatype *TypeOpPtradd::propagateType(Datatype *alttype,PcodeOp *op,Varnode *inv
+   return newtype;
+ }
+ 
++TypePointerOff *TypeOpPtradd::getPointerOffsetType(const PcodeOp *op) {
++  Datatype *base = op->getIn(0)->getTypeReadFacing(op);
++  Datatype *off = op->getIn(1)->getTypeReadFacing(op);
++  if (!off->isPointerOff() || base->getMetatype() != TYPE_PTR) return nullptr;
++  TypePointer *baseptr = (TypePointer*)base;
++  TypePointerOff *offptr = (TypePointerOff*)off;
++  if (baseptr->getPtrTo() != offptr->getPtrFrom()) return nullptr;
++  return offptr;
++}
++
+ void TypeOpPtradd::printRaw(ostream &s,const PcodeOp *op)
+ 
+ {
+-- 
+2.45.1
+

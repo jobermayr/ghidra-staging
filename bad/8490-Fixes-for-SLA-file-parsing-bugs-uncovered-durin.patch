@@ -1,0 +1,718 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: mnemonikr <138624285+mnemonikr@users.noreply.github.com>
+Date: Tue, 2 Sep 2025 12:06:29 -0700
+Subject: [PATCH] 8490: Fixes for SLA file parsing bugs uncovered during
+ fuzzing
+
+Memory leak in Architecture::decodeProto
+
+Memory leak in AddrSpaceManager::decodeSpace
+
+Memory leak in Override::decode
+
+Memory leak in Funcdata::decodeJumpTable
+
+Memory leak in DatatypeFilter::decodeFilter
+
+Memory leak in QualifierFilter::decodeFilter
+
+Memory leak in AssignAction::decodeAction
+
+Memory leak in AssignAction::decodeSideeffect
+
+Fixed arbitrary heap memory read caused by negative skip in PackedDecode::advancePosition
+
+Fixed null pointer dereference caused by PackedDecode::endIngest call with empty input
+
+Fixed out of bound read caused by not validating address space index
+
+Memory leak in OpTpl::decode
+
+Memory leak in ConstructTpl::decode
+
+Memory leak in DisjointPattern::decodeDisjoint
+
+Memory leak in Constructor::decode
+
+Validate SleighSymbol and SymbolScope (memory leak, nullptr deref, heap-buffer-overflow)
+
+Memory leak in DecisionNode::decode
+
+Throw exception in PatternExpression::decodeExpression instead of returning null to avoid caller nullptr deref
+
+Memory leak in PatternExpression::decodeExpression
+
+Heap buffer overflow read in OperandValue::decode
+
+Heap buffer overflow read in DecisionNode::decode
+
+Memory leaks in symbols with PatternExpression when decoded multiple times
+
+C++11 compatible
+---
+ .../src/decompile/cpp/architecture.cc         |  15 ++-
+ .../Decompiler/src/decompile/cpp/funcdata.cc  |   4 +-
+ .../decompile/cpp/include/ghidra/marshal.hh   |   4 +-
+ .../decompile/cpp/include/ghidra/semantics.hh |   2 +-
+ .../cpp/include/ghidra/slghsymbol.hh          |   6 +-
+ .../Decompiler/src/decompile/cpp/marshal.cc   |   6 +
+ .../src/decompile/cpp/modelrules.cc           |  48 +++----
+ .../Decompiler/src/decompile/cpp/override.cc  |   4 +-
+ .../Decompiler/src/decompile/cpp/semantics.cc |   8 +-
+ .../src/decompile/cpp/slghpatexpress.cc       |  11 +-
+ .../src/decompile/cpp/slghpattern.cc          |  10 +-
+ .../src/decompile/cpp/slghsymbol.cc           | 124 +++++++++++++-----
+ .../Decompiler/src/decompile/cpp/translate.cc |  14 +-
+ 13 files changed, 162 insertions(+), 94 deletions(-)
+
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/architecture.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/architecture.cc
+index 94050a3d16..2edd1ebea8 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/architecture.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/architecture.cc
+@@ -725,23 +725,24 @@ void Architecture::decodeDynamicRule(Decoder &decoder)
+ ProtoModel *Architecture::decodeProto(Decoder &decoder)
+ 
+ {
+-  ProtoModel *res;
++  std::unique_ptr<ProtoModel> model;
+   uint4 elemId = decoder.peekElement();
+   if (elemId == ELEM_PROTOTYPE)
+-    res = new ProtoModel(this);
++    model = std::unique_ptr<ProtoModel>(new ProtoModel(this));
+   else if (elemId == ELEM_RESOLVEPROTOTYPE)
+-    res = new ProtoModelMerged(this);
++    model = std::unique_ptr<ProtoModel>(new ProtoModelMerged(this));
+   else
+     throw LowlevelError("Expecting <prototype> or <resolveprototype> tag");
+ 
+-  res->decode(decoder);
++  model->decode(decoder);
+   
+-  ProtoModel *other = getModel(res->getName());
++  ProtoModel *other = getModel(model->getName());
+   if (other != (ProtoModel *)0) {
+-    string errMsg = "Duplicate ProtoModel name: " + res->getName();
+-    delete res;
++    string errMsg = "Duplicate ProtoModel name: " + model->getName();
+     throw LowlevelError(errMsg);
+   }
++
++  ProtoModel* res = model.release();
+   protoModels[res->getName()] = res;
+   return res;
+ }
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/funcdata.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/funcdata.cc
+index 99139b5a10..55c79e40a3 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/funcdata.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/funcdata.cc
+@@ -681,9 +681,9 @@ void Funcdata::decodeJumpTable(Decoder &decoder)
+ {
+   uint4 elemId = decoder.openElement(ELEM_JUMPTABLELIST);
+   while(decoder.peekElement() != 0) {
+-    JumpTable *jt = new JumpTable(glb);
++    std::unique_ptr<JumpTable> jt = std::unique_ptr<JumpTable>(new JumpTable(glb));
+     jt->decode(decoder);
+-    jumpvec.push_back(jt);
++    jumpvec.push_back(jt.release());
+   }
+   decoder.closeElement(elemId);
+ }
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/marshal.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/marshal.hh
+index cd9ef243e2..367988b703 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/marshal.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/marshal.hh
+@@ -536,7 +536,7 @@ private:
+   uint1 getByte(Position &pos) { return *pos.current; }	///< Get the byte at the current position, do not advance
+   uint1 getBytePlus1(Position &pos);	///< Get the byte following the current byte, do not advance position
+   uint1 getNextByte(Position &pos);	///< Get the byte at the current position and advance to the next byte
+-  void advancePosition(Position &pos,int4 skip);	///< Advance the position by the given number of bytes
++  void advancePosition(Position &pos,uint4 skip);	///< Advance the position by the given number of bytes
+   uint8 readInteger(int4 len);		///< Read an integer from the \e current position given its length in bytes
+   uint4 readLengthCode(uint1 typeByte) { return ((uint4)typeByte & PackedFormat::LENGTHCODE_MASK); }	///< Extract length code from type byte
+   void findMatchingAttribute(const AttributeId &attribId);	///< Find attribute matching the given id in open element
+@@ -631,7 +631,7 @@ inline uint1 PackedDecode::getNextByte(Position &pos)
+ /// An exception is thrown of position is advanced past the end of the stream
+ /// \param pos is the position being advanced
+ /// \param skip is the number of bytes to advance
+-inline void PackedDecode::advancePosition(Position &pos,int4 skip)
++inline void PackedDecode::advancePosition(Position &pos,uint4 skip)
+ 
+ {
+   while(pos.end - pos.current <= skip) {
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/semantics.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/semantics.hh
+index fec23dd3c2..3758fd7e9e 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/semantics.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/semantics.hh
+@@ -142,7 +142,7 @@ class OpTpl {
+   OpCode opc;
+   vector<VarnodeTpl *> input;
+ public:
+-  OpTpl(void) {}
++  OpTpl(void) : output(nullptr) {}
+   OpTpl(OpCode oc) { opc = oc; output = (VarnodeTpl *)0; }
+   ~OpTpl(void);
+   VarnodeTpl *getOut(void) const { return output; }
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/slghsymbol.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/slghsymbol.hh
+index a586197b32..55999a672b 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/slghsymbol.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/slghsymbol.hh
+@@ -327,7 +327,7 @@ private:
+   void setVariableLength(void) { flags |= variable_len; }
+   bool isVariableLength(void) const { return ((flags&variable_len)!=0); }
+ public:
+-  OperandSymbol(void) {}	// For use with decode
++  OperandSymbol(void) : localexp(nullptr), defexp(nullptr) {}	// For use with decode
+   OperandSymbol(const string &nm,int4 index,Constructor *ct);
+   uint4 getRelativeOffset(void) const { return reloffset; }
+   int4 getOffsetBase(void) const { return offsetbase; }
+@@ -483,8 +483,8 @@ class ContextOp : public ContextChange {
+   int4 shift;			// Number of bits to shift value into place
+ public:
+   ContextOp(int4 startbit,int4 endbit,PatternExpression *pe);
+-  ContextOp(void) {}		// For use with decode
+-  virtual ~ContextOp(void) { PatternExpression::release(patexp); }
++  ContextOp(void) : patexp(nullptr) {}		// For use with decode
++  virtual ~ContextOp(void) { if (patexp) PatternExpression::release(patexp); }
+   virtual void validate(void) const;
+   virtual void encode(Encoder &encoder) const;
+   virtual void decode(Decoder &decoder,SleighBase *trans);
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/marshal.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/marshal.cc
+index 5d231ef34d..cc36f7c0fb 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/marshal.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/marshal.cc
+@@ -689,7 +689,10 @@ void PackedDecode::endIngest(int4 bufPos)
+     }
+     uint1 *buf = inStream.back().start;
+     buf[bufPos] = ELEMENT_END;
++  } else {
++    throw DecoderError("Ended ingestion without any input");
+   }
++
+ }
+ 
+ PackedDecode::~PackedDecode(void)
+@@ -1006,6 +1009,9 @@ AddrSpace *PackedDecode::readSpace(void)
+   AddrSpace *spc;
+   if (typeCode == TYPECODE_ADDRESSSPACE) {
+     res = readInteger(readLengthCode(typeByte));
++    if (res >= spcManager->numSpaces())
++      throw DecoderError("Invalid address space index");
++
+     spc = spcManager->getSpace(res);
+     if (spc == (AddrSpace *)0)
+       throw DecoderError("Unknown address space index");
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/modelrules.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/modelrules.cc
+index eb3b389ac7..e884174cd5 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/modelrules.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/modelrules.cc
+@@ -253,23 +253,23 @@ PrimitiveExtractor::PrimitiveExtractor(Datatype *dt,bool unionIllegal,int offset
+ DatatypeFilter *DatatypeFilter::decodeFilter(Decoder &decoder)
+ 
+ {
+-  DatatypeFilter *filter;
++  std::unique_ptr<DatatypeFilter> filter;
+   uint4 elemId = decoder.openElement(ELEM_DATATYPE);
+   string nm = decoder.readString(ATTRIB_NAME);
+   if (nm == "any") {
+-    filter = new SizeRestrictedFilter();
++    filter = std::unique_ptr<DatatypeFilter>(new SizeRestrictedFilter());
+   }
+   else if (nm == "homogeneous-float-aggregate") {
+-    filter = new HomogeneousAggregate(TYPE_FLOAT,4,0,0);
++    filter = std::unique_ptr<DatatypeFilter>(new HomogeneousAggregate(TYPE_FLOAT,4,0,0));
+   }
+   else {
+     // If no other name matches, assume this is a metatype
+     type_metatype meta = string2metatype(nm);
+-    filter = new MetaTypeFilter(meta);
++    filter = std::unique_ptr<DatatypeFilter>(new MetaTypeFilter(meta));
+   }
+   filter->decode(decoder);
+   decoder.closeElement(elemId);
+-  return filter;
++  return filter.release();
+ }
+ 
+ /// Parse the given string as a comma or space separated list of decimal integers,
+@@ -452,18 +452,18 @@ void HomogeneousAggregate::decode(Decoder &decoder)
+ QualifierFilter *QualifierFilter::decodeFilter(Decoder &decoder)
+ 
+ {
+-  QualifierFilter *filter;
++  std::unique_ptr<QualifierFilter> filter;
+   uint4 elemId = decoder.peekElement();
+   if (elemId == ELEM_VARARGS)
+-    filter = new VarargsFilter();
++    filter = std::unique_ptr<QualifierFilter>(new VarargsFilter());
+   else if (elemId == ELEM_POSITION)
+-    filter = new PositionMatchFilter(-1);
++    filter = std::unique_ptr<QualifierFilter>(new PositionMatchFilter(-1));
+   else if (elemId == ELEM_DATATYPE_AT)
+-    filter = new DatatypeMatchFilter();
++    filter = std::unique_ptr<QualifierFilter>(new DatatypeMatchFilter());
+   else
+     return (QualifierFilter *)0;
+   filter->decode(decoder);
+-  return filter;
++  return filter.release();
+ }
+ 
+ /// The AndFilter assumes ownership of all the filters in the array and the original vector is cleared
+@@ -593,32 +593,32 @@ bool AssignAction::fillinOutputMap(ParamActive *active) const
+ AssignAction *AssignAction::decodeAction(Decoder &decoder,const ParamListStandard *res)
+ 
+ {
+-  AssignAction *action;
++  std::unique_ptr<AssignAction> action;
+   uint4 elemId = decoder.peekElement();
+   if (elemId == ELEM_GOTO_STACK)
+-    action = new GotoStack(res,0);
++    action = std::unique_ptr<AssignAction>(new GotoStack(res,0));
+   else if (elemId == ELEM_JOIN) {
+-    action = new MultiSlotAssign(res);
++    action = std::unique_ptr<AssignAction>(new MultiSlotAssign(res));
+   }
+   else if (elemId == ELEM_CONSUME) {
+-    action = new ConsumeAs(TYPECLASS_GENERAL,res);
++    action = std::unique_ptr<AssignAction>(new ConsumeAs(TYPECLASS_GENERAL,res));
+   }
+   else if (elemId == ELEM_CONVERT_TO_PTR) {
+-    action = new ConvertToPointer(res);
++    action = std::unique_ptr<AssignAction>(new ConvertToPointer(res));
+   }
+   else if (elemId == ELEM_HIDDEN_RETURN) {
+-    action = new HiddenReturnAssign(res,hiddenret_specialreg);
++    action = std::unique_ptr<AssignAction>(new HiddenReturnAssign(res,hiddenret_specialreg));
+   }
+   else if (elemId == ELEM_JOIN_PER_PRIMITIVE) {
+-    action = new MultiMemberAssign(TYPECLASS_GENERAL,false,res->isBigEndian(),res);
++    action = std::unique_ptr<AssignAction>(new MultiMemberAssign(TYPECLASS_GENERAL,false,res->isBigEndian(),res));
+   }
+   else if (elemId == ELEM_JOIN_DUAL_CLASS) {
+-    action = new MultiSlotDualAssign(res);
++    action = std::unique_ptr<AssignAction>(new MultiSlotDualAssign(res));
+   }
+   else
+     throw DecoderError("Expecting model rule action");
+   action->decode(decoder);
+-  return action;
++  return action.release();
+ }
+ 
+ /// \brief Read the next model rule precondition element from the stream
+@@ -654,22 +654,22 @@ AssignAction *AssignAction::decodePrecondition(Decoder &decoder,const ParamListS
+ AssignAction *AssignAction::decodeSideeffect(Decoder &decoder,const ParamListStandard *res)
+ 
+ {
+-  AssignAction *action;
++  std::unique_ptr<AssignAction> action;
+   uint4 elemId = decoder.peekElement();
+ 
+   if (elemId == ELEM_CONSUME_EXTRA) {
+-    action = new ConsumeExtra(res);
++    action = std::unique_ptr<AssignAction>(new ConsumeExtra(res));
+   }
+   else if (elemId == ELEM_EXTRA_STACK) {
+-    action = new ExtraStack(res);
++    action = std::unique_ptr<AssignAction>(new ExtraStack(res));
+   }
+   else if (elemId == ELEM_CONSUME_REMAINING) {
+-	action = new ConsumeRemaining(res);
++	action = std::unique_ptr<AssignAction>(new ConsumeRemaining(res));
+   }
+   else
+     throw DecoderError("Expecting model rule sideeffect");
+   action->decode(decoder);
+-  return action;
++  return action.release();
+ }
+ 
+ /// \brief Truncate a tiling by a given number of bytes
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/override.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/override.cc
+index 52b80d76ef..04af99fab1 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/override.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/override.cc
+@@ -365,10 +365,10 @@ void Override::decode(Decoder &decoder,Architecture *glb)
+     }
+     else if (subId == ELEM_PROTOOVERRIDE) {
+       Address callpoint = Address::decode(decoder);
+-      FuncProto *fp = new FuncProto();
++      std::unique_ptr<FuncProto> fp(new FuncProto());
+       fp->setInternal(glb->defaultfp,glb->types->getTypeVoid());
+       fp->decode(decoder,glb);
+-      insertProtoOverride(callpoint,fp);
++      insertProtoOverride(callpoint,fp.release());
+     }
+     else if (subId == ELEM_FORCEGOTO) {
+       Address targetpc = Address::decode(decoder);
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/semantics.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/semantics.cc
+index 60c19b1482..b3840c7a6c 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/semantics.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/semantics.cc
+@@ -736,9 +736,9 @@ void OpTpl::decode(Decoder &decoder)
+     output->decode(decoder);
+   }
+   while(decoder.peekElement() != 0) {
+-    VarnodeTpl *vn = new VarnodeTpl();
++    std::unique_ptr<VarnodeTpl> vn(new VarnodeTpl());
+     vn->decode(decoder);
+-    input.push_back(vn);
++    input.push_back(vn.release());
+   }
+   decoder.closeElement(el);
+ }
+@@ -926,9 +926,9 @@ int4 ConstructTpl::decode(Decoder &decoder)
+     result->decode(decoder);
+   }
+   while(decoder.peekElement() != 0) {
+-    OpTpl *op = new OpTpl();
++    std::unique_ptr<OpTpl> op(new OpTpl());
+     op->decode(decoder);
+-    vec.push_back(op);
++    vec.push_back(op.release());
+   }
+   decoder.closeElement(el);
+   return sectionid;
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/slghpatexpress.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/slghpatexpress.cc
+index 79a060735b..c68db7b40b 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/slghpatexpress.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/slghpatexpress.cc
+@@ -509,10 +509,12 @@ PatternExpression *PatternExpression::decodeExpression(Decoder &decoder,Translat
+   else if (el == sla::ELEM_OFFSET_EXP)
+     res = new OffsetInstructionValue();
+   else
+-    return (PatternExpression *)0;
++    throw DecoderError("Invalid pattern expression element");
+ 
+-  res->decode(decoder,trans);
+-  return res;
++  // Call PatternExpression::release on decoding failure
++  std::unique_ptr<PatternExpression, void(*)(PatternExpression *)> patexp(res, PatternExpression::release);
++  patexp->decode(decoder, trans);
++  return patexp.release();
+ }
+ 
+ static intb getInstructionBytes(ParserWalker &walker,int4 bytestart,int4 byteend,bool bigendian)
+@@ -865,6 +867,9 @@ void OperandValue::decode(Decoder &decoder,Translate *trans)
+   uintm ctid = decoder.readUnsignedInteger(sla::ATTRIB_CT);
+   SleighBase *sleigh = (SleighBase *)trans;
+   SubtableSymbol *tab = dynamic_cast<SubtableSymbol *>(sleigh->findSymbol(tabid));
++  if (ctid >= tab->getNumConstructors()) {
++    throw DecoderError("Invalid constructor id");
++  }
+   ct = tab->getConstructor(ctid);
+   decoder.closeElement(el);
+ }
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/slghpattern.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/slghpattern.cc
+index dc83bd8bcf..6cf48dfacb 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/slghpattern.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/slghpattern.cc
+@@ -141,16 +141,16 @@ bool DisjointPattern::resolvesIntersect(const DisjointPattern *op1,const Disjoin
+ DisjointPattern *DisjointPattern::decodeDisjoint(Decoder &decoder)
+ 
+ {				// DisjointPattern factory
+-  DisjointPattern *res;
++  std::unique_ptr<DisjointPattern> res;
+   uint4 el = decoder.peekElement();
+   if (el == sla::ELEM_INSTRUCT_PAT)
+-    res = new InstructionPattern();
++    res = std::unique_ptr<InstructionPattern>(new InstructionPattern());
+   else if (el == sla::ELEM_CONTEXT_PAT)
+-    res = new ContextPattern();
++    res = std::unique_ptr<ContextPattern>(new ContextPattern());
+   else
+-    res = new CombinePattern();
++    res = std::unique_ptr<CombinePattern>(new CombinePattern());
+   res->decode(decoder);
+-  return res;
++  return res.release();
+ }
+ 
+ void PatternBlock::normalize(void)
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/slghsymbol.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/slghsymbol.cc
+index 7b8394eabb..c12a0631d7 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/slghsymbol.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/slghsymbol.cc
+@@ -173,8 +173,20 @@ void SymbolTable::decode(Decoder &decoder,SleighBase *trans)
+   for(int4 i=0;i<table.size();++i) { // Decode the scopes
+     int4 subel = decoder.openElement(sla::ELEM_SCOPE);
+     uintm id = decoder.readUnsignedInteger(sla::ATTRIB_ID);
++    if (id >= table.size()) {
++      throw SleighError("Bad symbol scope id: exceeds symbol scope table size");
++    }
++
+     uintm parent = decoder.readUnsignedInteger(sla::ATTRIB_PARENT);
++    if (parent >= table.size()) {
++      throw SleighError("Bad symbol scope parent id: exceeds symbol scope table size");
++    }
++
+     SymbolScope *parscope = (parent==id) ? (SymbolScope *)0 : table[parent];
++    if (table[id]) {
++      throw SleighError("Bad symbol scope parent id: not unique");
++    }
++
+     table[id] = new SymbolScope( parscope, id );
+     decoder.closeElement(subel);
+   }
+@@ -200,43 +212,62 @@ void SymbolTable::decodeSymbolHeader(Decoder &decoder)
+ 
+ {				// Put the shell of a symbol in the symbol table
+ 				// in order to allow recursion
+-  SleighSymbol *sym;
++  std::unique_ptr<SleighSymbol> sym;
+   uint4 el = decoder.peekElement();
+   if (el == sla::ELEM_USEROP_HEAD)
+-    sym = new UserOpSymbol();
++    sym = std::unique_ptr<SleighSymbol>(new UserOpSymbol());
+   else if (el == sla::ELEM_EPSILON_SYM_HEAD)
+-    sym = new EpsilonSymbol();
++    sym = std::unique_ptr<SleighSymbol>(new EpsilonSymbol());
+   else if (el == sla::ELEM_VALUE_SYM_HEAD)
+-    sym = new ValueSymbol();
++    sym = std::unique_ptr<SleighSymbol>(new ValueSymbol());
+   else if (el == sla::ELEM_VALUEMAP_SYM_HEAD)
+-    sym = new ValueMapSymbol();
++    sym = std::unique_ptr<SleighSymbol>(new ValueMapSymbol());
+   else if (el == sla::ELEM_NAME_SYM_HEAD)
+-    sym = new NameSymbol();
++    sym = std::unique_ptr<SleighSymbol>(new NameSymbol());
+   else if (el == sla::ELEM_VARNODE_SYM_HEAD)
+-    sym = new VarnodeSymbol();
++    sym = std::unique_ptr<SleighSymbol>(new VarnodeSymbol());
+   else if (el == sla::ELEM_CONTEXT_SYM_HEAD)
+-    sym = new ContextSymbol();
++    sym = std::unique_ptr<SleighSymbol>(new ContextSymbol());
+   else if (el == sla::ELEM_VARLIST_SYM_HEAD)
+-    sym = new VarnodeListSymbol();
++    sym = std::unique_ptr<SleighSymbol>(new VarnodeListSymbol());
+   else if (el == sla::ELEM_OPERAND_SYM_HEAD)
+-    sym = new OperandSymbol();
++    sym = std::unique_ptr<SleighSymbol>(new OperandSymbol());
+   else if (el == sla::ELEM_START_SYM_HEAD)
+-    sym = new StartSymbol();
++    sym = std::unique_ptr<SleighSymbol>(new StartSymbol());
+   else if (el == sla::ELEM_OFFSET_SYM_HEAD)
+-    sym = new OffsetSymbol();
++    sym = std::unique_ptr<SleighSymbol>(new OffsetSymbol());
+   else if (el == sla::ELEM_END_SYM_HEAD)
+-    sym = new EndSymbol();
++    sym = std::unique_ptr<SleighSymbol>(new EndSymbol());
+   else if (el == sla::ELEM_NEXT2_SYM_HEAD)
+-    sym = new Next2Symbol();
++    sym = std::unique_ptr<SleighSymbol>(new Next2Symbol());
+   else if (el == sla::ELEM_SEG_SYM_HEAD)
+-    sym = new SegSymbol();
++    sym = std::unique_ptr<SleighSymbol>(new SegSymbol());
+   else if (el == sla::ELEM_SUBTABLE_SYM_HEAD)
+-    sym = new SubtableSymbol();
++    sym = std::unique_ptr<SleighSymbol>(new SubtableSymbol());
+   else
+     throw SleighError("Bad symbol xml");
++
+   sym->decodeHeader(decoder);	// Restore basic elements of symbol
+-  symbollist[sym->id] = sym;	// Put the basic symbol in the table
+-  table[sym->scopeid]->addSymbol(sym); // to allow recursion
++
++  if (sym->id >= symbollist.size()) {
++    throw SleighError("Bad symbol id: exceeds symbollist size");
++  }
++
++  if (symbollist[sym->id] != (SleighSymbol *)0) {
++    throw SleighError("Bad symbol id: not unique");
++  }
++
++  if (sym->scopeid >= table.size()) {
++    throw SleighError("Bad symbol scope id: too large");
++  }
++
++  if (table[sym->scopeid] == (SymbolScope *)0) {
++    throw SleighError("Bad symbol scope id: undefined");
++  }
++
++  SleighSymbol *res = sym.release();
++  symbollist[res->id] = res;	// Put the basic symbol in the table
++  table[res->scopeid]->addSymbol(res); // to allow recursion
+ }
+ 
+ void SymbolTable::purge(void)
+@@ -502,6 +533,9 @@ void ValueSymbol::encodeHeader(Encoder &encoder) const
+ void ValueSymbol::decode(Decoder &decoder,SleighBase *trans)
+ 
+ {
++  if (patval)
++    throw DecoderError("Already decoded symbol");
++
+   patval = (PatternValue *) PatternExpression::decodeExpression(decoder,trans);
+   patval->layClaim();
+   decoder.closeElement(sla::ELEM_VALUE_SYM.getId());
+@@ -583,6 +617,9 @@ void ValueMapSymbol::encodeHeader(Encoder &encoder) const
+ void ValueMapSymbol::decode(Decoder &decoder,SleighBase *trans)
+ 
+ {
++  if (patval)
++    throw DecoderError("Already decoded symbol");
++
+   patval = (PatternValue *) PatternExpression::decodeExpression(decoder,trans);
+   patval->layClaim();
+   while(decoder.peekElement() != 0) {
+@@ -662,6 +699,9 @@ void NameSymbol::encodeHeader(Encoder &encoder) const
+ void NameSymbol::decode(Decoder &decoder,SleighBase *trans)
+ 
+ {
++  if (patval)
++    throw DecoderError("Already decoded symbol");
++
+   patval = (PatternValue *) PatternExpression::decodeExpression(decoder,trans);
+   patval->layClaim();
+   while(decoder.peekElement() != 0) {
+@@ -796,6 +836,10 @@ void ContextSymbol::decode(Decoder &decoder,SleighBase *trans)
+   if (lowMissing || highMissing) {
+     throw DecoderError("Missing high/low attributes");
+   }
++
++  if (patval)
++    throw DecoderError("Already decoded symbol");
++
+   patval = (PatternValue *) PatternExpression::decodeExpression(decoder,trans);
+   patval->layClaim();
+   decoder.closeElement(sla::ELEM_CONTEXT_SYM.getId());
+@@ -900,6 +944,9 @@ void VarnodeListSymbol::encodeHeader(Encoder &encoder) const
+ void VarnodeListSymbol::decode(Decoder &decoder,SleighBase *trans)
+ 
+ {
++  if (patval)
++    throw DecoderError("Already decoded symbol");
++
+   patval = (PatternValue *) PatternExpression::decodeExpression(decoder,trans);
+   patval->layClaim();
+   while(decoder.peekElement() != 0) {
+@@ -947,7 +994,9 @@ void OperandSymbol::defineOperand(TripleSymbol *tri)
+ OperandSymbol::~OperandSymbol(void)
+ 
+ {
+-  PatternExpression::release(localexp);
++  if (localexp != (PatternExpression *)0)
++    PatternExpression::release(localexp);
++
+   if (defexp != (PatternExpression *)0)
+     PatternExpression::release(defexp);
+ }
+@@ -1042,6 +1091,9 @@ void OperandSymbol::encodeHeader(Encoder &encoder) const
+ void OperandSymbol::decode(Decoder &decoder,SleighBase *trans)
+ 
+ {
++  if (defexp || localexp)
++    throw DecoderError("Already decoded symbol");
++
+   defexp = (PatternExpression *)0;
+   triple = (TripleSymbol *)0;
+   flags = 0;
+@@ -1068,6 +1120,7 @@ void OperandSymbol::decode(Decoder &decoder,SleighBase *trans)
+   localexp = (OperandValue *)PatternExpression::decodeExpression(decoder,trans);
+   localexp->layClaim();
+   if (decoder.peekElement() != 0) {
++
+     defexp = PatternExpression::decodeExpression(decoder,trans);
+     defexp->layClaim();
+   }
+@@ -1756,29 +1809,29 @@ void Constructor::decode(Decoder &decoder,SleighBase *trans)
+       decoder.closeElement(subel);
+     }
+     else if (subel == sla::ELEM_CONTEXT_OP) {
+-      ContextOp *c_op = new ContextOp();
++      std::unique_ptr<ContextOp> c_op = std::unique_ptr<ContextOp>(new ContextOp());
+       c_op->decode(decoder,trans);
+-      context.push_back(c_op);
++      context.push_back(c_op.release());
+     }
+     else if (subel == sla::ELEM_COMMIT) {
+-      ContextCommit *c_op = new ContextCommit();
++      std::unique_ptr<ContextCommit> c_op = std::unique_ptr<ContextCommit>(new ContextCommit());
+       c_op->decode(decoder,trans);
+-      context.push_back(c_op);
++      context.push_back(c_op.release());
+     }
+     else {
+-      ConstructTpl *cur = new ConstructTpl();
++      std::unique_ptr<ConstructTpl> cur = std::unique_ptr<ConstructTpl>(new ConstructTpl());
+       int4 sectionid = cur->decode(decoder);
+       if (sectionid < 0) {
+-	if (templ != (ConstructTpl *)0)
+-	  throw LowlevelError("Duplicate main section");
+-	templ = cur;
++        if (templ != (ConstructTpl *)0)
++          throw LowlevelError("Duplicate main section");
++        templ = cur.release();
+       }
+       else {
+-	while(namedtempl.size() <= sectionid)
+-	  namedtempl.push_back((ConstructTpl *)0);
+-	if (namedtempl[sectionid] != (ConstructTpl *)0)
+-	  throw LowlevelError("Duplicate named section");
+-	namedtempl[sectionid] = cur;
++        while(namedtempl.size() <= sectionid)
++          namedtempl.push_back((ConstructTpl *)0);
++        if (namedtempl[sectionid] != (ConstructTpl *)0)
++          throw LowlevelError("Duplicate named section");
++        namedtempl[sectionid] = cur.release();
+       }
+     }
+     subel = decoder.peekElement();
+@@ -2455,15 +2508,18 @@ void DecisionNode::decode(Decoder &decoder,DecisionNode *par,SubtableSymbol *sub
+     if (subel == sla::ELEM_PAIR) {
+       decoder.openElement();
+       uintm id = decoder.readSignedInteger(sla::ATTRIB_ID);
++      if (id >= sub->getNumConstructors()) {
++        throw DecoderError("Invalid constructor id");
++      }
+       Constructor *ct = sub->getConstructor(id);
+       DisjointPattern *pat = DisjointPattern::decodeDisjoint(decoder);
+       list.push_back(pair<DisjointPattern *,Constructor *>(pat,ct));
+       decoder.closeElement(subel);
+     }
+     else if (subel == sla::ELEM_DECISION) {
+-      DecisionNode *subnode = new DecisionNode();
++      std::unique_ptr<DecisionNode> subnode = std::unique_ptr<DecisionNode>(new DecisionNode());
+       subnode->decode(decoder,this,sub);
+-      children.push_back(subnode);
++      children.push_back(subnode.release());
+     }
+     subel = decoder.peekElement();
+   }
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/translate.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/translate.cc
+index 414a9f0131..5e0b25e1ec 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/translate.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/translate.cc
+@@ -258,22 +258,22 @@ AddrSpace *AddrSpaceManager::decodeSpace(Decoder &decoder,const Translate *trans
+ 
+ {
+   uint4 elemId = decoder.peekElement();
+-  AddrSpace *res;
++  std::unique_ptr<AddrSpace> res;
+   if (elemId == ELEM_SPACE_BASE)
+-    res = new SpacebaseSpace(this,trans);
++    res = std::unique_ptr<SpacebaseSpace>(new SpacebaseSpace(this,trans));
+   else if (elemId == ELEM_SPACE_UNIQUE)
+-    res = new UniqueSpace(this,trans);
++    res = std::unique_ptr<UniqueSpace>(new UniqueSpace(this,trans));
+   else if (elemId == ELEM_SPACE_OTHER)
+-    res = new OtherSpace(this,trans);
++    res = std::unique_ptr<OtherSpace>(new OtherSpace(this,trans));
+   else if (elemId == ELEM_SPACE_OVERLAY)
+-    res = new OverlaySpace(this,trans);
++    res = std::unique_ptr<OverlaySpace>(new OverlaySpace(this,trans));
+   else if (elemId == ELEM_SPACE)
+-    res = new AddrSpace(this,trans,IPTR_PROCESSOR);
++    res = std::unique_ptr<AddrSpace>(new AddrSpace(this,trans,IPTR_PROCESSOR));
+   else
+     throw LowlevelError("Invalid address space element. Internal element id: " + to_string(elemId));
+ 
+   res->decode(decoder);
+-  return res;
++  return res.release();
+ }
+ 
+ /// This routine initializes (almost) all the address spaces used
+-- 
+2.45.1
+

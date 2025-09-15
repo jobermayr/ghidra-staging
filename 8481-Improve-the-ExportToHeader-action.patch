@@ -1,0 +1,108 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: johannes <johannesmiesenhardt@gmail.com>
+Date: Sun, 31 Aug 2025 13:28:02 +0200
+Subject: [PATCH] 8481: Improve the ExportToHeader action
+
+Only declare bool when using old C
+
+Remove bogus float16 declaration
+
+This removes all float declarations by default.
+The default float gets its own getCTypeDeclaration override in the
+attempt of stating intent more clearly.
+
+Prevent compilers from using implementation-defined memory layouts
+
+Remove extra newline character
+---
+ .../program/model/data/AbstractFloatDataType.java    |  4 ++--
+ .../ghidra/program/model/data/BooleanDataType.java   | 12 ++++++++++--
+ .../ghidra/program/model/data/DataTypeWriter.java    |  5 ++++-
+ .../ghidra/program/model/data/FloatDataType.java     |  5 +++++
+ 4 files changed, 21 insertions(+), 5 deletions(-)
+
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/data/AbstractFloatDataType.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/data/AbstractFloatDataType.java
+index c77ca4af02..54db868b91 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/data/AbstractFloatDataType.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/data/AbstractFloatDataType.java
+@@ -210,8 +210,8 @@ public abstract class AbstractFloatDataType extends BuiltIn {
+ 	@Override
+ 	public String getCTypeDeclaration(DataOrganization dataOrganization) {
+ 		// NOTE: There are a variety of naming conventions for fixed-length floats
+-		// so we will just use our name and rely on user to edit to suit there needs.
+-		return hasLanguageDependantLength() ? null : name;
++		// so we will just not provide a declaration and rely on the user to declare their own.
++		return null;
+ 	}
+ 
+ 	private static TreeMap<Integer, AbstractFloatDataType> floatTypes; // fixed-size float types
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/data/BooleanDataType.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/data/BooleanDataType.java
+index e15fc2d616..a649707f2c 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/data/BooleanDataType.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/data/BooleanDataType.java
+@@ -79,8 +79,7 @@ public class BooleanDataType extends AbstractUnsignedIntegerDataType {
+ 	public Object getValue(MemBuffer buf, Settings settings, int length) {
+ 		try {
+ 			return buf.getByte(0) != 0;
+-		}
+-		catch (MemoryAccessException e) {
++		} catch (MemoryAccessException e) {
+ 			return null;
+ 		}
+ 	}
+@@ -124,4 +123,13 @@ public class BooleanDataType extends AbstractUnsignedIntegerDataType {
+ 		return this;
+ 	}
+ 
++	private static final String EOL = System.getProperty("line.separator");
++
++	@Override
++	public String getCTypeDeclaration(DataOrganization dataOrganization) {
++		// In C++ and C23 and onwards bool is no longer a type that has to be declared first.
++		String declaration = super.getCTypeDeclaration(dataOrganization);
++		return "#if !defined(__cplusplus) && __STDC_VERSION__ < 202311L" + EOL + declaration + EOL + "#endif";
++	}
++
+ }
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/data/DataTypeWriter.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/data/DataTypeWriter.java
+index 829bb57cd0..a9d3e35b06 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/data/DataTypeWriter.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/data/DataTypeWriter.java
+@@ -455,6 +455,8 @@ public class DataTypeWriter {
+ 		String compositeType = composite instanceof Structure ? "struct" : "union";
+ 
+ 		StringBuilder sb = new StringBuilder();
++		sb.append("#pragma pack(push, 1)").append(EOL);
++
+ 		sb.append(compositeType + " " + composite.getDisplayName() + " {");
+ 
+ 		String descrip = composite.getDescription();
+@@ -469,7 +471,8 @@ public class DataTypeWriter {
+ 		}
+ 
+ 		sb.append(annotator.getSuffix(composite, null));
+-		sb.append("};");
++		sb.append("};").append(EOL);
++		sb.append("#pragma pack(pop)");
+ 
+ 		writer.write(sb.toString());
+ 		writer.write(EOL);
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/data/FloatDataType.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/data/FloatDataType.java
+index 6261f7a88c..94012b203b 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/data/FloatDataType.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/data/FloatDataType.java
+@@ -46,6 +46,11 @@ public class FloatDataType extends AbstractFloatDataType {
+ 		return new FloatDataType(dtm);
+ 	}
+ 
++	@Override
++	public String getCTypeDeclaration(DataOrganization dataOrganization) {
++		return null; // Standard C primitive
++	}
++
+ 	@Override
+ 	public boolean hasLanguageDependantLength() {
+ 		return true;
+-- 
+2.45.1
+

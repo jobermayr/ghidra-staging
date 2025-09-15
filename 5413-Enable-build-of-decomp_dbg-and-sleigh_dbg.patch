@@ -7,17 +7,18 @@ Building decomp_dbg and sleigh_dbg can now easily enabled via 'gradle -Pdebug' s
 
 Fixes: #5296
 ---
- .../Features/Decompiler/buildNatives.gradle   | 465 +++++++++++-------
- 1 file changed, 299 insertions(+), 166 deletions(-)
+ .../Features/Decompiler/buildNatives.gradle   | 515 ++++++++++++------
+ 1 file changed, 337 insertions(+), 178 deletions(-)
 
 diff --git a/Ghidra/Features/Decompiler/buildNatives.gradle b/Ghidra/Features/Decompiler/buildNatives.gradle
-index bc50d9d307..55b4b6162e 100644
+index 010461ae21..536cc2a9bd 100644
 --- a/Ghidra/Features/Decompiler/buildNatives.gradle
 +++ b/Ghidra/Features/Decompiler/buildNatives.gradle
-@@ -22,20 +22,179 @@ if (findProject(':Generic') == null) {
+@@ -22,20 +22,182 @@ if (findProject(':Generic') == null) {
  	apply from: "../../../GPL/nativeBuildProperties.gradle"
  }
  
+-/**
 +// Define the source files that are compiled and linked to become the decompiler.
 +// The decompiler source is a bit weird in that all the cpp and headers all live in
 +// the same directory with other files that are not used by the decompiler.
@@ -57,6 +58,7 @@ index bc50d9d307..55b4b6162e 100644
 +	"dynamic.cc",
 +	"emulate.cc",
 +	"emulateutil.cc",
++	"expression.cc",
 +	"flow.cc",
 +	"fspec.cc",
 +	"funcdata.cc",
@@ -155,7 +157,7 @@ index bc50d9d307..55b4b6162e 100644
 +]
 +
 +
-+/**
++/*
 + * Try to find libbfd*.so or a static libbfd.a for linking decomp_dbg
 + */
 +def linkBFDUnix = {
@@ -180,12 +182,14 @@ index bc50d9d307..55b4b6162e 100644
 +	return "-lbfd -Wl,--no-whole-archive -liberty -lsframe -lz -lzstd"
 +}
 +
- /**
++/*
   * Define the "native build model" for building the decompiler executables.
 + * Options:
++ * -Pcli	Build unoptimized debug interfaces with debug information (not for Windows)
++ * -Pdebug	Build with debug information (all systems)
++ * -Plto	Enable Link Time Optimization (not for debug interfaces (-Pcli), disable on Windows with -Pnolto)
++ * -Popt	Build optimized with GCC / Clang (disable on Windows with -Pnoopt)
 + * -PsysZlib	Build against system zlib (ignored for Windows)
-+ * -Pdebug	Build debug interfaces (not for Windows)
-+ * -Plto	Enable Link Time Optimization (Gcc and Clang; not for debug interfaces)
   */
  model {
 -	// Define the source files that are compiled and linked to become the decompiler.
@@ -201,7 +205,7 @@ index bc50d9d307..55b4b6162e 100644
  			// these tell gradle for which platforms to build a decompiler executable.
  			targetPlatform "win_x86_64"
  			targetPlatform "linux_x86_64"
-@@ -46,103 +205,26 @@ model {
+@@ -46,104 +208,31 @@ model {
  			targetPlatform "freebsd_arm_64"
  			sources {
  				cpp {
@@ -245,6 +249,7 @@ index bc50d9d307..55b4b6162e 100644
 -		                include "emulateutil.cc"
 -		                include "flow.cc"
 -		                include "userop.cc"
+-		                include "expression.cc"
 -		                include "multiprecision.cc"
 -		                include "funcdata.cc"
 -		                include "funcdata_block.cc"
@@ -312,7 +317,12 @@ index bc50d9d307..55b4b6162e 100644
 +			}
 +			binaries.all { b ->
 +				if (b.toolChain in Gcc || b.toolChain in Clang) {
-+					b.cppCompiler.args "-O2"
++					if (project.hasProperty('debug')) {
++						b.cppCompiler.args "-g"
++					}
++					if (project.hasProperty('opt')) {
++						b.cppCompiler.args "-O2"
++					}
 +					if (project.hasProperty('lto')) {
 +						b.cppCompiler.args "-flto"
 +						b.linker.args "-flto"
@@ -322,7 +332,7 @@ index bc50d9d307..55b4b6162e 100644
  		} // end decompile
  
  		sleigh(NativeExecutableSpec) {
-@@ -155,85 +237,147 @@ model {
+@@ -156,90 +245,175 @@ model {
  			targetPlatform "freebsd_arm_64"
  			sources {
  				cpp {
@@ -384,7 +394,14 @@ index bc50d9d307..55b4b6162e 100644
 +			}
 +			binaries.all { b ->
 +				if (b.toolChain in Gcc || b.toolChain in Clang) {
-+					b.cppCompiler.args "-O2"
++					if (project.hasProperty('debug')) {
++						b.cppCompiler.args "-g"
++						b.cCompiler.args "-g"
++					}
++					if (project.hasProperty('opt')) {
++						b.cppCompiler.args "-O2"
++						b.cCompiler.args "-O2"
++					}
 +					if (project.hasProperty('sysZlib')) {
 +						b.linker.args "-lz"
 +					}
@@ -409,7 +426,7 @@ index bc50d9d307..55b4b6162e 100644
  		} // end sleigh
  
 -	}  // end components
-+		if (project.hasProperty('debug')) {
++		if (project.hasProperty('cli')) {
 +			decomp_dbg(NativeExecutableSpec) {
 +				baseName "decomp_dbg"
 +				targetPlatform "linux_x86_64"
@@ -511,18 +528,53 @@ index bc50d9d307..55b4b6162e 100644
  				}
  			}
 -		 	else if (b.toolChain in VisualCpp) {
+-				b.cppCompiler.args "/EHsc"
 +			else if (b.toolChain in VisualCpp) {
- 				b.cppCompiler.args "/EHsc"
++				b.cppCompiler.args "/W3"
++				b.cCompiler.args "/W3"
++				if (project.hasProperty('debug')) {
++					b.cppCompiler.args "/Zi"
++					b.cppCompiler.args "/FS"
++					b.cCompiler.args "/Zi"
++					b.cCompiler.args "/FS"
++					b.linker.args "/DEBUG"
++				}
++				if (!project.hasProperty('noopt')) {
++					b.cppCompiler.args "/EHsc"
++					b.cppCompiler.args "/O2"
++					b.cppCompiler.args "/Oy"	// Omit frame pointer
++					b.cppCompiler.args "/GL"
++					b.cCompiler.args "/EHsc"
++					b.cCompiler.args "O2"
++					b.cCompiler.args "Oy"		// Omit frame pointer
++					b.cCompiler.args "GL"
++				}
++				if (!project.hasProperty('nolto')) {
++					b.linker.args "/LTCG"
++				}
  				b.cppCompiler.define "_SECURE_SCL=0"
  				b.cppCompiler.define "_HAS_ITERATOR_DEBUGGING=0"
  				b.cppCompiler.define "_HAS_STD_BYTE=0"  // msvc has a byte typedef that conflicts with c++17 std::byte
+-				b.cppCompiler.args "/W3"
+-				b.cppCompiler.args "/O2"
+-				b.cppCompiler.args "/Oy"			// Omit frame pointer
+-				b.cppCompiler.args "/GL"
 -				// b.cppCompiler.args "/Zi"		// for DEBUG, uncomment this line
 -				// b.cppCompiler.args "/FS"		// for DEBUG, uncomment this line
 -				// b.linker.args "/DEBUG"		// for DEBUG, uncomment this line
+-				b.linker.args "/LTCG"
  				if (b.targetPlatform.operatingSystem.windows) {
  					b.cppCompiler.define "WINDOWS"
  					b.cppCompiler.define "_WINDOWS"
-@@ -251,17 +395,6 @@ model {
+@@ -250,25 +424,10 @@ model {
+ 						b.cppCompiler.define "_WIN64"
+ 					}	
+ 				}
+-				b.cCompiler.args "/W3"
+-				b.cCompiler.args "/O2"
+-				b.cCompiler.args "/Oy"			// Omit frame pointer
+-				b.cCompiler.args "/GL"
+ 				b.cCompiler.define "_CRT_SECURE_NO_DEPRECATE"
  				b.cCompiler.define "_CRT_NONSTDC_NO_DEPRECATE"
  				b.cCompiler.define "ZLIB_WINAPI"
  			}

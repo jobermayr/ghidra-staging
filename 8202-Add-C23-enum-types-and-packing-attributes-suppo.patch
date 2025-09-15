@@ -1,0 +1,214 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: FeeeeK <26704473+FeeeeK@users.noreply.github.com>
+Date: Tue, 27 May 2025 01:39:53 +0300
+Subject: [PATCH] 8202: Add C23 enum types and packing attributes support for C
+ parser
+
+Add C23 enum types support for C parser
+
+Add __packed__ enum attribute support
+
+Remove debug print
+---
+ .../javacc/ghidra/app/util/cparser/C/C.jj     | 73 +++++++++++++------
+ .../ghidra/app/util/cparser/CParserTest.java  | 16 ++++
+ .../ghidra/app/util/cparser/CParserTest.h     | 33 +++++++++
+ 3 files changed, 99 insertions(+), 23 deletions(-)
+
+diff --git a/Ghidra/Features/Base/src/main/javacc/ghidra/app/util/cparser/C/C.jj b/Ghidra/Features/Base/src/main/javacc/ghidra/app/util/cparser/C/C.jj
+index c07389e177..1421c296d3 100644
+--- a/Ghidra/Features/Base/src/main/javacc/ghidra/app/util/cparser/C/C.jj
++++ b/Ghidra/Features/Base/src/main/javacc/ghidra/app/util/cparser/C/C.jj
+@@ -520,36 +520,53 @@ public class CParser {
+     }
+     
+ 
+-    private DataType allocateEnumDT(Token t, ArrayList<EnumMember> list, Declaration dec) {
+-    	String enumName = (t != null ? t.image : ("enum_" + cnt++));
++    private DataType allocateEnumDT(Token t, Declaration underlyingTypeDecl, ArrayList<EnumMember> list, boolean isPacked) {
++        String enumName = (t != null ? t.image : ("enum_" + cnt++));
++        int defaultSize = (dtMgr != null && dtMgr.getDataOrganization() != null ? dtMgr.getDataOrganization().getIntegerSize() : 4);
++        int initialEnumSize = defaultSize;
++        if (underlyingTypeDecl != null) {
++            DataType resolvedUnderlyingType = underlyingTypeDecl.getDataType();
++            if (resolvedUnderlyingType == null) {
++                addNearParseMessage("Error: Enum '" + enumName + "' has undefined underlying type '" +
++                                    underlyingTypeDecl.getName() + "'. Using default integer size (" + defaultSize + ").");
++            } else {
++                int typeLength = resolvedUnderlyingType.getLength();
++                if (typeLength == 1 || typeLength == 2 || typeLength == 4 || typeLength == 8) {
++                    initialEnumSize = typeLength;
++                } else {
++                        addNearParseMessage("Warning: Enum '" + enumName + "' specified underlying type '" +
++                                            resolvedUnderlyingType.getDisplayName() +
++                                            "' has a non-standard length (" + typeLength +
++                                            "). Enums should have a length of 1, 2, 4, or 8. Using default integer size (" + defaultSize + ").");
++                }
+ 
+-        // Create an initial enum
+-        EnumDataType enumDT = new EnumDataType(getCurrentCategoryPath(), enumName, 8, dtMgr);
++                if (!(resolvedUnderlyingType instanceof AbstractIntegerDataType)) {
++                    addNearParseMessage("Warning: Enum '" + enumName + "' has underlying type '" +
++                                        resolvedUnderlyingType.getDisplayName() +
++                                        "' which is not a standard C integer or char type. Behavior may be unexpected.");
++                }
++            }
++        }
+ 
+-        // Add all new enum members
++        EnumDataType enumDT = new EnumDataType(getCurrentCategoryPath(), enumName, initialEnumSize, dtMgr);
+         if (list != null) {
+             for (EnumMember member : list) {
+                 try {
+-                        enumDT.add(member.name, member.value);
++                    enumDT.add(member.name, member.value);
+                 } catch (IllegalArgumentException exc) {
+                     addNearParseMessage("duplicate enum value: " + enumName + " : " + member.name + " : " + member.value);
+                 }
+             }
+         }
+ 
+-        int defaultEnumLen = 0;
+-        if (dec.getQualifiers().contains(PACKED)) {
+-            // Get the default packed enum length
+-            defaultEnumLen = (dtMgr != null ? dtMgr.getDataOrganization().getCharSize() : 1);
++        int minLen = enumDT.getMinimumPossibleLength();
++        int finalEnumLength;
++        if (underlyingTypeDecl == null) {
++            finalEnumLength = minLen;
+         } else {
+-            // Get the default enum size, which is an int
+-            defaultEnumLen = (dtMgr != null ? dtMgr.getDataOrganization().getIntegerSize() : 4);
++            finalEnumLength = Math.max(minLen, initialEnumSize);
+         }
+-
+-        // If values in the enum require a bigger size, expand the enum...
+-        int enumLen = Math.max(defaultEnumLen, enumDT.getMinimumPossibleLength());
+-        enumDT.setLength(enumLen);
+-
++        enumDT.setLength(finalEnumLength);
+         return addDef(enums, enumDT.getName(), enumDT);
+     }
+ 
+@@ -1229,7 +1246,7 @@ TOKEN :
+     |
+     <UNALIGNED : "__unaligned" >
+     |
+-    <PACKED : ( [ "_" ] )* "packed" >
++    <PACKED : (["_"])* "packed" (["_"])* >
+     |
+     <ATTRIBUTE : "__attribute" (["_"])* >
+     |
+@@ -2305,23 +2322,33 @@ DataType EnumSpecifier() : {
+     Token t= null;
+     DataType dt;
+     ArrayList<EnumMember> list;
+-    Declaration dec = new Declaration();
++    Declaration attributeDecl = new Declaration();
++    Declaration typeDecl = null;
++    boolean isPacked = false;
+ }
+ {
+     <ENUM> 
++    [AttributeSpecList(attributeDecl)]
+     (
+-        LOOKAHEAD(3)
+-        [AttributeSpecList(dec)] [ t= <IDENTIFIER> ] "{" list= EnumeratorList() "}" 
++        LOOKAHEAD(4)
++        [ t= <IDENTIFIER> ]
++        [ ":" typeDecl= BuiltInTypeSpecifier(new Declaration()) ]
++        "{" list= EnumeratorList() "}"
++        [AttributeSpecList(attributeDecl)]
+         {
+-            dt = allocateEnumDT(t, list, dec);
++            isPacked = attributeDecl.getQualifiers().contains(PACKED);
++            dt = allocateEnumDT(t, typeDecl, list, isPacked);
+         }
+         |
+         t= <IDENTIFIER>
++        [ ":" typeDecl= BuiltInTypeSpecifier(new Declaration()) ]
++        [AttributeSpecList(attributeDecl)]
+         {
+             dt= getEnumDef(t.image);
+             // not defined yet, define an empty one
+             if (dt == null) {
+-                dt = allocateEnumDT(t, null, dec);
++                isPacked = attributeDecl.getQualifiers().contains(PACKED);
++		dt = allocateEnumDT(t, typeDecl, null, isPacked);
+             }
+         }
+     )
+diff --git a/Ghidra/Features/Base/src/test/java/ghidra/app/util/cparser/CParserTest.java b/Ghidra/Features/Base/src/test/java/ghidra/app/util/cparser/CParserTest.java
+index 4ab5fdbeea..c98e0fa7ea 100644
+--- a/Ghidra/Features/Base/src/test/java/ghidra/app/util/cparser/CParserTest.java
++++ b/Ghidra/Features/Base/src/test/java/ghidra/app/util/cparser/CParserTest.java
+@@ -480,6 +480,22 @@ public class CParserTest extends AbstractGhidraHeadlessIntegrationTest {
+ 		assertEquals("enum options_enum not correct", 15 >> 3 << 3,
+ 			((Enum) dt).getValue("SHIFTED4"));
+ 
++		dt = dtMgr.getDataType(new CategoryPath("/"), "_C23_enum_char");
++		assertTrue(dt instanceof Enum);
++		assertEquals("enum _C23_enum_char size not correct", 1, dt.getLength());
++		dt = dtMgr.getDataType(new CategoryPath("/"), "_C23_enum_short");
++		assertTrue(dt instanceof Enum);
++		assertEquals("enum _C23_enum_short size not correct", 2, dt.getLength());
++		dt = dtMgr.getDataType(new CategoryPath("/"), "_C23_enum_int");
++		assertTrue(dt instanceof Enum);
++		assertEquals("enum _C23_enum_int size not correct", 4, dt.getLength());
++		dt = dtMgr.getDataType(new CategoryPath("/"), "_C23_enum_long");
++		assertTrue(dt instanceof Enum);
++		assertEquals("enum _C23_enum_long size not correct", 4, dt.getLength());
++		dt = dtMgr.getDataType(new CategoryPath("/"), "_C23_enum_longlong");
++		assertTrue(dt instanceof Enum);
++		assertEquals("enum _C23_enum_longlong size not correct", 8, dt.getLength());
++
+ 		dt = dtMgr.getDataType(new CategoryPath("/functions"), "__checkint");
+ 		assertTrue("not a function", dt instanceof FunctionDefinition);
+ 		str = ((FunctionDefinition) dt).getPrototypeString();
+diff --git a/Ghidra/Features/Base/src/test/resources/ghidra/app/util/cparser/CParserTest.h b/Ghidra/Features/Base/src/test/resources/ghidra/app/util/cparser/CParserTest.h
+index 0b536ee0e7..98366d2dd0 100644
+--- a/Ghidra/Features/Base/src/test/resources/ghidra/app/util/cparser/CParserTest.h
++++ b/Ghidra/Features/Base/src/test/resources/ghidra/app/util/cparser/CParserTest.h
+@@ -958,6 +958,39 @@ typedef int FuncUseEnum(PARAM_TYPE ptype);
+ typedef enum _PARAM_TYPE { A, B, C } PARAM_TYPE;
+ 
+ 
++/**
++ ** C23 enum types
++ **/
++enum _C23_enum_char: char {
++    A = 1,
++    B = 2,
++    C = 3
++};
++enum _C23_enum_short : short
++{
++    A = 1,
++    B = 2,
++    C = 3
++};
++enum _C23_enum_int : int
++{
++    A = 1,
++    B = 2,
++    C = 3
++};
++enum _C23_enum_long : long
++{
++    A = 1,
++    B = 2,
++    C = 3
++};
++enum _C23_enum_longlong : long long
++{
++    A = 1,
++    B = 2,
++    C = 3
++};
++
+ /**
+  ** Casting
+  **/
+-- 
+2.45.1
+
