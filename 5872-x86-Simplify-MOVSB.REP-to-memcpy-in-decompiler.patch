@@ -4,12 +4,12 @@ Date: Tue, 10 Oct 2023 19:05:17 +0200
 Subject: [PATCH] 5872: x86: Simplify MOVSB.REP to memcpy in decompiler
 
 ---
- Ghidra/Processors/x86/data/languages/ia.sinc  | 239 +++++++++++++++---
+ Ghidra/Processors/x86/data/languages/ia.sinc  | 254 +++++++++++++++---
  .../x86/data/languages/lockable.sinc          |  51 +++-
- 2 files changed, 257 insertions(+), 33 deletions(-)
+ 2 files changed, 272 insertions(+), 33 deletions(-)
 
 diff --git a/Ghidra/Processors/x86/data/languages/ia.sinc b/Ghidra/Processors/x86/data/languages/ia.sinc
-index 05751cb074..a35c14e8d6 100644
+index 05751cb074..bcfbb1dc8b 100644
 --- a/Ghidra/Processors/x86/data/languages/ia.sinc
 +++ b/Ghidra/Processors/x86/data/languages/ia.sinc
 @@ -1448,25 +1448,25 @@ moffs64: segWide^[imm32]  is addrsize=1 & highseg=1 & segWide & imm32   { tmp:8
@@ -187,7 +187,8 @@ index 05751cb074..a35c14e8d6 100644
 +  EDI = EDI + ECX;
 +  ESI = ESI + ECX;
 +}
-+@ifdef IA64
+ @ifdef IA64
+-:MOVSQ^rep^reptail eseDI8,dseSI8    is $(LONGMODE_ON) & vexMode=0 & rep & reptail & opsize=2 & byte=0xa5 & eseDI8 & dseSI8   { build rep; build eseDI8; build dseSI8; eseDI8 = dseSI8; build reptail; }
 +:MOVSB eseDI8,dseSI8	is vexMode=0 & addrsize=2 & repx & repprefx=0 & byte=0xa4 & eseDI8 & dseSI8 { eseDI8 = dseSI8; }
 +:MOVSB^repx RDI,RSI	is vexMode=0 & addrsize=2 & repx & repprefx=1 & byte=0xa4 & RDI & RSI
 +{
@@ -235,8 +236,7 @@ index 05751cb074..a35c14e8d6 100644
 +  EDI = EDI + tmp;
 +  ESI = ESI + tmp;
 +}
- @ifdef IA64
--:MOVSQ^rep^reptail eseDI8,dseSI8    is $(LONGMODE_ON) & vexMode=0 & rep & reptail & opsize=2 & byte=0xa5 & eseDI8 & dseSI8   { build rep; build eseDI8; build dseSI8; eseDI8 = dseSI8; build reptail; }
++@ifdef IA64
 +:MOVSD^repx RDI,RSI	is vexMode=0 & addrsize=2 & repx & opsize=1 & byte=0xa5 & RDI & RSI
 +{
 +  local tmp:8 = zext(ECX) * 4;
@@ -254,7 +254,7 @@ index 05751cb074..a35c14e8d6 100644
  @endif
  
  :MOVSX Reg16,rm8    is vexMode=0 & opsize=0 & byte=0xf; byte=0xbe; rm8 & Reg16 ...  { Reg16 = sext(rm8); }
-@@ -4832,7 +4970,11 @@ define pcodeop smm_restore_state;
+@@ -4832,7 +4970,26 @@ define pcodeop smm_restore_state;
  :SBB  Reg64,rm64       is $(LONGMODE_ON) & vexMode=0 & opsize=2 & byte=0x1b; rm64 & Reg64 ...						{ subCarryFlags( Reg64, rm64 ); resultflags(Reg64); }
  @endif
  
@@ -264,10 +264,25 @@ index 05751cb074..a35c14e8d6 100644
 +{
 +  CX = strchr(peseDI1, AL);
 +}
++:SCASB^repe peseDI2 is vexMode=0 & addrsize=0 & repe & byte=0xae & peseDI2
++{
++  CX = strchr(peseDI2, AX);
++}
++:SCASB^repe peseDI4 is vexMode=0 & addrsize=1 & repe & byte=0xae & peseDI4
++{
++  ECX = strchr(peseDI4, EAX);
++}
++@ifdef IA64
++:SCASB^repe RDI is vexMode=0 & addrsize=2 & repe & byte=0xae & RDI
++{
++  RCX = strchr(RDI, RAX);
++}
++@endif
++
  :SCASW^repe^repetail eseDI2 is vexMode=0 & repe & repetail & opsize=0 & byte=0xaf & eseDI2  { build repe; build eseDI2; subflags(AX,eseDI2); local diff=AX-eseDI2; resultflags(diff); build repetail; }
  :SCASD^repe^repetail eseDI4 is vexMode=0 & repe & repetail & opsize=1 & byte=0xaf & eseDI4  { build repe; build eseDI4; subflags(EAX,eseDI4); local diff=EAX-eseDI4; resultflags(diff); build repetail; }
  @ifdef IA64
-@@ -5000,11 +5142,48 @@ define pcodeop stac;
+@@ -5000,11 +5157,48 @@ define pcodeop stac;
  
  :STMXCSR m32        is vexMode=0 & byte=0xf; byte=0xae; ( mod != 0b11 & reg_opcode=3 ) ... & m32 { m32 = MXCSR; }
  
