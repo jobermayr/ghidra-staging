@@ -79,6 +79,10 @@ Resolve AttributeId for 'rightoleft' and ParamListStandard.assignMap change for 
 Added 'AddressModel' unimplemented methods
 
 Updated attributes 'isrighttoleft' & 'XMLunknown' to compensate for Ghidra's new ones!
+
+Updated attribute 'isrighttoleft' in 'fspec.cc'.
+
+Applied GPP-4356 to methhod ParamListStandard::assignMapLtoR(...).
 ---
  Ghidra/Features/Base/certification.manifest   |    1 +
  .../Base/data/FunctionNames.properties        | 2308 +++++++++++++++++
@@ -100,9 +104,9 @@ Updated attributes 'isrighttoleft' & 'XMLunknown' to compensate for Ghidra's new
  .../ghidra/app/util/opinion/NeLoader.java     |    9 +-
  .../javacc/ghidra/app/util/cparser/C/C.jj     |  175 +-
  .../EditFunctionSignatureDialogTest.java      |   33 +
- .../Decompiler/src/decompile/cpp/fspec.cc     |   89 +-
+ .../Decompiler/src/decompile/cpp/fspec.cc     |   93 +-
  .../Decompiler/src/decompile/cpp/fspec.hh     |   12 +-
- .../Decompiler/src/decompile/cpp/marshal.cc   |    3 +-
+ .../Decompiler/src/decompile/cpp/marshal.cc   |    2 +-
  .../src/decompile/cpp/modelrules.cc           |    2 +-
  .../data/languages/compiler_spec.rxg          |    1 +
  .../program/database/data/AddressModelDB.java |  221 ++
@@ -130,7 +134,7 @@ Updated attributes 'isrighttoleft' & 'XMLunknown' to compensate for Ghidra's new
  .../model/TestDoubleFunctionSignature.java    |    6 +
  .../program/model/data/StubDataType.java      |   10 +
  .../x86/data/languages/x86-16.cspec           |  288 +-
- 50 files changed, 6136 insertions(+), 140 deletions(-)
+ 50 files changed, 6140 insertions(+), 139 deletions(-)
  create mode 100644 Ghidra/Features/Base/data/FunctionNames.properties
  create mode 100644 Ghidra/Features/Base/ghidra_scripts/FixPascalCallingConvention.java
  create mode 100644 Ghidra/Features/Base/ghidra_scripts/FixWin16LibraryFunctionNames.java
@@ -5477,7 +5481,7 @@ index f9f6fda857..d60b8f3b84 100644
  	public void testParseSignature_Good() throws Exception {
  
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.cc
-index a80a23512d..f1bf9b9076 100644
+index a80a23512d..bd24f14eec 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.cc
 @@ -34,6 +34,7 @@ AttributeId ATTRIB_STACKSHIFT = AttributeId("stackshift",126);
@@ -5497,7 +5501,7 @@ index a80a23512d..f1bf9b9076 100644
  
  {
    vector<int4> status(numgroup,0);
-@@ -810,6 +811,49 @@ void ParamListStandard::assignMap(const PrototypePieces &proto,TypeFactory &type
+@@ -810,6 +811,53 @@ void ParamListStandard::assignMap(const PrototypePieces &proto,TypeFactory &type
    }
  }
  
@@ -5523,14 +5527,18 @@ index a80a23512d..f1bf9b9076 100644
 +
 +  if (hiddenpiece) {	// Check for hidden parameters defined by the output list
 +    Datatype *dt = hiddenpiece->type;
-+    type_class store;
-+    if ((hiddenpiece->flags & ParameterPieces::hiddenretparm) != 0)
-+      store = TYPECLASS_HIDDENRET;
-+    else
-+      store = metatype2typeclass(dt->getMetatype());
-+    // Reserve last param for hidden return pointer
-+    if (assignAddressFallback(store,dt,false,status,*hiddenpiece) == AssignAction::fail)
-+      throw ParamUnassignedError("Cannot assign parameter address for " + hiddenpiece->type->getName());
++    if ((hiddenpiece->flags & ParameterPieces::hiddenretparm) != 0) {
++      // Need to pull from registers marked as hiddenret
++      if (assignAddressFallback(TYPECLASS_HIDDENRET,dt,false,status,*hiddenpiece) == AssignAction::fail) {
++        throw ParamUnassignedError("Cannot assign parameter address for " + hiddenpiece->type->getName());
++      }
++    }
++    else {
++	  // Assign as a regular first input pointer parameter
++	  if (assignAddress(dt,proto,0,typefactory,status,*hiddenpiece) == AssignAction::fail) {
++        throw ParamUnassignedError("Cannot assign parameter address for " + hiddenpiece->type->getName());
++	  }
++	}
 +    hiddenpiece->flags |= ParameterPieces::hiddenretparm;
 +  }
 +}
@@ -5547,7 +5555,7 @@ index a80a23512d..f1bf9b9076 100644
  /// From among the ParamEntrys matching the given \e group, return the one that best matches
  /// the given \e metatype attribute. If there are no ParamEntrys in the group, null is returned.
  /// \param grp is the given \e group number
-@@ -1584,7 +1628,8 @@ void ParamListStandardOut::assignMap(const PrototypePieces &proto,TypeFactory &t
+@@ -1584,7 +1632,8 @@ void ParamListStandardOut::assignMap(const PrototypePieces &proto,TypeFactory &t
      AddrSpace *spc = spacebase;
      if (spc == (AddrSpace *)0)
        spc = typefactory.getArch()->getDefaultDataSpace();
@@ -5557,7 +5565,7 @@ index a80a23512d..f1bf9b9076 100644
      int4 wordsize = spc->getWordSize();
      Datatype *pointertp = typefactory.getTypePointer(pointersize, proto.outtype, wordsize);
      if (responseCode == AssignAction::hiddenret_specialreg_void) {
-@@ -2345,6 +2390,7 @@ ProtoModel::ProtoModel(Architecture *g)
+@@ -2345,6 +2394,7 @@ ProtoModel::ProtoModel(Architecture *g)
    injectUponReturn = -1;
    stackgrowsnegative = true;	// Normal stack parameter ordering
    hasThis = false;
@@ -5565,7 +5573,7 @@ index a80a23512d..f1bf9b9076 100644
    isConstruct = false;
    isPrinted = true;
    defaultLocalRange();
-@@ -2384,6 +2430,7 @@ ProtoModel::ProtoModel(const string &nm,const ProtoModel &op2)
+@@ -2384,6 +2434,7 @@ ProtoModel::ProtoModel(const string &nm,const ProtoModel &op2)
    if (name == "__thiscall")
      hasThis = true;
    compatModel = &op2;
@@ -5573,7 +5581,7 @@ index a80a23512d..f1bf9b9076 100644
  }
  
  ProtoModel::~ProtoModel(void)
-@@ -2441,21 +2488,49 @@ void ProtoModel::assignParameterStorage(const PrototypePieces &proto,vector<Para
+@@ -2441,21 +2492,49 @@ void ProtoModel::assignParameterStorage(const PrototypePieces &proto,vector<Para
    }
    input->assignMap(proto,*glb->types,res);
  
@@ -5625,7 +5633,7 @@ index a80a23512d..f1bf9b9076 100644
  /// \brief Look up an effect from the given EffectRecord list
  ///
  /// If a given memory range matches an EffectRecord, return the effect type.
-@@ -2557,6 +2632,7 @@ void ProtoModel::decode(Decoder &decoder)
+@@ -2557,6 +2636,7 @@ void ProtoModel::decode(Decoder &decoder)
    extrapop = -300;
    hasThis = false;
    isConstruct = false;
@@ -5633,7 +5641,7 @@ index a80a23512d..f1bf9b9076 100644
    isPrinted = true;
    effectlist.clear();
    injectUponEntry = -1;
-@@ -2584,6 +2660,9 @@ void ProtoModel::decode(Decoder &decoder)
+@@ -2584,6 +2664,9 @@ void ProtoModel::decode(Decoder &decoder)
      else if (attribId == ATTRIB_CONSTRUCTOR) {
        isConstruct = decoder.readBool();
      }
@@ -5643,7 +5651,7 @@ index a80a23512d..f1bf9b9076 100644
      else
        throw LowlevelError("Unknown prototype attribute");
    }
-@@ -4083,7 +4162,7 @@ void FuncProto::updateInputTypes(Funcdata &data,const vector<Varnode *> &trialli
+@@ -4083,7 +4166,7 @@ void FuncProto::updateInputTypes(Funcdata &data,const vector<Varnode *> &trialli
  	  pieces.type = vn->getHigh()->getType();
  	else
  	  pieces.type = data.getArch()->types->getBase(sz, TYPE_UNKNOWN);
@@ -5711,19 +5719,18 @@ index 6d1615b449..cfb5d08657 100644
    ///
    /// Within the conventions of this model, do the two (hi/lo) locations represent
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/marshal.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/marshal.cc
-index 1c138774ac..b0619a95be 100644
+index 1c138774ac..bf5c007ada 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/marshal.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/marshal.cc
-@@ -1254,8 +1254,7 @@ AttributeId ATTRIB_WORDSIZE = AttributeId("wordsize",26);
+@@ -1254,7 +1254,7 @@ AttributeId ATTRIB_WORDSIZE = AttributeId("wordsize",26);
  AttributeId ATTRIB_STORAGE = AttributeId("storage",149);
  AttributeId ATTRIB_STACKSPILL = AttributeId("stackspill",150);
  
 -AttributeId ATTRIB_UNKNOWN = AttributeId("XMLunknown",159); // Number serves as next open index
--
 +AttributeId ATTRIB_UNKNOWN = AttributeId("XMLunknown",160); // Number serves as next open index
  
+ 
  ElementId ELEM_DATA = ElementId("data",1);
- ElementId ELEM_INPUT = ElementId("input",2);
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/modelrules.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/modelrules.cc
 index 2335bc012d..d5eb76c21b 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/modelrules.cc
