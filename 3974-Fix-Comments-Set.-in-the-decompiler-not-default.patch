@@ -58,7 +58,7 @@ index ad8a6ded10..6d5b2039ac 100644
  }
  
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/prettyprint.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/prettyprint.hh
-index 9f6ac1b999..792707b719 100644
+index 9f6ac1b999..067f570dda 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/prettyprint.hh
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/prettyprint.hh
 @@ -287,7 +287,8 @@ public:
@@ -120,7 +120,7 @@ index 9f6ac1b999..792707b719 100644
 -  void tagComment(const string &name,EmitMarkup::syntax_highlight h,const AddrSpace *s,uintb o) {
 -    tok = name; size = tok.size(); ptr_second.spc=s; off=o;
 +  /// \param type is the type of the comment
-+  void tagComment(const string &name,EmitMarkup::syntax_highlight h,const AddrSpace *s,uintb o,const char * type) {
++  void tagComment(const string &name,EmitMarkup::syntax_highlight h,const AddrSpace *s,uintb o,const char *type) {
 +    tok = name; size = tok.size(); ptr_second.spc=s; off=o; ptr_second.type=type;
      tagtype=comm_t; delimtype=tokenstring; hl=h; }
  
@@ -179,14 +179,14 @@ index 825a9935de..1a05ed0467 100644
    comm->setEmitted(true);
  }
 diff --git a/Ghidra/Features/Decompiler/src/main/java/ghidra/app/decompiler/ClangCommentToken.java b/Ghidra/Features/Decompiler/src/main/java/ghidra/app/decompiler/ClangCommentToken.java
-index 7a6a1e2a63..487fc22a05 100644
+index 7a6a1e2a63..0533253fd1 100644
 --- a/Ghidra/Features/Decompiler/src/main/java/ghidra/app/decompiler/ClangCommentToken.java
 +++ b/Ghidra/Features/Decompiler/src/main/java/ghidra/app/decompiler/ClangCommentToken.java
 @@ -18,6 +18,7 @@ package ghidra.app.decompiler;
  import ghidra.program.model.address.Address;
  import ghidra.program.model.address.AddressSpace;
  import ghidra.program.model.pcode.*;
-+import ghidra.program.model.listing.CodeUnit;
++import ghidra.program.model.listing.CommentType;
  
  /**
   * A token in source code representing (part of) a comment.
@@ -194,7 +194,7 @@ index 7a6a1e2a63..487fc22a05 100644
  public class ClangCommentToken extends ClangToken {
  
  	private Address srcaddr;	// source address of the comment
-+	private int commenttype;
++	private CommentType commenttype;
  
  	public static ClangCommentToken derive(ClangCommentToken source, String text) {
  
@@ -210,23 +210,23 @@ index 7a6a1e2a63..487fc22a05 100644
  		return srcaddr;
  	}
  
-+	public int getCommentType() {
++	public CommentType getCommentType() {
 +		return commenttype;
 +	}
 +
-+	public static int encodeCommentType(String name) {
++	public static CommentType encodeCommentType(String name) {
 +		switch (name) {
 +		case "user1":
-+			return CodeUnit.EOL_COMMENT;
++			return CommentType.EOL;
 +		case "user2":
-+			return CodeUnit.PRE_COMMENT;
++			return CommentType.PRE;
 +		case "user3":
-+			return CodeUnit.POST_COMMENT;
++			return CommentType.POST;
 +		case "header":
-+			return CodeUnit.PLATE_COMMENT;
++			return CommentType.PLATE;
 +		default:
 +			// Hit for "warning" and "warningheader"
-+			return CodeUnit.NO_COMMENT;
++			return null;
 +		}
 +	}
 +
@@ -240,7 +240,7 @@ index 7a6a1e2a63..487fc22a05 100644
  	}
  
 diff --git a/Ghidra/Features/Decompiler/src/main/java/ghidra/app/plugin/core/comments/DecompilerCommentsActionFactory.java b/Ghidra/Features/Decompiler/src/main/java/ghidra/app/plugin/core/comments/DecompilerCommentsActionFactory.java
-index 341655df3e..4aba48864d 100644
+index ec109bb477..6802ef0765 100644
 --- a/Ghidra/Features/Decompiler/src/main/java/ghidra/app/plugin/core/comments/DecompilerCommentsActionFactory.java
 +++ b/Ghidra/Features/Decompiler/src/main/java/ghidra/app/plugin/core/comments/DecompilerCommentsActionFactory.java
 @@ -22,6 +22,8 @@ import docking.action.*;
@@ -252,41 +252,41 @@ index 341655df3e..4aba48864d 100644
  import ghidra.app.plugin.core.decompile.DecompilerActionContext;
  import ghidra.app.util.HelpTopics;
  import ghidra.program.model.address.Address;
-@@ -130,16 +132,32 @@ public class DecompilerCommentsActionFactory extends CommentsActionFactory {
+@@ -126,16 +128,32 @@ public class DecompilerCommentsActionFactory extends CommentsActionFactory {
  
-         @Override
-         protected int getEditCommentType(ActionContext context) {
-+            ProgramLocation location = getLocationForContext(context);
-+            // CommentType.getCommentType has special-case logic for editing
-+            // the selected comment for CommentFieldLocation, but it doesn't know
-+            // about comments from the decompiler (and can't because CommentType
-+            // is framework code without knowledge of the decompiler).
-+            // Thus, we re-implement that check here.
-+            if (location instanceof DecompilerLocation) {
-+                ClangToken token = ((DecompilerLocation) location).getToken();
-+                if (token instanceof ClangCommentToken) {
-+                    return ((ClangCommentToken) token).getCommentType();
-+                }
-+            }
+ 		@Override
+ 		protected CommentType getEditCommentType(ActionContext context) {
++			ProgramLocation location = getLocationForContext(context);
++			// CommentType.getCommentType has special-case logic for editing
++			// the selected comment for CommentFieldLocation, but it doesn't know
++			// about comments from the decompiler (and can't because CommentType
++			// is framework code without knowledge of the decompiler).
++			// Thus, we re-implement that check here.
++			if (location instanceof DecompilerLocation) {
++				ClangToken token = ((DecompilerLocation) location).getToken();
++				if (token instanceof ClangCommentToken) {
++					return ((ClangCommentToken) token).getCommentType();
++				}
++			}
 +
-+            int defaultCommentType = CodeUnit.NO_COMMENT;
-             if (context instanceof DecompilerActionContext) {
-                 DecompilerActionContext decompContext = (DecompilerActionContext) context;
-                 Address addr = decompContext.getAddress();
-                 if (addr.equals(decompContext.getFunctionEntryPoint())) {
--                    return CodeUnit.PLATE_COMMENT;
-+                    defaultCommentType = CodeUnit.PLATE_COMMENT;
-+                }
-+                else {
-+                    defaultCommentType = CodeUnit.PRE_COMMENT;
-                 }
--                return CodeUnit.PRE_COMMENT;
-             }
-             CodeUnit cu = getCodeUnit(context);
--            return CommentTypeUtils.getCommentType(cu, getLocationForContext(context), CodeUnit.NO_COMMENT);
-+            return CommentTypeUtils.getCommentType(cu, location, defaultCommentType);
-         }
-     }
++			CommentType defaultCommentType = null;
+ 			if (context instanceof DecompilerActionContext) {
+ 				DecompilerActionContext decompContext = (DecompilerActionContext) context;
+ 				Address addr = decompContext.getAddress();
+ 				if (addr.equals(decompContext.getFunctionEntryPoint())) {
+-					return CommentType.PLATE;
++					defaultCommentType = CommentType.PLATE;
++				}
++				else {
++					defaultCommentType = CommentType.PRE;
+ 				}
+-				return CommentType.PRE;
+ 			}
+ 			CodeUnit cu = getCodeUnit(context);
+-			return CommentTypeUtils.getCommentType(cu, getLocationForContext(context), null);
++			return CommentTypeUtils.getCommentType(cu, location, defaultCommentType);
+ 		}
+ 	}
  }
 -- 
 2.45.1
