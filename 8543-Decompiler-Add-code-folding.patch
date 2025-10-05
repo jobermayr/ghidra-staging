@@ -1,0 +1,511 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Gr-i-niy <grigoriyklopov50@gmail.com>
+Date: Thu, 28 Nov 2024 14:02:20 +0300
+Subject: [PATCH] 8543: Decompiler: Add code folding
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Added Wall-AF solution from github
+
+Fixed solution from github
+
+Added indication to foldable blocks of code
+
+Code folding with mouse click added
+
+Added arrow drawing
+
+Added change of arrow direction when collapsing a block
+
+Fixed collapsing inner blocks
+
+fix: disappearing arrows
+
+style: fix indentation and spacing issues
+
+change: + and - indication
+
+Revert accidental changes to gradlew(.bat)
+
+Revert all accidental changes to gradlew Oops, missed a few...
+
+Various whitespace fixes to minimise diff
+
+Use open and close icons instead of - and + This is more consistent with the UI used for the folding in the listing display.
+
+Adjust line number when blocks are folded This way, the same tokens will keep the same line number, even if earlier blocks have been folded.
+
+Show ellipses when a block is collapsed After every syntax token that is an opening curly brace, an extra syntax token is created with the text "…". This token is collapsed by default, and uncollapsed when the other tokens in the block are collapsed and vice versa.
+
+Ensure initial line number is correct Previously, if there were any off-screen collapsed blocks before the first visible line, the initial line number would be off, since it didn't take into account the previous folded blocks. This commit fixes that.
+---
+ .../ghidra/app/decompiler/ClangToken.java     |  16 ++
+ .../app/decompiler/ClangTokenGroup.java       |  12 ++
+ .../component/ClangLayoutController.java      |   7 +-
+ .../decompiler/component/DecompilerPanel.java | 160 +++++++++++++++++-
+ .../decompiler/component/DecompilerUtils.java |   3 +
+ .../LineNumberDecompilerMarginProvider.java   |  95 ++++++++++-
+ 6 files changed, 281 insertions(+), 12 deletions(-)
+
+diff --git a/Ghidra/Features/Decompiler/src/main/java/ghidra/app/decompiler/ClangToken.java b/Ghidra/Features/Decompiler/src/main/java/ghidra/app/decompiler/ClangToken.java
+index b341c47183..81887a674d 100644
+--- a/Ghidra/Features/Decompiler/src/main/java/ghidra/app/decompiler/ClangToken.java
++++ b/Ghidra/Features/Decompiler/src/main/java/ghidra/app/decompiler/ClangToken.java
+@@ -45,13 +45,29 @@ public class ClangToken implements ClangNode {
+ 	public final static int SPECIAL_COLOR = 10;
+ 	public final static int MAX_COLOR = 11;
+ 
++	public final static String ELLIPSIS_TEXT = "…";
++
+ 	private ClangNode parent;
+ 	private ClangLine lineparent;
+ 	private String text;
+ 	private int syntax_type;
++	private int collapseLevel = 0;
+ 	private Color highlight; // Color to highlight with or null if no highlight
+ 	private boolean matchingToken;
+ 
++	public boolean getCollapsedToken() {
++		return collapseLevel > 0;
++	}
++
++	public void setCollapsedToken(boolean collapsedToken) {
++		if (collapsedToken) {
++			collapseLevel++;
++		}
++		else {
++			collapseLevel--;
++		}
++	}
++
+ 	public ClangToken(ClangNode par) {
+ 		parent = par;
+ 		text = null;
+diff --git a/Ghidra/Features/Decompiler/src/main/java/ghidra/app/decompiler/ClangTokenGroup.java b/Ghidra/Features/Decompiler/src/main/java/ghidra/app/decompiler/ClangTokenGroup.java
+index aa22cc498a..06509521f2 100644
+--- a/Ghidra/Features/Decompiler/src/main/java/ghidra/app/decompiler/ClangTokenGroup.java
++++ b/Ghidra/Features/Decompiler/src/main/java/ghidra/app/decompiler/ClangTokenGroup.java
+@@ -151,6 +151,18 @@ public class ClangTokenGroup implements ClangNode, Iterable<ClangNode> {
+ 			else {
+ 				ClangToken tok = ClangToken.buildToken(elem, this, decoder, pfactory);
+ 				AddTokenGroup(tok);
++
++				// Add an ellipsis syntax token after open curly braces that is
++				// collapsed by default. It will be uncollapsed when the rest of
++				// the block is collapsed, indicating that tokens have been
++				// collapsed at that point.
++				if ((tok instanceof ClangSyntaxToken) && "{".equals(tok.getText())) {
++					ClangSyntaxToken ellipsis = new ClangSyntaxToken(
++						this, ClangToken.ELLIPSIS_TEXT, ClangToken.COMMENT_COLOR
++					);
++					ellipsis.setCollapsedToken(true);
++					AddTokenGroup(ellipsis);
++				}
+ 			}
+ 			decoder.closeElement(elem);
+ 		}
+diff --git a/Ghidra/Features/Decompiler/src/main/java/ghidra/app/decompiler/component/ClangLayoutController.java b/Ghidra/Features/Decompiler/src/main/java/ghidra/app/decompiler/component/ClangLayoutController.java
+index 83d5093de7..735cef4da2 100644
+--- a/Ghidra/Features/Decompiler/src/main/java/ghidra/app/decompiler/component/ClangLayoutController.java
++++ b/Ghidra/Features/Decompiler/src/main/java/ghidra/app/decompiler/component/ClangLayoutController.java
+@@ -186,6 +186,9 @@ public class ClangLayoutController implements LayoutModel, LayoutModelListener {
+ 		int columnPosition = 0;
+ 		for (int i = 0; i < tokens.size(); ++i) {
+ 			ClangToken token = tokens.get(i);
++			if (token.getCollapsedToken()) {
++				continue;
++			}
+ 			Color color = getTokenColor(token);
+ 
+ 			if (token instanceof ClangCommentToken) {
+@@ -226,8 +229,8 @@ public class ClangLayoutController implements LayoutModel, LayoutModelListener {
+ 
+ 		// For now we have decided that any external function, linked or not, will be one color, as
+ 		// this makes it easy for the user to identify external function calls. Other functions will
+-		// be colored according to the SymbolInspector.  If we use the SymbolInspector for all 
+-		// colors, then some of the color values will be very close to some of the colors used by 
++		// be colored according to the SymbolInspector.  If we use the SymbolInspector for all
++		// colors, then some of the color values will be very close to some of the colors used by
+ 		// the Decompiler.  For example, non-linked external functions default to red and linked
+ 		// external functions default to green.
+ 		if (function.isExternal()) {
+diff --git a/Ghidra/Features/Decompiler/src/main/java/ghidra/app/decompiler/component/DecompilerPanel.java b/Ghidra/Features/Decompiler/src/main/java/ghidra/app/decompiler/component/DecompilerPanel.java
+index 18ba63f001..dc6f0aa1ca 100644
+--- a/Ghidra/Features/Decompiler/src/main/java/ghidra/app/decompiler/component/DecompilerPanel.java
++++ b/Ghidra/Features/Decompiler/src/main/java/ghidra/app/decompiler/component/DecompilerPanel.java
+@@ -107,6 +107,15 @@ public class DecompilerPanel extends JPanel implements FieldMouseListener, Field
+ 
+ 	private DecompilerHoverProvider decompilerHoverProvider;
+ 
++	public class CodeBlock {
++		public int startLineIdx;  //< 0-based
++		public int numLines;
++		public ClangSyntaxToken openToken;
++	}
++
++	private Map<Integer, CodeBlock> blocks; // start line idx: num lines
++	private boolean pendingOptionChange = true;
++
+ 	DecompilerPanel(DecompilerController controller, DecompileOptions options,
+ 			DecompilerClipboardProvider clipboard, JComponent taskMonitorComponent) {
+ 		this.controller = controller;
+@@ -158,7 +167,7 @@ public class DecompilerPanel extends JPanel implements FieldMouseListener, Field
+ 		setDecompileData(new EmptyDecompileData("No Function"));
+ 
+ 		if (options.isDisplayLineNumbers()) {
+-			addMarginProvider(lineNumbersMargin = new LineNumberDecompilerMarginProvider());
++			addMarginProvider(lineNumbersMargin = new LineNumberDecompilerMarginProvider(this));
+ 		}
+ 	}
+ 
+@@ -540,6 +549,13 @@ public class DecompilerPanel extends JPanel implements FieldMouseListener, Field
+ 		if (function != null) {
+ 			highlightController.reapplyAllHighlights(function);
+ 		}
++
++		// Only update the blocks when we're moving to a new function, or if the
++		// the display options changed
++		if (pendingOptionChange || !SystemUtilities.isEqual(oldData.getFunction(), decompileData.getFunction())) {
++			setBlocks();
++			pendingOptionChange = false;
++		}
+ 	}
+ 
+ 	private void setLocation(DecompileData oldData, DecompileData newData) {
+@@ -786,6 +802,144 @@ public class DecompilerPanel extends JPanel implements FieldMouseListener, Field
+ 		}
+ 	}
+ 
++	public void arrowClickAction(int y) {
++		int lineNumber = getLineNumber(y);
++		ClangToken openingBraceToken = null;
++		ClangLine line = getLines().get(lineNumber - 1);
++		for (ClangToken lineToken : line.getAllTokens()) {
++			if ("{".equals(lineToken.getText())) {
++				openingBraceToken = lineToken;
++				break;
++			}
++		}
++
++		if (openingBraceToken instanceof ClangSyntaxToken) {
++			toggleCollapseToken((ClangSyntaxToken) openingBraceToken);
++		}
++	}
++
++	private void toggleCollapseToken(ClangSyntaxToken openingBrace) {
++		if (DecompilerUtils.isBrace(openingBrace)) {
++			ClangSyntaxToken closingBrace = DecompilerUtils.getMatchingBrace(openingBrace);
++			if (closingBrace == null) {
++				return;
++			}
++
++			boolean isCollapsed = isBlockCollapsed(openingBrace);
++			List<ClangNode> list = new ArrayList<>();
++			openingBrace.Parent().flatten(list);
++
++			boolean inSection = false;
++			boolean seenEllipsis = false;
++
++			for (ClangNode element : list) {
++				ClangToken token = (ClangToken) element;
++				if (token.equals(openingBrace)) {
++					inSection = true;
++					continue;
++				}
++
++				if (token.equals(closingBrace)) {
++					inSection = false;
++					break;
++				}
++
++				if (! inSection) {
++					continue;
++				}
++
++				boolean isEllipsis = (token instanceof ClangSyntaxToken) && (ClangToken.ELLIPSIS_TEXT.equals(token.getText()));
++
++				if (isEllipsis && !seenEllipsis) {
++					token.setCollapsedToken(isCollapsed);
++					seenEllipsis = true;
++				} else {
++					token.setCollapsedToken(!isCollapsed);
++				}
++			}
++
++			setDecompileData(decompileData);
++		}
++	}
++
++	public boolean isBlockCollapsed(ClangSyntaxToken openingBrace) {
++		ClangSyntaxToken closingBrace = DecompilerUtils.getMatchingBrace(openingBrace);
++		if (closingBrace == null) {
++			return false;
++		}
++
++		List<ClangNode> list = new ArrayList<>();
++		openingBrace.Parent().flatten(list);
++
++		// Check if the block is collapsed by checking the first token inside the
++		// block that is not an ellipsis syntax token.
++		boolean inSection = false;
++		for (ClangNode element : list) {
++			ClangToken token = (ClangToken) element;
++			if (!inSection) {
++				inSection = token.equals(openingBrace);
++				continue;
++			}
++
++			if (token.equals(closingBrace)) {
++				return false;
++			}
++
++			if ((token instanceof ClangSyntaxToken) && (ClangToken.ELLIPSIS_TEXT.equals(token.getText()))) {
++				continue;
++			}
++
++			return token.getCollapsedToken();
++		}
++
++		return false;
++	}
++
++	public Map<Integer, CodeBlock> getBlocks() {
++		return blocks;
++	}
++
++	// Note: this assumes there is only at most one block starting at any given address
++	public void setBlocks() {
++		blocks = new HashMap<>();
++		List<ClangLine> lines = getLines();
++
++		for (int i = 0; i < lines.size(); i++) {
++			List<ClangToken> lineTokens = lines.get(i).getAllTokens();
++
++			for (ClangToken token : lineTokens) {
++				if (token.getText().contains("{") && token instanceof ClangSyntaxToken) {
++					List<ClangNode> list = new ArrayList<>();
++					token.Parent().flatten(list);
++
++					// Determine opening and closing line numbers
++					ClangSyntaxToken open = (ClangSyntaxToken) token;
++					ClangSyntaxToken close = DecompilerUtils.getMatchingBrace(open);
++					Integer openLine = i;
++
++					// It must be possible to compute this more efficiently than
++					// O(n^2)...
++					Integer blockLen = 1;
++					for (int j = openLine; j < lines.size(); j++) {
++						if (lines.get(j).indexOfToken(close) != -1) {
++							// +1 because we want to do openLine + blockLen to
++							// get the line number after the closing brace
++							blockLen = j - openLine + 1;
++							break;
++						}
++					}
++
++					CodeBlock block = new CodeBlock();
++					block.startLineIdx = openLine;
++					block.numLines = blockLen;
++					block.openToken = open;
++
++					blocks.put(openLine, block);
++				}
++			}
++		}
++	}
++
+ 	private void tryToGoto(FieldLocation location, Field field, MouseEvent event,
+ 			boolean newWindow) {
+ 		if (!navigationEnabled) {
+@@ -1308,7 +1462,7 @@ public class DecompilerPanel extends JPanel implements FieldMouseListener, Field
+ 
+ 		if (options.isDisplayLineNumbers()) {
+ 			if (lineNumbersMargin == null) {
+-				addMarginProvider(lineNumbersMargin = new LineNumberDecompilerMarginProvider());
++				addMarginProvider(lineNumbersMargin = new LineNumberDecompilerMarginProvider(this));
+ 			}
+ 		}
+ 		else {
+@@ -1321,6 +1475,8 @@ public class DecompilerPanel extends JPanel implements FieldMouseListener, Field
+ 		for (DecompilerMarginProvider element : marginProviders) {
+ 			element.setOptions(options);
+ 		}
++
++		pendingOptionChange = true;
+ 	}
+ 
+ 	public void addMarginProvider(DecompilerMarginProvider provider) {
+diff --git a/Ghidra/Features/Decompiler/src/main/java/ghidra/app/decompiler/component/DecompilerUtils.java b/Ghidra/Features/Decompiler/src/main/java/ghidra/app/decompiler/component/DecompilerUtils.java
+index 64d290e3fc..b6d06b6c5f 100644
+--- a/Ghidra/Features/Decompiler/src/main/java/ghidra/app/decompiler/component/DecompilerUtils.java
++++ b/Ghidra/Features/Decompiler/src/main/java/ghidra/app/decompiler/component/DecompilerUtils.java
+@@ -820,6 +820,9 @@ public class DecompilerUtils {
+ 		for (; i < alltoks.size(); ++i) {
+ 
+ 			ClangToken tok = (ClangToken) alltoks.get(i);
++			if (tok.getCollapsedToken()) {
++				continue;
++			}
+ 			if (tok instanceof ClangBreak) {
+ 				lines.add(current);
+ 				brk = (ClangBreak) tok;
+diff --git a/Ghidra/Features/Decompiler/src/main/java/ghidra/app/decompiler/component/margin/LineNumberDecompilerMarginProvider.java b/Ghidra/Features/Decompiler/src/main/java/ghidra/app/decompiler/component/margin/LineNumberDecompilerMarginProvider.java
+index a4138ac18b..f8ee98141e 100644
+--- a/Ghidra/Features/Decompiler/src/main/java/ghidra/app/decompiler/component/margin/LineNumberDecompilerMarginProvider.java
++++ b/Ghidra/Features/Decompiler/src/main/java/ghidra/app/decompiler/component/margin/LineNumberDecompilerMarginProvider.java
+@@ -4,9 +4,9 @@
+  * Licensed under the Apache License, Version 2.0 (the "License");
+  * you may not use this file except in compliance with the License.
+  * You may obtain a copy of the License at
+- * 
++ *
+  *      http://www.apache.org/licenses/LICENSE-2.0
+- * 
++ *
+  * Unless required by applicable law or agreed to in writing, software
+  * distributed under the License is distributed on an "AS IS" BASIS,
+  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+@@ -16,7 +16,10 @@
+ package ghidra.app.decompiler.component.margin;
+ 
+ import java.awt.*;
++import java.awt.event.MouseAdapter;
++import java.awt.event.MouseEvent;
+ import java.math.BigInteger;
++import java.util.Map;
+ 
+ import javax.swing.BorderFactory;
+ import javax.swing.JPanel;
+@@ -25,7 +28,9 @@ import docking.util.GraphicsUtils;
+ import docking.widgets.fieldpanel.LayoutModel;
+ import docking.widgets.fieldpanel.listener.IndexMapper;
+ import docking.widgets.fieldpanel.listener.LayoutModelListener;
++import generic.theme.GIcon;
+ import ghidra.app.decompiler.DecompileOptions;
++import ghidra.app.decompiler.component.DecompilerPanel;
+ import ghidra.program.model.listing.Program;
+ 
+ /**
+@@ -34,11 +39,24 @@ import ghidra.program.model.listing.Program;
+ public class LineNumberDecompilerMarginProvider extends JPanel
+ 		implements DecompilerMarginProvider, LayoutModelListener {
+ 
++	protected static final GIcon OPEN_ICON =
++		new GIcon("icon.base.util.viewer.fieldfactory.openclose.open");
++	protected static final GIcon CLOSED_ICON =
++		new GIcon("icon.base.util.viewer.fieldfactory.openclose.closed");
++
+ 	private LayoutPixelIndexMap pixmap;
+ 	private LayoutModel model;
++	private final DecompilerPanel decompilerPanel;
+ 
+-	public LineNumberDecompilerMarginProvider() {
++	public LineNumberDecompilerMarginProvider(DecompilerPanel decompilerPanel) {
++		this.decompilerPanel = decompilerPanel;
+ 		setBorder(BorderFactory.createEmptyBorder(0, 0, 0, 2));
++		addMouseListener(new MouseAdapter() {
++			@Override
++			public void mouseClicked(MouseEvent e) {
++				handleMouseClick(e);
++			}
++		});
+ 	}
+ 
+ 	@Override
+@@ -91,26 +109,87 @@ public class LineNumberDecompilerMarginProvider extends JPanel
+ 		}
+ 		int lastLine = model.getNumIndexes().intValueExact();
+ 		int width = getFontMetrics(getFont()).stringWidth(Integer.toString(lastLine));
++		int widthForArrows = getFontMetrics(getFont()).stringWidth(" ") * 2;
++		width += widthForArrows;
+ 		Insets insets = getInsets();
+ 		width += insets.left + insets.right;
+-		setPreferredSize(new Dimension(Math.max(16, width), 0));
++		setPreferredSize(new Dimension(Math.max(32, width), 0));
+ 		invalidate();
+ 	}
+ 
++	private void handleMouseClick(MouseEvent e) {
++		Insets insets = getInsets();
++		int y = e.getY() - insets.top;
++		int x = e.getX() - insets.left;
++
++		if (x >= getWidth() - getFontMetrics(getFont()).stringWidth(" ") * 2 - insets.right) {
++			decompilerPanel.arrowClickAction(y);
++			repaint();
++		}
++	}
++
+ 	@Override
+ 	public void paint(Graphics g) {
+ 		super.paint(g);
+ 
+ 		Insets insets = getInsets();
+-		int rightEdge = getWidth() - insets.right;
++		int rightEdge = getWidth() - insets.right - getFontMetrics(getFont()).stringWidth(" ") * 2;
++		int leftEdge = insets.left;
+ 		Rectangle visible = getVisibleRect();
+ 		BigInteger startIdx = pixmap.getIndex(visible.y);
+ 		BigInteger endIdx = pixmap.getIndex(visible.y + visible.height);
+ 		int ascent = g.getFontMetrics().getMaxAscent();
++
++		Map<Integer, DecompilerPanel.CodeBlock> blocks = decompilerPanel.getBlocks();
++		if (blocks == null) {
++			return;
++		}
++
++		// Skip any lines before startIdx
++		BigInteger lineNumber = BigInteger.ZERO;
++		for (BigInteger i = BigInteger.ZERO; i.compareTo(startIdx) < 0; i = i.add(BigInteger.ONE)) {
++			DecompilerPanel.CodeBlock block = blocks.getOrDefault(lineNumber.intValue(), null);
++
++			if (block == null || !decompilerPanel.isBlockCollapsed(block.openToken)) {
++				lineNumber = lineNumber.add(BigInteger.ONE);
++			} else {
++				lineNumber = lineNumber.add(BigInteger.valueOf(block.numLines));
++			}
++		}
++
+ 		for (BigInteger i = startIdx; i.compareTo(endIdx) <= 0; i = i.add(BigInteger.ONE)) {
+-			String text = i.add(BigInteger.ONE).toString();
+-			int width = g.getFontMetrics().stringWidth(text);
+-			GraphicsUtils.drawString(this, g, text, rightEdge - width, pixmap.getPixel(i) + ascent);
++			String text = lineNumber.add(BigInteger.ONE).toString();
++			GraphicsUtils.drawString(this, g, text, leftEdge, pixmap.getPixel(i) + ascent);
++
++			BigInteger increment = BigInteger.ONE;
++
++			DecompilerPanel.CodeBlock block = blocks.getOrDefault(lineNumber.intValue(), null);
++			if (block != null) {
++				// There's a block starting at this line number - check if it's
++				// collapsed to determine the icon to draw. If it is collapsed,
++				// we also need to skip some number of lines.
++
++				Image img = null;
++
++				if (decompilerPanel.isBlockCollapsed(block.openToken)) {
++					// block is collapsed
++					increment = BigInteger.valueOf(block.numLines);
++					img = CLOSED_ICON.getImageIcon().getImage();
++				} else {
++					// block is not collapsed
++					img = OPEN_ICON.getImageIcon().getImage();
++				}
++
++				// Center the image
++				int midX = rightEdge + (2 * getFontMetrics(getFont()).stringWidth(" ")) / 2;
++				int midY = pixmap.getPixel(i) + (ascent / 2);
++				int topLeftX = midX - (img.getWidth(null) / 2);
++				int topLeftY = midY - (img.getHeight(null) / 2);
++
++				g.drawImage(img, topLeftX, topLeftY, getBackground(), null);
++			}
++
++			lineNumber = lineNumber.add(increment);
+ 		}
+ 	}
+ }
+-- 
+2.45.1
+

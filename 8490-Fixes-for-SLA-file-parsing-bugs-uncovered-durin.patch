@@ -61,9 +61,9 @@ C++11 compatible
  .../Decompiler/src/decompile/cpp/semantics.cc |   9 +-
  .../src/decompile/cpp/slghpatexpress.cc       |  12 +-
  .../src/decompile/cpp/slghpattern.cc          |  11 +-
- .../src/decompile/cpp/slghsymbol.cc           | 123 +++++++++++++-----
+ .../src/decompile/cpp/slghsymbol.cc           | 121 +++++++++++++-----
  .../Decompiler/src/decompile/cpp/translate.cc |  15 ++-
- 13 files changed, 170 insertions(+), 93 deletions(-)
+ 13 files changed, 169 insertions(+), 92 deletions(-)
 
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/architecture.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/architecture.cc
 index 94050a3d16..ce29862b59 100644
@@ -156,7 +156,7 @@ index cd9ef243e2..367988b703 100644
  {
    while(pos.end - pos.current <= skip) {
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/semantics.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/semantics.hh
-index e765aa2921..4e0ed82e41 100644
+index 1983207bda..2950766384 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/semantics.hh
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/semantics.hh
 @@ -142,7 +142,7 @@ class OpTpl {
@@ -169,7 +169,7 @@ index e765aa2921..4e0ed82e41 100644
    ~OpTpl(void);
    VarnodeTpl *getOut(void) const { return output; }
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/slghsymbol.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/slghsymbol.hh
-index e602560a98..a64cf87576 100644
+index e5cd17890e..c091813059 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/slghsymbol.hh
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/slghsymbol.hh
 @@ -326,7 +326,7 @@ private:
@@ -181,7 +181,7 @@ index e602560a98..a64cf87576 100644
    OperandSymbol(const string &nm,int4 index,Constructor *ct);
    uint4 getRelativeOffset(void) const { return reloffset; }
    int4 getOffsetBase(void) const { return offsetbase; }
-@@ -465,8 +465,8 @@ class ContextOp : public ContextChange {
+@@ -448,8 +448,8 @@ class ContextOp : public ContextChange {
    int4 shift;			// Number of bits to shift value into place
  public:
    ContextOp(int4 startbit,int4 endbit,PatternExpression *pe);
@@ -378,7 +378,7 @@ index 52b80d76ef..9a1d64eb39 100644
      else if (subId == ELEM_FORCEGOTO) {
        Address targetpc = Address::decode(decoder);
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/semantics.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/semantics.cc
-index 8c92f89af1..ae96824878 100644
+index 2a910ce630..64c46ffc21 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/semantics.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/semantics.cc
 @@ -15,6 +15,7 @@
@@ -389,7 +389,7 @@ index 8c92f89af1..ae96824878 100644
  
  namespace ghidra {
  
-@@ -727,9 +728,9 @@ void OpTpl::decode(Decoder &decoder)
+@@ -718,9 +719,9 @@ void OpTpl::decode(Decoder &decoder)
      output->decode(decoder);
    }
    while(decoder.peekElement() != 0) {
@@ -401,7 +401,7 @@ index 8c92f89af1..ae96824878 100644
    }
    decoder.closeElement(el);
  }
-@@ -917,9 +918,9 @@ int4 ConstructTpl::decode(Decoder &decoder)
+@@ -908,9 +909,9 @@ int4 ConstructTpl::decode(Decoder &decoder)
      result->decode(decoder);
    }
    while(decoder.peekElement() != 0) {
@@ -414,7 +414,7 @@ index 8c92f89af1..ae96824878 100644
    decoder.closeElement(el);
    return sectionid;
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/slghpatexpress.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/slghpatexpress.cc
-index aae3a463ed..8d6d3b0686 100644
+index 94b46ea825..6fb62a8861 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/slghpatexpress.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/slghpatexpress.cc
 @@ -15,6 +15,7 @@
@@ -425,9 +425,9 @@ index aae3a463ed..8d6d3b0686 100644
  
  namespace ghidra {
  
-@@ -505,10 +506,12 @@ PatternExpression *PatternExpression::decodeExpression(Decoder &decoder,Translat
-   else if (el == sla::ELEM_OFFSET_EXP)
-     res = new OffsetInstructionValue();
+@@ -503,10 +504,12 @@ PatternExpression *PatternExpression::decodeExpression(Decoder &decoder,Translat
+   else if (el == sla::ELEM_NOT_EXP)
+     res = new NotExpression();
    else
 -    return (PatternExpression *)0;
 +    throw DecoderError("Invalid pattern expression element");
@@ -441,7 +441,7 @@ index aae3a463ed..8d6d3b0686 100644
  }
  
  static intb getInstructionBytes(ParserWalker &walker,int4 bytestart,int4 byteend,bool bigendian)
-@@ -847,6 +850,9 @@ void OperandValue::decode(Decoder &decoder,Translate *trans)
+@@ -831,6 +834,9 @@ void OperandValue::decode(Decoder &decoder,Translate *trans)
    uintm ctid = decoder.readUnsignedInteger(sla::ATTRIB_CT);
    SleighBase *sleigh = (SleighBase *)trans;
    SubtableSymbol *tab = dynamic_cast<SubtableSymbol *>(sleigh->findSymbol(tabid));
@@ -486,7 +486,7 @@ index dc83bd8bcf..ea51046ff9 100644
  
  void PatternBlock::normalize(void)
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/slghsymbol.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/slghsymbol.cc
-index 5c9ca321ea..c0fefc23ef 100644
+index b8f4fd50b6..c1f09c566a 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/slghsymbol.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/slghsymbol.cc
 @@ -16,6 +16,7 @@
@@ -518,7 +518,7 @@ index 5c9ca321ea..c0fefc23ef 100644
      table[id] = new SymbolScope( parscope, id );
      decoder.closeElement(subel);
    }
-@@ -200,41 +213,60 @@ void SymbolTable::decodeSymbolHeader(Decoder &decoder)
+@@ -200,39 +213,58 @@ void SymbolTable::decodeSymbolHeader(Decoder &decoder)
  
  {				// Put the shell of a symbol in the symbol table
  				// in order to allow recursion
@@ -555,9 +555,6 @@ index 5c9ca321ea..c0fefc23ef 100644
    else if (el == sla::ELEM_START_SYM_HEAD)
 -    sym = new StartSymbol();
 +    sym = std::unique_ptr<SleighSymbol>(new StartSymbol());
-   else if (el == sla::ELEM_OFFSET_SYM_HEAD)
--    sym = new OffsetSymbol();
-+    sym = std::unique_ptr<SleighSymbol>(new OffsetSymbol());
    else if (el == sla::ELEM_END_SYM_HEAD)
 -    sym = new EndSymbol();
 +    sym = std::unique_ptr<SleighSymbol>(new EndSymbol());
@@ -596,7 +593,7 @@ index 5c9ca321ea..c0fefc23ef 100644
  }
  
  void SymbolTable::purge(void)
-@@ -500,6 +532,9 @@ void ValueSymbol::encodeHeader(Encoder &encoder) const
+@@ -498,6 +530,9 @@ void ValueSymbol::encodeHeader(Encoder &encoder) const
  void ValueSymbol::decode(Decoder &decoder,SleighBase *trans)
  
  {
@@ -606,7 +603,7 @@ index 5c9ca321ea..c0fefc23ef 100644
    patval = (PatternValue *) PatternExpression::decodeExpression(decoder,trans);
    patval->layClaim();
    decoder.closeElement(sla::ELEM_VALUE_SYM.getId());
-@@ -581,6 +616,9 @@ void ValueMapSymbol::encodeHeader(Encoder &encoder) const
+@@ -579,6 +614,9 @@ void ValueMapSymbol::encodeHeader(Encoder &encoder) const
  void ValueMapSymbol::decode(Decoder &decoder,SleighBase *trans)
  
  {
@@ -616,7 +613,7 @@ index 5c9ca321ea..c0fefc23ef 100644
    patval = (PatternValue *) PatternExpression::decodeExpression(decoder,trans);
    patval->layClaim();
    while(decoder.peekElement() != 0) {
-@@ -660,6 +698,9 @@ void NameSymbol::encodeHeader(Encoder &encoder) const
+@@ -658,6 +696,9 @@ void NameSymbol::encodeHeader(Encoder &encoder) const
  void NameSymbol::decode(Decoder &decoder,SleighBase *trans)
  
  {
@@ -626,7 +623,7 @@ index 5c9ca321ea..c0fefc23ef 100644
    patval = (PatternValue *) PatternExpression::decodeExpression(decoder,trans);
    patval->layClaim();
    while(decoder.peekElement() != 0) {
-@@ -794,6 +835,10 @@ void ContextSymbol::decode(Decoder &decoder,SleighBase *trans)
+@@ -792,6 +833,10 @@ void ContextSymbol::decode(Decoder &decoder,SleighBase *trans)
    if (lowMissing || highMissing) {
      throw DecoderError("Missing high/low attributes");
    }
@@ -637,7 +634,7 @@ index 5c9ca321ea..c0fefc23ef 100644
    patval = (PatternValue *) PatternExpression::decodeExpression(decoder,trans);
    patval->layClaim();
    decoder.closeElement(sla::ELEM_CONTEXT_SYM.getId());
-@@ -898,6 +943,9 @@ void VarnodeListSymbol::encodeHeader(Encoder &encoder) const
+@@ -896,6 +941,9 @@ void VarnodeListSymbol::encodeHeader(Encoder &encoder) const
  void VarnodeListSymbol::decode(Decoder &decoder,SleighBase *trans)
  
  {
@@ -647,7 +644,7 @@ index 5c9ca321ea..c0fefc23ef 100644
    patval = (PatternValue *) PatternExpression::decodeExpression(decoder,trans);
    patval->layClaim();
    while(decoder.peekElement() != 0) {
-@@ -945,7 +993,9 @@ void OperandSymbol::defineOperand(TripleSymbol *tri)
+@@ -943,7 +991,9 @@ void OperandSymbol::defineOperand(TripleSymbol *tri)
  OperandSymbol::~OperandSymbol(void)
  
  {
@@ -658,7 +655,7 @@ index 5c9ca321ea..c0fefc23ef 100644
    if (defexp != (PatternExpression *)0)
      PatternExpression::release(defexp);
  }
-@@ -1040,6 +1090,9 @@ void OperandSymbol::encodeHeader(Encoder &encoder) const
+@@ -1038,6 +1088,9 @@ void OperandSymbol::encodeHeader(Encoder &encoder) const
  void OperandSymbol::decode(Decoder &decoder,SleighBase *trans)
  
  {
@@ -668,7 +665,7 @@ index 5c9ca321ea..c0fefc23ef 100644
    defexp = (PatternExpression *)0;
    triple = (TripleSymbol *)0;
    flags = 0;
-@@ -1066,6 +1119,7 @@ void OperandSymbol::decode(Decoder &decoder,SleighBase *trans)
+@@ -1064,6 +1117,7 @@ void OperandSymbol::decode(Decoder &decoder,SleighBase *trans)
    localexp = (OperandValue *)PatternExpression::decodeExpression(decoder,trans);
    localexp->layClaim();
    if (decoder.peekElement() != 0) {
@@ -676,7 +673,7 @@ index 5c9ca321ea..c0fefc23ef 100644
      defexp = PatternExpression::decodeExpression(decoder,trans);
      defexp->layClaim();
    }
-@@ -1689,29 +1743,29 @@ void Constructor::decode(Decoder &decoder,SleighBase *trans)
+@@ -1622,29 +1676,29 @@ void Constructor::decode(Decoder &decoder,SleighBase *trans)
        decoder.closeElement(subel);
      }
      else if (subel == sla::ELEM_CONTEXT_OP) {
@@ -719,7 +716,7 @@ index 5c9ca321ea..c0fefc23ef 100644
        }
      }
      subel = decoder.peekElement();
-@@ -2388,15 +2442,18 @@ void DecisionNode::decode(Decoder &decoder,DecisionNode *par,SubtableSymbol *sub
+@@ -2321,15 +2375,18 @@ void DecisionNode::decode(Decoder &decoder,DecisionNode *par,SubtableSymbol *sub
      if (subel == sla::ELEM_PAIR) {
        decoder.openElement();
        uintm id = decoder.readSignedInteger(sla::ATTRIB_ID);
