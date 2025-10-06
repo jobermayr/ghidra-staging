@@ -39,14 +39,18 @@ Adjust line number when blocks are folded This way, the same tokens will keep th
 Show ellipses when a block is collapsed After every syntax token that is an opening curly brace, an extra syntax token is created with the text "…". This token is collapsed by default, and uncollapsed when the other tokens in the block are collapsed and vice versa.
 
 Ensure initial line number is correct Previously, if there were any off-screen collapsed blocks before the first visible line, the initial line number would be off, since it didn't take into account the previous folded blocks. This commit fixes that.
+
+Refactor DecompilerPanel#getLineNumber(int y) Now, DecompilerPanel#getLineNumber accounts for skipped lines due to collapsed blocks. As such, it will now return the line number shown in the margin at a given y-offset. If you want to get an index for the list returned by getLines(), just use `pixmap.getIndex(y).intValue()`.
+
+Keep cursor location consistent when collapsing This doesn't quite work 100% of the time, but it's close enough...
 ---
  .../ghidra/app/decompiler/ClangToken.java     |  16 ++
- .../app/decompiler/ClangTokenGroup.java       |  12 ++
+ .../app/decompiler/ClangTokenGroup.java       |  12 +
  .../component/ClangLayoutController.java      |   7 +-
- .../decompiler/component/DecompilerPanel.java | 160 +++++++++++++++++-
+ .../decompiler/component/DecompilerPanel.java | 240 +++++++++++++++++-
  .../decompiler/component/DecompilerUtils.java |   3 +
- .../LineNumberDecompilerMarginProvider.java   |  95 ++++++++++-
- 6 files changed, 281 insertions(+), 12 deletions(-)
+ .../LineNumberDecompilerMarginProvider.java   |  87 ++++++-
+ 6 files changed, 352 insertions(+), 13 deletions(-)
 
 diff --git a/Ghidra/Features/Decompiler/src/main/java/ghidra/app/decompiler/ClangToken.java b/Ghidra/Features/Decompiler/src/main/java/ghidra/app/decompiler/ClangToken.java
 index b341c47183..81887a674d 100644
@@ -131,7 +135,7 @@ index 83d5093de7..735cef4da2 100644
  		// external functions default to green.
  		if (function.isExternal()) {
 diff --git a/Ghidra/Features/Decompiler/src/main/java/ghidra/app/decompiler/component/DecompilerPanel.java b/Ghidra/Features/Decompiler/src/main/java/ghidra/app/decompiler/component/DecompilerPanel.java
-index 18ba63f001..dc6f0aa1ca 100644
+index 18ba63f001..e1c7bcce81 100644
 --- a/Ghidra/Features/Decompiler/src/main/java/ghidra/app/decompiler/component/DecompilerPanel.java
 +++ b/Ghidra/Features/Decompiler/src/main/java/ghidra/app/decompiler/component/DecompilerPanel.java
 @@ -107,6 +107,15 @@ public class DecompilerPanel extends JPanel implements FieldMouseListener, Field
@@ -173,14 +177,14 @@ index 18ba63f001..dc6f0aa1ca 100644
  	}
  
  	private void setLocation(DecompileData oldData, DecompileData newData) {
-@@ -786,6 +802,144 @@ public class DecompilerPanel extends JPanel implements FieldMouseListener, Field
+@@ -786,6 +802,209 @@ public class DecompilerPanel extends JPanel implements FieldMouseListener, Field
  		}
  	}
  
 +	public void arrowClickAction(int y) {
-+		int lineNumber = getLineNumber(y);
++		int linesIdx = pixmap.getIndex(y).intValue();
 +		ClangToken openingBraceToken = null;
-+		ClangLine line = getLines().get(lineNumber - 1);
++		ClangLine line = getLines().get(linesIdx);
 +		for (ClangToken lineToken : line.getAllTokens()) {
 +			if ("{".equals(lineToken.getText())) {
 +				openingBraceToken = lineToken;
@@ -223,7 +227,7 @@ index 18ba63f001..dc6f0aa1ca 100644
 +					continue;
 +				}
 +
-+				boolean isEllipsis = (token instanceof ClangSyntaxToken) && (ClangToken.ELLIPSIS_TEXT.equals(token.getText()));
++				boolean isEllipsis = (token instanceof ClangSyntaxToken) && ClangToken.ELLIPSIS_TEXT.equals(token.getText());
 +
 +				if (isEllipsis && !seenEllipsis) {
 +					token.setCollapsedToken(isCollapsed);
@@ -233,7 +237,72 @@ index 18ba63f001..dc6f0aa1ca 100644
 +				}
 +			}
 +
++			ClangToken cursorToken = getTokenAtCursor();
++			FieldLocation cursorPos = getCursorPosition();
++			boolean wasOnScreen = getOffscreenDistance(
++				cursorToken.getLineParent().getLineNumber() - 1
++			) == 0;
++
 +			setDecompileData(decompileData);
++
++			if (! wasOnScreen) {
++				// If the cursor was not on screen to begin with, don't bother
++				// scrolling the cursor back into view.
++				return;
++			}
++
++			// Adjust the cursor to be at the same token
++			if (!cursorToken.getCollapsedToken()) {
++				// The token is still visible, it only moved to a different line
++				// The token only moved vertically, not horizontally, so we only
++				// adjust the row, not the column.
++				int lineNumber = cursorToken.getLineParent().getLineNumber() - 1;
++
++				fieldPanel.navigateTo(lineNumber, cursorPos.getCol());
++			} else {
++				// The token has been collapsed, iterate backwards until we find
++				// the first token that is not collapsed and target that
++
++				ClangNode cursorParent = cursorToken.Parent();
++				List<ClangNode> children = new ArrayList<>();
++				cursorParent.flatten(children);
++
++				int childIdx = children.indexOf(cursorToken);
++
++				// Attempt going up in the hierarchy at most 10 times
++				int j;
++				for (j = 0; j < 10; j++) {
++					int i;
++					for (i = childIdx; i >= 0; i--) {
++						ClangNode n = children.get(i);
++						if ((!(n instanceof ClangToken)) || ((ClangToken)n).getCollapsedToken()) {
++							continue;
++						}
++
++						cursorToken = (ClangToken)n;
++						break;
++					}
++
++					if (i >= 0) {
++						break;
++					}
++
++					// We did not find an uncollapsed token among these children,
++					// try the children of our parent.
++					ClangNode lastChild = children.get(0);
++					children.clear();
++					cursorParent = cursorParent.Parent();
++					cursorParent.flatten(children);
++					childIdx = children.indexOf(lastChild);
++				}
++
++				// Only change the token at the cursor if we managed to find an
++				// uncollapsed token. Otherwise, just leave the cursor at the
++				// same row/column position.
++				if (j != 10) {
++					goToToken(cursorToken);
++				}
++			}
 +		}
 +	}
 +
@@ -318,7 +387,29 @@ index 18ba63f001..dc6f0aa1ca 100644
  	private void tryToGoto(FieldLocation location, Field field, MouseEvent event,
  			boolean newWindow) {
  		if (!navigationEnabled) {
-@@ -1308,7 +1462,7 @@ public class DecompilerPanel extends JPanel implements FieldMouseListener, Field
+@@ -1225,7 +1444,20 @@ public class DecompilerPanel extends JPanel implements FieldMouseListener, Field
+ 	 * @return the line number, or 0 if not applicable
+ 	 */
+ 	public int getLineNumber(int y) {
+-		return pixmap.getIndex(y).intValue() + 1;
++		int lineNumber = 0;
++		int idx = pixmap.getIndex(y).intValue();
++
++		for (int i = 0; i < idx; i++) {
++			CodeBlock block = blocks.getOrDefault(lineNumber, null);
++
++			if (block == null || !isBlockCollapsed(block.openToken)) {
++				lineNumber++;
++			} else {
++				lineNumber += block.numLines;
++			}
++		}
++
++		return lineNumber;
+ 	}
+ 
+ 	public DecompileOptions getOptions() {
+@@ -1308,7 +1540,7 @@ public class DecompilerPanel extends JPanel implements FieldMouseListener, Field
  
  		if (options.isDisplayLineNumbers()) {
  			if (lineNumbersMargin == null) {
@@ -327,7 +418,7 @@ index 18ba63f001..dc6f0aa1ca 100644
  			}
  		}
  		else {
-@@ -1321,6 +1475,8 @@ public class DecompilerPanel extends JPanel implements FieldMouseListener, Field
+@@ -1321,6 +1553,8 @@ public class DecompilerPanel extends JPanel implements FieldMouseListener, Field
  		for (DecompilerMarginProvider element : marginProviders) {
  			element.setOptions(options);
  		}
@@ -351,7 +442,7 @@ index 64d290e3fc..b6d06b6c5f 100644
  				lines.add(current);
  				brk = (ClangBreak) tok;
 diff --git a/Ghidra/Features/Decompiler/src/main/java/ghidra/app/decompiler/component/margin/LineNumberDecompilerMarginProvider.java b/Ghidra/Features/Decompiler/src/main/java/ghidra/app/decompiler/component/margin/LineNumberDecompilerMarginProvider.java
-index a4138ac18b..f8ee98141e 100644
+index a4138ac18b..7a3ccbc1a2 100644
 --- a/Ghidra/Features/Decompiler/src/main/java/ghidra/app/decompiler/component/margin/LineNumberDecompilerMarginProvider.java
 +++ b/Ghidra/Features/Decompiler/src/main/java/ghidra/app/decompiler/component/margin/LineNumberDecompilerMarginProvider.java
 @@ -4,9 +4,9 @@
@@ -413,7 +504,7 @@ index a4138ac18b..f8ee98141e 100644
  	}
  
  	@Override
-@@ -91,26 +109,87 @@ public class LineNumberDecompilerMarginProvider extends JPanel
+@@ -91,26 +109,79 @@ public class LineNumberDecompilerMarginProvider extends JPanel
  		}
  		int lastLine = model.getNumIndexes().intValueExact();
  		int width = getFontMetrics(getFont()).stringWidth(Integer.toString(lastLine));
@@ -455,17 +546,9 @@ index a4138ac18b..f8ee98141e 100644
 +			return;
 +		}
 +
-+		// Skip any lines before startIdx
-+		BigInteger lineNumber = BigInteger.ZERO;
-+		for (BigInteger i = BigInteger.ZERO; i.compareTo(startIdx) < 0; i = i.add(BigInteger.ONE)) {
-+			DecompilerPanel.CodeBlock block = blocks.getOrDefault(lineNumber.intValue(), null);
-+
-+			if (block == null || !decompilerPanel.isBlockCollapsed(block.openToken)) {
-+				lineNumber = lineNumber.add(BigInteger.ONE);
-+			} else {
-+				lineNumber = lineNumber.add(BigInteger.valueOf(block.numLines));
-+			}
-+		}
++		BigInteger lineNumber = BigInteger.valueOf(
++			decompilerPanel.getLineNumber(visible.y)
++		);
 +
  		for (BigInteger i = startIdx; i.compareTo(endIdx) <= 0; i = i.add(BigInteger.ONE)) {
 -			String text = i.add(BigInteger.ONE).toString();

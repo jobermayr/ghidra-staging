@@ -4,12 +4,12 @@ Date: Tue, 10 Oct 2023 19:05:17 +0200
 Subject: [PATCH] 5872: x86: Simplify MOVSB.REP to memcpy in decompiler
 
 ---
- Ghidra/Processors/x86/data/languages/ia.sinc  | 298 ++++++++++++++++--
+ Ghidra/Processors/x86/data/languages/ia.sinc  | 297 ++++++++++++++++--
  .../x86/data/languages/lockable.sinc          |  51 ++-
- 2 files changed, 316 insertions(+), 33 deletions(-)
+ 2 files changed, 315 insertions(+), 33 deletions(-)
 
 diff --git a/Ghidra/Processors/x86/data/languages/ia.sinc b/Ghidra/Processors/x86/data/languages/ia.sinc
-index 05751cb074..fb873ec900 100644
+index 05751cb074..637fdcd768 100644
 --- a/Ghidra/Processors/x86/data/languages/ia.sinc
 +++ b/Ghidra/Processors/x86/data/languages/ia.sinc
 @@ -1448,25 +1448,25 @@ moffs64: segWide^[imm32]  is addrsize=1 & highseg=1 & segWide & imm32   { tmp:8
@@ -99,7 +99,7 @@ index 05751cb074..fb873ec900 100644
  # The base level constructors
  #   The prefixes
  :^instruction is instrPhase=0 & over=0x2e; instruction     [ segover=1; ]  {} # CS override
-@@ -3083,7 +3107,13 @@ define pcodeop clzero;
+@@ -3083,7 +3107,12 @@ define pcodeop clzero;
  :CMP Reg64,rm64     is $(LONGMODE_ON) & vexMode=0 & opsize=2 & byte=0x3b; rm64 & Reg64 ...       { local temp:8 = rm64; subflags(Reg64,temp); local diff = Reg64 - temp; resultflags(diff); }
  @endif
  
@@ -107,14 +107,13 @@ index 05751cb074..fb873ec900 100644
 +define pcodeop memcmp;
 +:CMPSB^repx peseDI1,pdseSI1  is vexMode=0 & repx & byte=0xa6 & pdseSI1 & peseDI1
 +{
-+  off = CX;
-+  CX = memcmp(peseDI1,pdseSI1,CX);
-+  newpos(DI,SI,off-1);
++  ZF = memcmp(peseDI1,pdseSI1,CX);
++  newpos(DI,SI,CX-1);
 +}
  :CMPSW^repe^repetail eseDI2,dseSI2  is vexMode=0 & repe & repetail & opsize=0 & byte=0xa7 & dseSI2 & eseDI2 { build repe; build eseDI2; build dseSI2; local temp_DI2:2 = eseDI2; local temp_SI2:2 = dseSI2; subflags(temp_SI2,temp_DI2); local diff=temp_SI2 - temp_DI2; resultflags(diff); build repetail; }
  :CMPSD^repe^repetail eseDI4,dseSI4  is vexMode=0 & repe & repetail & opsize=1 & byte=0xa7 & dseSI4 & eseDI4 { build repe; build eseDI4; build dseSI4; local temp_DI4:4 = eseDI4; local temp_SI4:4 = dseSI4; subflags(temp_SI4,temp_DI4); local diff=temp_SI4 - temp_DI4; resultflags(diff); build repetail; }
  @ifdef IA64
-@@ -4107,11 +4137,39 @@ define pcodeop LocalDescriptorTableRegister;
+@@ -4107,11 +4136,39 @@ define pcodeop LocalDescriptorTableRegister;
  }
  @endif
  
@@ -158,7 +157,7 @@ index 05751cb074..fb873ec900 100644
  @endif
  
  :LOOP   rel8        is vexMode=0 & addrsize=0 & byte=0xE2; rel8             { CX = CX -1; if (CX!=0) goto rel8; }
-@@ -4329,11 +4387,135 @@ define pcodeop swap_bytes;
+@@ -4329,11 +4386,135 @@ define pcodeop swap_bytes;
  :MOVNTI Mem,Reg64       is $(LONGMODE_ON) & vexMode=0 & opsize = 2; byte=0xf; byte=0xc3; Mem & Reg64 ...     { *Mem = Reg64; }
  @endif
  
@@ -298,7 +297,7 @@ index 05751cb074..fb873ec900 100644
  @endif
  
  :MOVSX Reg16,rm8    is vexMode=0 & opsize=0 & byte=0xf; byte=0xbe; rm8 & Reg16 ...  { Reg16 = sext(rm8); }
-@@ -4832,7 +5014,26 @@ define pcodeop smm_restore_state;
+@@ -4832,7 +5013,26 @@ define pcodeop smm_restore_state;
  :SBB  Reg64,rm64       is $(LONGMODE_ON) & vexMode=0 & opsize=2 & byte=0x1b; rm64 & Reg64 ...						{ subCarryFlags( Reg64, rm64 ); resultflags(Reg64); }
  @endif
  
@@ -326,7 +325,7 @@ index 05751cb074..fb873ec900 100644
  :SCASW^repe^repetail eseDI2 is vexMode=0 & repe & repetail & opsize=0 & byte=0xaf & eseDI2  { build repe; build eseDI2; subflags(AX,eseDI2); local diff=AX-eseDI2; resultflags(diff); build repetail; }
  :SCASD^repe^repetail eseDI4 is vexMode=0 & repe & repetail & opsize=1 & byte=0xaf & eseDI4  { build repe; build eseDI4; subflags(EAX,eseDI4); local diff=EAX-eseDI4; resultflags(diff); build repetail; }
  @ifdef IA64
-@@ -5000,11 +5201,48 @@ define pcodeop stac;
+@@ -5000,11 +5200,48 @@ define pcodeop stac;
  
  :STMXCSR m32        is vexMode=0 & byte=0xf; byte=0xae; ( mod != 0b11 & reg_opcode=3 ) ... & m32 { m32 = MXCSR; }
  
