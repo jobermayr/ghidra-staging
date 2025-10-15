@@ -1,0 +1,83 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Luke=20Sern=C3=A9?= <luke.serne@solconmail.nl>
+Date: Sun, 12 Oct 2025 18:09:26 +0200
+Subject: [PATCH] 8561: Decompiler: Fix inlining for call_return override
+
+Decompiler: Fix inlining for call_return override
+ Previously, when decompiling a function with a call to an inlined function
+ that is the result of a call_return flow override, the inline would fail with
+ a "Return address prevents inlining here" warning. This was due to an overly
+ restrictive check in FlowInfo::testHardInlineRestrictions. With this commit,
+ these function calls are inlined again.
+
+Allow CALL operations in the EZ inline model The EZ inline model causes all inlined ops to share the same address. As such, we have to be careful not to inline operations that would end the basic block, since every address needs to belong to exactly one basic block. Still, we can allow CALL operations just fine, since they don't end a basic block.
+
+Decompiler: Clarify doc for FlowInfo::checkEZModel
+---
+ .../Decompiler/src/decompile/cpp/flow.cc      | 30 +++++++++++++++----
+ 1 file changed, 24 insertions(+), 6 deletions(-)
+
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/flow.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/flow.cc
+index 7a13486027..921133da49 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/flow.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/flow.cc
+@@ -1115,7 +1115,9 @@ void FlowInfo::inlineEZClone(const FlowInfo &inlineflow,const Address &calladdr)
+     PcodeOp *op = *iter;
+     if (op->code() == CPUI_RETURN) break;
+     SeqNum myseq(calladdr,op->getSeqNum().getTime());
+-    data.cloneOp(op,myseq);
++    PcodeOp *cloneop = data.cloneOp(op,myseq);
++    if (cloneop->isCallOrBranch())
++      xrefInlinedBranch(cloneop);
+   }
+   // Because we are processing only straightline code and it is all getting assigned to one
+   // address, we don't touch unprocessed, addrlist, or visited
+@@ -1160,8 +1162,21 @@ bool FlowInfo::testHardInlineRestrictions(Funcdata *inlinefd,PcodeOp *op,Address
+     PcodeOp *nextop = *iter;
+     retaddr = nextop->getAddr();
+     if (op->getAddr() == retaddr) {
+-      inline_head->warning("Return address prevents inlining here",op->getAddr());
+-      return false;
++      // special case if the next op is a 'RETURN' - then we can tail-call and let
++      // the return in the inlined function handle the return from this function.
++      if (nextop->code() != CPUI_RETURN) {
++	ostringstream ss;
++	ss << "call op: '";
++	op->printRaw(ss);
++	ss << "'; next op: '";
++	nextop->printRaw(ss);
++	ss << "'";
++	inline_head->warning("CALL needs to be last p-code op at address, but isn't: " + ss.str(), op->getAddr());
++	return false;
++      }
++      // set an invalid address so the return of the inlined function will not
++      // be changed to a BRANCH op
++      retaddr = Address();
+     }
+     // If the inlining "jumps back" this starts a new basic block
+     data.opMarkStartBasic(nextop);
+@@ -1169,15 +1184,18 @@ bool FlowInfo::testHardInlineRestrictions(Funcdata *inlinefd,PcodeOp *op,Address
+   return true;
+ }
+ 
+-/// A function is in the EZ model if it is a straight-line leaf function.
+-/// \return \b true if this flow contains no CALL or BRANCH ops
++/// A function is in the EZ model if it is a straight-line leaf function. Note
++/// that we need to ensure that these instructions can all form a single basic
++/// block, since we cannot split a basic block in the middle of an address. As
++/// such, branches are disallowed, but CALL operations are allowed.
++/// \return \b true if this flow contains no BRANCH ops
+ bool FlowInfo::checkEZModel(void) const
+ 
+ {
+   list<PcodeOp *>::const_iterator iter = obank.beginDead();
+   while(iter != obank.endDead()) {
+     PcodeOp *op = *iter;
+-    if (op->isCallOrBranch()) return false;
++    if (op->isCallOrBranch() && (op->code() != CPUI_CALL)) return false;
+     ++iter;
+   }
+   return true;
+-- 
+2.45.1
+
