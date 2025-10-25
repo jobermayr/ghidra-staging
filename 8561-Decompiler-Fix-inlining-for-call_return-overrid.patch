@@ -13,12 +13,14 @@ Decompiler: Fix inlining for call_return override
 Allow CALL operations in the EZ inline model The EZ inline model causes all inlined ops to share the same address. As such, we have to be careful not to inline operations that would end the basic block, since every address needs to belong to exactly one basic block. Still, we can allow CALL operations just fine, since they don't end a basic block.
 
 Decompiler: Clarify doc for FlowInfo::checkEZModel
+
+Decompiler: EZ model: Allow p-code relative branch These branch ops have destinations inside the same adress in the original flow already, so it makes little sense to exclude those from inlining using the EZ model. This commit also allows CALLIND ops in the EZ model.
 ---
- .../Decompiler/src/decompile/cpp/flow.cc      | 30 +++++++++++++++----
- 1 file changed, 24 insertions(+), 6 deletions(-)
+ .../Decompiler/src/decompile/cpp/flow.cc      | 31 +++++++++++++++----
+ 1 file changed, 25 insertions(+), 6 deletions(-)
 
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/flow.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/flow.cc
-index 7a13486027..921133da49 100644
+index 7a13486027..e7b2e89b80 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/flow.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/flow.cc
 @@ -1115,7 +1115,9 @@ void FlowInfo::inlineEZClone(const FlowInfo &inlineflow,const Address &calladdr)
@@ -56,7 +58,7 @@ index 7a13486027..921133da49 100644
      }
      // If the inlining "jumps back" this starts a new basic block
      data.opMarkStartBasic(nextop);
-@@ -1169,15 +1184,18 @@ bool FlowInfo::testHardInlineRestrictions(Funcdata *inlinefd,PcodeOp *op,Address
+@@ -1169,15 +1184,19 @@ bool FlowInfo::testHardInlineRestrictions(Funcdata *inlinefd,PcodeOp *op,Address
    return true;
  }
  
@@ -65,8 +67,9 @@ index 7a13486027..921133da49 100644
 +/// A function is in the EZ model if it is a straight-line leaf function. Note
 +/// that we need to ensure that these instructions can all form a single basic
 +/// block, since we cannot split a basic block in the middle of an address. As
-+/// such, branches are disallowed, but CALL operations are allowed.
-+/// \return \b true if this flow contains no BRANCH ops
++/// such, branches to different addresses (i.e. non-pcode relative branches) are
++/// disallowed, but CALL(IND) and p-code relative (C)BRANCH operations are allowed.
++/// \return \b true if this flow can be inlined using the EZ model
  bool FlowInfo::checkEZModel(void) const
  
  {
@@ -74,7 +77,7 @@ index 7a13486027..921133da49 100644
    while(iter != obank.endDead()) {
      PcodeOp *op = *iter;
 -    if (op->isCallOrBranch()) return false;
-+    if (op->isCallOrBranch() && (op->code() != CPUI_CALL)) return false;
++    if (op->isBranch() && !(((op->code() == CPUI_BRANCH) || (op->code() == CPUI_CBRANCH)) && op->getIn(0)->isConstant())) return false;
      ++iter;
    }
    return true;
