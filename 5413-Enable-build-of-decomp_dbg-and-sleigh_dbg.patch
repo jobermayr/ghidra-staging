@@ -11,10 +11,10 @@ Fixes: #5296
  1 file changed, 349 insertions(+), 178 deletions(-)
 
 diff --git a/Ghidra/Features/Decompiler/buildNatives.gradle b/Ghidra/Features/Decompiler/buildNatives.gradle
-index 010461ae21..ba135232a9 100644
+index 010461ae21..9ffe5c94c9 100644
 --- a/Ghidra/Features/Decompiler/buildNatives.gradle
 +++ b/Ghidra/Features/Decompiler/buildNatives.gradle
-@@ -22,20 +22,182 @@ if (findProject(':Generic') == null) {
+@@ -22,20 +22,181 @@ if (findProject(':Generic') == null) {
  	apply from: "../../../GPL/nativeBuildProperties.gradle"
  }
  
@@ -161,23 +161,22 @@ index 010461ae21..ba135232a9 100644
 + * Try to find libbfd*.so or a static libbfd.a for linking decomp_dbg
 + */
 +def linkBFDUnix = {
-+	def stdout = new ByteArrayOutputStream()
-+	exec {
-+		ignoreExitValue false /* fail and abort if there is an error */
-+		commandLine 'bash', '-c', 'ld.bfd -v | grep -o \"[0-9].*$\"'
-+		standardOutput = stdout
++	def getLibName = {
++		def stdout = new ByteArrayOutputStream()
++		['bash', '-c', 'ld.bfd -v | grep -o \"[0-9].*$\"'].execute().with {
++			consumeProcessOutput(stdout, System.err)
++			waitFor()
++		}
++		return "-lbfd-" + stdout.toString().trim()
 +	}
-+	def lib = "-lbfd-" + stdout.toString().trim()
-+	stdout.reset()
-+	def ld = "ld -o /dev/null " + lib + " 2>&1 | grep -o \"cannot find -\""
-+	exec {
-+		ignoreExitValue true /* it would fail and abort otherwise */
-+		commandLine 'bash', '-c', ld
-+		standardOutput = stdout
-+	}
++	def lib = getLibName()
++	def check = ["bash", "-c", "ld -o /dev/null ${lib} 2>&1 | grep -o 'cannot find -'"].execute()
++	def result = new StringBuffer()
++	check.consumeProcessOutput(result, System.err)
++	check.waitFor()
 +	/* Use libbfd-* if found */
-+	if (stdout.toString().trim() == "")
-+		return lib + " -Wl,--no-whole-archive -liberty -lsframe -lz -lzstd"
++	if (result.toString().trim().isEmpty())
++		return "${lib} -Wl,--no-whole-archive -liberty -lsframe -lz -lzstd"
 +	/* Fallback to libbfd */
 +	return "-lbfd -Wl,--no-whole-archive -liberty -lsframe -lz -lzstd"
 +}
@@ -205,7 +204,7 @@ index 010461ae21..ba135232a9 100644
  			// these tell gradle for which platforms to build a decompiler executable.
  			targetPlatform "win_x86_64"
  			targetPlatform "linux_x86_64"
-@@ -46,104 +208,31 @@ model {
+@@ -46,104 +207,31 @@ model {
  			targetPlatform "freebsd_arm_64"
  			sources {
  				cpp {
@@ -332,7 +331,7 @@ index 010461ae21..ba135232a9 100644
  		} // end decompile
  
  		sleigh(NativeExecutableSpec) {
-@@ -156,90 +245,187 @@ model {
+@@ -156,90 +244,188 @@ model {
  			targetPlatform "freebsd_arm_64"
  			sources {
  				cpp {
@@ -389,8 +388,12 @@ index 010461ae21..ba135232a9 100644
 +							srcDir "src/decompile/zlib"
 +							include "*.c"
 +						}
-+					}
-+				}
+ 					}
+ 				}
+-			} // end sources (sleigh)
+-			
+-			binaries {
+-				all{ b ->
 +			}
 +			binaries.all { b ->
 +				if (b.toolChain in Gcc || b.toolChain in Clang) {
@@ -411,12 +414,8 @@ index 010461ae21..ba135232a9 100644
 +							b.cCompiler.args "-flto"
 +						}
 +						b.linker.args "-flto"
- 					}
- 				}
--			} // end sources (sleigh)
--			
--			binaries {
--				all{ b ->
++					}
++				}
 +				if (isCurrentWindows() || !project.hasProperty('sysZlib')) {
  					b.cppCompiler.define "LOCAL_ZLIB"
  					b.cCompiler.define "NO_GZIP"
@@ -516,6 +515,7 @@ index 010461ae21..ba135232a9 100644
 +					}
 +					if (isCurrentWindows() || !project.hasProperty('sysZlib')) {
 +						b.cppCompiler.define "LOCAL_ZLIB"
++						b.cCompiler.define "NO_GZIP"
 +					}
 +					b.cppCompiler.define "YYDEBUG"
 +				}

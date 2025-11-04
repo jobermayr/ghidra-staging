@@ -6,16 +6,37 @@ Subject: [PATCH] 8130: Language file support for cip-51 and Cx51
 Add CIP-51 microcontroller support to 8051 language files
 
 Add the missing keil-cx51.cspec file
+
+Update 8051 language files for CIP-51 and Keil compiler support
+
+Ignore local gradle configuration
+
+Update .gitignore for local development files
+
+Fix XML comment syntax error in keil-cx51.cspec
 ---
+ .gitignore                                    |   4 +
  Ghidra/Processors/8051/certification.manifest |   2 +
  .../Processors/8051/data/languages/8051.ldefs |  20 ++-
- .../8051/data/languages/8051_main.sinc        | 122 ++++++++++--------
+ .../8051/data/languages/8051_main.sinc        | 164 ++++++++++++------
  .../8051/data/languages/cip-51.slaspec        |   3 +
- .../8051/data/languages/keil-cx51.cspec       | 112 ++++++++++++++++
- 5 files changed, 201 insertions(+), 58 deletions(-)
+ .../8051/data/languages/keil-cx51.cspec       | 118 +++++++++++++
+ 6 files changed, 253 insertions(+), 58 deletions(-)
  create mode 100644 Ghidra/Processors/8051/data/languages/cip-51.slaspec
  create mode 100644 Ghidra/Processors/8051/data/languages/keil-cx51.cspec
 
+diff --git a/.gitignore b/.gitignore
+index ea8e272331..febde4cd83 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -95,3 +95,7 @@ core.*
+ # python files
+ *.egg-info
+ __pycache__
++gradle.properties
++#*#
++ghidra_12.1_DEV/
++build/
 diff --git a/Ghidra/Processors/8051/certification.manifest b/Ghidra/Processors/8051/certification.manifest
 index ab3f5280a2..5dac87b24b 100644
 --- a/Ghidra/Processors/8051/certification.manifest
@@ -74,7 +95,7 @@ index 7c2700ffe8..bf18be6947 100644
      <description>NXP/Phillips MX51</description>
      <compiler name="default" spec="mx51.cspec" id="default"/>
 diff --git a/Ghidra/Processors/8051/data/languages/8051_main.sinc b/Ghidra/Processors/8051/data/languages/8051_main.sinc
-index 22700c13ac..31475a6ccd 100644
+index 22700c13ac..6702067c21 100644
 --- a/Ghidra/Processors/8051/data/languages/8051_main.sinc
 +++ b/Ghidra/Processors/8051/data/languages/8051_main.sinc
 @@ -1,7 +1,7 @@
@@ -95,7 +116,7 @@ index 22700c13ac..31475a6ccd 100644
  
  @if defined(PTRSIZE)
  @else
-@@ -47,12 +47,22 @@ define space BITS     type=ram_space      size=2;
+@@ -47,12 +47,64 @@ define space BITS     type=ram_space      size=2;
  #
  @define SP_SIZE 1
  
@@ -104,21 +125,63 @@ index 22700c13ac..31475a6ccd 100644
  define space INTMEM   type=ram_space      size=1;
  define space EXTMEM   type=ram_space      size=2;
 +@if defined(CIP51)
++#
++# CIP-51 allows up to 256 128-byte pages of these, or 32768 bytes, so two address bytes
++# are needed for SFR space.
++#
++# At execution, SFR page selection uses the 8-bit SFRPAGE SFR to provide the page number,
++# which effectively is the upper byte of SFR's full address.
++#
++# The devices covered in the F12x/13x datasheet only have 5 SFR pages and numbers them 0,
++# 1, 2, 3, and F. The datasheet doesn't go into detail about SFRPAGE bits 2 to 6, but
++# I suppose that for Ghidra instruction decoding it would suffice to just decode the full
++# byte. A custom analyzer or script could check for the use of undefined SFRPAGEs.
++#
 +define space SFR      type=ram_space      size=2;
 +@else
++#
++# Intel MCS-51 devices have a maximum of 128 SFRs and a byte-wide address suffices
++#
  define space SFR      type=ram_space      size=1;
 +@endif
  define space BITS     type=ram_space      size=1;
  
 +@if defined(CIP51)
++# Per the datasheet https://www.silabs.com/documents/public/data-sheets/C8051F12x-13x.pdf
++# (rev 1.4)
++# on-chip (internal) flash program/data memory addresses are
++# 	00000 - 1fbff		F120/1/2/3/4/5/6/7, F130/1
++#   00000 - 0ffff		F132/3
++# All of the 12x/13x chips covered by the datasheet have
++# on-chip scratchpad (i.e. data only) flash:
++#	20000 - 200FF
++# So allowing 3 address bytes for CIP51 will cover the entire address range for the
++# on-chip (internal) flash
 +define space IFLASH   type=ram_space      size=3;
++#
++# As with Intel's original MCS-51 architecture, CIP-51 "internal" ordinary RAM resides on
++# the processor chip and uses single-byte addressing.
++#
++# The lower half of internal RAM can be accessed either directly (by encoding an 8 bit
++# address in the opcode) or indirectly (via an address stored in R0 or R1).
++#
++# The upper half of internal RAM can be accessed only indirectly, again via R0 or R1.
++#
++#  00 - 7f		directly and indirectly addressable
++#  80 - ff		indirectly addressable only (via R0 or R1)
++#
++# In CIP51 chips, addresses in the upper half of the range (that is, 80 - FF), when used
++# directly, rather than accessing ordinary RAM get mapped to the chip's special function
++# register  RAM.
++#
++
 +define space XRAM     type=ram_space	  size=2;
 +@endif
 +
  @elif defined(MCS80390)
  
  @define PTRSIZE 3
-@@ -114,13 +124,13 @@ define register offset=0x0   size=2 [ WR0  WR2  WR4  WR6  WR8  AB   WR12 WR14
+@@ -114,13 +166,13 @@ define register offset=0x0   size=2 [ WR0  WR2  WR4  WR6  WR8  AB   WR12 WR14
  define register offset=0x0   size=4 [ DR0  DR4  DR8  DR12 DR16 DR20 DR24 DR28 ];
  
  define register offset=0x38  size=1 [ R56 DPXL DPH DPL R60 R61 SPH ];
@@ -135,7 +198,7 @@ index 22700c13ac..31475a6ccd 100644
  define register offset=0x01  size=2 [ R2R1 ];
  define register offset=0x00  size=2 [ R0R1 R2R3 R4R5 R6R7 ];
  define register offset=0x04  size=4 [ R4R5R6R7 ];
-@@ -129,7 +139,7 @@ define register offset=0x05  size=3 [ R5R6R7 ];
+@@ -129,7 +181,7 @@ define register offset=0x05  size=3 [ R5R6R7 ];
  define register offset=0x0A  size=1 [ B ACC ];  # relocated to facilitate AB 16-bit access
  define register offset=0x0A  size=2 [ AB ];
  
@@ -144,7 +207,7 @@ index 22700c13ac..31475a6ccd 100644
  define register offset=0x82  size=2 [ DPTR ];
  define register offset=0x82  size=1 [ DPH DPL ]; # relocated to facilitate DPTR 16-bit access
  @elif defined(MCS80390)
-@@ -138,7 +148,7 @@ define register offset=0x82  size=1 [ DPH DPL ]; # relocated to facilitate DPTR
+@@ -138,7 +190,7 @@ define register offset=0x82  size=1 [ DPH DPL ]; # relocated to facilitate DPTR
  # access.  Rework some direct moves to compensate.  Not clear that all
  # cases are covered, thus might be problematic hack in the long term.
  define register offset=0x82  size=3 [ DPTR ];
@@ -153,7 +216,7 @@ index 22700c13ac..31475a6ccd 100644
  @endif
  
  @else
-@@ -192,7 +202,7 @@ define context contextReg
+@@ -192,7 +244,7 @@ define context contextReg
  # GROUP3 - MCS251 instructions in 0x60-0xff range
  @define GROUP3 "((srcMode=0 & A5Prefix=1) | (srcMode=1 & A5Prefix=0))"
  
@@ -162,7 +225,7 @@ index 22700c13ac..31475a6ccd 100644
  
  @define GROUP1 "epsilon"
  @define GROUP2 "epsilon"
-@@ -223,7 +233,7 @@ define token opbyte (8)
+@@ -223,7 +275,7 @@ define token opbyte (8)
     rifill   = (1,3)
     opaddr   = (5,7)
     addrfill = (4,4)
@@ -171,7 +234,7 @@ index 22700c13ac..31475a6ccd 100644
     b_0000 = (0,0)
     b_0001 = (0,1)
     b_0002 = (0,2)
-@@ -352,7 +362,7 @@ macro push8(val) {
+@@ -352,7 +404,7 @@ macro push8(val) {
    SPX = SPX + 1;
    ptr:3 = SPX:3;
    *[RAM]:1 ptr = val;
@@ -180,7 +243,7 @@ index 22700c13ac..31475a6ccd 100644
    SP = SP + 1;
    *[INTMEM]:1 SP = val;
  @elif defined(MX51)
-@@ -379,32 +389,32 @@ macro push16(val) {
+@@ -379,32 +431,32 @@ macro push16(val) {
  @if defined(MCS251)
    al:1 = val:1;
    ah:1 = val(1);
@@ -223,7 +286,7 @@ index 22700c13ac..31475a6ccd 100644
    *[RAM]:1 SP = ah;
  @else
    val = val;
-@@ -416,12 +426,12 @@ macro push24(val) {
+@@ -416,12 +468,12 @@ macro push24(val) {
    al:1 = val:1;
    ah:1 = val(1);
    ax:1 = val(2);
@@ -239,7 +302,7 @@ index 22700c13ac..31475a6ccd 100644
    *[INTMEM]:1 SP = ax;
  }
  @endif
-@@ -432,7 +442,7 @@ macro pop8(val) {
+@@ -432,7 +484,7 @@ macro pop8(val) {
    ptr:3 = SPX:3;
    val = *[RAM]:1 ptr;
    SPX = SPX - 1;
@@ -248,7 +311,7 @@ index 22700c13ac..31475a6ccd 100644
    val = *[INTMEM]:1 SP;
    SP = SP - 1;
  @elif defined(MX51)
-@@ -456,7 +466,7 @@ macro pop24(val) {
+@@ -456,7 +508,7 @@ macro pop24(val) {
     ax : 1 = *[INTMEM]:1 (ptr+2);
    bl:3 = zext(al);
    bh:3 = zext(ah) << 8;
@@ -257,7 +320,7 @@ index 22700c13ac..31475a6ccd 100644
     z : 3 = bl;
    z = (z | bh);
    z = (z | bx);
-@@ -469,31 +479,31 @@ macro pop24(val) {
+@@ -469,31 +521,31 @@ macro pop24(val) {
  macro pop16(val) { val = val; }
  @else
  macro pop16(val) {
@@ -298,7 +361,7 @@ index 22700c13ac..31475a6ccd 100644
    val = (zext(ah) << 8) | zext(al);
  @else
    val = val;
-@@ -512,7 +522,7 @@ DPTRreg: DPTR    is ophi & DPTR      { export DPTR; }
+@@ -512,7 +564,7 @@ DPTRreg: DPTR    is ophi & DPTR      { export DPTR; }
  
  @if defined(MCS251)
  ADPTR:   "@A+"^DPTR is ophi & DPTR		{ ptr:3 = 0xff0000 + zext(DPTR) + zext(ACC); export ptr; }
@@ -307,7 +370,7 @@ index 22700c13ac..31475a6ccd 100644
  ADPTR:   "@A+"^DPTR is ophi & DPTR		{ ptr:$(PTRSIZE) = zext(DPTR) + zext(ACC); export ptr; }
  @elif defined(MCS80390)
  ADPTR:   "@A+"^DPTR is ophi & DPTR		{ ptr:3 = zext(DPTR) + zext(ACC); export ptr; }
-@@ -524,7 +534,7 @@ APC:     "@A+PC"    is epsilon			{ tmp:$(PTRSIZE) = inst_next + zext(ACC); expor
+@@ -524,7 +576,7 @@ APC:     "@A+PC"    is epsilon			{ tmp:$(PTRSIZE) = inst_next + zext(ACC); expor
  
  @if defined(MCS251)
  ATDPTR:  "@"^DPTR   is ophi	& DPTR	{ ptr:3 = 0x010000 + zext(DPTR); export *:1 ptr; } # 8051 External data address mapped into RAM space
@@ -316,7 +379,7 @@ index 22700c13ac..31475a6ccd 100644
  ATDPTR:  "@"^DPTR   is ophi	& DPTR	{ ptr:2 = DPTR; export *[EXTMEM]:1 ptr; }
  @elif defined(MCS80390)
  ATDPTR:  "@"^DPTR   is ophi	& DPTR	{ ptr:3 = zext(DPTR); export *[EXTMEM]:1 ptr; }
-@@ -536,15 +546,15 @@ ATDPTR:  "@"^DPTR   is ophi	& DPTR	{ ptr:3 = zext(DPTR); export *[RAM]:1 ptr; }
+@@ -536,15 +588,15 @@ ATDPTR:  "@"^DPTR   is ophi	& DPTR	{ ptr:3 = zext(DPTR); export *[RAM]:1 ptr; }
  Ri:      @ri       is ri      { ptr:3 = zext(ri); export *[RAM]:1 ptr; }
  @elif defined(MX51)
  Ri:      @ri       is ri      { ptr:3 = zext(ri) + 0x7f0000; export *[RAM]:1 ptr; }
@@ -335,7 +398,7 @@ index 22700c13ac..31475a6ccd 100644
  RiX:     @ri       is ri      { ptr:3 = zext(ri); export *[EXTMEM]:1 ptr; } # tocheck
  @elif defined(MX51)
  RiX:     @ri       is ri      { ptr:3 = zext(ri); export *[RAM]:1 ptr; }
-@@ -560,7 +570,7 @@ Data24:  "#"data24 is data24  { export *[const]:3 data24; }
+@@ -560,7 +612,7 @@ Data24:  "#"data24 is data24  { export *[const]:3 data24; }
  Direct:  mainreg   is bank=0 & mainreg	{ export *[RAM]:1 mainreg; }
  @elif defined(MX51)
  Direct:  mainreg   is bank=0 & mainreg	{ tmp:3 = mainreg + 0x7f0000; export *[RAM]:1 tmp; }
@@ -344,7 +407,7 @@ index 22700c13ac..31475a6ccd 100644
  Direct:  mainreg   is bank=0 & mainreg	{ export *[INTMEM]:1 mainreg; }
  @endif
  Direct:  direct    is bank=1 & direct 	{ export *[SFR]:1 direct; }
-@@ -580,7 +590,7 @@ Direct:  DPXL      is bank=1 & direct=0x84 & DPXL  { export DPXL;  }
+@@ -580,7 +632,7 @@ Direct:  DPXL      is bank=1 & direct=0x84 & DPXL  { export DPXL;  }
  Direct2:  mainreg2  is bank2=0 & mainreg2	{ export *[RAM]:1 mainreg2; }
  @elif defined(MX51)
  Direct2:  mainreg2  is bank2=0 & mainreg2	{ tmp:3 = mainreg2 + 0x7f0000; export *[RAM]:1 tmp; }
@@ -353,7 +416,7 @@ index 22700c13ac..31475a6ccd 100644
  Direct2:  mainreg2  is bank2=0 & mainreg2	{ export *[INTMEM]:1 mainreg2; }
  @endif
  Direct2: direct2   is bank2=1 & direct2  	{ export *[SFR]:1 direct2; }
-@@ -592,7 +602,7 @@ Direct2:  DPH      is bank2=1 & direct2=0x83 & DPH  { export DPH;  }
+@@ -592,7 +644,7 @@ Direct2:  DPH      is bank2=1 & direct2=0x83 & DPH  { export DPH;  }
  @if defined(MCS80390)
  Direct2:  DPX      is bank2=1 & direct2=0x93 & DPX  { export DPX;  }
  @endif
@@ -362,7 +425,7 @@ index 22700c13ac..31475a6ccd 100644
  Direct2:  DPXL     is bank2=1 & direct2=0x84 & DPXL  { export DPXL;  }
  @endif
  
-@@ -601,7 +611,7 @@ BitAddr:  bitaddr is bitbank=1 & sfrbyte & sfrbit [ bitaddr =(sfrbyte << 6)+sfrb
+@@ -601,7 +653,7 @@ BitAddr:  bitaddr is bitbank=1 & sfrbyte & sfrbit [ bitaddr =(sfrbyte << 6)+sfrb
  BitAddr:  bitaddr is bitbank=0 & lowbyte & sfrbit [ bitaddr =(lowbyte << 3)+sfrbit; ] { export *[BITS]:1 bitaddr; }
  BitAddr2: "/"bitaddr is bitbank=1 & sfrbyte & sfrbit	 [ bitaddr =(sfrbyte << 6)+sfrbit; ] { export *[BITS]:1 bitaddr; }
  BitAddr2: "/"bitaddr is bitbank=0 & lowbyte & sfrbit [ bitaddr =(lowbyte << 3)+sfrbit; ] { export *[BITS]:1 bitaddr; }
@@ -371,7 +434,7 @@ index 22700c13ac..31475a6ccd 100644
  ##
  ##TODO !!! 8051 SFRBITS bit overlay block is probably incorrect since there is not a 1:1 mapping to the SFR space
  ##  While the BitAddr is only used for disassembly markup, and labels come from pspec, the underlying data will
-@@ -622,14 +632,14 @@ BitByteAddr: PSW 	    is bitbank=1 & sfrbyte=0x1A & sfrbit & PSW { export PSW; }
+@@ -622,14 +674,14 @@ BitByteAddr: PSW 	    is bitbank=1 & sfrbyte=0x1A & sfrbit & PSW { export PSW; }
  BitByteAddr: byteaddr 	is bitbank=0 & lowbyte & sfrbit [ byteaddr = lowbyte + 0x20; ] { export *[RAM]:1 byteaddr; }
  @elif defined(MX51)
  BitByteAddr: byteaddr 	is bitbank=0 & lowbyte & sfrbit [ byteaddr = lowbyte + 0x20; ] { tmp:3 = byteaddr + 0x7f0000; export *[RAM]:1 tmp; }
@@ -388,7 +451,7 @@ index 22700c13ac..31475a6ccd 100644
  Addr11: relAddr is aopaddr & adata [ relAddr =(inst_next $and 0xf800)+(aopaddr*256)+adata; ]  { export *:1 relAddr; }
  Addr16: addr16 is addr16 { export *:1 addr16; }
  @elif defined(MCS80390)
-@@ -736,7 +746,7 @@ Rel16:   relAddr is rel16		     [ relAddr=inst_next+rel16; ] { export *:1 relAdd
+@@ -736,7 +788,7 @@ Rel16:   relAddr is rel16		     [ relAddr=inst_next+rel16; ] { export *:1 relAdd
  :INC rn      is $(GROUP2) & ophi=0 & rnfill=1 & rn				    { rn = rn + 1; }
  :INC Direct  is $(GROUP1) & ophi=0 & oplo=5; Direct		{ Direct = Direct + 1; }
  @if defined(DUAL_DPTR) && defined(DPS_REG_NUM)
@@ -397,7 +460,7 @@ index 22700c13ac..31475a6ccd 100644
     AUXR1 = AUXR1 ^ 0x01;
     tmp:2 = DPTR;
     DPTR = DPTR2;
-@@ -856,23 +866,23 @@ Rel16:   relAddr is rel16		     [ relAddr=inst_next+rel16; ] { export *:1 relAdd
+@@ -856,23 +908,23 @@ Rel16:   relAddr is rel16		     [ relAddr=inst_next+rel16; ] { export *:1 relAdd
  
  :PUSH Direct is $(GROUP1) & ophi=12 & oplo=0; Direct	{ push8(Direct); }
  
@@ -442,12 +505,17 @@ index 0000000000..a4840d60ea
 +@include "8051_main.sinc"
 diff --git a/Ghidra/Processors/8051/data/languages/keil-cx51.cspec b/Ghidra/Processors/8051/data/languages/keil-cx51.cspec
 new file mode 100644
-index 0000000000..78b4e5b310
+index 0000000000..14efe89087
 --- /dev/null
 +++ b/Ghidra/Processors/8051/data/languages/keil-cx51.cspec
-@@ -0,0 +1,112 @@
+@@ -0,0 +1,118 @@
 +<?xml version="1.0" encoding="UTF-8"?>
 +<compiler_spec>
++<!-- Since data_organization isn't present in the other 8051-family cspecs, I suspect
++   - it's not needed here either, so although I've provided what I hope would be appropriate
++   - if it should prove necessary, I've commented it out.
++  -->
++<!--
 + <data_organization>
 +   <absolute_max_alignment value="0" />
 +   <machine_alignment value="1" />
@@ -468,6 +536,7 @@ index 0000000000..78b4e5b310
 +     <entry size="4" alignment="1" />
 +   </size_alignment_map>
 + </data_organization>
++-->
 +
 + <global>
 +   <range space="IFLASH"/>
@@ -558,6 +627,7 @@ index 0000000000..78b4e5b310
 +   </pcode>
 + </segmentop>
 +</compiler_spec>
+\ No newline at end of file
 -- 
 2.45.1
 
