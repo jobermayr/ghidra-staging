@@ -6,433 +6,180 @@ Subject: [PATCH] 8574: Add scripts to export function metrics (JSON/CSV) and
 
 Add scripts: export function metrics (JSON/CSV) and function
  call graph (DOT)
----
- .../ExportFunctionCallGraphToDot.java         | 131 +++++++++
- .../ExportFunctionMetricsToCsv.java           | 195 +++++++++++++
- .../ExportFunctionMetricsToJson.java          | 265 ++++++++++++++++++
- 3 files changed, 591 insertions(+)
- create mode 100644 Ghidra/Features/Base/ghidra_scripts/ExportFunctionCallGraphToDot.java
- create mode 100644 Ghidra/Features/Base/ghidra_scripts/ExportFunctionMetricsToCsv.java
- create mode 100644 Ghidra/Features/Base/ghidra_scripts/ExportFunctionMetricsToJson.java
 
-diff --git a/Ghidra/Features/Base/ghidra_scripts/ExportFunctionCallGraphToDot.java b/Ghidra/Features/Base/ghidra_scripts/ExportFunctionCallGraphToDot.java
-new file mode 100644
-index 0000000000..642e2fbd80
---- /dev/null
-+++ b/Ghidra/Features/Base/ghidra_scripts/ExportFunctionCallGraphToDot.java
-@@ -0,0 +1,131 @@
-+/* ###
-+ * IP: GHIDRA
-+ * REVIEWED: NO
-+ *
-+ * Licensed under the Apache License, Version 2.0 (the "License");
-+ * you may not use this file except in compliance with the License.
-+ * You may obtain a copy of the License at
-+ *
-+ *      http://www.apache.org/licenses/LICENSE-2.0
-+ *
-+ * Unless required by applicable law or agreed to in writing, software
-+ * distributed under the License is distributed on an "AS IS" BASIS,
-+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-+ * See the License for the specific language governing permissions and
-+ * limitations under the License.
-+ */
-+// Exports the program's function call graph to a DOT file.
-+//@category Graph
-+
+Integrate function export scripts into ExportFunctionInfoScript
+
+- Consolidated ExportFunctionMetricsToJson, ExportFunctionMetricsToCsv, and ExportFunctionCallGraphToDot into ExportFunctionInfoScript.java
+- Added format selection using GhidraScript.askChoices() as requested in code review
+- Users can now choose between: JSON (Simple), JSON (Detailed metrics), CSV (Detailed metrics), and DOT (Function call graph)
+- All export formats support optional selection/highlight filtering
+- Maintains backward compatibility with existing simple JSON export functionality
+---
+ .../ExportFunctionInfoScript.java             | 492 +++++++++++++++++-
+ 1 file changed, 487 insertions(+), 5 deletions(-)
+
+diff --git a/Ghidra/Features/Base/ghidra_scripts/ExportFunctionInfoScript.java b/Ghidra/Features/Base/ghidra_scripts/ExportFunctionInfoScript.java
+index 528786f7e9..5ac83cfd43 100644
+--- a/Ghidra/Features/Base/ghidra_scripts/ExportFunctionInfoScript.java
++++ b/Ghidra/Features/Base/ghidra_scripts/ExportFunctionInfoScript.java
+@@ -13,31 +13,122 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-// List function names and entry point addresses to a file in JSON format
++// Export function information in various formats (JSON, CSV, DOT)
+ //@category Functions
+ 
 +import java.io.BufferedWriter;
-+import java.io.File;
-+import java.io.FileWriter;
+ import java.io.File;
+ import java.io.FileWriter;
 +import java.io.IOException;
++import java.util.Arrays;
 +import java.util.HashMap;
 +import java.util.HashSet;
++import java.util.Iterator;
++import java.util.List;
 +import java.util.Map;
 +import java.util.Set;
-+
-+import ghidra.app.script.GhidraScript;
+ 
+ import com.google.gson.*;
+ import com.google.gson.stream.JsonWriter;
+ 
+ import ghidra.app.script.GhidraScript;
+ import ghidra.program.model.address.Address;
 +import ghidra.program.model.address.AddressSetView;
-+import ghidra.program.model.listing.Function;
-+import ghidra.program.model.listing.FunctionIterator;
-+import ghidra.program.model.listing.FunctionManager;
-+import ghidra.program.model.listing.Program;
-+
-+public class ExportFunctionCallGraphToDot extends GhidraScript {
-+
-+    @Override
-+    protected void run() throws Exception {
-+        if (currentProgram == null) {
-+            printerr("No current program.");
-+            return;
-+        }
-+
-+        File outFile = askFile("Choose output DOT file", "Save");
-+        if (outFile == null) {
-+            printerr("No output file selected.");
-+            return;
-+        }
-+
-+        AddressSetView scope = currentSelection != null ? currentSelection : currentHighlight;
-+        writeCallGraphDot(currentProgram, outFile, scope);
-+        println("Wrote function call graph to: " + outFile.getAbsolutePath());
-+    }
-+
-+    private void writeCallGraphDot(Program program, File outFile, AddressSetView scope)
-+            throws IOException {
-+        FunctionManager fm = program.getFunctionManager();
-+        FunctionIterator it = fm.getFunctions(true);
-+
-+        Map<String, Integer> idByEntry = new HashMap<>();
-+        Set<String> edges = new HashSet<>();
-+        int nextId = 1;
-+
-+        monitor.initialize(fm.getFunctionCount());
-+
-+        while (it.hasNext() && !monitor.isCancelled()) {
-+            Function f = it.next();
-+            if (scope != null && !scope.intersects(f.getBody())) {
-+                continue;
-+            }
-+            monitor.setMessage("Indexing function: " + f.getName());
-+            monitor.incrementProgress(1);
-+
-+            String fEntry = f.getEntryPoint().toString();
-+            idByEntry.computeIfAbsent(fEntry, k -> nextId++);
-+
-+            for (Function callee : f.getCalledFunctions(monitor)) {
-+                if (scope != null && !scope.intersects(callee.getBody())) {
-+                    // If filtered by selection, only keep edges entirely in scope
-+                    continue;
-+                }
-+                String cEntry = callee.getEntryPoint().toString();
-+                idByEntry.computeIfAbsent(cEntry, k -> nextId++);
-+                edges.add(fEntry + "->" + cEntry);
-+            }
-+        }
-+
-+        try (BufferedWriter w = new BufferedWriter(new FileWriter(outFile))) {
-+            String graphName = sanitizeId(program.getName());
-+            w.write("digraph \"" + escape(program.getName()) + "\" {\n");
-+            w.write("  node [shape=box, fontsize=10];\n");
-+
-+            for (Map.Entry<String, Integer> e : idByEntry.entrySet()) {
-+                String entry = e.getKey();
-+                int id = e.getValue();
-+                // label: function name + entry
-+                Function f = fm.getFunctionAt(program.getAddressFactory().getAddress(entry));
-+                String label = (f != null ? f.getName() : entry) + "\\n" + entry;
-+                w.write("  n" + id + " [label=\"" + escape(label) + "\"];\n");
-+            }
-+
-+            for (String edge : edges) {
-+                String[] parts = edge.split("->", 2);
-+                Integer sId = idByEntry.get(parts[0]);
-+                Integer tId = idByEntry.get(parts[1]);
-+                if (sId != null && tId != null) {
-+                    w.write("  n" + sId + " -> n" + tId + ";\n");
-+                }
-+            }
-+
-+            w.write("}\n");
-+        }
-+    }
-+
-+    private static String sanitizeId(String s) {
-+        if (s == null || s.isEmpty()) return "G";
-+        StringBuilder b = new StringBuilder();
-+        for (int i = 0; i < s.length(); i++) {
-+            char c = s.charAt(i);
-+            if (Character.isLetterOrDigit(c) || c == '_') b.append(c);
-+        }
-+        if (b.length() == 0) b.append('G');
-+        return b.toString();
-+    }
-+
-+    private static String escape(String s) {
-+        if (s == null) return "";
-+        return s.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n");
-+    }
-+}
-diff --git a/Ghidra/Features/Base/ghidra_scripts/ExportFunctionMetricsToCsv.java b/Ghidra/Features/Base/ghidra_scripts/ExportFunctionMetricsToCsv.java
-new file mode 100644
-index 0000000000..6f8425560d
---- /dev/null
-+++ b/Ghidra/Features/Base/ghidra_scripts/ExportFunctionMetricsToCsv.java
-@@ -0,0 +1,195 @@
-+/* ###
-+ * IP: GHIDRA
-+ * REVIEWED: NO
-+ *
-+ * Licensed under the Apache License, Version 2.0 (the "License");
-+ * you may not use this file except in compliance with the License.
-+ * You may obtain a copy of the License at
-+ *
-+ *      http://www.apache.org/licenses/LICENSE-2.0
-+ *
-+ * Unless required by applicable law or agreed to in writing, software
-+ * distributed under the License is distributed on an "AS IS" BASIS,
-+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-+ * See the License for the specific language governing permissions and
-+ * limitations under the License.
-+ */
-+// Exports per-function metrics to a CSV file for the current program.
-+//@category Functions
-+
-+import java.io.BufferedWriter;
-+import java.io.File;
-+import java.io.FileWriter;
-+import java.io.IOException;
-+import java.util.Iterator;
-+import java.util.Set;
-+
-+import ghidra.app.script.GhidraScript;
-+import ghidra.program.model.address.AddressSetView;
-+import ghidra.program.model.listing.Function;
-+import ghidra.program.model.listing.FunctionIterator;
-+import ghidra.program.model.listing.FunctionManager;
-+import ghidra.program.model.listing.Instruction;
-+import ghidra.program.model.listing.Listing;
-+import ghidra.program.model.listing.Program;
++import ghidra.program.model.block.CodeBlockIterator;
++import ghidra.program.model.block.SimpleBlockModel;
++import ghidra.program.model.data.DataType;
+ import ghidra.program.model.listing.*;
++import ghidra.program.model.symbol.Namespace;
 +import ghidra.program.util.CyclomaticComplexity;
 +import ghidra.util.Msg;
-+import ghidra.program.model.block.SimpleBlockModel;
-+import ghidra.program.model.block.CodeBlockIterator;
 +import ghidra.util.exception.CancelledException;
-+import ghidra.program.model.data.DataType;
-+import ghidra.program.model.symbol.Namespace;
+ 
+ public class ExportFunctionInfoScript extends GhidraScript {
+ 
+ 	private static final String NAME = "name";
+ 	private static final String ENTRY = "entry";
+ 
++	private enum ExportFormat {
++		JSON_SIMPLE("JSON (Simple - name and entry only)"),
++		JSON_METRICS("JSON (Detailed metrics)"),
++		CSV_METRICS("CSV (Detailed metrics)"),
++		DOT_CALLGRAPH("DOT (Function call graph)");
 +
-+public class ExportFunctionMetricsToCsv extends GhidraScript {
++		private final String displayName;
 +
-+    @Override
-+    protected void run() throws Exception {
-+        if (currentProgram == null) {
-+            printerr("No current program.");
-+            return;
-+        }
++		ExportFormat(String displayName) {
++			this.displayName = displayName;
++		}
 +
-+        File outFile = askFile("Choose output CSV file", "Save");
-+        if (outFile == null) {
-+            printerr("No output file selected.");
-+            return;
-+        }
++		@Override
++		public String toString() {
++			return displayName;
++		}
++	}
 +
-+        AddressSetView scope = currentSelection != null ? currentSelection : currentHighlight;
-+        writeFunctionMetricsCsv(currentProgram, outFile, scope);
-+        println("Wrote function metrics to: " + outFile.getAbsolutePath());
-+    }
-+
-+    private void writeFunctionMetricsCsv(Program program, File outFile, AddressSetView scope)
-+            throws IOException {
-+        FunctionManager fm = program.getFunctionManager();
-+        Listing listing = program.getListing();
-+        CyclomaticComplexity complexityCalc = new CyclomaticComplexity();
-+
-+        try (BufferedWriter w = new BufferedWriter(new FileWriter(outFile))) {
-+            // header
-+            w.write(String.join(",",
-+                "name","entry","address_ranges","instruction_count","cyclomatic_complexity",
-+                "parameters","locals","basic_blocks","external","thunk","thunk_target",
-+                "variadic","inline","no_return","custom_storage","stack_purge_size",
-+                "calling_convention","namespace","return_type","prototype","prototype_with_cc",
-+                "callers","callees"));
-+            w.write("\n");
-+
-+            FunctionIterator it = fm.getFunctions(true);
-+            monitor.initialize(fm.getFunctionCount());
-+
-+            while (it.hasNext() && !monitor.isCancelled()) {
-+                Function f = it.next();
-+                AddressSetView body = f.getBody();
-+                if (scope != null && !scope.intersects(body)) {
-+                    continue;
-+                }
-+
-+                monitor.setMessage("Exporting metrics: " + f.getName());
-+                monitor.incrementProgress(1);
-+
-+                String entry = f.getEntryPoint().toString();
-+
-+                // instruction count
-+                int instCount = 0;
-+                for (Iterator<Instruction> insIt = listing.getInstructions(body, true); insIt.hasNext();) {
-+                    insIt.next();
-+                    instCount++;
-+                }
-+
-+                int callers = sizeSafe(f.getCallingFunctions(monitor));
-+                int callees = sizeSafe(f.getCalledFunctions(monitor));
-+
-+                int cplx = 0;
-+                try {
-+                    cplx = complexityCalc.calculateCyclomaticComplexity(f, monitor);
-+                }
-+                catch (Exception e) {
-+                    Msg.warn(this, "Failed to compute complexity for " + f.getName(), e);
-+                }
-+
-+                int params = f.getParameterCount();
-+
-+                // basic blocks
-+                int basicBlocks = 0;
-+                try {
-+                    SimpleBlockModel model = new SimpleBlockModel(program);
-+                    CodeBlockIterator blocks = model.getCodeBlocksContaining(body, monitor);
-+                    while (blocks.hasNext() && !monitor.isCancelled()) {
-+                        blocks.next();
-+                        basicBlocks++;
-+                    }
-+                }
-+                catch (CancelledException ce) {
-+                    // respect cancellation
-+                }
-+
-+                int localsCount = 0;
-+                try {
-+                    if (!f.isExternal()) {
-+                        localsCount = f.getLocalVariables().length;
-+                    }
-+                }
-+                catch (Exception ignore) {
-+                }
-+
-+                boolean isExternal = f.isExternal();
-+                boolean isThunk = f.isThunk();
-+                boolean hasVarArgs = f.hasVarArgs();
-+                boolean isInline = f.isInline();
-+                boolean noReturn = f.hasNoReturn();
-+                boolean customStorage = f.hasCustomVariableStorage();
-+                int stackPurgeSize = f.getStackPurgeSize();
-+                String callConv = safeString(f.getCallingConventionName());
-+                Namespace ns = f.getParentNamespace();
-+                String namespace = ns != null ? ns.getName(true) : "";
-+                DataType retType = f.getReturnType();
-+                String returnType = retType != null ? retType.getDisplayName() : "void";
-+                String proto = f.getPrototypeString(true, false);
-+                String protoWithCc = f.getPrototypeString(true, true);
-+                String thunkTarget = null;
-+                if (isThunk) {
-+                    Function tf = f.getThunkedFunction(true);
-+                    if (tf != null) {
-+                        thunkTarget = tf.getEntryPoint().toString();
-+                    }
-+                }
-+
-+                w.write(String.join(",",
-+                    csv(f.getName()), csv(entry),
-+                    Integer.toString(body.getNumAddressRanges()),
-+                    Integer.toString(instCount), Integer.toString(cplx),
-+                    Integer.toString(params), Integer.toString(localsCount),
-+                    Integer.toString(basicBlocks), Boolean.toString(isExternal),
-+                    Boolean.toString(isThunk), csvOrEmpty(thunkTarget),
-+                    Boolean.toString(hasVarArgs), Boolean.toString(isInline),
-+                    Boolean.toString(noReturn), Boolean.toString(customStorage),
-+                    Integer.toString(stackPurgeSize), csv(callConv), csv(namespace),
-+                    csv(returnType), csv(proto), csv(protoWithCc),
-+                    Integer.toString(callers), Integer.toString(callees)));
-+                w.write("\n");
-+            }
-+        }
-+    }
-+
-+    private static int sizeSafe(Set<?> s) {
-+        return s == null ? 0 : s.size();
-+    }
-+
-+    private static String safeString(String s) {
-+        return s == null ? "" : s;
-+    }
-+
-+    private static String csv(String s) {
-+        if (s == null) {
-+            return "\"\"";
-+        }
-+        String v = s.replace("\"", "\"\"");
-+        return "\"" + v + "\"";
-+    }
-+
-+    private static String csvOrEmpty(String s) {
-+        return s == null ? "" : csv(s);
-+    }
-+}
-diff --git a/Ghidra/Features/Base/ghidra_scripts/ExportFunctionMetricsToJson.java b/Ghidra/Features/Base/ghidra_scripts/ExportFunctionMetricsToJson.java
-new file mode 100644
-index 0000000000..d17609ffd4
---- /dev/null
-+++ b/Ghidra/Features/Base/ghidra_scripts/ExportFunctionMetricsToJson.java
-@@ -0,0 +1,265 @@
-+/* ###
-+ * IP: GHIDRA
-+ * REVIEWED: NO
-+ *
-+ * Licensed under the Apache License, Version 2.0 (the "License");
-+ * you may not use this file except in compliance with the License.
-+ * You may obtain a copy of the License at
-+ *
-+ *      http://www.apache.org/licenses/LICENSE-2.0
-+ *
-+ * Unless required by applicable law or agreed to in writing, software
-+ * distributed under the License is distributed on an "AS IS" BASIS,
-+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-+ * See the License for the specific language governing permissions and
-+ * limitations under the License.
-+ */
-+// Exports basic per-function metrics to a JSON file for the current program.
-+//@category Functions
-+
-+import java.io.BufferedWriter;
-+import java.io.File;
-+import java.io.FileWriter;
-+import java.io.IOException;
-+import java.util.Iterator;
-+import java.util.Set;
-+
-+import ghidra.app.script.GhidraScript;
-+import ghidra.program.model.address.AddressSetView;
-+import ghidra.program.model.listing.Function;
-+import ghidra.program.model.listing.FunctionIterator;
-+import ghidra.program.model.listing.FunctionManager;
-+import ghidra.program.model.listing.Instruction;
-+import ghidra.program.model.listing.Listing;
-+import ghidra.program.model.listing.Program;
-+import ghidra.program.util.CyclomaticComplexity;
-+import ghidra.util.Msg;
-+import ghidra.program.model.block.SimpleBlockModel;
-+import ghidra.program.model.block.CodeBlockIterator;
-+import ghidra.util.exception.CancelledException;
-+import ghidra.program.model.data.DataType;
-+import ghidra.program.model.symbol.Namespace;
-+
-+public class ExportFunctionMetricsToJson extends GhidraScript {
-+
-+	@Override
-+	protected void run() throws Exception {
+ 	@Override
+ 	public void run() throws Exception {
 +		if (currentProgram == null) {
 +			printerr("No current program.");
 +			return;
 +		}
+ 
+-		Gson gson = new GsonBuilder().setPrettyPrinting().create();
++		// Ask user to choose export format
++		List<ExportFormat> formats = Arrays.asList(ExportFormat.values());
++		ExportFormat selectedFormat = askChoice("Choose Export Format",
++				"Select the format for exporting function information:", formats, ExportFormat.JSON_SIMPLE);
 +
-+		File outFile = askFile("Choose output JSON file", "Save");
-+		if (outFile == null) {
++		// Determine file extension based on format
++		String extension;
++		switch (selectedFormat) {
++			case JSON_SIMPLE:
++			case JSON_METRICS:
++				extension = ".json";
++				break;
++			case CSV_METRICS:
++				extension = ".csv";
++				break;
++			case DOT_CALLGRAPH:
++				extension = ".dot";
++				break;
++			default:
++				extension = ".txt";
++				break;
++		}
+ 
+ 		File outputFile = askFile("Please Select Output File", "Choose");
+-		JsonWriter jsonWriter = new JsonWriter(new FileWriter(outputFile));
++		if (outputFile == null) {
 +			printerr("No output file selected.");
 +			return;
 +		}
 +
++		// Get optional scope (selection or highlight)
 +		AddressSetView scope = currentSelection != null ? currentSelection : currentHighlight;
-+		writeFunctionMetricsJson(currentProgram, outFile, scope);
-+		println("Wrote function metrics to: " + outFile.getAbsolutePath());
++
++		// Export based on selected format
++		switch (selectedFormat) {
++			case JSON_SIMPLE:
++				exportSimpleJson(outputFile, scope);
++				break;
++			case JSON_METRICS:
++				exportMetricsJson(outputFile, scope);
++				break;
++			case CSV_METRICS:
++				exportMetricsCsv(outputFile, scope);
++				break;
++			case DOT_CALLGRAPH:
++				exportCallGraphDot(outputFile, scope);
++				break;
++		}
++
++		println("Wrote function information to: " + outputFile.getAbsolutePath());
 +	}
 +
-+	private void writeFunctionMetricsJson(Program program, File outFile, AddressSetView scope)
-+			throws IOException {
-+		FunctionManager fm = program.getFunctionManager();
-+		Listing listing = program.getListing();
++	// ========== SIMPLE JSON EXPORT ==========
++	private void exportSimpleJson(File outputFile, AddressSetView scope) throws Exception {
++		Gson gson = new GsonBuilder().setPrettyPrinting().create();
++
++		try (JsonWriter jsonWriter = new JsonWriter(new FileWriter(outputFile))) {
+ 		jsonWriter.beginArray();
+ 
+ 		Listing listing = currentProgram.getListing();
+@@ -45,6 +136,11 @@ public class ExportFunctionInfoScript extends GhidraScript {
+ 		while (iter.hasNext() && !monitor.isCancelled()) {
+ 			Function f = iter.next();
+ 
++				// Apply scope filtering if present
++				if (scope != null && !scope.intersects(f.getBody())) {
++					continue;
++				}
++
+ 			String name = f.getName();
+ 			Address entry = f.getEntryPoint();
+ 
+@@ -56,8 +152,394 @@ public class ExportFunctionInfoScript extends GhidraScript {
+ 		}
+ 
+ 		jsonWriter.endArray();
+-		jsonWriter.close();
++		}
++	}
++
++	// ========== DETAILED JSON METRICS EXPORT ==========
++	private void exportMetricsJson(File outputFile, AddressSetView scope) throws IOException {
++		FunctionManager fm = currentProgram.getFunctionManager();
++		Listing listing = currentProgram.getListing();
 +		CyclomaticComplexity complexityCalc = new CyclomaticComplexity();
 +
-+		try (BufferedWriter w = new BufferedWriter(new FileWriter(outFile))) {
++		try (BufferedWriter w = new BufferedWriter(new FileWriter(outputFile))) {
 +			w.write("{\n");
-+			// basic program info
++			// Basic program info
 +			w.write("  \"program\": {\n");
-+			w.write("    \"name\": \"" + escape(program.getName()) + "\",\n");
-+			w.write("    \"language\": \"" + escape(program.getLanguageID().getIdAsString()) + "\"\n");
++			w.write("    \"name\": \"" + escape(currentProgram.getName()) + "\",\n");
++			w.write("    \"language\": \"" + escape(currentProgram.getLanguageID().getIdAsString()) + "\"\n");
 +			w.write("  },\n");
 +			w.write("  \"functions\": [\n");
 +
@@ -458,7 +205,7 @@ index 0000000000..d17609ffd4
 +				String entry = f.getEntryPoint().toString();
 +				long size = body.getNumAddresses();
 +
-+				// instruction count (iterate rather than rely on size for accuracy)
++				// Instruction count
 +				int instCount = 0;
 +				for (Iterator<Instruction> insIt = listing.getInstructions(body, true); insIt.hasNext();) {
 +					insIt.next();
@@ -478,10 +225,10 @@ index 0000000000..d17609ffd4
 +
 +				int params = f.getParameterCount();
 +
-+				// basic blocks (Simple block model over function body)
++				// Basic blocks
 +				int basicBlocks = 0;
 +				try {
-+					SimpleBlockModel model = new SimpleBlockModel(program);
++					SimpleBlockModel model = new SimpleBlockModel(currentProgram);
 +					CodeBlockIterator blocks = model.getCodeBlocksContaining(body, monitor);
 +					while (blocks.hasNext() && !monitor.isCancelled()) {
 +						blocks.next();
@@ -489,10 +236,10 @@ index 0000000000..d17609ffd4
 +					}
 +				}
 +				catch (CancelledException ce) {
-+					// respect cancellation; leave count as is
++					// Respect cancellation; leave count as is
 +				}
 +
-+				// locals count
++				// Locals count
 +				int localsCount = 0;
 +				try {
 +					if (!f.isExternal()) {
@@ -500,10 +247,10 @@ index 0000000000..d17609ffd4
 +					}
 +				}
 +				catch (Exception ignore) {
-+					// in some cases locals may not resolve; ignore
++					// In some cases locals may not resolve; ignore
 +				}
 +
-+				// signature and flags
++				// Signature and flags
 +				boolean isExternal = f.isExternal();
 +				boolean isThunk = f.isThunk();
 +				boolean hasVarArgs = f.hasVarArgs();
@@ -565,6 +312,179 @@ index 0000000000..d17609ffd4
 +		}
 +	}
 +
++	// ========== CSV METRICS EXPORT ==========
++	private void exportMetricsCsv(File outputFile, AddressSetView scope) throws IOException {
++		FunctionManager fm = currentProgram.getFunctionManager();
++		Listing listing = currentProgram.getListing();
++		CyclomaticComplexity complexityCalc = new CyclomaticComplexity();
++
++		try (BufferedWriter w = new BufferedWriter(new FileWriter(outputFile))) {
++			// Header
++			w.write(String.join(",",
++				"name","entry","address_ranges","instruction_count","cyclomatic_complexity",
++				"parameters","locals","basic_blocks","external","thunk","thunk_target",
++				"variadic","inline","no_return","custom_storage","stack_purge_size",
++				"calling_convention","namespace","return_type","prototype","prototype_with_cc",
++				"callers","callees"));
++			w.write("\n");
++
++			FunctionIterator it = fm.getFunctions(true);
++			monitor.initialize(fm.getFunctionCount());
++
++			while (it.hasNext() && !monitor.isCancelled()) {
++				Function f = it.next();
++				AddressSetView body = f.getBody();
++				if (scope != null && !scope.intersects(body)) {
++					continue;
++				}
++
++				monitor.setMessage("Exporting metrics: " + f.getName());
++				monitor.incrementProgress(1);
++
++				String entry = f.getEntryPoint().toString();
++
++				// Instruction count
++				int instCount = 0;
++				for (Iterator<Instruction> insIt = listing.getInstructions(body, true); insIt.hasNext();) {
++					insIt.next();
++					instCount++;
++				}
++
++				int callers = sizeSafe(f.getCallingFunctions(monitor));
++				int callees = sizeSafe(f.getCalledFunctions(monitor));
++
++				int cplx = 0;
++				try {
++					cplx = complexityCalc.calculateCyclomaticComplexity(f, monitor);
++				}
++				catch (Exception e) {
++					Msg.warn(this, "Failed to compute complexity for " + f.getName(), e);
++				}
++
++				int params = f.getParameterCount();
++
++				// Basic blocks
++				int basicBlocks = 0;
++				try {
++					SimpleBlockModel model = new SimpleBlockModel(currentProgram);
++					CodeBlockIterator blocks = model.getCodeBlocksContaining(body, monitor);
++					while (blocks.hasNext() && !monitor.isCancelled()) {
++						blocks.next();
++						basicBlocks++;
++					}
++				}
++				catch (CancelledException ce) {
++					// Respect cancellation
++				}
++
++				int localsCount = 0;
++				try {
++					if (!f.isExternal()) {
++						localsCount = f.getLocalVariables().length;
++					}
++				}
++				catch (Exception ignore) {
++				}
++
++				boolean isExternal = f.isExternal();
++				boolean isThunk = f.isThunk();
++				boolean hasVarArgs = f.hasVarArgs();
++				boolean isInline = f.isInline();
++				boolean noReturn = f.hasNoReturn();
++				boolean customStorage = f.hasCustomVariableStorage();
++				int stackPurgeSize = f.getStackPurgeSize();
++				String callConv = safeString(f.getCallingConventionName());
++				Namespace ns = f.getParentNamespace();
++				String namespace = ns != null ? ns.getName(true) : "";
++				DataType retType = f.getReturnType();
++				String returnType = retType != null ? retType.getDisplayName() : "void";
++				String proto = f.getPrototypeString(true, false);
++				String protoWithCc = f.getPrototypeString(true, true);
++				String thunkTarget = null;
++				if (isThunk) {
++					Function tf = f.getThunkedFunction(true);
++					if (tf != null) {
++						thunkTarget = tf.getEntryPoint().toString();
++					}
++				}
++
++				w.write(String.join(",",
++					csv(f.getName()), csv(entry),
++					Integer.toString(body.getNumAddressRanges()),
++					Integer.toString(instCount), Integer.toString(cplx),
++					Integer.toString(params), Integer.toString(localsCount),
++					Integer.toString(basicBlocks), Boolean.toString(isExternal),
++					Boolean.toString(isThunk), csvOrEmpty(thunkTarget),
++					Boolean.toString(hasVarArgs), Boolean.toString(isInline),
++					Boolean.toString(noReturn), Boolean.toString(customStorage),
++					Integer.toString(stackPurgeSize), csv(callConv), csv(namespace),
++					csv(returnType), csv(proto), csv(protoWithCc),
++					Integer.toString(callers), Integer.toString(callees)));
++				w.write("\n");
++			}
++		}
++	}
++
++	// ========== DOT CALL GRAPH EXPORT ==========
++	private void exportCallGraphDot(File outputFile, AddressSetView scope) throws IOException {
++		FunctionManager fm = currentProgram.getFunctionManager();
++		FunctionIterator it = fm.getFunctions(true);
++
++		Map<String, Integer> idByEntry = new HashMap<>();
++		Set<String> edges = new HashSet<>();
++		int nextId = 1;
++
++		monitor.initialize(fm.getFunctionCount());
++
++		while (it.hasNext() && !monitor.isCancelled()) {
++			Function f = it.next();
++			if (scope != null && !scope.intersects(f.getBody())) {
++				continue;
++			}
++			monitor.setMessage("Indexing function: " + f.getName());
++			monitor.incrementProgress(1);
++
++			String fEntry = f.getEntryPoint().toString();
++			idByEntry.computeIfAbsent(fEntry, k -> nextId++);
++
++			for (Function callee : f.getCalledFunctions(monitor)) {
++				if (scope != null && !scope.intersects(callee.getBody())) {
++					// If filtered by selection, only keep edges entirely in scope
++					continue;
++				}
++				String cEntry = callee.getEntryPoint().toString();
++				idByEntry.computeIfAbsent(cEntry, k -> nextId++);
++				edges.add(fEntry + "->" + cEntry);
++			}
++		}
++
++		try (BufferedWriter w = new BufferedWriter(new FileWriter(outputFile))) {
++			w.write("digraph \"" + escape(currentProgram.getName()) + "\" {\n");
++			w.write("  node [shape=box, fontsize=10];\n");
++
++			for (Map.Entry<String, Integer> e : idByEntry.entrySet()) {
++				String entry = e.getKey();
++				int id = e.getValue();
++				// Label: function name + entry
++				Function f = fm.getFunctionAt(currentProgram.getAddressFactory().getAddress(entry));
++				String label = (f != null ? f.getName() : entry) + "\\n" + entry;
++				w.write("  n" + id + " [label=\"" + escape(label) + "\"];\n");
++			}
++
++			for (String edge : edges) {
++				String[] parts = edge.split("->", 2);
++				Integer sId = idByEntry.get(parts[0]);
++				Integer tId = idByEntry.get(parts[1]);
++				if (sId != null && tId != null) {
++					w.write("  n" + sId + " -> n" + tId + ";\n");
++				}
++			}
++
++			w.write("}\n");
++		}
++	}
++
++	// ========== HELPER METHODS ==========
 +	private static int sizeSafe(Set<?> s) {
 +		return s == null ? 0 : s.size();
 +	}
@@ -623,7 +543,20 @@ index 0000000000..d17609ffd4
 +		}
 +		b.append(hex);
 +	}
-+}
++
++	private static String csv(String s) {
++		if (s == null) {
++			return "\"\"";
++		}
++		String v = s.replace("\"", "\"\"");
++		return "\"" + v + "\"";
++	}
+ 
+-		println("Wrote functions to " + outputFile);
++	private static String csvOrEmpty(String s) {
++		return s == null ? "" : csv(s);
+ 	}
+ }
 -- 
 2.45.1
 
