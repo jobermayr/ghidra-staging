@@ -1,0 +1,215 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Obermayr <johannesobermayr@gmx.de>
+Date: Wed, 12 Nov 2025 16:02:33 +0100
+Subject: [PATCH] 8622: Fix build issues with Gradle 9 on --parallel Fixes:
+ #8621
+
+---
+ .../Test/DebuggerIntegrationTest/build.gradle | 22 +++++++-------
+ GhidraBuild/BuildFiles/Doclets/build.gradle   | 10 +++++--
+ GhidraBuild/MarkdownSupport/build.gradle      | 11 +++++++
+ build.gradle                                  | 20 +++++++++++++
+ gradle/helpProject.gradle                     | 29 +++++++++----------
+ gradle/root/distribution.gradle               | 28 +++++++++---------
+ 6 files changed, 78 insertions(+), 42 deletions(-)
+
+diff --git a/Ghidra/Test/DebuggerIntegrationTest/build.gradle b/Ghidra/Test/DebuggerIntegrationTest/build.gradle
+index 5ea87b4572..c0c6bb1582 100644
+--- a/Ghidra/Test/DebuggerIntegrationTest/build.gradle
++++ b/Ghidra/Test/DebuggerIntegrationTest/build.gradle
+@@ -44,17 +44,17 @@ dependencies {
+ 	def ghidraPath = projectDir.getParentFile().getParentFile().path.replace(File.separator, "/") + "/";
+ 	
+ 	rootProject.subprojects { p ->
+-		p.plugins.withType(JavaPlugin) {
+-			def projectPath = p.projectDir.path.replace(File.separator, "/")
+-			if (projectPath.startsWith(ghidraPath) && (
+-				projectPath.contains("/Framework/") ||
+-				projectPath.contains("/Features/") ||
+-				projectPath.contains("/Debug/") ||
+-				projectPath.contains("/Processors/"))) {
+-
+-				api p
+-			}
+-		}	
++		def projectPath = p.projectDir.path.replace(File.separator, "/")
++		if (projectPath.startsWith(ghidraPath) && (
++			projectPath.contains("/Framework/") ||
++			projectPath.contains("/Features/") ||
++			projectPath.contains("/Debug/") ||
++			projectPath.contains("/Processors/"))) {
++
++			evaluationDependsOn(p.path)
++
++			api p
++		}
+ 	}
+ 
+ 	// some tests use classes in Base, FunctionGraph and PDB
+diff --git a/GhidraBuild/BuildFiles/Doclets/build.gradle b/GhidraBuild/BuildFiles/Doclets/build.gradle
+index 8115975f7f..665e44f9af 100644
+--- a/GhidraBuild/BuildFiles/Doclets/build.gradle
++++ b/GhidraBuild/BuildFiles/Doclets/build.gradle
+@@ -27,6 +27,12 @@ dependencies {
+ 	api "com.google.code.gson:gson:2.9.0"
+ }
+ 
+-rootProject.createJsondocs.dependsOn jar
+-rootProject.createPythonTypeStubs.dependsOn jar
++def jsonTask = rootProject.tasks.findByName("createJsondocs") ?: rootProject.tasks.findByName("createJsonDocs")
++if (jsonTask != null) {
++    jsonTask.dependsOn(jar)
++}
+ 
++def stubTask = rootProject.tasks.findByName("createPythonTypeStubs")
++if (stubTask != null) {
++    stubTask.dependsOn(jar)
++}
+diff --git a/GhidraBuild/MarkdownSupport/build.gradle b/GhidraBuild/MarkdownSupport/build.gradle
+index 6143085dea..4c84b1d9e8 100644
+--- a/GhidraBuild/MarkdownSupport/build.gradle
++++ b/GhidraBuild/MarkdownSupport/build.gradle
+@@ -23,3 +23,14 @@ dependencies {
+ 	implementation 'org.commonmark:commonmark-ext-footnotes:0.23.0'
+ 	implementation 'org.commonmark:commonmark-ext-gfm-tables:0.23.0'
+ }
++
++project.afterEvaluate {
++	rootProject.ext.mdDeps.clear()
++	configurations.runtimeClasspath.resolve().each { File f ->
++		rootProject.ext.mdDeps.add(f.getAbsolutePath())
++	}
++
++	sourceSets.main.output.files.each { File f ->
++		rootProject.ext.mdDeps.add(f.getAbsolutePath())
++	}
++}
+diff --git a/build.gradle b/build.gradle
+index e357fe4afd..9366e9fdb8 100644
+--- a/build.gradle
++++ b/build.gradle
+@@ -90,6 +90,26 @@ else {
+ 	}
+ }
+ 
++/*********************************************************************************
++ *  Force all project compile classpaths to be resolved at configuration time.
++ *********************************************************************************/
++allprojects {
++	afterEvaluate {
++		configurations.matching { it.name.endsWith("compileClasspath") }.all { cfg ->
++			if (cfg.canBeResolved) {
++				try {
++					cfg.files   // trigger resolution safely now
++				} catch (ignored) { }
++			}
++		}
++	}
++}
++
++/*********************************************************************************
++ *  Store :MarkdownSupport ClassPath to fix issues with Gradle 9.
++ *********************************************************************************/
++ext.mdDeps = []
++
+ /*********************************************************************************
+  * Imports
+  *  For these tasks to be available on all subprojects, this MUST be placed 
+diff --git a/gradle/helpProject.gradle b/gradle/helpProject.gradle
+index 934770db53..ccf60415ab 100644
+--- a/gradle/helpProject.gradle
++++ b/gradle/helpProject.gradle
+@@ -324,28 +324,27 @@ task indexHelp(type: JavaExec) {
+ // Task for building Markdown in src/global/docs to HTML
+ //      - the files generated will be placed in a build directory usable during development mode
+ tasks.register('buildGlobalMarkdown') {
+-	group = "private"	
++	group = "private"
+ 	dependsOn ':MarkdownSupport:classes'
+-	
++
+ 	FileTree markdownFiles = this.project.fileTree('src/global/docs') {
+ 		include '*.md'
+ 	}
+-	
++
+ 	onlyIf ("There are no markdown files") { !markdownFiles.isEmpty() }
++
++	inputs.files markdownFiles
+ 	
+-	inputs.files markdownFiles  
+-	
+-	def markdownProject = project(':MarkdownSupport')
+-	
+-	doFirst {
++	doLast {
+ 		markdownFiles.each { f ->
+-			def htmlName = f.name[0..-3] + "html"
+-			providers.javaexec {
+-				classpath = markdownProject.sourceSets.main.runtimeClasspath
+-				mainClass = 'ghidra.markdown.MarkdownToHtml'
+-				args f
+-				args file("build/src/global/docs/${htmlName}")
+-			}.result.get()
++			def htmlFile = "build/src/global/docs/" + f.name[0..-3] + "html"
++			[
++				'java',
++				'-cp', project.files(rootProject.ext.mdDeps).asPath,
++				'ghidra.markdown.MarkdownToHtml',
++				f,
++				file(htmlFile)
++			].execute()
+ 		}
+ 	}
+ }
+diff --git a/gradle/root/distribution.gradle b/gradle/root/distribution.gradle
+index b444e803bc..59de427dec 100644
+--- a/gradle/root/distribution.gradle
++++ b/gradle/root/distribution.gradle
+@@ -540,29 +540,29 @@ task assembleSource (type: Copy) {
+ 
+ /************************************************************************************
+  *
+- * Copies a markdown file and a generaterated html file into the distribution folder.
++ * Copies markdown files and generaterate html files into the distribution folder.
+  *
+  ************************************************************************************/
+ task assembleMarkdownToHtml (type: Copy) {
+ 	group = 'private'
+-	description = "Copies a markdown file and a generaterated html file into the distribution folder"
++	description = "Copies markdown files and generaterate html files into the distribution folder"
+ 	
+ 	dependsOn ':MarkdownSupport:classes'
+ 	outputs.upToDateWhen {false}
+ 	destinationDir = file(DISTRIBUTION_DIR.getPath() + "/" +  ZIP_DIR_PREFIX)
+ 	
+-	def markdownSuppportProject = project(':MarkdownSupport')
+-	
+-	eachFile { f ->
+-		def htmlName = f.sourceName[0..-3] + "html"
+-		def htmlPath = f.relativePath.replaceLastName(htmlName).pathString 
+-		
+-		providers.javaexec {		
+-			classpath = markdownSuppportProject.sourceSets.main.runtimeClasspath
+-			mainClass = 'ghidra.markdown.MarkdownToHtml'
+-			args f.file
+-			args file("${destinationDir.path}/${htmlPath}")
+-		}.result.get()
++	doLast {
++		eachFile { f ->
++			def htmlName = f.sourceName[0..-3] + "html"
++			def htmlPath = f.relativePath.replaceLastName(htmlName).pathString
++			[
++				'java',
++				'-cp', project.files(rootProject.ext.mdDeps).asPath,
++				'ghidra.markdown.MarkdownToHtml',
++				f.file,
++				file("${destinationDir.path}/${htmlPath}")
++			].execute()
++		}
+ 	}
+ }
+ 
+-- 
+2.45.1
+

@@ -8,16 +8,27 @@ Loongarch: add Loongarch64 PLT analysis
 Loongarch: add Loongarch64 LSX load/store instructions modelling
 
 Loongarch: add LSX SIMD immediate load modelling
+
+Loongarch: loongarch_main.sinc: relative offsets are [ram] addresses
+
+This fixes assembler for blt/beq/... instructions
+
+Loongarch: add DWARF definitions
+
+Loongarch: fix QEMU tool executable name
 ---
  Ghidra/Processors/Loongarch/build.gradle      |   1 +
- .../Loongarch/certification.manifest          |   1 +
- .../languages/loongarch32_instructions.sinc   |   5 +
- .../data/languages/loongarch_main.sinc        |  20 +-
+ .../Loongarch/certification.manifest          |   2 +
+ .../Loongarch/data/languages/loongarch.dwarf  |  18 ++
+ .../Loongarch/data/languages/loongarch.ldefs  |  12 +-
+ .../languages/loongarch32_instructions.sinc   |   6 +
+ .../data/languages/loongarch_main.sinc        |  26 +-
  .../Loongarch/data/languages/lsx.sinc         | 275 ++++++++++++-----
- .../Loongarch/data/loongarch-pltThunks.xml    |  14 +
+ .../Loongarch/data/loongarch-pltThunks.xml    |  22 ++
  .../data/patterns/loongarch_patterns.xml      |  13 +-
- .../analysis/LoongArchCallStubAnalyzer.java   | 283 ++++++++++++++++++
- 8 files changed, 530 insertions(+), 82 deletions(-)
+ .../analysis/LoongArchCallStubAnalyzer.java   | 288 ++++++++++++++++++
+ 10 files changed, 574 insertions(+), 89 deletions(-)
+ create mode 100644 Ghidra/Processors/Loongarch/data/languages/loongarch.dwarf
  create mode 100644 Ghidra/Processors/Loongarch/data/loongarch-pltThunks.xml
  create mode 100644 Ghidra/Processors/Loongarch/src/main/java/ghidra/app/plugin/core/analysis/LoongArchCallStubAnalyzer.java
 
@@ -32,10 +43,10 @@ index 4c3d1333b5..a76e47a759 100644
 +	api project(':BytePatterns')
  }
 diff --git a/Ghidra/Processors/Loongarch/certification.manifest b/Ghidra/Processors/Loongarch/certification.manifest
-index 4d37fb78cd..3e221b7590 100644
+index 4d37fb78cd..f2eac10af1 100644
 --- a/Ghidra/Processors/Loongarch/certification.manifest
 +++ b/Ghidra/Processors/Loongarch/certification.manifest
-@@ -1,6 +1,7 @@
+@@ -1,10 +1,12 @@
  ##VERSION: 2.0
  Module.manifest||GHIDRA||||END|
  README.md||GHIDRA||||END|
@@ -43,24 +54,99 @@ index 4d37fb78cd..3e221b7590 100644
  data/languages/ilp32d.cspec||GHIDRA||||END|
  data/languages/ilp32f.cspec||GHIDRA||||END|
  data/languages/lasx.sinc||GHIDRA||||END|
+ data/languages/lbt.sinc||GHIDRA||||END|
++data/languages/loongarch.dwarf||GHIDRA||||END|
+ data/languages/loongarch.ldefs||GHIDRA||||END|
+ data/languages/loongarch.opinion||GHIDRA||||END|
+ data/languages/loongarch32.pspec||GHIDRA||||END|
+diff --git a/Ghidra/Processors/Loongarch/data/languages/loongarch.dwarf b/Ghidra/Processors/Loongarch/data/languages/loongarch.dwarf
+new file mode 100644
+index 0000000000..7f11ef61eb
+--- /dev/null
++++ b/Ghidra/Processors/Loongarch/data/languages/loongarch.dwarf
+@@ -0,0 +1,18 @@
++<dwarf>
++	<register_mappings>
++		<register_mapping dwarf="0" ghidra="zero"/>
++		<register_mapping dwarf="1" ghidra="ra"/>
++		<register_mapping dwarf="2" ghidra="tp"/>
++		<register_mapping dwarf="3" ghidra="sp" stackpointer="true"/>
++		<register_mapping dwarf="4" ghidra="a0" auto_count="8"/> <!-- a0..a7 -->
++		<register_mapping dwarf="12" ghidra="t0" auto_count="9"/> <!-- t0..t8 -->
++		<register_mapping dwarf="21" ghidra="r21"/>
++		<register_mapping dwarf="22" ghidra="fp"/>
++		<register_mapping dwarf="23" ghidra="s0" auto_count="9"/> <!-- s0..s8 -->
++
++		<register_mapping dwarf="32" ghidra="fa0" auto_count="8"/> <!-- fa0..fa7 -->
++		<register_mapping dwarf="40" ghidra="ft0" auto_count="16"/> <!-- ft0..ft15 -->
++		<register_mapping dwarf="56" ghidra="fs0" auto_count="8"/> <!-- fs0..fs7 -->
++	</register_mappings>
++	<call_frame_cfa value="0"/>
++</dwarf>
+diff --git a/Ghidra/Processors/Loongarch/data/languages/loongarch.ldefs b/Ghidra/Processors/Loongarch/data/languages/loongarch.ldefs
+index 97627b450b..8ebf43020b 100644
+--- a/Ghidra/Processors/Loongarch/data/languages/loongarch.ldefs
++++ b/Ghidra/Processors/Loongarch/data/languages/loongarch.ldefs
+@@ -13,6 +13,7 @@
+     <description>Loongson 3 32-bit with 32-bit FP</description>
+     <compiler name="gnu" spec="ilp32f.cspec" id="default"/>
+     <external_name tool="gnu" name="Loongarch32"/>
++    <external_name tool="DWARF.register.mapping.file" name="loongarch.dwarf"/>
+   </language>
+   
+   <language processor="Loongarch"
+@@ -26,6 +27,7 @@
+             id="Loongarch:LE:32:ilp32d">
+     <description>Loongson 3 32-bit with 64-bit FP</description>
+     <compiler name="default" spec="ilp32d.cspec" id="default"/>
++    <external_name tool="DWARF.register.mapping.file" name="loongarch.dwarf"/>
+     <external_name tool="gnu" name="Loongarch32"/>
+   </language>
+   
+@@ -41,8 +43,9 @@
+     <description>Loongson 3 64-bit with 32-bit FP</description>
+     <compiler name="default" spec="lp64f.cspec" id="default"/>
+     <external_name tool="gnu" name="Loongarch64"/>
+-    <external_name tool="qemu" name="qemu-mips64el"/>
+-    <external_name tool="qemu_system" name="qemu-system-mips64el"/>
++    <external_name tool="DWARF.register.mapping.file" name="loongarch.dwarf"/>
++    <external_name tool="qemu" name="qemu-loongarch64"/>
++    <external_name tool="qemu_system" name="qemu-system-loongarch64"/>
+   </language>
+   
+   <language processor="Loongarch"
+@@ -57,8 +60,9 @@
+     <description>Loongson 3 64-bit with 64-bit FP</description>
+     <compiler name="default" spec="lp64d.cspec" id="default"/>
+     <external_name tool="gnu" name="Loongarch64"/>
+-    <external_name tool="qemu" name="qemu-mips64el"/>
+-    <external_name tool="qemu_system" name="qemu-system-mips64el"/>
++    <external_name tool="DWARF.register.mapping.file" name="loongarch.dwarf"/>
++    <external_name tool="qemu" name="qemu-loongarch64"/>
++    <external_name tool="qemu_system" name="qemu-system-loongarch64"/>
+   </language>
+ 
+ </language_definitions>
+\ No newline at end of file
 diff --git a/Ghidra/Processors/Loongarch/data/languages/loongarch32_instructions.sinc b/Ghidra/Processors/Loongarch/data/languages/loongarch32_instructions.sinc
-index 5d18bee31d..dc44235bde 100644
+index 5d18bee31d..9ac1d549a5 100644
 --- a/Ghidra/Processors/Loongarch/data/languages/loongarch32_instructions.sinc
 +++ b/Ghidra/Processors/Loongarch/data/languages/loongarch32_instructions.sinc
-@@ -656,6 +656,11 @@
+@@ -655,6 +655,12 @@
+ #la-base-32.txt jirl mask=0x4c000000	[@orig_fmt=DJSk16ps2, @la32, @primary, @qemu]
  #0x4c000000	0xfc000000	r0:5,r5:5,so10:16<<2	['reg0_5_s0', 'reg5_5_s0', 'soffs10_16_s0']
  :jirl  RD, RelJ16              is op26_31=0x13 & RD & RJsrc & RelJ16 {
- 	RD = inst_next;
-+	if (RD != 1) goto <label1>;
-+	<label1>
++	RD = inst_next;
 +	goto [RelJ16];
-+	if (RD == 1) goto <label2>;
-+	<label2>
++}
++
++# call for rd = ra
++:jirl  RD, RelJ16              is op26_31=0x13 & RD & rD=0x1 & RJsrc & RelJ16 {
+ 	RD = inst_next;
  	call [RelJ16];
  }
- 
 diff --git a/Ghidra/Processors/Loongarch/data/languages/loongarch_main.sinc b/Ghidra/Processors/Loongarch/data/languages/loongarch_main.sinc
-index 1827d43817..4f413c9a55 100644
+index 1827d43817..433c602962 100644
 --- a/Ghidra/Processors/Loongarch/data/languages/loongarch_main.sinc
 +++ b/Ghidra/Processors/Loongarch/data/languages/loongarch_main.sinc
 @@ -114,7 +114,7 @@ define register offset=0x1000 size=8 [
@@ -72,6 +158,19 @@ index 1827d43817..4f413c9a55 100644
  # overlaps the floating point registers above
  define register offset=0x1000 size=16 [
  	v0  _   v1  _   v2  _   v3  _   v4  _   v5  _   v6  _   v7  _
+@@ -457,9 +457,9 @@ pcala12: reloffs  is simm5_20 [reloffs = (inst_start & ~0xfff) + (simm5_20 << 12
+ 
+ pcadd18: reloffs  is simm5_20 [reloffs = inst_start + (simm5_20 << 18);] { export *[const]:$(REGSIZE) reloffs; }
+ 
+-Rel16: reloc  is simm10_16            [ reloc = inst_start + (simm10_16 << 2); ]                               { export *:$(ADDRSIZE) reloc; }
+-Rel21: reloc  is imm10_16 & simm0_5  [ reloc = inst_start + (((simm0_5 << 16) + imm10_16) << 2); ]   { export *:$(ADDRSIZE) reloc; }
+-Rel26: reloc  is imm10_16 & simm0_10 [ reloc = inst_start + (((simm0_10 << 16) | imm10_16) << 2); ] { export *:$(ADDRSIZE) reloc; }
++Rel16: reloc  is simm10_16            [ reloc = inst_start + (simm10_16 << 2); ]                               { export *[ram]:$(ADDRSIZE) reloc; }
++Rel21: reloc  is imm10_16 & simm0_5  [ reloc = inst_start + (((simm0_5 << 16) + imm10_16) << 2); ]   { export *[ram]:$(ADDRSIZE) reloc; }
++Rel26: reloc  is imm10_16 & simm0_10 [ reloc = inst_start + (((simm0_10 << 16) | imm10_16) << 2); ] { export *[ram]:$(ADDRSIZE) reloc; }
+ 
+ RelJ16: RJsrc, simm10_16  is RJsrc & simm10_16 { local tmp:$(ADDRSIZE) = RJsrc + (simm10_16 << 2); export tmp; }
+ 
 @@ -469,6 +469,16 @@ simm32i: immed  is simm5_20  [immed = simm5_20  << 32; ] { export *[const]:$(REG
  
  simm52i: immed  is simm10_12 [immed = simm10_12 << 52; ] { export *[const]:$(REGSIZE) immed; }
@@ -469,10 +568,10 @@ index 936d63a24b..17e3d8914a 100644
  
 diff --git a/Ghidra/Processors/Loongarch/data/loongarch-pltThunks.xml b/Ghidra/Processors/Loongarch/data/loongarch-pltThunks.xml
 new file mode 100644
-index 0000000000..4d81692ce9
+index 0000000000..571c08d518
 --- /dev/null
 +++ b/Ghidra/Processors/Loongarch/data/loongarch-pltThunks.xml
-@@ -0,0 +1,14 @@
+@@ -0,0 +1,22 @@
 +<patternlist>
 +    <!--
 +    This file contains all known call stub (i.e., thunk) patterns which
@@ -482,13 +581,21 @@ index 0000000000..4d81692ce9
 +<pattern> <!-- .plt entry thunk -->
 +    <data>
 +        ...01111 ........ ........ 0001110. # pcaddu12i t3, x
-+        0xef ......01 11...... 0x28         # ld.ld t3, t3(x)
++        0xef ......01 11...... 0x28         # ld.d t3, t3(x)
 +        0xed 0x01 0x00 0x4c                 # jirl t1, t3, 0
++    </data>
++</pattern>
++<pattern> <!-- .plt entry thunk -->
++    <data>
++        ...01111 ........ ........ 0001110. # pcaddu12i t3, x
++        0xef ......01 11...... 0x28         # ld.d t3, t3(x)
++        0x0d 0x00 0x00 0x1c                 # pcaddu12i t1, x
++        0xe0 0x01 0x00 0x4c                 # jr t3
 +    </data>
 +</pattern>
 +</patternlist>
 diff --git a/Ghidra/Processors/Loongarch/data/patterns/loongarch_patterns.xml b/Ghidra/Processors/Loongarch/data/patterns/loongarch_patterns.xml
-index b96f9c6a32..e5b5db6633 100644
+index b96f9c6a32..55ab6b90ed 100644
 --- a/Ghidra/Processors/Loongarch/data/patterns/loongarch_patterns.xml
 +++ b/Ghidra/Processors/Loongarch/data/patterns/loongarch_patterns.xml
 @@ -34,5 +34,14 @@
@@ -502,7 +609,7 @@ index b96f9c6a32..e5b5db6633 100644
 +  <pattern> <!-- .plt entry thunk -->
 +      <data>
 +          ...01111 ........ ........ 0001110. <!-- pcaddu12i t3, x -->
-+              0xef ......01 11...... 0x28     <!-- ld.ld t3, t3(x) -->
++              0xef ......01 11...... 0x28     <!-- ld.d t3, t3(x) -->
 +              0xed 0x01 0x00 0x4c             <!-- jirl t1, t3, 0 -->
 +      </data>
 +    <codeboundary />  <!-- definitely code -->
@@ -511,10 +618,10 @@ index b96f9c6a32..e5b5db6633 100644
 +</patternlist>
 diff --git a/Ghidra/Processors/Loongarch/src/main/java/ghidra/app/plugin/core/analysis/LoongArchCallStubAnalyzer.java b/Ghidra/Processors/Loongarch/src/main/java/ghidra/app/plugin/core/analysis/LoongArchCallStubAnalyzer.java
 new file mode 100644
-index 0000000000..9c996e0de3
+index 0000000000..d5a477c990
 --- /dev/null
 +++ b/Ghidra/Processors/Loongarch/src/main/java/ghidra/app/plugin/core/analysis/LoongArchCallStubAnalyzer.java
-@@ -0,0 +1,283 @@
+@@ -0,0 +1,288 @@
 +/* ###
 + * IP: GHIDRA
 + *
@@ -717,32 +824,37 @@ index 0000000000..9c996e0de3
 +			public boolean evaluateDestination(VarnodeContext context, Instruction instruction) {
 +
 +				// We only handle indirect branch
-+				if (!"jirl".equals(instruction.getMnemonicString())) {
-+					return true;
-+				}
++                String mnemonic = instruction.getMnemonicString();
++                boolean isJirl = "jirl".equals(mnemonic);
++                if (!isJirl && !"jr".equals(mnemonic)) {
++                    return true;
++                }
++                // Change jirl/jr flow to call-return
++                instruction.setFlowOverride(FlowOverride.CALL_RETURN);
++                Object[] opObjects = instruction.getOpObjects(isJirl ? 1 : 0);
++                if (isJirl) {
++                    assert (opObjects.length == 2) : "jirl should have two input registers!";
++                } else {
++                    assert (opObjects.length == 1) : "jr should have one input register!";
++                }
++                Register targetReg = (Register) opObjects[0];
++                Scalar scalar = isJirl ? (Scalar) opObjects[1] : new Scalar(32, 0);
++                assert (targetReg != null);
++                assert (scalar != null) : "jirl should have an offset!";
 +
-+				// Change jirl flow to call-return
-+				instruction.setFlowOverride(FlowOverride.CALL_RETURN);
-+				Object[] opObjects = instruction.getOpObjects(1);
-+				assert (opObjects.length == 2) : "jirl should have two input registers!";
-+				Register targetReg = (Register) opObjects[0];
-+				Scalar scalar = (Scalar) opObjects[1];
-+				assert (targetReg != null);
-+				assert (scalar != null) : "jirl should have an offset!";
++                RegisterValue targetValue = context.getRegisterValue(targetReg);
++                if (targetValue != null && targetValue.hasValue()) {
++                    Address destAddr = entryAddr.getNewAddress(targetValue.getUnsignedValue().longValue() + scalar.getUnsignedValue());
++                    Function thunkedFunction = createDestinationFunction(program, destAddr, instruction.getAddress(),
++                            monitor);
++                    if (thunkedFunction != null) {
++                        CreateThunkFunctionCmd cmd = new CreateThunkFunctionCmd(entryAddr, thunkBody,
++                                thunkedFunction.getEntryPoint());
++                        cmd.applyTo(program);
++                    }
++                }
 +
-+				RegisterValue targetValue = context.getRegisterValue(targetReg);
-+				if (targetValue != null && targetValue.hasValue()) {
-+					Address destAddr = entryAddr.getNewAddress(targetValue.getUnsignedValue().longValue() + scalar.getUnsignedValue());
-+					Function thunkedFunction = createDestinationFunction(program, destAddr, instruction.getAddress(),
-+							monitor);
-+					if (thunkedFunction != null) {
-+						CreateThunkFunctionCmd cmd = new CreateThunkFunctionCmd(entryAddr, thunkBody,
-+								thunkedFunction.getEntryPoint());
-+						cmd.applyTo(program);
-+					}
-+				}
-+
-+				return true;
++                return true;
 +			}
 +
 +			@Override
