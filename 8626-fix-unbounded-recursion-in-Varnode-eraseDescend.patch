@@ -1,0 +1,53 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Quentin Kaiser <quentin.kaiser@onekey.com>
+Date: Fri, 14 Nov 2025 09:33:05 +0100
+Subject: [PATCH] 8626: fix unbounded recursion in Varnode::eraseDescend
+
+Moved to a bounds-checked search in Varnode::eraseDescend
+(Ghidra/Features/Decompiler/src/decompile/cpp/varnode.cc:316) so the
+descendant list is only mutated when the requested PcodeOp is actually
+present, preventing invalid std::list::erase calls that previously
+corrupted the allocator and triggered the segfault.
+
+Builds compiled with OPACTION_DEBUG will now throw a LowlevelError if an
+unexpected removal is attempted, preserving diagnostics without crashing
+release builds.
+
+Fixes issue #7321
+---
+ .../Decompiler/src/decompile/cpp/varnode.cc    | 18 ++++++++++++------
+ 1 file changed, 12 insertions(+), 6 deletions(-)
+
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/varnode.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/varnode.cc
+index 625cdce966..31ed859e63 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/varnode.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/varnode.cc
+@@ -313,13 +313,19 @@ void Varnode::printInfo(ostream &s) const
+ void Varnode::eraseDescend(PcodeOp *op)
+ 
+ {
+-  list<PcodeOp *>::iterator iter;
++  list<PcodeOp *>::iterator iter = descend.begin();
+ 
+-  iter = descend.begin();
+-  while (*iter != op)		// Find this op in list of vn's descendants
+-    iter++;
+-  descend.erase(iter);		// Remove it from list
+-  setFlags(Varnode::coverdirty);
++  while(iter != descend.end()) {	// Find this op in list of vn's descendants
++    if (*iter == op) {
++      descend.erase(iter);		// Remove it from list
++      setFlags(Varnode::coverdirty);
++      return;
++    }
++    ++iter;
++  }
++#ifdef OPACTION_DEBUG
++  throw LowlevelError("Attempted to erase non-existent PcodeOp descendant");
++#endif
+ }
+ 
+ /// Put a new operator in the descendant list and set the cover dirty flag
+-- 
+2.45.1
+
