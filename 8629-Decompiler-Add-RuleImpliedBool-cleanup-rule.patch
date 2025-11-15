@@ -1,0 +1,135 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Luke=20Sern=C3=A9?= <luke.serne@solconmail.nl>
+Date: Sat, 15 Nov 2025 17:31:07 +0100
+Subject: [PATCH] 8629: Decompiler: Add RuleImpliedBool cleanup rule
+
+Decompiler: Add RuleImpliedBool cleanup rule This new cleanup
+ rule tries to eliminate comparisons with booleans. Such comparisons would
+ often be shown as "x != false", which is more complex than strictly necessary
+ - "x == true" or even just "x" would suffice. This rule changes such boolean
+ expressions to completely remove the equality check, leading to less complex
+ decompiler output.
+---
+ .../src/decompile/cpp/coreaction.cc           |  1 +
+ .../cpp/include/ghidra/ruleaction.hh          | 11 ++++
+ .../src/decompile/cpp/ruleaction.cc           | 63 +++++++++++++++++++
+ 3 files changed, 75 insertions(+)
+
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
+index 59b43791d1..08d9c3e977 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
+@@ -5815,6 +5815,7 @@ void ActionDatabase::universalAction(Architecture *conf)
+     actcleanup->addRule( new RuleSubRight("cleanup") );
+     actcleanup->addRule( new RuleFloatSignCleanup("cleanup") );
+     actcleanup->addRule( new RuleExpandLoad("cleanup") );
++    actcleanup->addRule( new RuleImpliedBool("cleanup") );
+     actcleanup->addRule( new RulePtrsubCharConstant("cleanup") );
+     actcleanup->addRule( new RuleExtensionPush("cleanup") );
+     actcleanup->addRule( new RulePieceStructure("cleanup") );
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/ruleaction.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/ruleaction.hh
+index 6fcd7d4443..f95f353b88 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/ruleaction.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/ruleaction.hh
+@@ -1632,6 +1632,17 @@ public:
+   virtual int4 applyOp(PcodeOp *op,Funcdata &data);
+ };
+ 
++class RuleImpliedBool : public Rule {
++public:
++  RuleImpliedBool(const string &g) : Rule( g, 0, "impliedbool") {}	///< Constructor
++  virtual Rule *clone(const ActionGroupList &grouplist) const {
++    if (!grouplist.contains(getGroup())) return (Rule *)0;
++    return new RuleImpliedBool(getGroup());
++  }
++  virtual void getOpList(vector<uint4> &oplist) const;
++  virtual int4 applyOp(PcodeOp *op,Funcdata &data);
++};
++
+ class RuleExpandLoad : public Rule {
+   static bool checkAndComparison(Varnode *vn);
+   static void modifyAndComparison(Funcdata &data,Varnode *oldVn,Varnode *newVn,Datatype *dt,int4 offset);
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc
+index ac96699613..a3ebd00add 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc
+@@ -17,6 +17,7 @@
+ #include "ghidra/coreaction.hh"
+ #include "ghidra/rangeutil.hh"
+ #include "ghidra/multiprecision.hh"
++#include "ghidra/type.hh"
+ #include <climits>
+ 
+ namespace ghidra {
+@@ -7792,6 +7793,68 @@ int4 RuleSubRight::applyOp(PcodeOp *op,Funcdata &data)
+   return 1;
+ }
+ 
++/// \class RuleImpliedBool
++/// \brief Cleanup: Convert boolean comparisons with INT_EQUAL and INT_NOTEQUAL.
++///  `V == true  ==> V`
++///  `V != true  ==> !V`
++///  `V == false  ==> !V`
++///  `V != false  ==> V`
++void RuleImpliedBool::getOpList(vector<uint4> &oplist) const
++
++{
++  oplist.push_back(CPUI_INT_EQUAL);
++  oplist.push_back(CPUI_INT_NOTEQUAL);
++}
++
++int4 RuleImpliedBool::applyOp(PcodeOp *op,Funcdata &data)
++
++{
++  Varnode *var = op->getIn(0);
++  Varnode *value = op->getIn(1);
++
++  if (var->isConstant()) {
++    Varnode *tmp = var;
++    var = value;
++    value = tmp;
++  }
++
++  // Exactly one of the inputs needs to be a constant
++  if (!value->isConstant()) return 0;
++  if (var->isConstant()) return 0;
++
++  // The variable needs to have a boolean type
++  // Sadly, there is no direct boolean type, so this is a bit hacky
++  Datatype *ct = var->getType();
++  if (!(var->getNZMask() == 0xFF && ct->getSize() == 1 && ct->getDisplayName() == "bool")) return 0;
++
++  bool should_flip = (op->code() == CPUI_INT_EQUAL) != (value->constantMatch(1));
++
++  if (should_flip) {
++    // Let's make the CPUI_INT_EQUAL a CPUI_BOOL_NEGATE
++    data.opSetOpcode(op, CPUI_BOOL_NEGATE);
++    data.opRemoveInput(op, 1);
++    data.opSetInput(op, var, 0);
++  } else {
++    // The CPUI_INT_EQUAL becomes a NOP, so just connect the output directly
++    Varnode *out = op->getOut();
++
++    // TODO: Add support if the output of the equality is used in multiple
++    // places. This seems to be pretty uncommon though...
++    PcodeOp *res = out->loneDescend();
++    if (res == ((PcodeOp *)0)) return 0;
++
++    int4 slot_id = res->getSlot(out);
++    data.opUnsetInput(res, slot_id);
++    data.opSetInput(res, var, slot_id);
++
++    // We bypassed the INT_EQUAL, so it's time to remove it
++    data.opDestroy(op);
++    // data.opUnsetOutput(op);
++  }
++
++  return 1;
++}
++
+ /// \brief Try to push constant pointer further
+ ///
+ /// Given a PTRSUB has been collapsed to a constant COPY of a string address,
+-- 
+2.45.1
+
