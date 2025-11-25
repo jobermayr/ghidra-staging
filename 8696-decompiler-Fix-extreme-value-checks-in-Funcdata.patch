@@ -1,0 +1,86 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Fabian Kilger <kilger@sec.in.tum.de>
+Date: Tue, 25 Nov 2025 13:32:37 +0100
+Subject: [PATCH] 8696: decompiler: Fix extreme value checks in
+ Funcdata::replaceLessequal
+
+Fixes https://github.com/NationalSecurityAgency/ghidra/issues/8696
+
+The checks for extreme values when transforming <= to < were incomplete
+and relied on undefined behavior, making compilers optimize them out.
+
+Specifically, for SLESS_EQUAL, the decompiler relied on integer overflows.
+For integers smaller than 8 bytes, no overflow will occur when adding 1,
+resulting in a missed case and, thus, x <= INT_MAX will become x < INT_MIN.
+For the signed case when subtracting one, the compiler removes the check
+due to undefined behavior, resulting in another missed case.
+
+To fix this, add helper functions for computing maximum and minimum values
+for signed and unsigned varnodes and directly check for them.
+---
+ .../Decompiler/src/decompile/cpp/funcdata_op.cc    | 14 ++++++++------
+ .../src/decompile/cpp/include/ghidra/address.hh    | 12 ++++++++++++
+ 2 files changed, 20 insertions(+), 6 deletions(-)
+
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/funcdata_op.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/funcdata_op.cc
+index 1eb18f1bbf..489d45f3d3 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/funcdata_op.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/funcdata_op.cc
+@@ -1035,7 +1035,8 @@ bool Funcdata::replaceLessequal(PcodeOp *op)
+ {
+   Varnode *vn;
+   int4 i;
+-  intb val,diff;
++  uintb val;
++  intb diff;
+   
+   if ((vn=op->getIn(0))->isConstant()) {
+     diff = -1;
+@@ -1048,15 +1049,16 @@ bool Funcdata::replaceLessequal(PcodeOp *op)
+   else
+     return false;
+ 
+-  val = sign_extend(vn->getOffset(),8*vn->getSize()-1);
++  val = vn->getOffset();
+   if (op->code() == CPUI_INT_SLESSEQUAL) {
+-    if ((val<0)&&(val+diff>0)) return false; // Check for sign overflow
+-    if ((val>0)&&(val+diff<0)) return false;
++    // Check for signed overflow
++    if ((diff == -1) && (val == calc_int_min(vn->getSize()))) return false;
++    if ((diff ==  1) && (val == calc_int_max(vn->getSize()))) return false;
+     opSetOpcode(op,CPUI_INT_SLESS);
+   }
+   else {			// Check for unsigned overflow
+-    if ((diff==-1)&&(val==0)) return false;
+-    if ((diff==1)&&(val==-1)) return false;
++    if ((diff == -1) && (val == 0)) return false;
++    if ((diff ==  1) && (val == calc_uint_max(vn->getSize()))) return false;
+     opSetOpcode(op,CPUI_INT_LESS);
+   }
+   uintb res = (val+diff) & calc_mask(vn->getSize());
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/address.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/address.hh
+index 02e2879836..a62952291b 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/address.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/address.hh
+@@ -498,6 +498,18 @@ inline bool Range::contains(const Address &addr) const {
+ /// \return a value appropriate for masking off the first \e size bytes
+ inline uintb calc_mask(int4 size) { return uintbmasks[((uint4)size) < 8  ? size : 8]; }
+ 
++/// \param size of the integer in bytes
++/// \return largest unsigned integer value for given size
++inline uintb calc_uint_max(int4 size) { return calc_mask(size); }
++
++/// \param size of the integer in bytes
++/// \return largest signed integer value for given size
++inline uintb calc_int_max(int4 size) { return calc_mask(size) >> 1; }
++
++/// \param size of the integer in bytes
++/// \return smallest signed integer value for given size
++inline uintb calc_int_min(int4 size) { return (uintb)1 << (size * 8 - 1); }
++
+ /// Perform a CPUI_INT_RIGHT on the given val
+ /// \param val is the value to shift
+ /// \param sa is the number of bits to shift
+-- 
+2.45.1
+
