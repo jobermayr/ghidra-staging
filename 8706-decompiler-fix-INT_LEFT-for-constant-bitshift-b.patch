@@ -1,0 +1,33 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Fabian Kilger <kilger@sec.in.tum.de>
+Date: Thu, 27 Nov 2025 16:28:24 +0100
+Subject: [PATCH] 8706: decompiler: fix INT_LEFT for constant bitshift by 0 and
+ varnodes > 8
+
+Fixes https://github.com/NationalSecurityAgency/ghidra/issues/8705
+
+In case of a 0-bitshift, the mask computation was performing a 64-bit shift,
+assuming the result will be 0. However, such a bitshift is undefined and
+will be equal to a NOP on some architectures.
+
+This is fixed by explicitly checking for a shift-amount of 0.
+---
+ Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
+index 08d9c3e977..f5fde5adef 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
+@@ -3797,6 +3797,8 @@ void ActionDeadCode::propagateConsumed(vector<Varnode *> &worklist)
+       if (sz > sizeof(uintb)) {	// If there exists bits beyond the precision of the consume field
+ 	if (sa >= 8*sizeof(uintb))
+ 	  a = ~((uintb)0);	// Make sure we assume one bits where we shift in unrepresented bits
++	else if (!sa)		// Special case to avoid undefined behavior caused by shifting too many bits
++	  a = outc;
+ 	else
+ 	  a = (outc >> sa) ^ ( (~((uintb)0)) << (8*sizeof(uintb)-sa));
+ 	sz = 8*sz -sa;
+-- 
+2.45.1
+
