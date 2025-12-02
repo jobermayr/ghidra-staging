@@ -1,0 +1,39 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Fabian Kilger <kilger@sec.in.tum.de>
+Date: Tue, 2 Dec 2025 10:59:10 +0100
+Subject: [PATCH] 8718: decompiler: fix bit extractions with RuleShiftAnd and
+ RuleShiftCompare
+
+Fixes https://github.com/NationalSecurityAgency/ghidra/issues/8717
+
+RuleShiftAnd previously replaced the AND opcode with COPY. This,
+however doesn't update the NZMask of the Varnode. As a result, following
+rules may assume the NZMask after the AND operation also applies to the
+Varnode being copied.
+
+In combination with RuleShiftCompare, an expression of the form
+(a & bitmask) >> const != 0, wrongfully is reduced to a != 0.
+Instead of replacing the AND with COPY, we now replace the input
+of the shift operation instead. This way, future rules will see
+the correct NZMask.
+---
+ Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc | 3 +--
+ 1 file changed, 1 insertion(+), 2 deletions(-)
+
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc
+index ccdf162607..ad6b39e1bf 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc
+@@ -5088,8 +5088,7 @@ int4 RuleShiftAnd::applyOp(PcodeOp *op,Funcdata &data)
+     mask &= fullmask;
+   }
+   if ((mask & nzm) != nzm) return 0;
+-  data.opSetOpcode(andop,CPUI_COPY); // AND effectively does nothing, so we change it to a copy
+-  data.opRemoveInput(andop,1);
++  data.opSetInput(op, invn, 0);	// Bypass the INT_AND
+   return 1;
+ }
+ 
+-- 
+2.45.1
+
