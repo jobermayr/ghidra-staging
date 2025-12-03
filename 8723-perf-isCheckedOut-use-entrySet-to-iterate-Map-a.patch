@@ -1,0 +1,77 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: "jean.rothenburg" <jeancarlosrothenburg13@gmail.com>
+Date: Wed, 3 Dec 2025 02:35:45 -0300
+Subject: [PATCH] 8723: perf(isCheckedOut): use entrySet to iterate Map and
+ improve performance
+
+perf(isCheckedOut): use entrySet to iterate Map and
+ improve performance
+
+fix(export): Check return value of file.delete() in export method
+
+fix(isFunction, isVariable): Use getName() to compare symbol name instead of byte array
+---
+ .../ghidra/app/util/bin/format/xcoff/XCoffSymbol.java     | 8 +++++---
+ .../main/java/ghidra/app/util/exporter/GdtExporter.java   | 5 ++++-
+ .../ghidra/framework/store/local/CheckoutManager.java     | 4 ++--
+ 3 files changed, 11 insertions(+), 6 deletions(-)
+
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/xcoff/XCoffSymbol.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/xcoff/XCoffSymbol.java
+index 0b4d212c83..69d00e44a8 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/xcoff/XCoffSymbol.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/xcoff/XCoffSymbol.java
+@@ -72,15 +72,17 @@ public class XCoffSymbol {
+ 	public boolean isFunction() {
+ 		return ((n_sclass == XCoffSymbolStorageClass.C_EXT || n_sclass == XCoffSymbolStorageClass.C_HIDEXT || n_sclass == XCoffSymbolStorageClass.C_WEAKEXT) && 
+ 				n_scnum == _optionalHeader.getSectionNumberForText() &&
+-				!n_name.equals(XCoffSectionHeaderNames._TEXT));
++				!this.getName().trim().equalsIgnoreCase(XCoffSectionHeaderNames._TEXT.trim()));
+ 	}
+ 
+ 	public boolean isVariable() {
++		String trimmedName = this.getName().trim();
++
+ 		return ((n_sclass == XCoffSymbolStorageClass.C_EXT || n_sclass == XCoffSymbolStorageClass.C_HIDEXT || n_sclass == XCoffSymbolStorageClass.C_WEAKEXT) &&
+ 				(n_scnum == _optionalHeader.getSectionNumberForBss() || n_scnum == _optionalHeader.getSectionNumberForData()) &&
+ 				x_smclas != XCoffSymbolStorageClassCSECT.XMC_TC0 && x_smclas != XCoffSymbolStorageClassCSECT.XMC_TC && x_smclas != XCoffSymbolStorageClassCSECT.XMC_DS &&
+-				!n_name.equals(XCoffSectionHeaderNames._BSS) &&
+-				!n_name.equals(XCoffSectionHeaderNames._DATA));
++				!trimmedName.equalsIgnoreCase(XCoffSectionHeaderNames._BSS.trim()) &&
++				!trimmedName.equals(XCoffSectionHeaderNames._DATA));
+ 	}
+ 
+ 	@Override
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/exporter/GdtExporter.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/exporter/GdtExporter.java
+index 21d049525a..ca694b7a53 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/exporter/GdtExporter.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/exporter/GdtExporter.java
+@@ -60,7 +60,10 @@ public class GdtExporter extends Exporter {
+ 	public boolean export(File file, DomainObject domainObj, AddressSetView addrSet,
+ 			TaskMonitor monitor) {
+ 		try {
+-			file.delete();
++			if (!file.delete()){
++				log.appendMsg("Could not delete file: " + file.getAbsolutePath());
++				return false;
++			}
+ 			domainObj.saveToPackedFile(file, monitor);
+ 		}
+ 		catch (UnsupportedOperationException e) {
+diff --git a/Ghidra/Framework/FileSystem/src/main/java/ghidra/framework/store/local/CheckoutManager.java b/Ghidra/Framework/FileSystem/src/main/java/ghidra/framework/store/local/CheckoutManager.java
+index bca80e809b..b62cfbdd8d 100644
+--- a/Ghidra/Framework/FileSystem/src/main/java/ghidra/framework/store/local/CheckoutManager.java
++++ b/Ghidra/Framework/FileSystem/src/main/java/ghidra/framework/store/local/CheckoutManager.java
+@@ -163,8 +163,8 @@ class CheckoutManager {
+ 	 */
+ 	synchronized boolean isCheckedOut(int version) throws IOException {
+ 		validate();
+-		for (long id : checkouts.keySet()) {
+-			ItemCheckoutStatus coStatus = checkouts.get(id);
++		for (Map.Entry<Long, ItemCheckoutStatus> entry : checkouts.entrySet()) {
++			ItemCheckoutStatus coStatus = entry.getValue();
+ 			if (coStatus.getCheckoutVersion() == version) {
+ 				return true;
+ 			}
+-- 
+2.45.1
+
