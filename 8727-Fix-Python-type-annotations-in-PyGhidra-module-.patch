@@ -1,0 +1,140 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Nicolas Iooss <nicolas.iooss@ledger.fr>
+Date: Wed, 3 Dec 2025 15:26:38 +0100
+Subject: [PATCH] 8727: Fix Python type annotations in PyGhidra module when
+ using `contextmanager`
+
+Verifying the type annotations used by PyGhidra with Mypy static type
+checker leads to the following error:
+
+    core.py:171: error: Argument 1 to "contextmanager" has incompatible
+    type "Callable[[str | Path, str | Path, str, Any, str, str, str |
+    JClass, str, Any], AbstractContextManager[Any, bool | None]]";
+    expected "Callable[[str | Path, str | Path, str, Any, str, str, str
+    | JClass, str, Any], Iterator[Never]]"  [arg-type]
+
+Indeed, in Ghidra/Features/PyGhidra/src/main/py/src/pyghidra/core.py,
+function open_program was declared to return a
+ContextManager["FlatProgramAPI"]. While this function indeed returns
+such a type, the implementation uses decorator @contextlib.contextmanager
+which expects the wrapped function to return an generator (with yield).
+
+Use Generator["FlatProgramAPI", None, None] to fix this.
+
+While at it, fix other locations where the type annotation of the
+function wrapped with contextmanager was incorrect.
+---
+ Ghidra/Features/PyGhidra/src/main/py/src/pyghidra/api.py    | 6 +++---
+ Ghidra/Features/PyGhidra/src/main/py/src/pyghidra/core.py   | 4 ++--
+ .../src/main/py/src/pyghidra/internal/plugin/plugin.py      | 5 +++--
+ .../Features/PyGhidra/src/main/py/src/pyghidra/launcher.py  | 4 ++--
+ 4 files changed, 10 insertions(+), 9 deletions(-)
+
+diff --git a/Ghidra/Features/PyGhidra/src/main/py/src/pyghidra/api.py b/Ghidra/Features/PyGhidra/src/main/py/src/pyghidra/api.py
+index b5b13d608e..7e396fc698 100644
+--- a/Ghidra/Features/PyGhidra/src/main/py/src/pyghidra/api.py
++++ b/Ghidra/Features/PyGhidra/src/main/py/src/pyghidra/api.py
+@@ -15,7 +15,7 @@
+ ##
+ import sys
+ import contextlib
+-from typing import Union, TYPE_CHECKING, Tuple, List, Callable, Any, Optional
++from typing import Union, TYPE_CHECKING, Tuple, List, Callable, Generator, Any, Optional
+ 
+ from pyghidra.converters import *  # pylint: disable=wildcard-import, unused-wildcard-import
+ 
+@@ -142,7 +142,7 @@ def consume_program(
+ def program_context(
+         project: "Project", 
+         path: Union[str, Path],
+-    ) -> "Program":
++    ) -> Generator["Program", None, None]:
+     """
+     Gets the Ghidra program from the given project with the given project path. The returned
+     program's resource cleanup is performed by a context manager.
+@@ -256,7 +256,7 @@ def ghidra_script(
+ def transaction(
+         program: "Program",
+         description: str = "Unnamed Transaction"
+-    ):
++    ) -> Generator[int, None, None]:
+     """
+     Creates a context for running a Ghidra transaction.
+ 
+diff --git a/Ghidra/Features/PyGhidra/src/main/py/src/pyghidra/core.py b/Ghidra/Features/PyGhidra/src/main/py/src/pyghidra/core.py
+index 04938d7034..81858670cc 100644
+--- a/Ghidra/Features/PyGhidra/src/main/py/src/pyghidra/core.py
++++ b/Ghidra/Features/PyGhidra/src/main/py/src/pyghidra/core.py
+@@ -15,7 +15,7 @@
+ ##
+ import contextlib
+ import warnings
+-from typing import Union, TYPE_CHECKING, Tuple, ContextManager, List, Optional
++from typing import Union, TYPE_CHECKING, Tuple, Generator, List, Optional
+ 
+ from pyghidra.converters import *  # pylint: disable=wildcard-import, unused-wildcard-import
+ 
+@@ -179,7 +179,7 @@ def open_program(
+         loader: Union[str, JClass] = None,
+         program_name: str = None,
+         nested_project_location = True
+-) -> ContextManager["FlatProgramAPI"]: # type: ignore
++) -> Generator["FlatProgramAPI", None, None]:
+     """
+     Opens given binary path (or optional program name) in Ghidra and returns FlatProgramAPI object.
+ 
+diff --git a/Ghidra/Features/PyGhidra/src/main/py/src/pyghidra/internal/plugin/plugin.py b/Ghidra/Features/PyGhidra/src/main/py/src/pyghidra/internal/plugin/plugin.py
+index 913b6e143e..b7629e021e 100644
+--- a/Ghidra/Features/PyGhidra/src/main/py/src/pyghidra/internal/plugin/plugin.py
++++ b/Ghidra/Features/PyGhidra/src/main/py/src/pyghidra/internal/plugin/plugin.py
+@@ -22,6 +22,7 @@ import sys
+ import threading
+ import types
+ from code import InteractiveConsole
++from typing import Generator
+ 
+ from ghidra.app.script import ScriptControls
+ from ghidra.framework import Application
+@@ -276,7 +277,7 @@ class PyConsole(InteractiveConsole):
+                 self.reset()
+ 
+     @contextlib.contextmanager
+-    def redirect_writer(self):
++    def redirect_writer(self) -> Generator[None, None, None]:
+         self._writer = self._err
+         try:
+             yield
+@@ -292,7 +293,7 @@ class PyConsole(InteractiveConsole):
+             super().showtraceback()
+ 
+     @contextlib.contextmanager
+-    def _run_context(self):
++    def _run_context(self) -> Generator[None, None, None]:
+         self._script.start()
+         success = False
+         try:
+diff --git a/Ghidra/Features/PyGhidra/src/main/py/src/pyghidra/launcher.py b/Ghidra/Features/PyGhidra/src/main/py/src/pyghidra/launcher.py
+index 31214c4b11..324365aee5 100644
+--- a/Ghidra/Features/PyGhidra/src/main/py/src/pyghidra/launcher.py
++++ b/Ghidra/Features/PyGhidra/src/main/py/src/pyghidra/launcher.py
+@@ -29,7 +29,7 @@ import tempfile
+ import threading
+ from importlib.machinery import ModuleSpec
+ from pathlib import Path
+-from typing import List, NoReturn, Tuple, Union
++from typing import Generator, List, NoReturn, Tuple, Union
+ 
+ import jpype
+ from jpype import imports, _jpype
+@@ -43,7 +43,7 @@ logger = logging.getLogger(__name__)
+ 
+ 
+ @contextlib.contextmanager
+-def _silence_java_output(stdout=True, stderr=True):
++def _silence_java_output(stdout=True, stderr=True) -> Generator[None, None, None]:
+     from java.io import OutputStream, PrintStream # type:ignore @UnresolvedImport
+     from java.lang import System # type:ignore @UnresolvedImport
+     out = System.out
+-- 
+2.45.1
+
