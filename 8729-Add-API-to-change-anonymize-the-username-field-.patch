@@ -1,0 +1,492 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: mattp-zetier <mathew.piscitelli@zetier.com>
+Date: Thu, 20 Nov 2025 11:23:31 -0500
+Subject: [PATCH] 8729: Add API to change/anonymize the username field of
+ comment history and label history
+
+8728 - Add API to change the username field of comment
+ history and label history
+---
+ .../program/DBTraceProgramViewListing.java    | 12 +++++
+ .../DBTraceProgramViewSymbolTable.java        | 12 +++++
+ .../ghidra/program/database/ListingDB.java    | 11 ++++
+ .../program/database/code/CodeManager.java    | 50 +++++++++++++++++++
+ .../database/code/CommentHistoryAdapter.java  | 16 ++++++
+ .../code/CommentHistoryAdapterNoTable.java    | 10 ++++
+ .../code/CommentHistoryAdapterV0.java         | 22 ++++++++
+ .../database/symbol/LabelHistoryAdapter.java  | 17 +++++++
+ .../symbol/LabelHistoryAdapterNoTable.java    | 16 ++++++
+ .../symbol/LabelHistoryAdapterV0.java         | 25 ++++++++++
+ .../database/symbol/SymbolManager.java        | 46 +++++++++++++++++
+ .../ghidra/program/model/listing/Listing.java | 22 ++++++++
+ .../program/model/listing/StubListing.java    | 10 ++++
+ .../program/model/symbol/SymbolTable.java     | 20 ++++++++
+ .../program/model/symbol/StubSymbolTable.java | 10 ++++
+ 15 files changed, 299 insertions(+)
+
+diff --git a/Ghidra/Debug/Framework-TraceModeling/src/main/java/ghidra/trace/database/program/DBTraceProgramViewListing.java b/Ghidra/Debug/Framework-TraceModeling/src/main/java/ghidra/trace/database/program/DBTraceProgramViewListing.java
+index deb4e548cf..9d8251d2f9 100644
+--- a/Ghidra/Debug/Framework-TraceModeling/src/main/java/ghidra/trace/database/program/DBTraceProgramViewListing.java
++++ b/Ghidra/Debug/Framework-TraceModeling/src/main/java/ghidra/trace/database/program/DBTraceProgramViewListing.java
+@@ -69,4 +69,16 @@ public class DBTraceProgramViewListing extends AbstractDBTraceProgramViewListing
+ 			throw new AssertionError(e);
+ 		}
+ 	}
++
++	@Override
++	public int anonymizeCommentHistory(String anonymousName) {
++		// Trace programs don't support comment history anonymization
++		return 0;
++	}
++
++	@Override
++	public int anonymizeCommentHistory(String anonymousName, Address addr) {
++		// Trace programs don't support comment history anonymization
++		return 0;
++	}
+ }
+diff --git a/Ghidra/Debug/Framework-TraceModeling/src/main/java/ghidra/trace/database/program/DBTraceProgramViewSymbolTable.java b/Ghidra/Debug/Framework-TraceModeling/src/main/java/ghidra/trace/database/program/DBTraceProgramViewSymbolTable.java
+index 6c151204b6..9e98b4c476 100644
+--- a/Ghidra/Debug/Framework-TraceModeling/src/main/java/ghidra/trace/database/program/DBTraceProgramViewSymbolTable.java
++++ b/Ghidra/Debug/Framework-TraceModeling/src/main/java/ghidra/trace/database/program/DBTraceProgramViewSymbolTable.java
+@@ -557,4 +557,16 @@ public class DBTraceProgramViewSymbolTable implements SymbolTable {
+ 		}
+ 	}
+ 
++	@Override
++	public int anonymizeLabelHistory(String anonymousName) {
++		// Trace programs don't support label history anonymization
++		return 0;
++	}
++
++	@Override
++	public int anonymizeLabelHistory(String anonymousName, Address addr) {
++		// Trace programs don't support label history anonymization
++		return 0;
++	}
++
+ }
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/ListingDB.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/ListingDB.java
+index 483d2832e5..c6339b2ee9 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/ListingDB.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/ListingDB.java
+@@ -15,6 +15,7 @@
+  */
+ package ghidra.program.database;
+ 
++import java.io.IOException;
+ import java.util.*;
+ 
+ import ghidra.program.database.code.CodeManager;
+@@ -468,6 +469,16 @@ class ListingDB implements Listing {
+ 		return codeMgr.getCommentHistory(addr, commentType);
+ 	}
+ 
++	@Override
++	public int anonymizeCommentHistory(String anonymousName) throws IOException {
++		return codeMgr.anonymizeCommentHistory(anonymousName);
++	}
++
++	@Override
++	public int anonymizeCommentHistory(String anonymousName, Address addr) throws IOException {
++		return codeMgr.anonymizeCommentHistory(anonymousName, addr);
++	}
++
+ 	@Override
+ 	public CodeUnitIterator getCommentCodeUnitIterator(CommentType commentType,
+ 			AddressSetView addrSet) {
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/code/CodeManager.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/code/CodeManager.java
+index 1ac2dff24d..0ce02b6a25 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/code/CodeManager.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/code/CodeManager.java
+@@ -3409,6 +3409,56 @@ public class CodeManager implements ErrorHandler, ManagerDB {
+ 		return new CommentHistory[0];
+ 	}
+ 
++	/**
++	 * Anonymize all comment history records by replacing usernames with a given identifier.
++	 *
++	 * @param anonymousName the replacement name (e.g., "anonymous" or "user")
++	 * @return the number of records updated
++	 * @throws IOException if there was a problem accessing the database
++	 */
++	public int anonymizeCommentHistory(String anonymousName) throws IOException {
++		lock.acquire();
++		try {
++			if (historyAdapter == null) {
++				return 0;
++			}
++			historyAdapter.anonymizeAllRecords(anonymousName);
++			return historyAdapter.getRecordCount();
++		}
++		finally {
++			lock.release();
++		}
++	}
++
++	/**
++	 * Anonymize comment history records for a specific address by replacing usernames with a given identifier.
++	 *
++	 * @param addr the address to anonymize
++	 * @param anonymousName the replacement name
++	 * @return the number of records updated
++	 * @throws IOException if there was a problem accessing the database
++	 */
++	public int anonymizeCommentHistory(String anonymousName, Address addr) throws IOException {
++		lock.acquire();
++		try {
++			if (historyAdapter == null) {
++				return 0;
++			}
++			historyAdapter.anonymizeRecordsByAddress(anonymousName, addr);
++			// Count records for this address
++			int count = 0;
++			RecordIterator it = historyAdapter.getRecordsByAddress(addr);
++			while (it.hasNext()) {
++				it.next();
++				count++;
++			}
++			return count;
++		}
++		finally {
++			lock.release();
++		}
++	}
++
+ 	// note: you must have the lock when calling this method
+ 	private List<DBRecord> getHistoryRecords(Address addr, CommentType commentType)
+ 			throws IOException {
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/code/CommentHistoryAdapter.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/code/CommentHistoryAdapter.java
+index c944567730..0064c75cd8 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/code/CommentHistoryAdapter.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/code/CommentHistoryAdapter.java
+@@ -177,4 +177,20 @@ abstract class CommentHistoryAdapter {
+ 	 * @throws IOException if there was a problem accessing the database
+ 	 */
+ 	abstract RecordIterator getAllRecords() throws IOException;
++
++	/**
++	 * Anonymize all comment history records by replacing the userName field with the given anonymousName.
++	 * @param anonymousName the name to replace the userName field with
++	 * @throws IOException if there was a problem accessing the database
++	 */
++	abstract void anonymizeAllRecords(String anonymousName) throws IOException;
++
++	/**
++	 * Anonymize comment history records for a specific address by replacing the userName field with the given anonymousName.
++	 * @param anonymousName the name to replace the userName field with
++	 * @param addr the address of the records to anonymize
++	 * @throws IOException if there was a problem accessing the database
++	 */
++	abstract void anonymizeRecordsByAddress(String anonymousName, Address addr) throws IOException;
++
+ }
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/code/CommentHistoryAdapterNoTable.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/code/CommentHistoryAdapterNoTable.java
+index ff4a48a331..772ca123f2 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/code/CommentHistoryAdapterNoTable.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/code/CommentHistoryAdapterNoTable.java
+@@ -58,4 +58,14 @@ class CommentHistoryAdapterNoTable extends CommentHistoryAdapter {
+ 	int getRecordCount() {
+ 		return 0;
+ 	}
++
++	@Override
++	void anonymizeAllRecords(String anonymousName) throws IOException {
++		// No-op: no table to anonymize
++	}
++
++	@Override
++	void anonymizeRecordsByAddress(String anonymousName, Address addr) throws IOException {
++		// No-op: no table to anonymize
++	}
+ }
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/code/CommentHistoryAdapterV0.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/code/CommentHistoryAdapterV0.java
+index f446f6ee81..465a1d78c2 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/code/CommentHistoryAdapterV0.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/code/CommentHistoryAdapterV0.java
+@@ -100,4 +100,26 @@ class CommentHistoryAdapterV0 extends CommentHistoryAdapter {
+ 	int getRecordCount() {
+ 		return table.getRecordCount();
+ 	}
++
++	@Override
++	void anonymizeAllRecords(String anonymousName) throws IOException {
++		// Use table.iterator() instead of getAllRecords() to avoid issues
++		// with AddressKeyRecordIterator when modifying records during iteration
++		RecordIterator iter = table.iterator();
++		while (iter.hasNext()) {
++			DBRecord rec = iter.next();
++			rec.setString(HISTORY_USER_COL, anonymousName);
++			table.putRecord(rec);
++		}
++	}
++
++	@Override
++	void anonymizeRecordsByAddress(String anonymousName, Address addr) throws IOException {
++		RecordIterator iter = getRecordsByAddress(addr);
++		while (iter.hasNext()) {
++			DBRecord rec = iter.next();
++			rec.setString(HISTORY_USER_COL, anonymousName);
++			table.putRecord(rec);
++		}
++	}
+ }
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/symbol/LabelHistoryAdapter.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/symbol/LabelHistoryAdapter.java
+index 383151852c..a65dea2bcc 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/symbol/LabelHistoryAdapter.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/symbol/LabelHistoryAdapter.java
+@@ -142,4 +142,21 @@ abstract class LabelHistoryAdapter {
+ 			Set<Address> doNotDeleteSet, TaskMonitor monitor)
+ 			throws CancelledException, IOException;
+ 
++	/**
++	 * Anonymize all label history records by replacing the userName field with the given anonymousName.
++	 * @param anonymousName the name to replace the userName field with
++	 * @throws IOException if there was a problem accessing the database
++	 */
++	abstract void anonymizeAllRecords(String anonymousName)
++			throws IOException;
++
++	/**
++	 * Anonymize label history records for a specific address by replacing the userName field with the given username.
++	 * @param anonymousName the name to replace the userName field with
++	 * @param addr the address key of the records to anonymize
++	 * @throws IOException if there was a problem accessing the database
++	 */
++	abstract void anonymizeRecordsByAddress(String anonymousName, long addr)
++			throws IOException;
++
+ }
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/symbol/LabelHistoryAdapterNoTable.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/symbol/LabelHistoryAdapterNoTable.java
+index 481bd52db3..15172dda4c 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/symbol/LabelHistoryAdapterNoTable.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/symbol/LabelHistoryAdapterNoTable.java
+@@ -99,4 +99,20 @@ class LabelHistoryAdapterNoTable extends LabelHistoryAdapter {
+ 		throw new UnsupportedOperationException();
+ 	}
+ 
++	/**
++	 * @see ghidra.program.database.symbol.LabelHistoryAdapter#anonymizeAllRecords(java.lang.String)
++	 */
++	@Override
++	void anonymizeAllRecords(String anonymousName) throws IOException {
++		// No-op: no table to anonymize
++	}
++
++	/**
++	 * @see ghidra.program.database.symbol.LabelHistoryAdapter#anonymizeRecordsByAddress(java.lang.String, long)
++	 */
++	@Override
++	void anonymizeRecordsByAddress(String anonymousName, long addr) throws IOException {
++		// No-op: no table to anonymize
++	}
++
+ }
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/symbol/LabelHistoryAdapterV0.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/symbol/LabelHistoryAdapterV0.java
+index 1b712c9da8..9937f893d1 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/symbol/LabelHistoryAdapterV0.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/symbol/LabelHistoryAdapterV0.java
+@@ -192,4 +192,29 @@ class LabelHistoryAdapterV0 extends LabelHistoryAdapter {
+ 			filter);
+ 	}
+ 
++	/**
++	 * @see ghidra.program.database.symbol.LabelHistoryAdapter#anonymizeAllRecords(java.lang.String)
++	 */
++	@Override
++	void anonymizeAllRecords(String anonymousName) throws IOException {
++		RecordIterator iter = getAllRecords();
++		while (iter.hasNext()) {
++			DBRecord rec = iter.next();
++			rec.setString(HISTORY_USER_COL, anonymousName);
++			table.putRecord(rec);
++		}
++	}
++
++	/**
++	 * @see ghidra.program.database.symbol.LabelHistoryAdapter#anonymizeRecordsByAddress(java.lang.String, long)
++	 */
++	@Override
++	void anonymizeRecordsByAddress(String anonymousName, long addr) throws IOException {
++		RecordIterator iter = getRecordsByAddress(addr);
++		while (iter.hasNext()) {
++			DBRecord rec = iter.next();
++			rec.setString(HISTORY_USER_COL, anonymousName);
++			table.putRecord(rec);
++		}
++	}
+ }
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/symbol/SymbolManager.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/symbol/SymbolManager.java
+index 6275670096..7ce09304e6 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/symbol/SymbolManager.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/symbol/SymbolManager.java
+@@ -1506,6 +1506,52 @@ public class SymbolManager implements SymbolTable, ManagerDB {
+ 		return new LabelHistory[0];
+ 	}
+ 
++	@Override
++	public int anonymizeLabelHistory(String anonymousName) throws IOException {
++		lock.acquire();
++		try {
++			if (historyAdapter == null) {
++				return 0;
++			}
++			historyAdapter.anonymizeAllRecords(anonymousName);
++			return historyAdapter.getRecordCount();
++		}
++		catch (IOException e) {
++			program.dbError(e);
++			throw e;
++		}
++		finally {
++			lock.release();
++		}
++	}
++
++	@Override
++	public int anonymizeLabelHistory(String anonymousName, Address addr) throws IOException {
++		lock.acquire();
++		try {
++			if (historyAdapter == null) {
++				return 0;
++			}
++			long addrKey = addrMap.getKey(addr, false);
++			historyAdapter.anonymizeRecordsByAddress(anonymousName, addrKey);
++			// Count records for this address
++			int count = 0;
++			RecordIterator it = historyAdapter.getRecordsByAddress(addrKey);
++			while (it.hasNext()) {
++				it.next();
++				count++;
++			}
++			return count;
++		}
++		catch (IOException e) {
++			program.dbError(e);
++			throw e;
++		}
++		finally {
++			lock.release();
++		}
++	}
++
+ 	@Override
+ 	public void invalidateCache(boolean all) {
+ 		variableStorageMgr.invalidateCache(all);
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/listing/Listing.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/listing/Listing.java
+index 3ddbcc0bf1..c561457fbc 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/listing/Listing.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/listing/Listing.java
+@@ -15,6 +15,7 @@
+  */
+ package ghidra.program.model.listing;
+ 
++import java.io.IOException;
+ import java.util.Iterator;
+ import java.util.List;
+ 
+@@ -1039,4 +1040,25 @@ public interface Listing {
+ 	 */
+ 	public long getCommentAddressCount();
+ 
++	/**
++	 * Anonymize all comment history records by replacing usernames with a given identifier.
++	 *
++	 * @param anonymousName the replacement name
++	 * @return the number of records updated
++	 * @throws IOException if there was a problem accessing the database
++	 */
++	public int anonymizeCommentHistory(String anonymousName)
++		throws IOException;
++
++	/**
++	 * Anonymize comment history records for a specific address and comment type by replacing usernames with a given identifier.
++	 *
++	 * @param anonymousName the replacement name
++	 * @param addr the address of the comment to anonymize
++	 * @return the number of records updated
++	 * @throws IOException if there was a problem accessing the database
++	 */
++	public int anonymizeCommentHistory(String anonymousName, Address addr)
++		throws IOException;
++
+ }
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/listing/StubListing.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/listing/StubListing.java
+index 043a257b93..c667083aac 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/listing/StubListing.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/listing/StubListing.java
+@@ -476,4 +476,14 @@ public class StubListing implements Listing {
+ 		throw new UnsupportedOperationException();
+ 	}
+ 
++	@Override
++	public int anonymizeCommentHistory(String anonymousName) {
++		throw new UnsupportedOperationException();
++	}
++
++	@Override
++	public int anonymizeCommentHistory(String anonymousName, Address addr) {
++		throw new UnsupportedOperationException();
++	}
++
+ }
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/symbol/SymbolTable.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/symbol/SymbolTable.java
+index ef31e7061d..87374ab5e0 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/symbol/SymbolTable.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/symbol/SymbolTable.java
+@@ -15,6 +15,7 @@
+  */
+ package ghidra.program.model.symbol;
+ 
++import java.io.IOException;
+ import java.util.*;
+ 
+ import ghidra.program.database.symbol.*;
+@@ -659,6 +660,25 @@ public interface SymbolTable {
+ 	 */
+ 	public boolean hasLabelHistory(Address addr);
+ 
++	/**
++	 * Anonymize all label history records by replacing usernames with a given identifier.
++	 *
++	 * @param anonymousName the replacement name (e.g., "anonymous" or "user")
++	 * @return the number of records updated
++	 * @throws IOException if there was a problem accessing the database
++	 */
++	public int anonymizeLabelHistory(String anonymousName) throws IOException;
++
++	/**
++	 * Anonymize label history records for a specific address by replacing usernames with a given identifier.
++	 *
++	 * @param anonymousName the replacement name
++	 * @param addr the address to anonymize
++	 * @return the number of records updated
++	 * @throws IOException if there was a problem accessing the database
++	 */
++	public int anonymizeLabelHistory(String anonymousName, Address addr) throws IOException;
++
+ 	/**
+ 	 * Get the deepest namespace containing the given address
+ 	 * 
+diff --git a/Ghidra/Framework/SoftwareModeling/src/test/java/ghidra/program/model/symbol/StubSymbolTable.java b/Ghidra/Framework/SoftwareModeling/src/test/java/ghidra/program/model/symbol/StubSymbolTable.java
+index 07b6416bf7..25a61912fd 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/test/java/ghidra/program/model/symbol/StubSymbolTable.java
++++ b/Ghidra/Framework/SoftwareModeling/src/test/java/ghidra/program/model/symbol/StubSymbolTable.java
+@@ -311,4 +311,14 @@ public class StubSymbolTable implements SymbolTable {
+ 		throw new UnsupportedOperationException();
+ 	}
+ 
++	@Override
++	public int anonymizeLabelHistory(String anonymousName) {
++		throw new UnsupportedOperationException();
++	}
++
++	@Override
++	public int anonymizeLabelHistory(String anonymousName, Address addr) {
++		throw new UnsupportedOperationException();
++	}
++
+ }
+-- 
+2.45.1
+
