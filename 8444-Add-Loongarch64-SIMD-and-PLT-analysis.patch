@@ -18,20 +18,24 @@ Loongarch: add DWARF definitions
 Loongarch: fix QEMU tool executable name
 
 Loongarch: zero-extend argument registers
+
+Add Loongarch64 SIMD and PLT analysis
 ---
  Ghidra/Processors/Loongarch/build.gradle      |   1 +
  .../Loongarch/certification.manifest          |   2 +
  .../Loongarch/data/languages/loongarch.dwarf  |  18 ++
  .../Loongarch/data/languages/loongarch.ldefs  |  12 +-
  .../languages/loongarch32_instructions.sinc   |   6 +
- .../data/languages/loongarch_main.sinc        |  26 +-
+ .../data/languages/loongarch_double.sinc      |   3 +-
+ .../data/languages/loongarch_float.sinc       |   3 +-
+ .../data/languages/loongarch_main.sinc        |  27 +-
  .../Loongarch/data/languages/lp64d.cspec      |   2 +-
  .../Loongarch/data/languages/lp64f.cspec      |   2 +-
  .../Loongarch/data/languages/lsx.sinc         | 275 ++++++++++++-----
  .../Loongarch/data/loongarch-pltThunks.xml    |  22 ++
  .../data/patterns/loongarch_patterns.xml      |  13 +-
  .../analysis/LoongArchCallStubAnalyzer.java   | 288 ++++++++++++++++++
- 12 files changed, 576 insertions(+), 91 deletions(-)
+ 14 files changed, 580 insertions(+), 94 deletions(-)
  create mode 100644 Ghidra/Processors/Loongarch/data/languages/loongarch.dwarf
  create mode 100644 Ghidra/Processors/Loongarch/data/loongarch-pltThunks.xml
  create mode 100644 Ghidra/Processors/Loongarch/src/main/java/ghidra/app/plugin/core/analysis/LoongArchCallStubAnalyzer.java
@@ -149,8 +153,36 @@ index 5d18bee31d..9ac1d549a5 100644
  	RD = inst_next;
  	call [RelJ16];
  }
+diff --git a/Ghidra/Processors/Loongarch/data/languages/loongarch_double.sinc b/Ghidra/Processors/Loongarch/data/languages/loongarch_double.sinc
+index 47f075056c..49027c3941 100644
+--- a/Ghidra/Processors/Loongarch/data/languages/loongarch_double.sinc
++++ b/Ghidra/Processors/Loongarch/data/languages/loongarch_double.sinc
+@@ -72,7 +72,8 @@
+ #la-fp-d.txt fscaleb.d mask=0x01110000	
+ #0x01110000	0xffff8000	f0:5, f5:5, f10:5	['freg0_5_s0', 'freg5_5_s0', 'freg10_5_s0']
+ :fscaleb.d  drD, drJ, drK       is op15_31=0x222 & drD & drJ & drK {
+-	drD = f_scaleb(drJ, drK);
++    local bn:8 = 1 << drK;
++	drD = drJ f* int2float(bn);
+ }
+ 
+ 
+diff --git a/Ghidra/Processors/Loongarch/data/languages/loongarch_float.sinc b/Ghidra/Processors/Loongarch/data/languages/loongarch_float.sinc
+index 14e29b7b26..0a5bd257e8 100644
+--- a/Ghidra/Processors/Loongarch/data/languages/loongarch_float.sinc
++++ b/Ghidra/Processors/Loongarch/data/languages/loongarch_float.sinc
+@@ -237,7 +237,8 @@ define pcodeop uncertain_fcsr;
+ #la-fp-s.txt fscaleb.s mask=0x01108000	
+ #0x01108000	0xffff8000	f0:5, f5:5, f10:5	['freg0_5_s0', 'freg5_5_s0', 'freg10_5_s0']
+ :fscaleb.s  frD, frJ, frK            is op15_31=0x221 & frD & frJ & frK {
+-	frD = f_scaleb(frJ, frK);
++    local bn:4 = 1 << frK;
++	frD = frJ f* int2float(bn);
+ }
+ 
+ 
 diff --git a/Ghidra/Processors/Loongarch/data/languages/loongarch_main.sinc b/Ghidra/Processors/Loongarch/data/languages/loongarch_main.sinc
-index 1827d43817..433c602962 100644
+index 1827d43817..ab830217be 100644
 --- a/Ghidra/Processors/Loongarch/data/languages/loongarch_main.sinc
 +++ b/Ghidra/Processors/Loongarch/data/languages/loongarch_main.sinc
 @@ -114,7 +114,7 @@ define register offset=0x1000 size=8 [
@@ -192,7 +224,15 @@ index 1827d43817..433c602962 100644
  # general pcodeops
  define pcodeop break;
  define pcodeop cpucfg;
-@@ -576,3 +586,11 @@ macro tzcount64(input, count) {
+@@ -500,7 +510,6 @@ define pcodeop rdtime.counter;
+ define pcodeop rdtime.counterid;
+ define pcodeop syscall;
+ 
+-define pcodeop f_scaleb;
+ define pcodeop f_logb;
+ define pcodeop f_class;
+ define pcodeop round_even;
+@@ -576,3 +585,11 @@ macro tzcount64(input, count) {
  	count = count -  1 * zext((v & 0x5555555555555555) != 0);
  }
  
