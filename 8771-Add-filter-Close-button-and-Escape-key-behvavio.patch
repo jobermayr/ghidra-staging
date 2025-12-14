@@ -1,0 +1,418 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Lee Chagolla-Christensen <lee@localhost>
+Date: Fri, 12 Dec 2025 16:48:07 -0800
+Subject: [PATCH] 8771: Add filter Close button and Escape key behvavior
+
+---
+ .../help/topics/Trees/GhidraTreeFilter.html   | 33 +++++-----
+ .../widgets/filter/FilterTextField.java       | 15 +++++
+ .../java/docking/widgets/table/GTable.java    | 33 +---------
+ .../widgets/table/GTableFilterPanel.java      | 55 +++++++++++++++-
+ .../tree/DefaultGTreeFilterProvider.java      | 62 ++++++++++++++++++-
+ .../main/java/docking/widgets/tree/GTree.java | 18 +-----
+ 6 files changed, 150 insertions(+), 66 deletions(-)
+
+diff --git a/Ghidra/Framework/Docking/src/main/help/help/topics/Trees/GhidraTreeFilter.html b/Ghidra/Framework/Docking/src/main/help/help/topics/Trees/GhidraTreeFilter.html
+index 1f950bc14f..885aa84066 100644
+--- a/Ghidra/Framework/Docking/src/main/help/help/topics/Trees/GhidraTreeFilter.html
++++ b/Ghidra/Framework/Docking/src/main/help/help/topics/Trees/GhidraTreeFilter.html
+@@ -42,11 +42,13 @@
+       </BLOCKQUOTE>
+ 	  
+ 	  <BLOCKQUOTE>
+-          <P><IMG alt="" src="help/shared/tip.png">While focus is in the filter you can press the 
+-		  up and down arrow keys to change focus to the tree or table.  This allows you to enter 
++          <P><IMG alt="" src="help/shared/tip.png">While focus is in the filter you can press the
++		  up and down arrow keys to change focus to the tree or table.  This allows you to enter
+ 		  a filter and arrow through the results without using the mouse.   To get back to the
+-		  filter easily, press the <A HREF="#Activate_Filter">activate filter</A> action (the 
+-	      default key binding is <CODE>Ctrl-F</CODE>) to transfer focus back to the filter.</P>
++		  filter easily, press the <A HREF="#Activate_Filter">activate filter</A> action (the
++	      default key binding is <CODE>Ctrl-F</CODE>) to transfer focus back to the filter.
++		  Press <CODE>Escape</CODE> to clear the filter text; press <CODE>Escape</CODE> again
++		  (when the field is empty) to hide the filter.</P>
+         </BLOCKQUOTE>
+     </BLOCKQUOTE><BR>
+      <BR>
+@@ -61,16 +63,7 @@
+ 		  The default key binding for this action is <CODE>Ctrl-F</CODE>.
+ 		  </P>
+ 		</BLOCKQUOTE>
+-	
+-	
+-	<H3><A name="Toggle_Filter"></A>Toggle Filter</H3>
+-		<BLOCKQUOTE>
+-	      <P>
+-		  The <B>Toggle Filter</B> action will hide and show the filter field of the tree or table.
+-		  To use this action you must first assign it a key binding from the tool options.
+-		  </P>
+-		</BLOCKQUOTE>
+-		
++
+ 
+     <H3>Clear Filter</H3>
+ 
+@@ -96,6 +89,18 @@
+           </TR>
+         </TABLE>
+       </CENTER>
++    </BLOCKQUOTE>
++
++    <H3><A name="Close_Filter"></A>Close Filter</H3>
++
++    <BLOCKQUOTE>
++      <P>The <B>Close Filter</B> button, located to the right of the Filter Options button,
++      will hide the filter panel when clicked. This can be useful to save screen space when
++      filtering is not needed. The filter can be shown again by pressing <CODE>Ctrl-F</CODE>.
++      You can also hide the filter by pressing <CODE>Escape</CODE> while the filter field has
++      focus and is empty (if the field contains text, the first <CODE>Escape</CODE> press will
++      clear the text, and the second press will hide the filter).
++      Ghidra will remember whether you prefer the filter shown or hidden.</P>
+     </BLOCKQUOTE><BR>
+      <BR>
+ 	</BLOCKQUOTE>		
+diff --git a/Ghidra/Framework/Docking/src/main/java/docking/widgets/filter/FilterTextField.java b/Ghidra/Framework/Docking/src/main/java/docking/widgets/filter/FilterTextField.java
+index ac306cfb1a..b7f89dad6f 100644
+--- a/Ghidra/Framework/Docking/src/main/java/docking/widgets/filter/FilterTextField.java
++++ b/Ghidra/Framework/Docking/src/main/java/docking/widgets/filter/FilterTextField.java
+@@ -303,6 +303,21 @@ public class FilterTextField extends JPanel {
+ 		return textField.requestFocusInWindow();
+ 	}
+ 
++	@Override
++	public void addKeyListener(java.awt.event.KeyListener listener) {
++		textField.addKeyListener(listener);
++	}
++
++	@Override
++	public void removeKeyListener(java.awt.event.KeyListener listener) {
++		textField.removeKeyListener(listener);
++	}
++
++	@Override
++	public java.awt.event.KeyListener[] getKeyListeners() {
++		return textField.getKeyListeners();
++	}
++
+ 	private void fireFilterChanged(String text) {
+ 		for (FilterListener l : listeners) {
+ 			l.filterChanged(text);
+diff --git a/Ghidra/Framework/Docking/src/main/java/docking/widgets/table/GTable.java b/Ghidra/Framework/Docking/src/main/java/docking/widgets/table/GTable.java
+index feac5590cb..c40aca0425 100644
+--- a/Ghidra/Framework/Docking/src/main/java/docking/widgets/table/GTable.java
++++ b/Ghidra/Framework/Docking/src/main/java/docking/widgets/table/GTable.java
+@@ -1530,38 +1530,8 @@ public class GTable extends JTable {
+ 		);
+ 		activateFilterAction.setKeyBindingData(new KeyBindingData(ACTIVATE_FILTER_KEY_STROKE));
+ 		activateFilterAction.setHelpLocation(new HelpLocation("Trees", "Activate_Filter"));
+-		//@formatter:on
+-
+-		GTableAction toggleFilterAction = new GTableAction("Table/Tree Toggle Filter", owner) {
+ 
+-			@Override
+-			public boolean isEnabledForContext(ActionContext context) {
+-				if (!super.isEnabledForContext(context)) {
+-					return false;
+-				}
+-
+-				GTable gTable = (GTable) context.getSourceComponent();
+-				return gTable.getTableFilterPanel() != null;
+-			}
+-
+-			@Override
+-			public void actionPerformed(ActionContext context) {
+-
+-				GTable gTable = (GTable) context.getSourceComponent();
+-				GTableFilterPanel<?> filterPanel = gTable.getTableFilterPanel();
+-				filterPanel.toggleVisibility();
+-			}
+-		};
+-		//@formatter:off
+-		toggleFilterAction.setPopupMenuData(new MenuData(
+-				new String[] { "Toggle Filter" },
+-				null /*icon*/,
+-				actionMenuGroup,
+-				NO_MNEMONIC,
+-				Integer.toString(subGroupIndex++)
+-			)
+-		);		
+-		toggleFilterAction.setHelpLocation(new HelpLocation("Trees", "Toggle_Filter"));
++		// Removed Toggle Filter action - users can now use the Close Filter button or Escape key
+ 		//@formatter:on
+ 
+ 		toolActions.addGlobalAction(copyAction);
+@@ -1571,7 +1541,6 @@ public class GTable extends JTable {
+ 		toolActions.addGlobalAction(exportColumnsAction);
+ 		toolActions.addGlobalAction(selectAllAction);
+ 		toolActions.addGlobalAction(activateFilterAction);
+-		toolActions.addGlobalAction(toggleFilterAction);
+ 	}
+ 
+ //==================================================================================================
+diff --git a/Ghidra/Framework/Docking/src/main/java/docking/widgets/table/GTableFilterPanel.java b/Ghidra/Framework/Docking/src/main/java/docking/widgets/table/GTableFilterPanel.java
+index 39a01abed4..2524bd7792 100644
+--- a/Ghidra/Framework/Docking/src/main/java/docking/widgets/table/GTableFilterPanel.java
++++ b/Ghidra/Framework/Docking/src/main/java/docking/widgets/table/GTableFilterPanel.java
+@@ -17,6 +17,7 @@ package docking.widgets.table;
+ 
+ import java.awt.Component;
+ import java.awt.Rectangle;
++import java.awt.event.KeyEvent;
+ import java.beans.PropertyChangeListener;
+ import java.util.*;
+ 
+@@ -28,12 +29,15 @@ import javax.swing.table.TableColumnModel;
+ import org.jdom.Attribute;
+ import org.jdom.Element;
+ 
++import docking.DockingUtils;
+ import docking.DockingWindowManager;
++import docking.actions.KeyBindingUtils;
+ import docking.widgets.EmptyBorderButton;
+ import docking.widgets.filter.*;
+ import docking.widgets.label.GDLabel;
+ import docking.widgets.table.columnfilter.ColumnBasedTableFilter;
+ import docking.widgets.table.columnfilter.ColumnFilterManager;
++import resources.Icons;
+ import ghidra.framework.options.PreferenceState;
+ import ghidra.util.HelpLocation;
+ import ghidra.util.Msg;
+@@ -119,6 +123,7 @@ public class GTableFilterPanel<ROW_OBJECT> extends JPanel {
+ 	private RowFilterTransformer<ROW_OBJECT> transformer;
+ 	private TableFilter<ROW_OBJECT> secondaryTableFilter;
+ 	private EmptyBorderButton filterStateButton;
++	private EmptyBorderButton closeFilterButton;
+ 
+ 	// This tracks whether the filter has been configured to be part of the display, whether by the
+ 	// user or via the API.
+@@ -212,6 +217,12 @@ public class GTableFilterPanel<ROW_OBJECT> extends JPanel {
+ 		// tooltips which seem excessive to read to the user every time they get focus. We may need
+ 		// to revisit this decision.
+ 		filterStateButton.getAccessibleContext().setAccessibleDescription("");
++
++		// Do the same for the Hide Filter button
++		String hideFilterPrefix = namePrefix + " Hide Filter";
++		closeFilterButton.setName(hideFilterPrefix + " Button");
++		closeFilterButton.getAccessibleContext().setAccessibleName(hideFilterPrefix);
++		closeFilterButton.getAccessibleContext().setAccessibleDescription("");
+ 	}
+ 
+ 	public GTableFilterPanel(JTable table, RowObjectTableModel<ROW_OBJECT> tableModel,
+@@ -445,6 +456,7 @@ public class GTableFilterPanel<ROW_OBJECT> extends JPanel {
+ 		add(Box.createHorizontalStrut(5));
+ 		add(filterField);
+ 		add(buildFilterStateButton());
++		add(buildCloseFilterButton());
+ 		if (isTableColumnFilterableModel()) {
+ 			add(Box.createHorizontalStrut(5));
+ 			add(columnFilterManager.getConfigureButton());
+@@ -452,9 +464,39 @@ public class GTableFilterPanel<ROW_OBJECT> extends JPanel {
+ 
+ 		HelpService helpService = DockingWindowManager.getHelpService();
+ 		HelpLocation helpLocation = new HelpLocation("Trees", "Filters");
+-		helpService.registerHelp(filterStateButton, helpLocation);
++		HelpLocation filterOptionsHelpLocation = new HelpLocation("Trees", "Filter_Options");
++		HelpLocation closeFilterHelpLocation = new HelpLocation("Trees", "Close_Filter");
++		helpService.registerHelp(filterStateButton, filterOptionsHelpLocation);
+ 		helpService.registerHelp(searchLabel, helpLocation);
+ 		helpService.registerHelp(filterField, helpLocation);
++		helpService.registerHelp(closeFilterButton, closeFilterHelpLocation);
++
++		KeyStroke ctrlF = KeyStroke.getKeyStroke(KeyEvent.VK_F,
++			DockingUtils.CONTROL_KEY_MODIFIER_MASK);
++		Action activateFilterAction = new AbstractAction("Activate Filter") {
++			@Override
++			public void actionPerformed(java.awt.event.ActionEvent e) {
++				activate();
++			}
++		};
++		KeyBindingUtils.registerAction(this, ctrlF, activateFilterAction,
++			JComponent.WHEN_ANCESTOR_OF_FOCUSED_COMPONENT);
++
++		filterField.addKeyListener(new java.awt.event.KeyAdapter() {
++			@Override
++			public void keyPressed(java.awt.event.KeyEvent e) {
++				if (e.getKeyCode() == KeyEvent.VK_ESCAPE) {
++					if (filterField.getText().isEmpty()) {
++						doToggleVisibility();
++						table.requestFocus();
++					}
++					else {
++						filterField.setText("");
++					}
++					e.consume();
++				}
++			}
++		});
+ 	}
+ 
+ 	private JComponent buildFilterStateButton() {
+@@ -473,6 +515,17 @@ public class GTableFilterPanel<ROW_OBJECT> extends JPanel {
+ 		return filterStateButton;
+ 	}
+ 
++	private JComponent buildCloseFilterButton() {
++		closeFilterButton = new EmptyBorderButton(Icons.CLOSE_ICON);
++		closeFilterButton.addActionListener(e -> {
++			doToggleVisibility();
++			table.requestFocus();
++		});
++
++		closeFilterButton.setToolTipText("Close Filter");
++		return closeFilterButton;
++	}
++
+ 	private boolean isTableColumnFilterableModel() {
+ 		return table.getModel() instanceof RowObjectFilterModel;
+ 	}
+diff --git a/Ghidra/Framework/Docking/src/main/java/docking/widgets/tree/DefaultGTreeFilterProvider.java b/Ghidra/Framework/Docking/src/main/java/docking/widgets/tree/DefaultGTreeFilterProvider.java
+index 2d42aac0f7..c976b644e2 100644
+--- a/Ghidra/Framework/Docking/src/main/java/docking/widgets/tree/DefaultGTreeFilterProvider.java
++++ b/Ghidra/Framework/Docking/src/main/java/docking/widgets/tree/DefaultGTreeFilterProvider.java
+@@ -16,6 +16,7 @@
+ package docking.widgets.tree;
+ 
+ import java.awt.BorderLayout;
++import java.awt.event.KeyEvent;
+ 
+ import javax.accessibility.AccessibleContext;
+ import javax.swing.*;
+@@ -24,10 +25,13 @@ import javax.swing.border.BevelBorder;
+ import org.jdom.Attribute;
+ import org.jdom.Element;
+ 
++import docking.DockingUtils;
+ import docking.DockingWindowManager;
++import docking.actions.KeyBindingUtils;
+ import docking.widgets.EmptyBorderButton;
+ import docking.widgets.filter.*;
+ import docking.widgets.label.GLabel;
++import resources.Icons;
+ import docking.widgets.tree.internal.DefaultGTreeDataTransformer;
+ import docking.widgets.tree.support.GTreeFilter;
+ import ghidra.framework.options.PreferenceState;
+@@ -40,6 +44,7 @@ public class DefaultGTreeFilterProvider implements GTreeFilterProvider {
+ 
+ 	private FilterTextField filterField;
+ 	private EmptyBorderButton filterStateButton;
++	private EmptyBorderButton closeFilterButton;
+ 	private GTreeFilterFactory filterFactory;
+ 	private FilterDocumentListener filterListener = new FilterDocumentListener();
+ 
+@@ -116,6 +121,13 @@ public class DefaultGTreeFilterProvider implements GTreeFilterProvider {
+ 		// tooltips which seem excessive to read to the user every time they get focus. We may need
+ 		// to revisit this decision.
+ 		context.setAccessibleDescription("");
++
++		// Do the same for the Close button
++		String closeButtonNamePrefix = namePrefix + " Close Filter";
++		closeFilterButton.setName(closeButtonNamePrefix + " Button");
++		AccessibleContext closeContext = closeFilterButton.getAccessibleContext();
++		closeContext.setAccessibleName(closeButtonNamePrefix);
++		closeContext.setAccessibleDescription("");
+ 	}
+ 
+ 	private void updateModelFilter() {
+@@ -294,15 +306,59 @@ public class DefaultGTreeFilterProvider implements GTreeFilterProvider {
+ 				updateModelFilter();
+ 			}
+ 		});
++		filterStateButton.setToolTipText("Filter Options");
++
++		closeFilterButton = new EmptyBorderButton(Icons.CLOSE_ICON);
++		closeFilterButton.addActionListener(e -> {
++			doToggleVisibility();
++			gTree.requestFocus();
++		});
++		closeFilterButton.setToolTipText("Close Filter");
++
++		// Create a panel to hold both buttons
++		JPanel buttonPanel = new JPanel();
++		buttonPanel.setLayout(new BoxLayout(buttonPanel, BoxLayout.X_AXIS));
++		buttonPanel.add(filterStateButton);
++		buttonPanel.add(closeFilterButton);
+ 
+ 		HelpService helpService = DockingWindowManager.getHelpService();
+ 		HelpLocation helpLocation = new HelpLocation("Trees", "Filters");
+-		helpService.registerHelp(filterStateButton, helpLocation);
++		HelpLocation filterOptionsHelpLocation = new HelpLocation("Trees", "Filter_Options");
++		helpService.registerHelp(filterStateButton, filterOptionsHelpLocation);
+ 		helpService.registerHelp(filterLabel, helpLocation);
+ 		helpService.registerHelp(filterField, helpLocation);
++		HelpLocation closeFilterHelpLocation = new HelpLocation("Trees", "Close_Filter");
++		helpService.registerHelp(closeFilterButton, closeFilterHelpLocation);
++
++		newFilterPanel.add(buttonPanel, BorderLayout.EAST);
++
++		KeyStroke ctrlF = KeyStroke.getKeyStroke(KeyEvent.VK_F,
++			DockingUtils.CONTROL_KEY_MODIFIER_MASK);
++		Action activateFilterAction = new AbstractAction("Activate Filter") {
++			@Override
++			public void actionPerformed(java.awt.event.ActionEvent e) {
++				activate();
++			}
++		};
++		KeyBindingUtils.registerAction(newFilterPanel, ctrlF, activateFilterAction,
++			JComponent.WHEN_ANCESTOR_OF_FOCUSED_COMPONENT);
++
++		filterField.addKeyListener(new java.awt.event.KeyAdapter() {
++			@Override
++			public void keyPressed(java.awt.event.KeyEvent e) {
++				if (e.getKeyCode() == KeyEvent.VK_ESCAPE) {
++					if (filterField.getText().isEmpty()) {
++						doToggleVisibility();
++						gTree.requestFocus();
++					}
++					else {
++						filterField.setText("");
++					}
++					e.consume();
++				}
++			}
++		});
+ 
+-		filterStateButton.setToolTipText("Filter Options");
+-		newFilterPanel.add(filterStateButton, BorderLayout.EAST);
+ 		return newFilterPanel;
+ 	}
+ 
+diff --git a/Ghidra/Framework/Docking/src/main/java/docking/widgets/tree/GTree.java b/Ghidra/Framework/Docking/src/main/java/docking/widgets/tree/GTree.java
+index be7fe09479..8f7da52bc5 100644
+--- a/Ghidra/Framework/Docking/src/main/java/docking/widgets/tree/GTree.java
++++ b/Ghidra/Framework/Docking/src/main/java/docking/widgets/tree/GTree.java
+@@ -1978,22 +1978,9 @@ public class GTree extends JPanel implements BusyListener {
+ 			)
+ 		);
+ 		activateFilterAction.setKeyBindingData(new KeyBindingData("Control F"));
+-		activateFilterAction.setHelpLocation(new HelpLocation("Trees", "Toggle_Filter"));
+-		
+-		GTreeAction toggleFilterAction = new GTreeAction("Table/Tree Toggle Filter", owner) {
+-			@Override
+-			public void actionPerformed(ActionContext context) {
+-				GTree gTree = getTree(context);
+-				gTree.filterProvider.toggleVisibility();				
+-			}
+-		};
++		activateFilterAction.setHelpLocation(new HelpLocation("Trees", "Activate_Filter"));
++
+ 		//@formatter:on
+-		toggleFilterAction.setPopupMenuData(new MenuData(
+-			new String[] { "Toggle Filter" },
+-			null,
+-			actionMenuGroup, NO_MNEMONIC,
+-			Integer.toString(subGroupIndex++)));
+-		toggleFilterAction.setHelpLocation(new HelpLocation("Trees", "Toggle_Filter"));
+ 
+ 		// these actions are self-explanatory and do need help
+ 		collapseAction.markHelpUnnecessary();
+@@ -2007,7 +1994,6 @@ public class GTree extends JPanel implements BusyListener {
+ 		toolActions.addGlobalAction(expandTreeAction);
+ 		toolActions.addGlobalAction(copyFormattedAction);
+ 		toolActions.addGlobalAction(activateFilterAction);
+-		toolActions.addGlobalAction(toggleFilterAction);
+ 	}
+ 
+ 	private static String generateFilterPreferenceKey() {
+-- 
+2.45.1
+
