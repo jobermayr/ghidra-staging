@@ -93,12 +93,16 @@ add missing input parameters
 Some RISCV vector instructions read the output register.
 
 Restore RISCV T-Head instruction extension support
+
+RISC-V vcompress instruction semantics fix
+The semantic pcodeop section of many RISC-V instructions needs to show
+that the output vector register is also a dependent input register.
 ---
  .../Decompiler/certification.manifest         |    1 +
  .../datatests/riscv_isaext_memcpy.xml         |   30 +
  .../src/decompile/unittests/riscv_isaext.cc   |   90 +
  .../Processors/RISCV/certification.manifest   |   17 +
- .../data/languages/Readme_isa_extensions.md   |  167 +
+ .../data/languages/Readme_isa_extensions.md   |  178 +
  .../RISCV/data/languages/riscv.custom.sinc    |    2 +-
  .../data/languages/riscv.ilp32d_thead.slaspec |   31 +
  .../RISCV/data/languages/riscv.instr.sinc     |   15 +-
@@ -113,7 +117,7 @@ Restore RISCV T-Head instruction extension support
  .../RISCV/data/languages/riscv.rv32p.sinc     |   44 +-
  .../RISCV/data/languages/riscv.rv64b.sinc     |   12 +-
  .../RISCV/data/languages/riscv.rv64q.sinc     |   42 +
- .../RISCV/data/languages/riscv.rvv.sinc       | 4389 ++++++++++++++---
+ .../RISCV/data/languages/riscv.rvv.sinc       | 4388 ++++++++++++++---
  .../RISCV/data/languages/riscv.table.sinc     |   23 +-
  .../RISCV/data/languages/riscv.xthead.sinc    |  712 +++
  .../RISCV/data/languages/riscv.zcb.sinc       |   71 +
@@ -129,7 +133,7 @@ Restore RISCV T-Head instruction extension support
  .../RISCV/data/languages/riscv.zvkng.sinc     |   55 +
  .../RISCV/data/languages/riscv.zvksg.sinc     |   19 +
  gradle/support/ip.gradle                      |    2 +
- 35 files changed, 6665 insertions(+), 792 deletions(-)
+ 35 files changed, 6675 insertions(+), 792 deletions(-)
  create mode 100644 Ghidra/Features/Decompiler/src/decompile/datatests/riscv_isaext_memcpy.xml
  create mode 100644 Ghidra/Features/Decompiler/src/decompile/unittests/riscv_isaext.cc
  create mode 100644 Ghidra/Processors/RISCV/data/languages/Readme_isa_extensions.md
@@ -341,10 +345,10 @@ index 86ac4c8328..7061906c95 100644
  data/languages/riscv32.dwarf||GHIDRA||||END|
 diff --git a/Ghidra/Processors/RISCV/data/languages/Readme_isa_extensions.md b/Ghidra/Processors/RISCV/data/languages/Readme_isa_extensions.md
 new file mode 100644
-index 0000000000..68d2ab176a
+index 0000000000..0142b9ece4
 --- /dev/null
 +++ b/Ghidra/Processors/RISCV/data/languages/Readme_isa_extensions.md
-@@ -0,0 +1,167 @@
+@@ -0,0 +1,178 @@
 +# RISCV Instruction Set Extensions
 +
 +> The RISCV instruction set is relatively easy to extend with new instructions.  These extensions present Ghidra with many design and implementation challenges.
@@ -491,12 +495,6 @@ index 0000000000..68d2ab176a
 +The `datatests` directory holds binary instruction snippets to be decompiled, along with key strings as they must
 +appear in the decompiler view.
 +
-+Basic combinations of RISCV architecture, extensions, and generated code are listed below.
-+
-+
-+| Language | Data Test | Architecture | Notes |
-+| ------------------ | --------- | ---------- | ----- |
-+| RISCV:LE:64:RV64GC | `riscv_isaext_memcpy` | rv64gcv | Minimal test of 64 bit vectorized memcpy |
 +
 +Pre-commit testing should include something like:
 +
@@ -512,6 +510,23 @@ index 0000000000..68d2ab176a
 +Total tests applied = 3
 +Total passing tests = 3
 +```
++
++## Limitations - decompiler dependency calculations
++
++The Ghidra decompiler tracks dependencies between instructions, noting where register
++values are written and read amongst the blocks of any given function.  That's a problem
++with RISC-V vector instructions, since registers read, written, and modified are not fully encoded
++within those instructions.  The current vector context affects those decisions - and that vector context
++can change rapidly within a given RISC-V binary.
++
++* Registers are often grouped together to increase the number of elements processed per instruction.
++  Ghidra might see an instruction reading vector register v8 and modifying vector register v4,
++  but in execution registers v8, v9, v10, and v11 are used as input and
++  registers v4, v5, v6, and v7 are modified.
++* Vector context controls element masking and tail handling.  Most often, the context tells vector
++  instructions that unselected elements will not be used as later inputs.  If this is not the case,
++  then unmasked or tail elements may be marked as 'unchanged' - and the output vector register
++  must be considered an input vector register too.
 diff --git a/Ghidra/Processors/RISCV/data/languages/riscv.custom.sinc b/Ghidra/Processors/RISCV/data/languages/riscv.custom.sinc
 index 75a6ff7a24..deb5891af8 100644
 --- a/Ghidra/Processors/RISCV/data/languages/riscv.custom.sinc
@@ -1376,10 +1391,10 @@ index 51849d3a64..c78a0b436f 100644
 +        frd = tmpfrs1;
 +}
 diff --git a/Ghidra/Processors/RISCV/data/languages/riscv.rvv.sinc b/Ghidra/Processors/RISCV/data/languages/riscv.rvv.sinc
-index bb37a6c42b..fac7612e0c 100644
+index bb37a6c42b..6fb5327056 100644
 --- a/Ghidra/Processors/RISCV/data/languages/riscv.rvv.sinc
 +++ b/Ghidra/Processors/RISCV/data/languages/riscv.rvv.sinc
-@@ -38,1918 +38,5023 @@
+@@ -38,1918 +38,5022 @@
  # sumop=16 unit-stride fault-only-first
  # nfields imm is nf [ imm = nf + 1; ] { export *[const]:1 imm; }
  
@@ -1939,8 +1954,7 @@ index bb37a6c42b..fac7612e0c 100644
  # vcompress.vm   31..26=0x17 25=1 vs2 vs1 14..12=0x2 vd 6..0=0x57
  # vcompress.vm vd, vs2, vs1  # Compress into vd elements of vs2 where vs1 is enabled
 -:vcompress.vm  vd, vs2, vs1   is op2631=0x17 & op2525=0x1 & vs2 & vs1 & op1214=0x2 & vd & op0006=0x57  unimpl
-+:vcompress.vm  vd, vs2, vs1         is op2631=0x17 & op2525=0x1 & vs2 & vs1 & op1214=0x2 & vd & op0006=0x57 {vd=vcompress_vm(vs2,vs1);}
-+:vcompress.vm  vd, vs2, vs1, "v0.t" is op2631=0x17 & op2525=0x0 & vs2 & vs1 & op1214=0x2 & vd & op0006=0x57 {vd=vcompress_vm(vs2,vs1,v0);}
++:vcompress.vm  vd, vs2, vs1         is op2631=0x17 & op2525=0x1 & vs2 & vs1 & op1214=0x2 & vd & op0006=0x57 {vd=vcompress_vm(vs2,vs1,vd);}
  
 +define pcodeop vdiv_vv;
  # vdiv.vv        31..26=0x21 vm vs2 vs1 14..12=0x2 vd 6..0=0x57
