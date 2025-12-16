@@ -1,0 +1,225 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Lee Chagolla-Christensen <lee@localhost>
+Date: Sat, 13 Dec 2025 14:33:45 -0800
+Subject: [PATCH] 8785: Toggle component header/title bars
+
+add component header toggling
+
+fix click-to-focus docked window when empty
+
+update help
+---
+ .../topics/DockingWindows/Docking_Windows.htm |  5 +++
+ .../src/main/java/docking/ComponentNode.java  |  8 ++++
+ .../java/docking/ComponentPlaceholder.java    |  1 +
+ .../main/java/docking/DockableComponent.java  | 27 +++++++++++
+ .../java/docking/DockingWindowManager.java    | 13 ++++++
+ .../ToggleActiveComponentHeaderAction.java    | 45 +++++++++++++++++++
+ .../java/docking/actions/ToolActions.java     |  2 +
+ 7 files changed, 101 insertions(+)
+ create mode 100644 Ghidra/Framework/Docking/src/main/java/docking/action/ToggleActiveComponentHeaderAction.java
+
+diff --git a/Ghidra/Features/Base/src/main/help/help/topics/DockingWindows/Docking_Windows.htm b/Ghidra/Features/Base/src/main/help/help/topics/DockingWindows/Docking_Windows.htm
+index 0d8c005927..9450d5c14a 100644
+--- a/Ghidra/Features/Base/src/main/help/help/topics/DockingWindows/Docking_Windows.htm
++++ b/Ghidra/Features/Base/src/main/help/help/topics/DockingWindows/Docking_Windows.htm
+@@ -40,6 +40,11 @@
+ 		      tool. &nbsp;The title bar's color indicates whether the component has keyboard focus.
+ 		      When the component has focus, the title bar is blue, otherwise it is gray. Only
+ 		      one component can have focus at a time.</P>
++
++		      <P><IMG src="help/shared/tip.png" border="0"> The title bar can be toggled on/off
++		      using the "Toggle Component Title Bar/Header" key binding
++			  (<B>&lt;CTRL&gt;&lt;SHIFT&gt;&lt;ALT&gt;H</B> by default). The visibility setting
++		      is saved per-component and persists across Ghidra sessions.</P>
+ 		    </BLOCKQUOTE>
+ 	    
+ 	    
+diff --git a/Ghidra/Framework/Docking/src/main/java/docking/ComponentNode.java b/Ghidra/Framework/Docking/src/main/java/docking/ComponentNode.java
+index f555b1ce28..96d935c606 100644
+--- a/Ghidra/Framework/Docking/src/main/java/docking/ComponentNode.java
++++ b/Ghidra/Framework/Docking/src/main/java/docking/ComponentNode.java
+@@ -84,6 +84,9 @@ class ComponentNode extends Node {
+ 
+ 			long uniqueID = getUniqueID(e, 0);
+ 
++			String showHeaderStr = e.getAttributeValue("SHOW_HEADER");
++			boolean showHeader = showHeaderStr != null ? Boolean.parseBoolean(showHeaderStr) : true;
++
+ 			String mappedOwner = ComponentProvider.getMappedOwner(owner, name);
+ 			if (mappedOwner != null) {
+ 				name = ComponentProvider.getMappedName(owner, name);
+@@ -93,6 +96,10 @@ class ComponentNode extends Node {
+ 			ComponentPlaceholder placeholder =
+ 				new ComponentPlaceholder(name, owner, group, title, isActive, this, uniqueID);
+ 
++			if (!showHeader) {
++				placeholder.showHeader(false);
++			}
++
+ 			if (!containsPlaceholder(placeholder)) {
+ 				windowPlaceholders.add(placeholder);
+ 				restoredPlaceholders.add(placeholder);
+@@ -509,6 +516,7 @@ class ComponentNode extends Node {
+ 			elem.setAttribute("ACTIVE", "" + placeholder.isActive());
+ 			elem.setAttribute("GROUP", placeholder.getGroup());
+ 			elem.setAttribute("INSTANCE_ID", Long.toString(placeholder.getInstanceID()));
++			elem.setAttribute("SHOW_HEADER", Boolean.toString(placeholder.isHeaderShowing()));
+ 			root.addContent(elem);
+ 		}
+ 		return root;
+diff --git a/Ghidra/Framework/Docking/src/main/java/docking/ComponentPlaceholder.java b/Ghidra/Framework/Docking/src/main/java/docking/ComponentPlaceholder.java
+index 90fcfd74ba..cc31b150ac 100644
+--- a/Ghidra/Framework/Docking/src/main/java/docking/ComponentPlaceholder.java
++++ b/Ghidra/Framework/Docking/src/main/java/docking/ComponentPlaceholder.java
+@@ -105,6 +105,7 @@ public class ComponentPlaceholder {
+ 	void showHeader(boolean b) {
+ 		this.showHeader = b;
+ 		invalidateComponentNode();
++		disposeComponent();
+ 	}
+ 
+ 	boolean isHeaderShowing() {
+diff --git a/Ghidra/Framework/Docking/src/main/java/docking/DockableComponent.java b/Ghidra/Framework/Docking/src/main/java/docking/DockableComponent.java
+index bc79c0a14c..3a93106c2d 100644
+--- a/Ghidra/Framework/Docking/src/main/java/docking/DockableComponent.java
++++ b/Ghidra/Framework/Docking/src/main/java/docking/DockableComponent.java
+@@ -36,6 +36,21 @@ public class DockableComponent extends JPanel implements ContainerListener {
+ 
+ 	private static final Dimension MIN_DIM = new Dimension(100, 50);
+ 
++	private static final MouseAdapter VIEWPORT_FOCUS_HANDLER = new MouseAdapter() {
++		@Override
++		public void mousePressed(MouseEvent e) {
++			if (e.isConsumed()) {
++				return;
++			}
++			if (e.getSource() instanceof JViewport viewport) {
++				Component view = viewport.getView();
++				if (view != null && view.isEnabled() && view.isShowing()) {
++					view.requestFocusInWindow();
++				}
++			}
++		}
++	};
++
+ 	public static DropCode DROP_CODE;
+ 	public static ComponentPlaceholder TARGET_INFO;
+ 	public static ComponentPlaceholder DRAGGED_OVER_INFO;
+@@ -356,6 +371,15 @@ public class DockableComponent extends JPanel implements ContainerListener {
+ 		if (comp.isFocusable()) {
+ 			installPopupListenerFirst(comp);
+ 		}
++
++		if (comp instanceof JViewport viewport) {
++			installPopupListenerFirst(viewport);
++			installViewportFocusHandler(viewport);
++		}
++	}
++
++	private void installViewportFocusHandler(JViewport viewport) {
++		viewport.addMouseListener(VIEWPORT_FOCUS_HANDLER);
+ 	}
+ 
+ 	/**
+@@ -397,6 +421,9 @@ public class DockableComponent extends JPanel implements ContainerListener {
+ 			comp.setDropTarget(newDropTarget);
+ 		}
+ 		comp.removeMouseListener(popupListener);
++		if (comp instanceof JViewport) {
++			comp.removeMouseListener(VIEWPORT_FOCUS_HANDLER);
++		}
+ 	}
+ 
+ 	/**
+diff --git a/Ghidra/Framework/Docking/src/main/java/docking/DockingWindowManager.java b/Ghidra/Framework/Docking/src/main/java/docking/DockingWindowManager.java
+index 4663ad7faf..2712487f4a 100644
+--- a/Ghidra/Framework/Docking/src/main/java/docking/DockingWindowManager.java
++++ b/Ghidra/Framework/Docking/src/main/java/docking/DockingWindowManager.java
+@@ -679,6 +679,19 @@ public class DockingWindowManager implements PropertyChangeListener, Placeholder
+ 		}
+ 	}
+ 
++	public void toggleActiveComponentHeader() {
++		ComponentProvider provider = getActiveComponentProvider();
++		if (provider != null) {
++			ComponentPlaceholder placeholder = getActivePlaceholder(provider);
++			if (placeholder != null) {
++				boolean currentState = placeholder.isHeaderShowing();
++				placeholder.showHeader(!currentState);
++				setNextFocusPlaceholder(placeholder);
++				scheduleUpdate();
++			}
++		}
++	}
++
+ 	public void setIcon(ComponentProvider provider, Icon icon) {
+ 		ComponentPlaceholder placeholder = getActivePlaceholder(provider);
+ 		placeholder.setIcon(icon);
+diff --git a/Ghidra/Framework/Docking/src/main/java/docking/action/ToggleActiveComponentHeaderAction.java b/Ghidra/Framework/Docking/src/main/java/docking/action/ToggleActiveComponentHeaderAction.java
+new file mode 100644
+index 0000000000..550be39718
+--- /dev/null
++++ b/Ghidra/Framework/Docking/src/main/java/docking/action/ToggleActiveComponentHeaderAction.java
+@@ -0,0 +1,45 @@
++/* ###
++ * IP: GHIDRA
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package docking.action;
++
++import java.awt.event.InputEvent;
++import java.awt.event.KeyEvent;
++
++import javax.swing.KeyStroke;
++
++import docking.ActionContext;
++import docking.DockingWindowManager;
++
++public class ToggleActiveComponentHeaderAction extends DockingAction {
++
++	private DockingWindowManager windowManager;
++
++	public ToggleActiveComponentHeaderAction(DockingWindowManager winMgr) {
++		super("Toggle Component Title Bar/Header", DockingWindowManager.DOCKING_WINDOWS_OWNER);
++		this.windowManager = winMgr;
++
++		setDescription("Toggle visibility of the active component's title bar/header");
++		createSystemKeyBinding(KeyStroke.getKeyStroke(
++			KeyEvent.VK_H,
++			InputEvent.CTRL_DOWN_MASK | InputEvent.SHIFT_DOWN_MASK | InputEvent.ALT_DOWN_MASK));
++		setEnabled(true);
++	}
++
++	@Override
++	public void actionPerformed(ActionContext context) {
++		windowManager.toggleActiveComponentHeader();
++	}
++}
+diff --git a/Ghidra/Framework/Docking/src/main/java/docking/actions/ToolActions.java b/Ghidra/Framework/Docking/src/main/java/docking/actions/ToolActions.java
+index d49142f86a..f646dfdb6b 100644
+--- a/Ghidra/Framework/Docking/src/main/java/docking/actions/ToolActions.java
++++ b/Ghidra/Framework/Docking/src/main/java/docking/actions/ToolActions.java
+@@ -103,6 +103,8 @@ public class ToolActions implements DockingToolActions, PropertyChangeListener {
+ 
+ 		addSystemAction(new ShowActionChooserDialogAction());
+ 
++		addSystemAction(new ToggleActiveComponentHeaderAction(tool.getWindowManager()));
++
+ 		// helpful debugging actions
+ 		addSystemAction(new ShowFocusInfoAction());
+ 		addSystemAction(new ShowFocusCycleAction());
+-- 
+2.45.1
+
