@@ -1,0 +1,876 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Pal Marci <20556689+palmarci@users.noreply.github.com>
+Date: Sat, 20 Dec 2025 22:35:35 +0100
+Subject: [PATCH] 8813: TriCore: mapping CSFRs to RAM space, to fix MTCR/MFCR
+ instructions
+
+TriCore: mapping CSFR registers from sleigh to processor
+ specification. applying proposed CSFR fix from
+ https://github.com/NationalSecurityAgency/ghidra/pull/1640
+
+TriCore: map TC17x CSFRs to processor spec, fix in TC29x
+---
+ .../tricore/data/languages/tc172x.pspec       | 132 +++++++++++
+ .../tricore/data/languages/tc176x.pspec       | 220 ++++++++++++++----
+ .../tricore/data/languages/tc29x.pspec        | 135 +++++++++++
+ .../tricore/data/languages/tricore.sinc       | 120 +++++-----
+ 4 files changed, 504 insertions(+), 103 deletions(-)
+
+diff --git a/Ghidra/Processors/tricore/data/languages/tc172x.pspec b/Ghidra/Processors/tricore/data/languages/tc172x.pspec
+index 57dc6aeee9..1e46ea2325 100644
+--- a/Ghidra/Processors/tricore/data/languages/tc172x.pspec
++++ b/Ghidra/Processors/tricore/data/languages/tc172x.pspec
+@@ -10,6 +10,7 @@
+   <data_space space="ram"/>
+ 
+   <default_memory_blocks>
++    <memory_block name="CSFRs" start_address="0x0" length="0x10000" mode="rwv" initialized="false"/>
+ 	<memory_block name="LDRAM.13" start_address="0xd0000000" length="0x1e000" mode="rwv" initialized="false"/>
+ 	<memory_block name="SPRAM.13" start_address="0xd4000000" length="0x6000" mode="rwv" initialized="false"/>
+ 	<memory_block name="LDRAM.14" start_address="0xe8400000" length="0x1e000" mode="rwv" initialized="false"/>
+@@ -70,6 +71,137 @@
+   </default_memory_blocks>
+ 
+   <default_symbols>
++	<symbol name="CSFR_MMU_CON" address="0x8000" entry="false"/>
++	<symbol name="CSFR_MMU_ASI" address="0x8004" entry="false"/>
++	<symbol name="CSFR_MMU_TVA" address="0x800C" entry="false"/>
++	<symbol name="CSFR_MMU_TPA" address="0x8010" entry="false"/>
++	<symbol name="CSFR_MMU_TPX" address="0x8014" entry="false"/>
++	<symbol name="CSFR_MMU_TFA" address="0x8018" entry="false"/>
++	<symbol name="CSFR_BMACON" address="0x9004" entry="false"/>
++	<symbol name="CSFR_SMACON" address="0x900C" entry="false"/>
++	<symbol name="CSFR_DIEAR" address="0x9020" entry="false"/>
++	<symbol name="CSFR_DIETR" address="0x9024" entry="false"/>
++	<symbol name="CSFR_CCDIER" address="0x9028" entry="false"/>
++	<symbol name="CSFR_MIECON" address="0x9044" entry="false"/>
++	<symbol name="CSFR_PIEAR" address="0x9210" entry="false"/>
++	<symbol name="CSFR_PIETR" address="0x9214" entry="false"/>
++	<symbol name="CSFR_CCPIER" address="0x9218" entry="false"/>
++	<symbol name="CSFR_COMPAT" address="0x9400" entry="false"/>
++	<symbol name="CSFR_FPU_TRAP_CON" address="0xA000" entry="false"/>
++	<symbol name="CSFR_FPU_TRAP_PC" address="0xA004" entry="false"/>
++	<symbol name="CSFR_FPU_TRAP_OPC" address="0xA008" entry="false"/>
++	<symbol name="CSFR_FPU_TRAP_SRC1" address="0xA010" entry="false"/>
++	<symbol name="CSFR_FPU_TRAP_SRC2" address="0xA014" entry="false"/>
++	<symbol name="CSFR_FPU_TRAP_SRC3" address="0xA018" entry="false"/>
++	<symbol name="CSFR_FPU_ID" address="0xA020" entry="false"/>
++	<symbol name="CSFR_DPR0_0L" address="0xC000" entry="false"/>
++	<symbol name="CSFR_DPR0_0U" address="0xC004" entry="false"/>
++	<symbol name="CSFR_DPR0_1L" address="0xC008" entry="false"/>
++	<symbol name="CSFR_DPR0_1U" address="0xC00C" entry="false"/>
++	<symbol name="CSFR_DPR0_2L" address="0xC010" entry="false"/>
++	<symbol name="CSFR_DPR0_2U" address="0xC014" entry="false"/>
++	<symbol name="CSFR_DPR0_3L" address="0xC018" entry="false"/>
++	<symbol name="CSFR_DPR0_3U" address="0xC01C" entry="false"/>
++	<symbol name="CSFR_DPR1_0L" address="0xC400" entry="false"/>
++	<symbol name="CSFR_DPR1_0U" address="0xC404" entry="false"/>
++	<symbol name="CSFR_DPR1_1L" address="0xC408" entry="false"/>
++	<symbol name="CSFR_DPR1_1U" address="0xC40C" entry="false"/>
++	<symbol name="CSFR_DPR1_2L" address="0xC410" entry="false"/>
++	<symbol name="CSFR_DPR1_2U" address="0xC414" entry="false"/>
++	<symbol name="CSFR_DPR1_3L" address="0xC418" entry="false"/>
++	<symbol name="CSFR_DPR1_3U" address="0xC41C" entry="false"/>
++	<symbol name="CSFR_DPR2_0L" address="0xC800" entry="false"/>
++	<symbol name="CSFR_DPR2_0U" address="0xC804" entry="false"/>
++	<symbol name="CSFR_DPR2_1L" address="0xC808" entry="false"/>
++	<symbol name="CSFR_DPR2_1U" address="0xC80C" entry="false"/>
++	<symbol name="CSFR_DPR2_2L" address="0xC810" entry="false"/>
++	<symbol name="CSFR_DPR2_2U" address="0xC814" entry="false"/>
++	<symbol name="CSFR_DPR2_3L" address="0xC818" entry="false"/>
++	<symbol name="CSFR_DPR2_3U" address="0xC81C" entry="false"/>
++	<symbol name="CSFR_DPR3_0L" address="0xCC00" entry="false"/>
++	<symbol name="CSFR_DPR3_0U" address="0xCC04" entry="false"/>
++	<symbol name="CSFR_DPR3_1L" address="0xCC08" entry="false"/>
++	<symbol name="CSFR_DPR3_1U" address="0xCC0C" entry="false"/>
++	<symbol name="CSFR_DPR3_2L" address="0xCC10" entry="false"/>
++	<symbol name="CSFR_DPR3_2U" address="0xCC14" entry="false"/>
++	<symbol name="CSFR_DPR3_3L" address="0xCC18" entry="false"/>
++	<symbol name="CSFR_DPR3_3U" address="0xCC1C" entry="false"/>
++	<symbol name="CSFR_CPR0_0L" address="0xD000" entry="false"/>
++	<symbol name="CSFR_CPR0_0U" address="0xD004" entry="false"/>
++	<symbol name="CSFR_CPR0_1L" address="0xD008" entry="false"/>
++	<symbol name="CSFR_CPR0_1U" address="0xD00C" entry="false"/>
++	<symbol name="CSFR_CPR0_2L" address="0xD010" entry="false"/>
++	<symbol name="CSFR_CPR0_2U" address="0xD014" entry="false"/>
++	<symbol name="CSFR_CPR0_3L" address="0xD018" entry="false"/>
++	<symbol name="CSFR_CPR0_3U" address="0xD01C" entry="false"/>
++	<symbol name="CSFR_CPR1_0L" address="0xD400" entry="false"/>
++	<symbol name="CSFR_CPR1_0U" address="0xD404" entry="false"/>
++	<symbol name="CSFR_CPR1_1L" address="0xD408" entry="false"/>
++	<symbol name="CSFR_CPR1_1U" address="0xD40C" entry="false"/>
++	<symbol name="CSFR_CPR1_2L" address="0xD410" entry="false"/>
++	<symbol name="CSFR_CPR1_2U" address="0xD414" entry="false"/>
++	<symbol name="CSFR_CPR1_3L" address="0xD418" entry="false"/>
++	<symbol name="CSFR_CPR1_3U" address="0xD41C" entry="false"/>
++	<symbol name="CSFR_CPR2_0L" address="0xD800" entry="false"/>
++	<symbol name="CSFR_CPR2_0U" address="0xD804" entry="false"/>
++	<symbol name="CSFR_CPR2_1L" address="0xD808" entry="false"/>
++	<symbol name="CSFR_CPR2_1U" address="0xD80C" entry="false"/>
++	<symbol name="CSFR_CPR2_2L" address="0xD810" entry="false"/>
++	<symbol name="CSFR_CPR2_2U" address="0xD814" entry="false"/>
++	<symbol name="CSFR_CPR2_3L" address="0xD818" entry="false"/>
++	<symbol name="CSFR_CPR2_3U" address="0xD81C" entry="false"/>
++	<symbol name="CSFR_CPR3_0L" address="0xDC00" entry="false"/>
++	<symbol name="CSFR_CPR3_0U" address="0xDC04" entry="false"/>
++	<symbol name="CSFR_CPR3_1L" address="0xDC08" entry="false"/>
++	<symbol name="CSFR_CPR3_1U" address="0xDC0C" entry="false"/>
++	<symbol name="CSFR_CPR3_2L" address="0xDC10" entry="false"/>
++	<symbol name="CSFR_CPR3_2U" address="0xDC14" entry="false"/>
++	<symbol name="CSFR_CPR3_3L" address="0xDC18" entry="false"/>
++	<symbol name="CSFR_CPR3_3U" address="0xDC1C" entry="false"/>
++	<symbol name="CSFR_DPM0" address="0xE000" entry="false"/>
++	<symbol name="CSFR_DPM1" address="0xE080" entry="false"/>
++	<symbol name="CSFR_DPM2" address="0xE100" entry="false"/>
++	<symbol name="CSFR_DPM3" address="0xE180" entry="false"/>
++	<symbol name="CSFR_CPM0" address="0xE200" entry="false"/>
++	<symbol name="CSFR_CPM1" address="0xE280" entry="false"/>
++	<symbol name="CSFR_CPM2" address="0xE300" entry="false"/>
++	<symbol name="CSFR_CPM3" address="0xE380" entry="false"/>
++	<symbol name="CSFR_CCTRL" address="0xFC00" entry="false"/>
++	<symbol name="CSFR_CCNT" address="0xFC04" entry="false"/>
++	<symbol name="CSFR_ICNT" address="0xFC08" entry="false"/>
++	<symbol name="CSFR_M1CNT" address="0xFC0C" entry="false"/>
++	<symbol name="CSFR_M2CNT" address="0xFC10" entry="false"/>
++	<symbol name="CSFR_M3CNT" address="0xFC14" entry="false"/>
++	<symbol name="CSFR_DBGSR" address="0xFD00" entry="false"/>
++	<symbol name="CSFR_EXEVT" address="0xFD08" entry="false"/>
++	<symbol name="CSFR_CREVT" address="0xFD0C" entry="false"/>
++	<symbol name="CSFR_SWEVT" address="0xFD10" entry="false"/>
++	<symbol name="CSFR_TR0EVT" address="0xFD20" entry="false"/>
++	<symbol name="CSFR_TR1EVT" address="0xFD24" entry="false"/>
++	<symbol name="CSFR_DMS" address="0xFD40" entry="false"/>
++	<symbol name="CSFR_DCX" address="0xFD44" entry="false"/>
++	<symbol name="CSFR_DBGTCR" address="0xFD48" entry="false"/>
++	<symbol name="CSFR_PCX" address="0xFE00" entry="false"/>
++	<symbol name="CSFR_PCXI" address="0xFE00" entry="false"/>
++	<symbol name="CSFR_PSW" address="0xFE04" entry="false"/>
++	<symbol name="CSFR_PC" address="0xFE08" entry="false"/>
++	<symbol name="CSFR_SYSCON" address="0xFE14" entry="false"/>
++	<symbol name="CSFR_CPU_ID" address="0xFE18" entry="false"/>
++	<symbol name="CSFR_BIV" address="0xFE20" entry="false"/>
++	<symbol name="CSFR_BTV" address="0xFE24" entry="false"/>
++	<symbol name="CSFR_ISP" address="0xFE28" entry="false"/>
++	<symbol name="CSFR_ICR" address="0xFE2C" entry="false"/>
++	<symbol name="CSFR_FCX" address="0xFE38" entry="false"/>
++	<symbol name="CSFR_LCX" address="0xFE3C" entry="false"/>
++	<symbol name="CSFR_CPU_SBSRC3" address="0xFFB0" entry="false"/>
++	<symbol name="CSFR_CPU_SBSRC2" address="0xFFB4" entry="false"/>
++	<symbol name="CSFR_CPU_SBSRC1" address="0xFFB8" entry="false"/>
++	<symbol name="CSFR_CPU_SBSRC0" address="0xFFBC" entry="false"/>
++	<symbol name="CSFR_CPU_SRC3" address="0xFFF0" entry="false"/>
++	<symbol name="CSFR_CPU_SRC2" address="0xFFF4" entry="false"/>
++	<symbol name="CSFR_CPU_SRC1" address="0xFFF8" entry="false"/>
++	<symbol name="CSFR_CPU_SRC0" address="0xFFFC" entry="false"/>
++
+ 	<symbol name="ADEDCTL" address="0xf87ffc30" entry="false"/>
+ 	<symbol name="CPS_ID" address="0xf7e0ff08" entry="false"/>
+ 	<symbol name="CPU_SBSRC" address="0xf7e0ffbc" entry="false"/>
+diff --git a/Ghidra/Processors/tricore/data/languages/tc176x.pspec b/Ghidra/Processors/tricore/data/languages/tc176x.pspec
+index e5d96cdc2b..b058d3eaca 100644
+--- a/Ghidra/Processors/tricore/data/languages/tc176x.pspec
++++ b/Ghidra/Processors/tricore/data/languages/tc176x.pspec
+@@ -10,52 +10,184 @@
+   <data_space space="ram"/>
+   
+   <default_memory_blocks>
+-        <memory_block name="LDRAM.13" start_address="0xd0000000" length="0x1e000" mode="rwv" initialized="false"/>
+-	<memory_block name="SPRAM.13" start_address="0xd4000000" length="0x6000" mode="rwv" initialized="false"/>
+-	<memory_block name="LDRAM.14" start_address="0xe8400000" length="0x1e000" mode="rwv" initialized="false"/>
+-	<memory_block name="SPRAM.14" start_address="0xe8500000" length="0x6000" mode="rwv" initialized="false"/>
+-        <memory_block name="SCUWDT" start_address="0xf0000000" length="0x100" mode="rwv" initialized="false"/>
+-	<memory_block name="SBCU" start_address="0xf0000100" length="0x100" mode="rwv" initialized="false"/>
+-    	<memory_block name="STM" start_address="0xf0000200" length="0x100" mode="rwv" initialized="false"/>
+-	<memory_block name="CERBERUS" start_address="0xf0000400" length="0x100" mode="rwv" initialized="false"/>
+-	<memory_block name="MSC0" start_address="0xf0000800" length="0x100" mode="rwv" initialized="false"/>
+-	<memory_block name="ASC0" start_address="0xf0000A00" length="0x100" mode="rwv" initialized="false"/>
+-	<memory_block name="ASC1" start_address="0xf0000B00" length="0x100" mode="rwv" initialized="false"/>
+-	<memory_block name="PORT0" start_address="0xf0000C00" length="0x100" mode="rwv" initialized="false"/>
+-	<memory_block name="PORT1" start_address="0xf0000D00" length="0x100" mode="rwv" initialized="false"/>
+-	<memory_block name="PORT2" start_address="0xf0000E00" length="0x100" mode="rwv" initialized="false"/>
+-	<memory_block name="PORT3" start_address="0xf0000F00" length="0x100" mode="rwv" initialized="false"/>
+-	<memory_block name="PORT4" start_address="0xf0001000" length="0x100" mode="rwv" initialized="false"/>
+-	<memory_block name="PORT5" start_address="0xf0001100" length="0x100" mode="rwv" initialized="false"/>
+-	<memory_block name="GPTA0" start_address="0xf0001800" length="0x800" mode="rwv" initialized="false"/>
+-	<memory_block name="DMA" start_address="0xf0003C00" length="0x300" mode="rwv" initialized="false"/>
+-	<memory_block name="CAN" start_address="0xf0004000" length="0x4000" mode="rwv" initialized="false"/>
+-	<memory_block name="PCP.REG" start_address="0xf0043F00" length="0x100" mode="rwv" initialized="false"/>
+-	<memory_block name="PCP.PRAM" start_address="0xf0050000" length="0x2000" mode="rwv" initialized="false"/>
+-	<memory_block name="PCP.CMEM" start_address="0xf0060000" length="0x6000" mode="rwv" initialized="false"/>
+-	<memory_block name="SSC0" start_address="0xf0100100" length="0x100" mode="rwv" initialized="false"/>
+-	<memory_block name="SSC1" start_address="0xf0100200" length="0x100" mode="rwv" initialized="false"/>
+-	<memory_block name="FADC" start_address="0xf0100300" length="0x100" mode="rwv" initialized="false"/>
+-	<memory_block name="ADC0" start_address="0xf0100400" length="0x100" mode="rwv" initialized="false"/>
+-	<memory_block name="MLI0" start_address="0xf010C000" length="0x100" mode="rwv" initialized="false"/>
+-	<memory_block name="MLI1" start_address="0xf010C100" length="0x100" mode="rwv" initialized="false"/>
+-	<memory_block name="MCHK" start_address="0xf010C200" length="0x100" mode="rwv" initialized="false"/>
+-	<memory_block name="MLI0stw" start_address="0xf01e0000" length="0x8000" mode="rwv" initialized="false"/>
+-	<memory_block name="MLI1stw" start_address="0xf01e8000" length="0x8000" mode="rwv" initialized="false"/>
+-	<memory_block name="MLI0ltw" start_address="0xf0200000" length="0x40000" mode="rwv" initialized="false"/>
+-	<memory_block name="MLI1ltw" start_address="0xf0240000" length="0x40000" mode="rwv" initialized="false"/>
+-	<memory_block name="PORT12" start_address="0xf0300000" length="0x100" mode="rwv" initialized="false"/>
+-	<memory_block name="CPU.CPS" start_address="0xf7E0FF00" length="0x100" mode="rwv" initialized="false"/>
+-	<memory_block name="CPU.SFRGPR" start_address="0xf7E10000" length="0x10000" mode="rwv" initialized="false"/>
+-	<memory_block name="PMU" start_address="0xf8000500" length="0x100" mode="rwv" initialized="false"/>
+-	<memory_block name="PMUflash" start_address="0xf8001000" length="0x1400" mode="rwv" initialized="false"/>
+-	<memory_block name="CPU.DMI" start_address="0xf87FFC00" length="0x100" mode="rwv" initialized="false"/>
+-	<memory_block name="CPU.PMI" start_address="0xf87FFD00" length="0x100" mode="rwv" initialized="false"/>
+-	<memory_block name="LBCU" start_address="0xf87FFE00" length="0x100" mode="rwv" initialized="false"/>
+-	<memory_block name="LFI" start_address="0xf87FFF00" length="0x100" mode="rwv" initialized="false"/>
+-  </default_memory_blocks>
++    <memory_block name="CSFRs" start_address="0x0" length="0x10000" mode="rwv" initialized="false"/>
++    <memory_block name="LDRAM.13" start_address="0xd0000000" length="0x1e000" mode="rwv" initialized="false"/>
++    <memory_block name="SPRAM.13" start_address="0xd4000000" length="0x6000" mode="rwv" initialized="false"/>
++    <memory_block name="LDRAM.14" start_address="0xe8400000" length="0x1e000" mode="rwv" initialized="false"/>
++    <memory_block name="SPRAM.14" start_address="0xe8500000" length="0x6000" mode="rwv" initialized="false"/>
++    <memory_block name="SCUWDT" start_address="0xf0000000" length="0x100" mode="rwv" initialized="false"/>
++    <memory_block name="SBCU" start_address="0xf0000100" length="0x100" mode="rwv" initialized="false"/>
++    <memory_block name="STM" start_address="0xf0000200" length="0x100" mode="rwv" initialized="false"/>
++    <memory_block name="CERBERUS" start_address="0xf0000400" length="0x100" mode="rwv" initialized="false"/>
++    <memory_block name="MSC0" start_address="0xf0000800" length="0x100" mode="rwv" initialized="false"/>
++    <memory_block name="ASC0" start_address="0xf0000A00" length="0x100" mode="rwv" initialized="false"/>
++    <memory_block name="ASC1" start_address="0xf0000B00" length="0x100" mode="rwv" initialized="false"/>
++    <memory_block name="PORT0" start_address="0xf0000C00" length="0x100" mode="rwv" initialized="false"/>
++    <memory_block name="PORT1" start_address="0xf0000D00" length="0x100" mode="rwv" initialized="false"/>
++    <memory_block name="PORT2" start_address="0xf0000E00" length="0x100" mode="rwv" initialized="false"/>
++    <memory_block name="PORT3" start_address="0xf0000F00" length="0x100" mode="rwv" initialized="false"/>
++    <memory_block name="PORT4" start_address="0xf0001000" length="0x100" mode="rwv" initialized="false"/>
++    <memory_block name="PORT5" start_address="0xf0001100" length="0x100" mode="rwv" initialized="false"/>
++    <memory_block name="GPTA0" start_address="0xf0001800" length="0x800" mode="rwv" initialized="false"/>
++    <memory_block name="DMA" start_address="0xf0003C00" length="0x300" mode="rwv" initialized="false"/>
++    <memory_block name="CAN" start_address="0xf0004000" length="0x4000" mode="rwv" initialized="false"/>
++    <memory_block name="PCP.REG" start_address="0xf0043F00" length="0x100" mode="rwv" initialized="false"/>
++    <memory_block name="PCP.PRAM" start_address="0xf0050000" length="0x2000" mode="rwv" initialized="false"/>
++    <memory_block name="PCP.CMEM" start_address="0xf0060000" length="0x6000" mode="rwv" initialized="false"/>
++    <memory_block name="SSC0" start_address="0xf0100100" length="0x100" mode="rwv" initialized="false"/>
++    <memory_block name="SSC1" start_address="0xf0100200" length="0x100" mode="rwv" initialized="false"/>
++    <memory_block name="FADC" start_address="0xf0100300" length="0x100" mode="rwv" initialized="false"/>
++    <memory_block name="ADC0" start_address="0xf0100400" length="0x100" mode="rwv" initialized="false"/>
++    <memory_block name="MLI0" start_address="0xf010C000" length="0x100" mode="rwv" initialized="false"/>
++    <memory_block name="MLI1" start_address="0xf010C100" length="0x100" mode="rwv" initialized="false"/>
++    <memory_block name="MCHK" start_address="0xf010C200" length="0x100" mode="rwv" initialized="false"/>
++    <memory_block name="MLI0stw" start_address="0xf01e0000" length="0x8000" mode="rwv" initialized="false"/>
++    <memory_block name="MLI1stw" start_address="0xf01e8000" length="0x8000" mode="rwv" initialized="false"/>
++    <memory_block name="MLI0ltw" start_address="0xf0200000" length="0x40000" mode="rwv" initialized="false"/>
++    <memory_block name="MLI1ltw" start_address="0xf0240000" length="0x40000" mode="rwv" initialized="false"/>
++    <memory_block name="PORT12" start_address="0xf0300000" length="0x100" mode="rwv" initialized="false"/>
++    <memory_block name="CPU.CPS" start_address="0xf7E0FF00" length="0x100" mode="rwv" initialized="false"/>
++    <memory_block name="CPU.SFRGPR" start_address="0xf7E10000" length="0x10000" mode="rwv" initialized="false"/>
++    <memory_block name="PMU" start_address="0xf8000500" length="0x100" mode="rwv" initialized="false"/>
++    <memory_block name="PMUflash" start_address="0xf8001000" length="0x1400" mode="rwv" initialized="false"/>
++    <memory_block name="CPU.DMI" start_address="0xf87FFC00" length="0x100" mode="rwv" initialized="false"/>
++    <memory_block name="CPU.PMI" start_address="0xf87FFD00" length="0x100" mode="rwv" initialized="false"/>
++    <memory_block name="LBCU" start_address="0xf87FFE00" length="0x100" mode="rwv" initialized="false"/>
++    <memory_block name="LFI" start_address="0xf87FFF00" length="0x100" mode="rwv" initialized="false"/>
++    </default_memory_blocks>
+ 
+   <default_symbols>
++	<symbol name="CSFR_MMU_CON" address="0x8000" entry="false"/>
++		<symbol name="CSFR_MMU_ASI" address="0x8004" entry="false"/>
++		<symbol name="CSFR_MMU_TVA" address="0x800C" entry="false"/>
++		<symbol name="CSFR_MMU_TPA" address="0x8010" entry="false"/>
++		<symbol name="CSFR_MMU_TPX" address="0x8014" entry="false"/>
++		<symbol name="CSFR_MMU_TFA" address="0x8018" entry="false"/>
++		<symbol name="CSFR_BMACON" address="0x9004" entry="false"/>
++		<symbol name="CSFR_SMACON" address="0x900C" entry="false"/>
++		<symbol name="CSFR_DIEAR" address="0x9020" entry="false"/>
++		<symbol name="CSFR_DIETR" address="0x9024" entry="false"/>
++		<symbol name="CSFR_CCDIER" address="0x9028" entry="false"/>
++		<symbol name="CSFR_MIECON" address="0x9044" entry="false"/>
++		<symbol name="CSFR_PIEAR" address="0x9210" entry="false"/>
++		<symbol name="CSFR_PIETR" address="0x9214" entry="false"/>
++		<symbol name="CSFR_CCPIER" address="0x9218" entry="false"/>
++		<symbol name="CSFR_COMPAT" address="0x9400" entry="false"/>
++		<symbol name="CSFR_FPU_TRAP_CON" address="0xA000" entry="false"/>
++		<symbol name="CSFR_FPU_TRAP_PC" address="0xA004" entry="false"/>
++		<symbol name="CSFR_FPU_TRAP_OPC" address="0xA008" entry="false"/>
++		<symbol name="CSFR_FPU_TRAP_SRC1" address="0xA010" entry="false"/>
++		<symbol name="CSFR_FPU_TRAP_SRC2" address="0xA014" entry="false"/>
++		<symbol name="CSFR_FPU_TRAP_SRC3" address="0xA018" entry="false"/>
++		<symbol name="CSFR_FPU_ID" address="0xA020" entry="false"/>
++		<symbol name="CSFR_DPR0_0L" address="0xC000" entry="false"/>
++		<symbol name="CSFR_DPR0_0U" address="0xC004" entry="false"/>
++		<symbol name="CSFR_DPR0_1L" address="0xC008" entry="false"/>
++		<symbol name="CSFR_DPR0_1U" address="0xC00C" entry="false"/>
++		<symbol name="CSFR_DPR0_2L" address="0xC010" entry="false"/>
++		<symbol name="CSFR_DPR0_2U" address="0xC014" entry="false"/>
++		<symbol name="CSFR_DPR0_3L" address="0xC018" entry="false"/>
++		<symbol name="CSFR_DPR0_3U" address="0xC01C" entry="false"/>
++		<symbol name="CSFR_DPR1_0L" address="0xC400" entry="false"/>
++		<symbol name="CSFR_DPR1_0U" address="0xC404" entry="false"/>
++		<symbol name="CSFR_DPR1_1L" address="0xC408" entry="false"/>
++		<symbol name="CSFR_DPR1_1U" address="0xC40C" entry="false"/>
++		<symbol name="CSFR_DPR1_2L" address="0xC410" entry="false"/>
++		<symbol name="CSFR_DPR1_2U" address="0xC414" entry="false"/>
++		<symbol name="CSFR_DPR1_3L" address="0xC418" entry="false"/>
++		<symbol name="CSFR_DPR1_3U" address="0xC41C" entry="false"/>
++		<symbol name="CSFR_DPR2_0L" address="0xC800" entry="false"/>
++		<symbol name="CSFR_DPR2_0U" address="0xC804" entry="false"/>
++		<symbol name="CSFR_DPR2_1L" address="0xC808" entry="false"/>
++		<symbol name="CSFR_DPR2_1U" address="0xC80C" entry="false"/>
++		<symbol name="CSFR_DPR2_2L" address="0xC810" entry="false"/>
++		<symbol name="CSFR_DPR2_2U" address="0xC814" entry="false"/>
++		<symbol name="CSFR_DPR2_3L" address="0xC818" entry="false"/>
++		<symbol name="CSFR_DPR2_3U" address="0xC81C" entry="false"/>
++		<symbol name="CSFR_DPR3_0L" address="0xCC00" entry="false"/>
++		<symbol name="CSFR_DPR3_0U" address="0xCC04" entry="false"/>
++		<symbol name="CSFR_DPR3_1L" address="0xCC08" entry="false"/>
++		<symbol name="CSFR_DPR3_1U" address="0xCC0C" entry="false"/>
++		<symbol name="CSFR_DPR3_2L" address="0xCC10" entry="false"/>
++		<symbol name="CSFR_DPR3_2U" address="0xCC14" entry="false"/>
++		<symbol name="CSFR_DPR3_3L" address="0xCC18" entry="false"/>
++		<symbol name="CSFR_DPR3_3U" address="0xCC1C" entry="false"/>
++		<symbol name="CSFR_CPR0_0L" address="0xD000" entry="false"/>
++		<symbol name="CSFR_CPR0_0U" address="0xD004" entry="false"/>
++		<symbol name="CSFR_CPR0_1L" address="0xD008" entry="false"/>
++		<symbol name="CSFR_CPR0_1U" address="0xD00C" entry="false"/>
++		<symbol name="CSFR_CPR0_2L" address="0xD010" entry="false"/>
++		<symbol name="CSFR_CPR0_2U" address="0xD014" entry="false"/>
++		<symbol name="CSFR_CPR0_3L" address="0xD018" entry="false"/>
++		<symbol name="CSFR_CPR0_3U" address="0xD01C" entry="false"/>
++		<symbol name="CSFR_CPR1_0L" address="0xD400" entry="false"/>
++		<symbol name="CSFR_CPR1_0U" address="0xD404" entry="false"/>
++		<symbol name="CSFR_CPR1_1L" address="0xD408" entry="false"/>
++		<symbol name="CSFR_CPR1_1U" address="0xD40C" entry="false"/>
++		<symbol name="CSFR_CPR1_2L" address="0xD410" entry="false"/>
++		<symbol name="CSFR_CPR1_2U" address="0xD414" entry="false"/>
++		<symbol name="CSFR_CPR1_3L" address="0xD418" entry="false"/>
++		<symbol name="CSFR_CPR1_3U" address="0xD41C" entry="false"/>
++		<symbol name="CSFR_CPR2_0L" address="0xD800" entry="false"/>
++		<symbol name="CSFR_CPR2_0U" address="0xD804" entry="false"/>
++		<symbol name="CSFR_CPR2_1L" address="0xD808" entry="false"/>
++		<symbol name="CSFR_CPR2_1U" address="0xD80C" entry="false"/>
++		<symbol name="CSFR_CPR2_2L" address="0xD810" entry="false"/>
++		<symbol name="CSFR_CPR2_2U" address="0xD814" entry="false"/>
++		<symbol name="CSFR_CPR2_3L" address="0xD818" entry="false"/>
++		<symbol name="CSFR_CPR2_3U" address="0xD81C" entry="false"/>
++		<symbol name="CSFR_CPR3_0L" address="0xDC00" entry="false"/>
++		<symbol name="CSFR_CPR3_0U" address="0xDC04" entry="false"/>
++		<symbol name="CSFR_CPR3_1L" address="0xDC08" entry="false"/>
++		<symbol name="CSFR_CPR3_1U" address="0xDC0C" entry="false"/>
++		<symbol name="CSFR_CPR3_2L" address="0xDC10" entry="false"/>
++		<symbol name="CSFR_CPR3_2U" address="0xDC14" entry="false"/>
++		<symbol name="CSFR_CPR3_3L" address="0xDC18" entry="false"/>
++		<symbol name="CSFR_CPR3_3U" address="0xDC1C" entry="false"/>
++		<symbol name="CSFR_DPM0" address="0xE000" entry="false"/>
++		<symbol name="CSFR_DPM1" address="0xE080" entry="false"/>
++		<symbol name="CSFR_DPM2" address="0xE100" entry="false"/>
++		<symbol name="CSFR_DPM3" address="0xE180" entry="false"/>
++		<symbol name="CSFR_CPM0" address="0xE200" entry="false"/>
++		<symbol name="CSFR_CPM1" address="0xE280" entry="false"/>
++		<symbol name="CSFR_CPM2" address="0xE300" entry="false"/>
++		<symbol name="CSFR_CPM3" address="0xE380" entry="false"/>
++		<symbol name="CSFR_CCTRL" address="0xFC00" entry="false"/>
++		<symbol name="CSFR_CCNT" address="0xFC04" entry="false"/>
++		<symbol name="CSFR_ICNT" address="0xFC08" entry="false"/>
++		<symbol name="CSFR_M1CNT" address="0xFC0C" entry="false"/>
++		<symbol name="CSFR_M2CNT" address="0xFC10" entry="false"/>
++		<symbol name="CSFR_M3CNT" address="0xFC14" entry="false"/>
++		<symbol name="CSFR_DBGSR" address="0xFD00" entry="false"/>
++		<symbol name="CSFR_EXEVT" address="0xFD08" entry="false"/>
++		<symbol name="CSFR_CREVT" address="0xFD0C" entry="false"/>
++		<symbol name="CSFR_SWEVT" address="0xFD10" entry="false"/>
++		<symbol name="CSFR_TR0EVT" address="0xFD20" entry="false"/>
++		<symbol name="CSFR_TR1EVT" address="0xFD24" entry="false"/>
++		<symbol name="CSFR_DMS" address="0xFD40" entry="false"/>
++		<symbol name="CSFR_DCX" address="0xFD44" entry="false"/>
++		<symbol name="CSFR_DBGTCR" address="0xFD48" entry="false"/>
++		<symbol name="CSFR_PCX" address="0xFE00" entry="false"/>
++		<symbol name="CSFR_PCXI" address="0xFE00" entry="false"/>
++		<symbol name="CSFR_PSW" address="0xFE04" entry="false"/>
++		<symbol name="CSFR_PC" address="0xFE08" entry="false"/>
++		<symbol name="CSFR_SYSCON" address="0xFE14" entry="false"/>
++		<symbol name="CSFR_CPU_ID" address="0xFE18" entry="false"/>
++		<symbol name="CSFR_BIV" address="0xFE20" entry="false"/>
++		<symbol name="CSFR_BTV" address="0xFE24" entry="false"/>
++		<symbol name="CSFR_ISP" address="0xFE28" entry="false"/>
++		<symbol name="CSFR_ICR" address="0xFE2C" entry="false"/>
++		<symbol name="CSFR_FCX" address="0xFE38" entry="false"/>
++		<symbol name="CSFR_LCX" address="0xFE3C" entry="false"/>
++		<symbol name="CSFR_CPU_SBSRC3" address="0xFFB0" entry="false"/>
++		<symbol name="CSFR_CPU_SBSRC2" address="0xFFB4" entry="false"/>
++		<symbol name="CSFR_CPU_SBSRC1" address="0xFFB8" entry="false"/>
++		<symbol name="CSFR_CPU_SBSRC0" address="0xFFBC" entry="false"/>
++		<symbol name="CSFR_CPU_SRC3" address="0xFFF0" entry="false"/>
++		<symbol name="CSFR_CPU_SRC2" address="0xFFF4" entry="false"/>
++		<symbol name="CSFR_CPU_SRC1" address="0xFFF8" entry="false"/>
++		<symbol name="CSFR_CPU_SRC0" address="0xFFFC" entry="false"/>
++
+     <symbol name="SCU_ID" address="0xf0000008" entry="false"/>
+     <symbol name="SCU_SCLKFDR" address="0xf000000c" entry="false"/>
+     <symbol name="RST_REQ" address="0xf0000010" entry="false"/>
+diff --git a/Ghidra/Processors/tricore/data/languages/tc29x.pspec b/Ghidra/Processors/tricore/data/languages/tc29x.pspec
+index bc492e27f9..9c4572bd25 100644
+--- a/Ghidra/Processors/tricore/data/languages/tc29x.pspec
++++ b/Ghidra/Processors/tricore/data/languages/tc29x.pspec
+@@ -10,6 +10,7 @@
+   <data_space space="ram"/>
+ 			
+   <default_memory_blocks>
++    <memory_block name="CSFRs" start_address="0x0" length="0x10000" mode="rwv" initialized="false"/>
+     <memory_block name="CPU2_DSPR" start_address="0x50000000" length="0x1E000" mode="rwv" initialized="false"/>
+     <memory_block name="CPU2_PSPR" start_address="0x50100000" length="0x8000" mode="rwv" initialized="false"/>
+     <memory_block name="CPU1_DSPR" start_address="0x60000000" length="0x1E000" mode="rwv" initialized="false"/>
+@@ -99,6 +100,140 @@
+   </default_memory_blocks>
+ 
+   <default_symbols>
++    <symbol name="CSFR_BIV" address="0xfe20" entry="false">
++    <symbol name="CSFR_BTV" address="0xfe24" entry="false">
++    <symbol name="CSFR_CCNT" address="0xfc04" entry="false">
++    <symbol name="CSFR_CCTRL" address="0xfc00" entry="false">
++    <symbol name="CSFR_COMPAT" address="0x9400" entry="false">
++    <symbol name="CSFR_CORE_ID" address="0xfe1c" entry="false">
++    <symbol name="CSFR_CPR0_L" address="0xd000" entry="false">
++    <symbol name="CSFR_CPR0_U" address="0xd004" entry="false">
++    <symbol name="CSFR_CPR1_L" address="0xd008" entry="false">
++    <symbol name="CSFR_CPR1_U" address="0xd00c" entry="false">
++    <symbol name="CSFR_CPR2_L" address="0xd010" entry="false">
++    <symbol name="CSFR_CPR2_U" address="0xd014" entry="false">
++    <symbol name="CSFR_CPR3_L" address="0xd018" entry="false">
++    <symbol name="CSFR_CPR3_U" address="0xd01c" entry="false">
++    <symbol name="CSFR_CPR4_L" address="0xd020" entry="false">
++    <symbol name="CSFR_CPR4_U" address="0xd024" entry="false">
++    <symbol name="CSFR_CPR5_L" address="0xd028" entry="false">
++    <symbol name="CSFR_CPR5_U" address="0xd02c" entry="false">
++    <symbol name="CSFR_CPR6_L" address="0xd030" entry="false">
++    <symbol name="CSFR_CPR6_U" address="0xd034" entry="false">
++    <symbol name="CSFR_CPR7_L" address="0xd038" entry="false">
++    <symbol name="CSFR_CPR7_U" address="0xd03c" entry="false">
++    <symbol name="CSFR_CPU_ID" address="0xfe18" entry="false">
++    <symbol name="CSFR_CPXE0" address="0xe000" entry="false">
++    <symbol name="CSFR_CPXE1" address="0xe004" entry="false">
++    <symbol name="CSFR_CPXE2" address="0xe008" entry="false">
++    <symbol name="CSFR_CPXE3" address="0xe00c" entry="false">
++    <symbol name="CSFR_CREVT" address="0xfd0c" entry="false">
++    <symbol name="CSFR_CUS_ID" address="0xfe50" entry="false">
++    <symbol name="CSFR_DATR" address="0x9018" entry="false">
++    <symbol name="CSFR_DBGSR" address="0xfd00" entry="false">
++    <symbol name="CSFR_DBGTCR" address="0xfd48" entry="false">
++    <symbol name="CSFR_DCON0" address="0x9040" entry="false">
++    <symbol name="CSFR_DCON2" address="0x9000" entry="false">
++    <symbol name="CSFR_DCX" address="0xfd44" entry="false">
++    <symbol name="CSFR_DEADD" address="0x901c" entry="false">
++    <symbol name="CSFR_DIEAR" address="0x9020" entry="false">
++    <symbol name="CSFR_DIETR" address="0x9024" entry="false">
++    <symbol name="CSFR_DMS" address="0xfd40" entry="false">
++    <symbol name="CSFR_DPR0_L" address="0xc000" entry="false">
++    <symbol name="CSFR_DPR0_U" address="0xc004" entry="false">
++    <symbol name="CSFR_DPR10_L" address="0xc050" entry="false">
++    <symbol name="CSFR_DPR10_U" address="0xc054" entry="false">
++    <symbol name="CSFR_DPR11_L" address="0xc058" entry="false">
++    <symbol name="CSFR_DPR11_U" address="0xc05c" entry="false">
++    <symbol name="CSFR_DPR12_L" address="0xc060" entry="false">
++    <symbol name="CSFR_DPR12_U" address="0xc064" entry="false">
++    <symbol name="CSFR_DPR13_L" address="0xc068" entry="false">
++    <symbol name="CSFR_DPR13_U" address="0xc06c" entry="false">
++    <symbol name="CSFR_DPR14_L" address="0xc070" entry="false">
++    <symbol name="CSFR_DPR14_U" address="0xc074" entry="false">
++    <symbol name="CSFR_DPR15_L" address="0xc078" entry="false">
++    <symbol name="CSFR_DPR15_U" address="0xc07c" entry="false">
++    <symbol name="CSFR_DPR1_L" address="0xc008" entry="false">
++    <symbol name="CSFR_DPR1_U" address="0xc00c" entry="false">
++    <symbol name="CSFR_DPR2_L" address="0xc010" entry="false">
++    <symbol name="CSFR_DPR2_U" address="0xc014" entry="false">
++    <symbol name="CSFR_DPR3_L" address="0xc018" entry="false">
++    <symbol name="CSFR_DPR3_U" address="0xc01c" entry="false">
++    <symbol name="CSFR_DPR4_L" address="0xc020" entry="false">
++    <symbol name="CSFR_DPR4_U" address="0xc024" entry="false">
++    <symbol name="CSFR_DPR5_L" address="0xc028" entry="false">
++    <symbol name="CSFR_DPR5_U" address="0xc02c" entry="false">
++    <symbol name="CSFR_DPR6_L" address="0xc030" entry="false">
++    <symbol name="CSFR_DPR6_U" address="0xc034" entry="false">
++    <symbol name="CSFR_DPR7_L" address="0xc038" entry="false">
++    <symbol name="CSFR_DPR7_U" address="0xc03c" entry="false">
++    <symbol name="CSFR_DPR8_L" address="0xc040" entry="false">
++    <symbol name="CSFR_DPR8_U" address="0xc044" entry="false">
++    <symbol name="CSFR_DPR9_L" address="0xc048" entry="false">
++    <symbol name="CSFR_DPR9_U" address="0xc04c" entry="false">
++    <symbol name="CSFR_DPRE0" address="0xe010" entry="false">
++    <symbol name="CSFR_DPRE1" address="0xe014" entry="false">
++    <symbol name="CSFR_DPRE2" address="0xe018" entry="false">
++    <symbol name="CSFR_DPRE3" address="0xe01c" entry="false">
++    <symbol name="CSFR_DPWE0" address="0xe020" entry="false">
++    <symbol name="CSFR_DPWE1" address="0xe024" entry="false">
++    <symbol name="CSFR_DPWE2" address="0xe028" entry="false">
++    <symbol name="CSFR_DPWE3" address="0xe02c" entry="false">
++    <symbol name="CSFR_DSTR" address="0x9010" entry="false">
++    <symbol name="CSFR_EXEVT" address="0xfd08" entry="false">
++    <symbol name="CSFR_FCX" address="0xfe38" entry="false">
++    <symbol name="CSFR_FPU_TRAP_CON" address="0xa000" entry="false">
++    <symbol name="CSFR_FPU_TRAP_OPC" address="0xa008" entry="false">
++    <symbol name="CSFR_FPU_TRAP_PC" address="0xa004" entry="false">
++    <symbol name="CSFR_FPU_TRAP_SRC1" address="0xa010" entry="false">
++    <symbol name="CSFR_FPU_TRAP_SRC2" address="0xa014" entry="false">
++    <symbol name="CSFR_FPU_TRAP_SRC3" address="0xa018" entry="false">
++    <symbol name="CSFR_ICNT" address="0xfc08" entry="false">
++    <symbol name="CSFR_ICR" address="0xfe2c" entry="false">
++    <symbol name="CSFR_ISP" address="0xfe28" entry="false">
++    <symbol name="CSFR_LCX" address="0xfe3c" entry="false">
++    <symbol name="CSFR_M1CNT" address="0xfc0c" entry="false">
++    <symbol name="CSFR_M2CNT" address="0xfc10" entry="false">
++    <symbol name="CSFR_M3CNT" address="0xfc14" entry="false">
++    <symbol name="CSFR_PC" address="0xfe08" entry="false">
++    <symbol name="CSFR_PCON0" address="0x920c" entry="false">
++    <symbol name="CSFR_PCON1" address="0x9204" entry="false">
++    <symbol name="CSFR_PCON2" address="0x9208" entry="false">
++    <symbol name="CSFR_PCXI" address="0xfe00" entry="false">
++    <symbol name="CSFR_PIEAR" address="0x9210" entry="false">
++    <symbol name="CSFR_PIETR" address="0x9214" entry="false">
++    <symbol name="CSFR_PMA0" address="0x8100" entry="false">
++    <symbol name="CSFR_PMA1" address="0x8104" entry="false">
++    <symbol name="CSFR_PMA2" address="0x8108" entry="false">
++    <symbol name="CSFR_PSTR" address="0x9200" entry="false">
++    <symbol name="CSFR_PSW" address="0xfe04" entry="false">
++    <symbol name="CSFR_SEGEN" address="0x1030" entry="false">
++    <symbol name="CSFR_SMACON" address="0x900c" entry="false">
++    <symbol name="CSFR_SR" address="0x0xf0036114" entry="false">
++    <symbol name="CSFR_SWEVT" address="0xfd10" entry="false">
++    <symbol name="CSFR_SYSCON" address="0xfe14" entry="false">
++    <symbol name="CSFR_TASK_ASI" address="0x8004" entry="false">
++    <symbol name="CSFR_TPS_CON" address="0xe400" entry="false">
++    <symbol name="CSFR_TPS_TIMER0" address="0xe404" entry="false">
++    <symbol name="CSFR_TPS_TIMER1" address="0xe408" entry="false">
++    <symbol name="CSFR_TPS_TIMER2" address="0xe40c" entry="false">
++    <symbol name="CSFR_TR0_ADR" address="0xf004" entry="false">
++    <symbol name="CSFR_TR0_EVT" address="0xf000" entry="false">
++    <symbol name="CSFR_TR1_ADR" address="0xf00c" entry="false">
++    <symbol name="CSFR_TR1_EVT" address="0xf008" entry="false">
++    <symbol name="CSFR_TR2_ADR" address="0xf014" entry="false">
++    <symbol name="CSFR_TR2_EVT" address="0xf010" entry="false">
++    <symbol name="CSFR_TR3_ADR" address="0xf01c" entry="false">
++    <symbol name="CSFR_TR3_EVT" address="0xf018" entry="false">
++    <symbol name="CSFR_TR4_ADR" address="0xf024" entry="false">
++    <symbol name="CSFR_TR4_EVT" address="0xf020" entry="false">
++    <symbol name="CSFR_TR5_ADR" address="0xf02c" entry="false">
++    <symbol name="CSFR_TR5_EVT" address="0xf028" entry="false">
++    <symbol name="CSFR_TR6_ADR" address="0xf034" entry="false">
++    <symbol name="CSFR_TR6_EVT" address="0xf030" entry="false">
++    <symbol name="CSFR_TR7_ADR" address="0xf03c" entry="false">
++    <symbol name="CSFR_TR7_EVT" address="0xf038" entry="false">
++    <symbol name="CSFR_TRIG_ACC" address="0xfd30" entry="false">
+     <symbol name="STM0_CLC" address="0xf0000000" entry="false"/>
+     <symbol name="STM0_ID" address="0xf0000008" entry="false"/>
+     <symbol name="STM0_TIM0" address="0xf0000010" entry="false"/>
+diff --git a/Ghidra/Processors/tricore/data/languages/tricore.sinc b/Ghidra/Processors/tricore/data/languages/tricore.sinc
+index a573c02d32..6178b6c70d 100644
+--- a/Ghidra/Processors/tricore/data/languages/tricore.sinc
++++ b/Ghidra/Processors/tricore/data/languages/tricore.sinc
+@@ -18,7 +18,7 @@ define register offset=0xFF80 size=8 [ p0    p2    p4    p6    p8    p10     p12
+ define register offset=0xFF80 size=4 [ a0 a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15 ];
+ 
+ # Program Counter
+-define register offset=0xFE08 size=4 [ PC ];
++#define register offset=0xFE08 size=4 [ PC ];
+ 
+ # Program Status Word Register
+ define register offset=0xFE04 size=4 [ PSW ];
+@@ -69,10 +69,10 @@ define register offset=0xFE00 size=4 [ PCXI ];
+ # ;
+ 
+ # Interrupt Stack Pointer Register
+-define register offset=0xFE28 size=4 [ ISP ];
++#define register offset=0xFE28 size=4 [ ISP ];
+ 
+ # System Control Register
+-define register offset=0xFE14 size=4 [ SYSCON ];
++# define register offset=0xFE14 size=4 [ SYSCON ];
+ # define context SYSCON
+ #   FCDSF=(0,0)
+ #   PROTEN=(1,1)
+@@ -84,7 +84,7 @@ define register offset=0xFE14 size=4 [ SYSCON ];
+ # ;
+ 
+ # CPU Identification Register
+-define register offset=0xFE18 size=4 [ CPU_ID ];
++# define register offset=0xFE18 size=4 [ CPU_ID ];
+ # define context CPU_ID
+ #   MOD_REV=(0,7)
+ #   MOD_32B=(8,15)
+@@ -92,14 +92,14 @@ define register offset=0xFE18 size=4 [ CPU_ID ];
+ # ;
+ 
+ # Core Identification Register
+-define register offset=0xFE1C size=4 [ CORE_ID ];
++#define register offset=0xFE1C size=4 [ CORE_ID ];
+ 
+ 
+ # Compatibility Mode Register
+-define register offset=0x9400 size=4 [ COMPAT ];
++#define register offset=0x9400 size=4 [ COMPAT ];
+ 
+ # SIST Mode Access Control Register
+-define register offset=0x900C size=4 [ SMACON ];
++#define register offset=0x900C size=4 [ SMACON ];
+ 
+ # Free CSA List Head Pointer Register
+ define register offset=0xFE38 size=4 [ FCX ];
+@@ -128,69 +128,69 @@ define register offset=0xFE2E size=1 [ PIPN ];
+ @define ICR_CCPN "ICR[0,8]"
+ 
+ # Base Interrupt Vector Table Pointer
+-define register offset=0xFE20 size=4 [ BIV ];
++# define register offset=0xFE20 size=4 [ BIV ];
+ # define context BIV
+ #   VSS=(0,0)
+ # ;
+ 
+ # Base Trap Vector Table Pointer
+-define register offset=0xFE24 size=4 [ BTV ];
++# define register offset=0xFE24 size=4 [ BTV ];
+ 
+ # Program Synchronous Error Trap Register
+-define register offset=0x9200 size=4 [ PSTR ];
++# define register offset=0x9200 size=4 [ PSTR ];
+ 
+ # Data Synchronous Error Trap Register
+-define register offset=0x9010 size=4 [ DSTR ];
++# define register offset=0x9010 size=4 [ DSTR ];
+ 
+ # Data Asynchronous Error Trap Register
+-define register offset=0x9018 size=4 [ DATR ];
++# define register offset=0x9018 size=4 [ DATR ];
+ 
+ # Data Error Address Register
+-define register offset=0x901C size=4 [ DEADD ];
++# define register offset=0x901C size=4 [ DEADD ];
+ 
+ # Program Integrity Error Trap Register
+-define register offset=0x9214 size=4 [ PIETR ];
++# define register offset=0x9214 size=4 [ PIETR ];
+ 
+ # Program Integrity Error Address Register
+-define register offset=0x9210 size=4 [ PIEAR ];
++# define register offset=0x9210 size=4 [ PIEAR ];
+ 
+ # Data Integrity Error Trap Register
+-define register offset=0x9024 size=4 [ DIETR ];
++# define register offset=0x9024 size=4 [ DIETR ];
+ 
+ # Data Integrity Error Address Register
+-define register offset=0x9020 size=4 [ DIEAR ];
++# define register offset=0x9020 size=4 [ DIEAR ];
+ 
+ # Programmable Memory Access Register
+-define register offset=0x8100 size=4 [ PMA0 PMA1 PMA2 ];
++# define register offset=0x8100 size=4 [ PMA0 PMA1 PMA2 ];
+ 
+ # Program Memory Configuration Registers
+-define register offset=0x9204 size=4 [ PCON1 PCON2 PCON0 ];
++# define register offset=0x9204 size=4 [ PCON1 PCON2 PCON0 ];
+ 
+ # Data Memory Configuration Registers
+-define register offset=0x9040 size=4 [ DCON0 ];
+-define register offset=0x9008 size=4 [ DCON1 ];
+-define register offset=0x9000 size=4 [ DCON2 ];
++# define register offset=0x9040 size=4 [ DCON0 ];
++# define register offset=0x9008 size=4 [ DCON1 ];
++# define register offset=0x9000 size=4 [ DCON2 ];
+ 
+ # Data Protection Range Register Lower & Upper Bound
+-define register offset=0xC000 size=4 [ DPR0_L DPR0_U DPR1_L DPR1_U DPR2_L DPR2_U DPR3_L DPR3_U DPR4_L DPR4_U DPR5_L DPR5_U DPR6_L DPR6_U DPR7_L DPR7_U DPR8_L DPR8_U DPR9_L DPR9_U DPR10_L DPR10_U DPR11_L DPR11_U DPR12_L DPR12_U DPR13_L DPR13_U DPR14_L DPR14_U DPR15_L DPR15_U ];
++# define register offset=0xC000 size=4 [ DPR0_L DPR0_U DPR1_L DPR1_U DPR2_L DPR2_U DPR3_L DPR3_U DPR4_L DPR4_U DPR5_L DPR5_U DPR6_L DPR6_U DPR7_L DPR7_U DPR8_L DPR8_U DPR9_L DPR9_U DPR10_L DPR10_U DPR11_L DPR11_U DPR12_L DPR12_U DPR13_L DPR13_U DPR14_L DPR14_U DPR15_L DPR15_U ];
+ 
+ # Code Protection Range Register Lower & Upper Bound
+-define register offset=0xD000 size=4 [ CPR0_L CPR0_U CPR1_L CPR1_U CPR2_L CPR2_U CPR3_L CPR3_U CPR4_L CPR4_U CPR5_L CPR5_U CPR6_L CPR6_U CPR7_L CPR7_U CPR8_L CPR8_U CPR9_L CPR9_U CPR10_L CPR10_U CPR11_L CPR11_U CPR12_L CPR12_U CPR13_L CPR13_U CPR14_L CPR14_U CPR15_L CPR15_U ];
++# define register offset=0xD000 size=4 [ CPR0_L CPR0_U CPR1_L CPR1_U CPR2_L CPR2_U CPR3_L CPR3_U CPR4_L CPR4_U CPR5_L CPR5_U CPR6_L CPR6_U CPR7_L CPR7_U CPR8_L CPR8_U CPR9_L CPR9_U CPR10_L CPR10_U CPR11_L CPR11_U CPR12_L CPR12_U CPR13_L CPR13_U CPR14_L CPR14_U CPR15_L CPR15_U ];
+ 
+ # Data Protection Read Enable Set Configuration Register
+-define register offset=0xE010 size=4 [ DPRE_0 DPRE_1 DPRE_2 DPRE_3 ];
++# define register offset=0xE010 size=4 [ DPRE_0 DPRE_1 DPRE_2 DPRE_3 ];
+ 
+ # Data Protection Write Enable Set Configuration Register
+-define register offset=0xE020 size=4 [ DPWE_0 DPWE_1 DPWE_2 DPWE_3 ];
++# define register offset=0xE020 size=4 [ DPWE_0 DPWE_1 DPWE_2 DPWE_3 ];
+ 
+ # Code Protection Execute Enable Set Configuration Register
+-define register offset=0xE000 size=4 [ CPXE_0 CPXE_1 CPXE_2 CPXE_3 ];
++# define register offset=0xE000 size=4 [ CPXE_0 CPXE_1 CPXE_2 CPXE_3 ];
+ 
+ # Temporal Protect System (TPS) Timer Register
+-define register offset=0xE404 size=4 [ TPS_TIMER0 TPS_TIMER1 TPS_TIMER2 ];
++# define register offset=0xE404 size=4 [ TPS_TIMER0 TPS_TIMER1 TPS_TIMER2 ];
+ 
+ # TPS Control Register
+-define register offset=0xE400 size=4 [ TPS_CON ];
++#define register offset=0xE400 size=4 [ TPS_CON ];
+ # define context TPS_CON
+ #   TEXP0=(0,0)
+ #   TEXP1=(1,1)
+@@ -199,7 +199,7 @@ define register offset=0xE400 size=4 [ TPS_CON ];
+ # ;
+ 
+ # FPU Trap Control Register
+-define register offset=0xA000 size=4 [ FPU_TRAP_CON ];
++#define register offset=0xA000 size=4 [ FPU_TRAP_CON ];
+ # define context FPU_TRAP_CON
+ #   TST=(0,0)
+ #   TCL=(1,1)
+@@ -217,10 +217,10 @@ define register offset=0xA000 size=4 [ FPU_TRAP_CON ];
+ # ;
+ 
+ # FPU Trapping Instruction Program Counter
+-define register offset=0xA004 size=4 [ FPU_TRAP_PC ];
++# define register offset=0xA004 size=4 [ FPU_TRAP_PC ];
+ 
+ # FPU Trapping Instruction Opcode Register
+-define register offset=0xA008 size=4 [ FPU_TRAP_OPC ];
++# define register offset=0xA008 size=4 [ FPU_TRAP_OPC ];
+ # define context FPU_TRAP_OPC
+ #   OPC=(0,7)
+ #   FMT=(8,8)
+@@ -228,7 +228,7 @@ define register offset=0xA008 size=4 [ FPU_TRAP_OPC ];
+ # ;
+ 
+ # FPU Trapping Instruction Operand SRC1 Register
+-define register offset=0xA010 size=4 [ FPU_TRAP_SRC1 FPU_TRAP_SRC2 FPU_TRAP_SRC3 ];
++# define register offset=0xA010 size=4 [ FPU_TRAP_SRC1 FPU_TRAP_SRC2 FPU_TRAP_SRC3 ];
+ 
+ 
+ 
+@@ -253,7 +253,7 @@ define register offset=0xFD00 size=4 [ DBGSR ];
+ @define DBGSR_DE "DBGSR[0,1]"
+ 
+ # External Event Register
+-define register offset=0xFD08 size=4 [ EXEVT ];
++# define register offset=0xFD08 size=4 [ EXEVT ];
+ # define context EXEVT
+ #   EVTA=(0,2)
+ #   BBM=(3,3)
+@@ -263,7 +263,7 @@ define register offset=0xFD08 size=4 [ EXEVT ];
+ # ;
+ 
+ # Core Register Access Event Register
+-define register offset=0xFD0C size=4 [ CREVT ];
++# define register offset=0xFD0C size=4 [ CREVT ];
+ # define context CREVT
+ #   CREVT_EVTA=(0,2)
+ #   CREVT_BBM=(3,3)
+@@ -273,7 +273,7 @@ define register offset=0xFD0C size=4 [ CREVT ];
+ # ;
+ 
+ # Software Debug Event Register
+-define register offset=0xFD10 size=4 [ SWEVT ];
++# define register offset=0xFD10 size=4 [ SWEVT ];
+ # define context SWEVT
+ #   SWEVT_EVTA=(0,2)
+ #   SWEVT_BBM=(3,3)
+@@ -283,7 +283,7 @@ define register offset=0xFD10 size=4 [ SWEVT ];
+ # ;
+ 
+ # Trigger Accumulator Register
+-define register offset=0xFD30 size=4 [ TRIG_ACC ];
++# define register offset=0xFD30 size=4 [ TRIG_ACC ];
+ # define context TRIC_ACC
+ #   T0=(0,0)
+ #   T1=(1,1)
+@@ -296,22 +296,22 @@ define register offset=0xFD30 size=4 [ TRIG_ACC ];
+ # ;
+ 
+ # Debug Monitor Start Address Register
+-define register offset=0xFD40 size=4 [ DMS ];
++# define register offset=0xFD40 size=4 [ DMS ];
+ 
+ # Debug Context Save Area Pointer Register
+-define register offset=0xFD44 size=4 [ DCX ];
++# define register offset=0xFD44 size=4 [ DCX ];
+ 
+ # Debug Trap Control Register
+-define register offset=0xFD48 size=4 [ DBGTCR ];
++# define register offset=0xFD48 size=4 [ DBGTCR ];
+ 
+ # Application Space Identifier Register
+-define register offset=0x8004 size=4 [ TASK_ASI ];
++# define register offset=0x8004 size=4 [ TASK_ASI ];
+ 
+ # Software Breakpoint Service Request Control
+ #define register offset=0xFFB0 size=4 [ SBSRC3 SBSRC2 SBSRC1 SBSRC0 ];
+ 
+ # Trigger Event Configuration / Address Register
+-define register offset=0xF000 size=4 [ TR0EVT TR0ADR TR1EVT TR1ADR TR2EVT TRA2DR TR3EVT TR3ADR TR4EVT TR4ADR TR5EVT TR5ADR TR6EVT TR6ADR TR7EVT TR7ADR ];
++# define register offset=0xF000 size=4 [ TR0EVT TR0ADR TR1EVT TR1ADR TR2EVT TRA2DR TR3EVT TR3ADR TR4EVT TR4ADR TR5EVT TR5ADR TR6EVT TR6ADR TR7EVT TR7ADR ];
+ # define context TRxEVT
+ #   EVTA=(0,2)
+ #   BBM=(3,3)
+@@ -328,7 +328,7 @@ define register offset=0xF000 size=4 [ TR0EVT TR0ADR TR1EVT TR1ADR TR2EVT TRA2DR
+ 
+ 
+ # Counter Control Register
+-define register offset=0xFC00 size=4 [ CCTRL ];
++# define register offset=0xFC00 size=4 [ CCTRL ];
+ # define context CCTRL
+ #   CM=(0,0)
+ #   CE=(1,1)
+@@ -338,13 +338,13 @@ define register offset=0xFC00 size=4 [ CCTRL ];
+ # ;
+ 
+ # CPU Clock Cycle Count Register
+-define register offset=0xFC04 size=4 [ CCNT ];
++# define register offset=0xFC04 size=4 [ CCNT ];
+ 
+ # Instruction Count Register
+-define register offset=0xFC08 size=4 [ ICNT ];
++# define register offset=0xFC08 size=4 [ ICNT ];
+ 
+ # Mult-Count Register
+-define register offset=0xFC0C size=4 [ M1CNT M2CNT M3CNT ];
++# define register offset=0xFC0C size=4 [ M1CNT M2CNT M3CNT ];
+ 
+ 
+ 
+@@ -5062,14 +5062,15 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ :mfcr Rd2831,const1227Z is PCPMode=0 & ( op0007=0x4d & op0811=0x0 ; Rd2831 ) & const1227Z
+ {
+ 	Rd2831 = *[ram]:4 const1227Z;
++	#Rd2831 = mfcr(const1227Z);
+ }
+ 
+-@if defined(TRICORE_V2)
+-:mffr Rd2831,Rd0811 is PCPMode=0 & Rd0811 & op0007=0x4b & op1215=0x0 ; Rd2831 & op1627=0x1d1
+-{
+-	Rd2831 = *[ram]:4 Rd0811;
+-}
+-@endif
++# @if defined(TRICORE_V2)
++# :mffr Rd2831,Rd0811 is PCPMode=0 & Rd0811 & op0007=0x4b & op1215=0x0 ; Rd2831 & op1627=0x1d1
++# {
++# 	Rd2831 = *[ram]:4 Rd0811;
++# }
++# @endif
+ 
+ # MIN D[c], D[a], D[b] (RR)
+ :min Rd2831,Rd0811,Rd1215 is PCPMode=0 & Rd0811 & Rd1215 & op0007=0xb ; Rd2831 & op1627=0x180
+@@ -6384,14 +6385,15 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ :mtcr const1227Z,Rd0811 is PCPMode=0 & ( Rd0811 & op0007=0xcd ; op2831=0x0 ) & const1227Z
+ {
+ 	*[ram]:4 const1227Z = Rd0811;
++	#mtcr(const1227Z, Rd0811);
+ }
+ 
+-@if defined(TRICORE_V2)
+-:mtfr Rd0811,Rd1215 is PCPMode=0 & Rd0811 & Rd1215 & op0007=0x4b ; op1631=0x1c1
+-{
+-	*[ram]:4 Rd1215 = Rd0811;
+-}
+-@endif
++# @if defined(TRICORE_V2)
++# :mtfr Rd0811,Rd1215 is PCPMode=0 & Rd0811 & Rd1215 & op0007=0x4b ; op1631=0x1c1
++# {
++# 	*[ram]:4 Rd1215 = Rd0811;
++# }
++# @endif
+ 
+ # MUL D[a], D[b] (SRR)
+ :mul Rd0811,Rd1215 is PCPMode=0 & Rd0811 & Rd1215 & op0007=0xe2
+@@ -6673,7 +6675,7 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ @endif
+ 
+ @if defined(TRICORE_RIDER_B) || defined(TRICORE_RIDER_D) || defined(TRICORE_V2)
+-# # MULR.H D[c], D[a], D[b] LL, n (RR1)
++# MULR.H D[c], D[a], D[b] LL, n (RR1)
+ :mulr.h Rd2831,Rd0811,Rd1215^"ll",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0xb3 ; Rd2831 & const1617Z & op1827=0xe
+ {
+ 	local sc1 = (Rd0811[16,16] == 0x8000) && (Rd1215[0,16] == 0x8000) && (const1617Z == 1);
+-- 
+2.45.1
+
