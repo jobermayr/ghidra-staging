@@ -1,0 +1,119 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Luke=20Sern=C3=A9?= <luke.serne@solconmail.nl>
+Date: Mon, 29 Dec 2025 16:12:59 +0100
+Subject: [PATCH] 8834: Decompiler: Add space after comma in function call
+
+Decompiler: Add space after comma in function call Also adds
+ a space after the comma in the function prototype. This patch adds a new
+ OpToken type for the comma token, that is treated like "OpToken::binary", but
+ instead of printing spaces both before and after the token, the spaces are
+ only printed after the token.
+---
+ .../decompile/cpp/include/ghidra/printlanguage.hh    |  1 +
+ .../Features/Decompiler/src/decompile/cpp/printc.cc  | 12 ++++++++----
+ .../Decompiler/src/decompile/cpp/printlanguage.cc    | 10 ++++++++--
+ 3 files changed, 17 insertions(+), 6 deletions(-)
+
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/printlanguage.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/printlanguage.hh
+index b8f6e490f6..f43333490b 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/printlanguage.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/printlanguage.hh
+@@ -86,6 +86,7 @@ public:
+   /// \brief The possible types of operator token
+   enum tokentype {
+     binary,			///< Binary operator form (printed between its inputs)
++    binary_trailspace,	///< Binary operator (printed between its inputs), only space after operator
+     unary_prefix,		///< Unary operator form (printed before its input)
+     postsurround,		///< Function or array operator form
+     presurround,		///< Modifier form (like a cast operation)
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/printc.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/printc.cc
+index 8dfeb4bb8a..375691003c 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/printc.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/printc.cc
+@@ -19,7 +19,7 @@
+ namespace ghidra {
+ 
+ // Operator tokens for expressions
+-//                        token #in prec assoc   optype       space bump
++//                        token #in prec assoc   optype       space bump negate
+ OpToken PrintC::hidden = { "", "", 1, 70, false, OpToken::hiddenfunction, 0, 0, (OpToken *)0 };
+ OpToken PrintC::scope = { "::", "", 2, 70, true, OpToken::binary, 0, 0, (OpToken *)0 };
+ OpToken PrintC::object_member = { ".", "", 2, 66, true, OpToken::binary, 0, 0, (OpToken *)0  };
+@@ -58,7 +58,7 @@ OpToken PrintC::boolean_and = { "&&", "", 2, 22, false, OpToken::binary, 1, 0, (
+ OpToken PrintC::boolean_xor = { "^^", "", 2, 20, false, OpToken::binary, 1, 0, (OpToken *)0 };
+ OpToken PrintC::boolean_or = { "||", "", 2, 18, false, OpToken::binary, 1, 0, (OpToken *)0 };
+ OpToken PrintC::assignment = { "=", "", 2, 14, false, OpToken::binary, 1, 5, (OpToken *)0 };
+-OpToken PrintC::comma = { ",", "", 2, 2, true, OpToken::binary, 0, 0, (OpToken *)0 };
++OpToken PrintC::comma = { ",", "", 2, 2, true, OpToken::binary_trailspace, 1, 0, (OpToken *)0 };
+ OpToken PrintC::new_op = { "", "", 2, 62, false, OpToken::space, 1, 0, (OpToken *)0 };
+ 
+ // Inplace assignment operators
+@@ -2250,8 +2250,10 @@ void PrintC::emitPrototypeInputs(const FuncProto *proto)
+   else {
+     bool printComma = false;
+     for(int4 i=0;i<sz;++i) {
+-      if (printComma)
++      if (printComma) {
+ 	emit->print(COMMA);
++	emit->spaces(1);
++      }
+       ProtoParameter *param = proto->getParam(i);
+       if (isSet(hide_thisparam) && param->isThisPointer())
+ 	continue;
+@@ -2269,8 +2271,10 @@ void PrintC::emitPrototypeInputs(const FuncProto *proto)
+     }
+   }
+   if (proto->isDotdotdot()) {
+-    if (sz != 0)
++    if (sz != 0) {
+       emit->print(COMMA);
++emit->spaces(1);
++    }
+     emit->print(DOTDOTDOT);
+   }
+ }
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/printlanguage.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/printlanguage.cc
+index e1e451bf19..943efe3a40 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/printlanguage.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/printlanguage.cc
+@@ -281,6 +281,7 @@ bool PrintLanguage::parentheses(const OpToken *op2)
+   switch(topToken->type) {
+   case OpToken::space:
+   case OpToken::binary:
++  case OpToken::binary_trailspace:
+     if (topToken->precedence > op2->precedence) return true;
+     if (topToken->precedence < op2->precedence) return false;
+     if (topToken->associative && (topToken == op2)) return false;
+@@ -308,7 +309,7 @@ bool PrintLanguage::parentheses(const OpToken *op2)
+     if (topToken->precedence < op2->precedence) return false;
+     // If the precedences are equal, we know this postsurround
+     // comes after, so op2 being first doesn't need parens
+-    if ((op2->type==OpToken::postsurround)||(op2->type==OpToken::binary)) return false;
++    if ((op2->type==OpToken::postsurround)||(op2->type==OpToken::binary)||(op2->type==OpToken::binary_trailspace)) return false;
+     //    if (associative && (this == &op2)) return false;
+     return true;
+   case OpToken::presurround:
+@@ -322,7 +323,7 @@ bool PrintLanguage::parentheses(const OpToken *op2)
+     if ((stage==0)&&(revpol.size() > 1)) {	// If there is an unresolved previous token
+       // New token is printed next to the previous token.
+       const OpToken *prevToken = revpol[revpol.size()-2].tok;
+-      if (prevToken->type != OpToken::binary && prevToken->type != OpToken::unary_prefix)
++      if (prevToken->type != OpToken::binary && prevToken->type != OpToken::unary_prefix && prevToken->type != OpToken::binary_trailspace)
+ 	return false;
+       if (prevToken->precedence < op2->precedence) return false;
+       // If precedence is equal, make sure we don't treat two tokens as associative,
+@@ -347,6 +348,11 @@ void PrintLanguage::emitOp(const ReversePolish &entry)
+     emit->tagOp(entry.tok->print1,EmitMarkup::no_color,entry.op);
+     emit->spaces(entry.tok->spacing,entry.tok->bump);
+     break;
++  case OpToken::binary_trailspace:
++    if (entry.visited!=1) return;
++    emit->tagOp(entry.tok->print1,EmitMarkup::no_color,entry.op);
++    emit->spaces(entry.tok->spacing,entry.tok->bump); // Spacing around operator
++    break;
+   case OpToken::unary_prefix:
+     if (entry.visited!=0) return;
+     emit->tagOp(entry.tok->print1,EmitMarkup::no_color,entry.op);
+-- 
+2.45.1
+
