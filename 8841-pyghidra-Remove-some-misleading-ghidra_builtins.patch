@@ -1,0 +1,82 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Jakub Stasiak <jakub@stasiak.at>
+Date: Tue, 30 Dec 2025 22:03:17 +0100
+Subject: [PATCH] 8841: pyghidra: Remove some misleading ghidra_builtins
+ entries
+
+I compared the exports declared in the ghidra_builtins stubs against
+what was actually available at runtime and I found some names that were
+present in the stubs but not available:
+
+    decorate
+    decorateOutput
+    loadPropertiesFile
+    loadVariablesFromState
+    updateStateFromVariables
+    promptToKeepChangesOnException
+
+As far as I can tell:
+
+* Most of these are protected methods and it's enought to check
+  child's kind fo exclude them.
+* The above leaves out decorateOutput which is a field but it's not
+  explicitly exposed, therefore I copied the explicitly exposed field
+  list from elsewhere.
+
+The side effect of the above is the PyGhidraGhidraScript.run method is
+also no longer present in the stubs *but* it's still available at
+runtime. I think this is fine? I don't see much point in calling it
+anyway, all you'll get is an recursion explosion.
+---
+ .../doclets/typestubs/PythonTypeStubType.java | 31 ++++++++++++++++++-
+ 1 file changed, 30 insertions(+), 1 deletion(-)
+
+diff --git a/GhidraBuild/BuildFiles/Doclets/src/main/java/ghidra/doclets/typestubs/PythonTypeStubType.java b/GhidraBuild/BuildFiles/Doclets/src/main/java/ghidra/doclets/typestubs/PythonTypeStubType.java
+index 056767d8ea..a5497437ef 100644
+--- a/GhidraBuild/BuildFiles/Doclets/src/main/java/ghidra/doclets/typestubs/PythonTypeStubType.java
++++ b/GhidraBuild/BuildFiles/Doclets/src/main/java/ghidra/doclets/typestubs/PythonTypeStubType.java
+@@ -620,11 +620,40 @@ class PythonTypeStubType extends PythonTypeStubElement<TypeElement> {
+ 			return true;
+ 		}
+ 		if (protectedScope) {
+-			return isProtected(child);
++			return isProtected(child) &&
++				// I think only fields can be explicitly exposed via @ExposedFields.
++				child.getKind() == ElementKind.FIELD &&
++				isExplicitlyExposedField((VariableElement) child);
+ 		}
+ 		return false;
+ 	}
+ 
++	/**
++	 * Checks if a field is explicitly exposed through @ExposedFields annotation.
++	 *
++	 * @param field the field to check
++	 * @return true if this field is explicitly exposed
++	 */
++	private boolean isExplicitlyExposedField(VariableElement field) {
++		Name fieldName = field.getSimpleName();
++
++		// Hardcoded list of exposed fields from PyGhidraScriptProvider
++		String[] exposedFields = {
++			"currentAddress", "currentLocation", "currentSelection",
++			"currentHighlight", "currentProgram", "monitor",
++			"potentialPropertiesFileLocs", "propertiesFileParams",
++			"sourceFile", "state", "writer", "errorWriter"
++		};
++
++		for (String exposedField : exposedFields) {
++			if (fieldName.contentEquals(exposedField)) {
++				return true;
++			}
++		}
++
++		return false;
++	}
++
+ 	/**
+ 	 * Gets the base class to use for this type
+ 	 *
+-- 
+2.45.1
+
