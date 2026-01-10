@@ -1,0 +1,52 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Peter Fedak <pzfedak@gmail.com>
+Date: Sat, 10 Jan 2026 00:33:28 -0500
+Subject: [PATCH] 8863: SuperH: fix an endianness issue in mac.w
+
+The mac.w instruction is supposed to load two bytes from the addresses in the registers. The previous code was giving pcode like
+```
+nodeA:4 = LOAD register
+nodeB:2 = SUBPIECE(nodeA, 0)
+```
+which loads the low-order half. This was incorrect for a big-endian system, where it effectively skips two bytes.
+
+It's possible this is really a sleigh bug, but I'm not sure what the semantics of `*:2` are supposed to be.
+---
+ Ghidra/Processors/SuperH/data/languages/superh.sinc | 10 ++++++----
+ 1 file changed, 6 insertions(+), 4 deletions(-)
+
+diff --git a/Ghidra/Processors/SuperH/data/languages/superh.sinc b/Ghidra/Processors/SuperH/data/languages/superh.sinc
+index 6235f067a0..213f829e43 100644
+--- a/Ghidra/Processors/SuperH/data/languages/superh.sinc
++++ b/Ghidra/Processors/SuperH/data/languages/superh.sinc
+@@ -1219,7 +1219,9 @@ MovMUReg2: MovMUReg2_15 is MovMUReg2_15 {
+ :mac.w  @rm_04_07+,@rn_08_11+  is opcode_12_15=0b0100 & rn_08_11 & rm_04_07 & opcode_00_03=0b1111 
+ {
+     # FIXME: review this instruction
+-    
++
++	local loadm:2;
++	local loadn:2;
+     local tempm:4;
+     local tempn:4;
+     local dest;
+@@ -1227,13 +1229,13 @@ MovMUReg2: MovMUReg2_15 is MovMUReg2_15 {
+     local ans;
+     local templ:4;
+     
+-    tempn = *:2 rn_08_11;
++    loadn = * rn_08_11;
+     rn_08_11 = rn_08_11 + 2;    
+-    tempm = *:2 rm_04_07;
++    loadm = * rm_04_07;
+     rm_04_07 = rm_04_07 + 2;
+     
+     templ = macl;
+-    tempm = sext(tempn:2) * sext(tempm:2);
++    tempm = sext(loadn) * sext(loadm);
+     
+     dest = (macl s< 0);
+     
+-- 
+2.45.1
+
