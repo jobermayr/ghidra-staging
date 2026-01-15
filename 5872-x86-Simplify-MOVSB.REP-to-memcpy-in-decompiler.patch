@@ -9,10 +9,10 @@ Subject: [PATCH] 5872: x86: Simplify MOVSB.REP to memcpy in decompiler
  2 files changed, 419 insertions(+), 48 deletions(-)
 
 diff --git a/Ghidra/Processors/x86/data/languages/ia.sinc b/Ghidra/Processors/x86/data/languages/ia.sinc
-index 05751cb074..5a9d4cef5f 100644
+index 635d130aad..5c4909cb1a 100644
 --- a/Ghidra/Processors/x86/data/languages/ia.sinc
 +++ b/Ghidra/Processors/x86/data/languages/ia.sinc
-@@ -1448,34 +1448,48 @@ moffs64: segWide^[imm32]  is addrsize=1 & highseg=1 & segWide & imm32   { tmp:8
+@@ -1450,34 +1450,48 @@ moffs64: segWide^[imm32]  is addrsize=1 & highseg=1 & segWide & imm32   { tmp:8
  # TODO: segment register offset in 64bit might not be right
  
  # String memory access
@@ -86,7 +86,7 @@ index 05751cb074..5a9d4cef5f 100644
  @endif
  
  rm8: Rmr8   is mod=3 & Rmr8     { export Rmr8; }
-@@ -1550,6 +1564,8 @@ rep: ".REP" is ((repprefx=1 & repneprefx=0)|(repprefx=0 & repneprefx=1)) & addrs
+@@ -1552,6 +1566,8 @@ rep: ".REP" is ((repprefx=1 & repneprefx=0)|(repprefx=0 & repneprefx=1)) & addrs
  rep: ".REP" is ((repprefx=1 & repneprefx=0)|(repprefx=0 & repneprefx=1)) & addrsize=2  { if (RCX==0) goto inst_next; RCX=RCX-1; }
  @endif
  rep:        is repprefx=0 & repneprefx=0			{ }
@@ -95,7 +95,7 @@ index 05751cb074..5a9d4cef5f 100644
  
  reptail:	is ((repprefx=1 & repneprefx=0)|(repprefx=0 & repneprefx=1))			{ goto inst_start; }
  reptail:	is repprefx=0 & repneprefx=0			{ }
-@@ -2349,6 +2365,38 @@ macro fucompe(val1, val2) {
+@@ -2351,6 +2367,38 @@ macro fucompe(val1, val2) {
      SF = 0;
  }
  
@@ -134,7 +134,7 @@ index 05751cb074..5a9d4cef5f 100644
  # The base level constructors
  #   The prefixes
  :^instruction is instrPhase=0 & over=0x2e; instruction     [ segover=1; ]  {} # CS override
-@@ -3083,11 +3131,51 @@ define pcodeop clzero;
+@@ -3085,11 +3133,51 @@ define pcodeop clzero;
  :CMP Reg64,rm64     is $(LONGMODE_ON) & vexMode=0 & opsize=2 & byte=0x3b; rm64 & Reg64 ...       { local temp:8 = rm64; subflags(Reg64,temp); local diff = Reg64 - temp; resultflags(diff); }
  @endif
  
@@ -190,7 +190,7 @@ index 05751cb074..5a9d4cef5f 100644
  @endif
  
  # See 'lockable.sinc' for memory destination, lockable variants
-@@ -4107,11 +4195,35 @@ define pcodeop LocalDescriptorTableRegister;
+@@ -4141,11 +4229,35 @@ define pcodeop LocalDescriptorTableRegister;
  }
  @endif
  
@@ -230,7 +230,7 @@ index 05751cb074..5a9d4cef5f 100644
  @endif
  
  :LOOP   rel8        is vexMode=0 & addrsize=0 & byte=0xE2; rel8             { CX = CX -1; if (CX!=0) goto rel8; }
-@@ -4329,11 +4441,135 @@ define pcodeop swap_bytes;
+@@ -4363,11 +4475,135 @@ define pcodeop swap_bytes;
  :MOVNTI Mem,Reg64       is $(LONGMODE_ON) & vexMode=0 & opsize = 2; byte=0xf; byte=0xc3; Mem & Reg64 ...     { *Mem = Reg64; }
  @endif
  
@@ -370,7 +370,7 @@ index 05751cb074..5a9d4cef5f 100644
  @endif
  
  :MOVSX Reg16,rm8    is vexMode=0 & opsize=0 & byte=0xf; byte=0xbe; rm8 & Reg16 ...  { Reg16 = sext(rm8); }
-@@ -4832,11 +5068,64 @@ define pcodeop smm_restore_state;
+@@ -4866,11 +5102,64 @@ define pcodeop smm_restore_state;
  :SBB  Reg64,rm64       is $(LONGMODE_ON) & vexMode=0 & opsize=2 & byte=0x1b; rm64 & Reg64 ...						{ subCarryFlags( Reg64, rm64 ); resultflags(Reg64); }
  @endif
  
@@ -439,7 +439,7 @@ index 05751cb074..5a9d4cef5f 100644
  @endif
  
  :SET^cc rm8     is vexMode=0 & byte=0xf; row=9 & cc; rm8                { rm8 = cc; }
-@@ -5000,11 +5289,48 @@ define pcodeop stac;
+@@ -5034,11 +5323,48 @@ define pcodeop stac;
  
  :STMXCSR m32        is vexMode=0 & byte=0xf; byte=0xae; ( mod != 0b11 & reg_opcode=3 ) ... & m32 { m32 = MXCSR; }
  

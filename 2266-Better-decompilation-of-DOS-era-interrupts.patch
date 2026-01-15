@@ -4,271 +4,456 @@ Date: Tue, 22 Apr 2025 22:56:17 +0200
 Subject: [PATCH] 2266: Better decompilation of DOS era interrupts
 
 ---
- Ghidra/Processors/x86/data/languages/ia.sinc | 251 ++++++++++++++++++-
- 1 file changed, 250 insertions(+), 1 deletion(-)
+ Ghidra/Processors/x86/certification.manifest  |   1 +
+ Ghidra/Processors/x86/data/languages/ia.sinc  | 287 +++++++++++++++++-
+ .../x86/ghidra_scripts/InterruptContext.java  | 121 ++++++++
+ 3 files changed, 407 insertions(+), 2 deletions(-)
+ create mode 100644 Ghidra/Processors/x86/ghidra_scripts/InterruptContext.java
 
+diff --git a/Ghidra/Processors/x86/certification.manifest b/Ghidra/Processors/x86/certification.manifest
+index c150f1550e..62da5d42e3 100644
+--- a/Ghidra/Processors/x86/certification.manifest
++++ b/Ghidra/Processors/x86/certification.manifest
+@@ -100,5 +100,6 @@ data/patterns/x86gcc_patterns.xml||GHIDRA||||END|
+ data/patterns/x86gcc_prepatterns.xml||GHIDRA||||END|
+ data/patterns/x86win_patterns.xml||GHIDRA||||END|
+ data/patterns/x86win_prepatterns.xml||GHIDRA||||END|
++ghidra_scripts/InterruptContext.java||GHIDRA||||END|
+ src/main/java/ghidra/app/plugin/core/analysis/DOSInterruptAnalyzer.java||GHIDRA||||END|
+ src/main/java/ghidra/app/plugin/core/analysis/InterruptAnalyzer.java||GHIDRA||||END|
 diff --git a/Ghidra/Processors/x86/data/languages/ia.sinc b/Ghidra/Processors/x86/data/languages/ia.sinc
-index ebcc9ee2a6..aec167f5d4 100644
+index ebcc9ee2a6..c3b1d6f25f 100644
 --- a/Ghidra/Processors/x86/data/languages/ia.sinc
 +++ b/Ghidra/Processors/x86/data/languages/ia.sinc
-@@ -3658,7 +3658,256 @@ enterFrames: low5 is low5 { tmp:1 = low5; export tmp; }
+@@ -468,8 +468,10 @@ define context contextreg
+   evexBType=(47,47)     # Used for Disp8*N (see table 2-34 in 325462-sdm-vol-1-2abcd-3abcd-4.pdf)
+   evexTType=(44,47)     # Used for Disp8*N (see table 2-35 in 325462-sdm-vol-1-2abcd-3abcd-4.pdf)
+   evexDisp8=(44,46)
+-  reservedHigh=(48,63)  # reserved for future use
+ 
++  ctxAX = (48,63)
++    ctxAL = (48,55)
++    ctxAH = (56,63)
+ ;
+ 
+ 
+@@ -3658,7 +3660,288 @@ enterFrames: low5 is low5 { tmp:1 = low5; export tmp; }
  
  :INT1           is vexMode=0 & byte=0xf1                            { tmp:1 = 0x1; intloc:$(SIZE) = swi(tmp); call [intloc]; return [0:1]; }
  :INT3           is vexMode=0 & byte=0xcc                            { tmp:1 = 0x3; intloc:$(SIZE) = swi(tmp); call [intloc]; return [0:1]; }
 -:INT imm8       is vexMode=0 & byte=0xcd; imm8                      { tmp:1 = imm8; intloc:$(SIZE) = swi(tmp); call [intloc]; }
 +
-+define pcodeop ALLOCATE_MEMORY;
-+define pcodeop CDROM_INSTALLATION_CHECK;
-+define pcodeop CLOSE_HANDLE;
-+define pcodeop COMMIT_FILE;
-+define pcodeop CREATE_DIR;
-+define pcodeop CREATE_HANDLE;
-+define pcodeop DELETE_FILE;
-+define pcodeop DPMI_GET_SEGMENT_BASE_ADDRESS;
-+define pcodeop END_PROCESS;
-+define pcodeop FILE_SERVER_FILE_COPY;
-+define pcodeop FIND_FIRST;
-+define pcodeop FIND_NEXT;
-+define pcodeop FREE_MEMORY;
-+define pcodeop GET_CURRENT_DIR;
-+define pcodeop GET_CURRENT_DISK;
-+define pcodeop GET_DATE;
-+define pcodeop GET_DOS_VERSION_NUMBER;
-+define pcodeop GET_EXTENDED_COUNTRY_INFORMATION;
-+define pcodeop GET_INTERRUPT_VECTOR;
-+define pcodeop GET_FILE_ATTRIBUTES;
-+define pcodeop GET_TIME;
-+define pcodeop IOCTL;
-+define pcodeop LSEEK;
-+define pcodeop OPEN_HANDLE;
-+define pcodeop PARSE_FILENAME;
-+define pcodeop READ_HANDLE;
-+define pcodeop RESIZE_MEMORY_BLOCK;
-+define pcodeop SELECT_SERIAL_INTERFACE;
-+define pcodeop SET_DISK_TRANSFER_AREA;
-+define pcodeop SET_TEXTMODE_CURSOR_SHAPE;
 +define pcodeop SET_VIDEO_MODE;
-+define pcodeop STDIN_W_ECHO;
-+define pcodeop STDIN_WO_ECHO;
-+define pcodeop STDOUT;
-+define pcodeop TOPWARE_GET_SYSTEM_INFORMATION;
-+define pcodeop TOPVIEW_UPDATE_SCREEN_FROM_SHADOW_BUFFER;
-+define pcodeop VESA_CPU_VIDEO_MEMORY_CONTROL;
++:INT "10"  is vexMode=0 & byte=0xcd; byte=0x10 & ctxAH=0x0
++{
++  SET_VIDEO_MODE(AL);
++}
++
++define pcodeop SET_TEXTMODE_CURSOR_SHAPE;
++:INT "10"  is vexMode=0 & byte=0xcd; byte=0x10 & ctxAH=0x1
++{
++  SET_TEXTMODE_CURSOR_SHAPE(CH, CL);
++}
++
 +define pcodeop VESA_SET_SUPERVGA_VIDEO_MODE;
++:INT "10"  is vexMode=0 & byte=0xcd; byte=0x10 & ctxAX=0x4f02
++{
++  VESA_SET_SUPERVGA_VIDEO_MODE(BX);
++}
++
++define pcodeop VESA_CPU_VIDEO_MEMORY_CONTROL;
++:INT "10"  is vexMode=0 & byte=0xcd; byte=0x10 & ctxAX=0x4f05
++{
++  AX = VESA_CPU_VIDEO_MEMORY_CONTROL(BH, DX);
++}
++
++define pcodeop TOPVIEW_UPDATE_SCREEN_FROM_SHADOW_BUFFER;
++:INT "10"  is vexMode=0 & byte=0xcd; byte=0x10 & ctxAH=0xff
++{
++  local tmp:4 = segment(ES, DI);
++  TOPVIEW_UPDATE_SCREEN_FROM_SHADOW_BUFFER(tmp, CX);
++}
++
++define pcodeop GET_BIOS_TYPE;
++:INT "15"  is vexMode=0 & byte=0xcd; byte=0x15 & ctxAH=0x49 & ctxAL=0x0
++{
++  # artifical tmp to get AH and BL
++  tmp:4 = GET_BIOS_TYPE();
++  AX = tmp[0,16];
++  BL = tmp[24,8];
++  CF = (AH != 0);
++}
++
++define pcodeop SELECT_SERIAL_INTERFACE;
++:INT "15"  is vexMode=0 & byte=0xcd; byte=0x15 & ctxAH=0x49 & ctxAL != 0x0
++{
++  SELECT_SERIAL_INTERFACE(AL);
++}
++
++define pcodeop STDIN_W_ECHO;
++:INT "21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x1
++{
++  AL = STDIN_W_ECHO();
++}
++
++define pcodeop STDOUT;
++:INT "21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x2
++{
++  STDOUT(DL);
++}
++
++define pcodeop STDIN_WO_ECHO;
++:INT "21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x8
++{
++  AL = STDIN_WO_ECHO();
++}
++
++:INT "21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x9
++{
++  local tmp:4 = segment(DS,DX);
++  AL = STDOUT(tmp);
++}
++
++define pcodeop GET_CURRENT_DISK;
++:INT "21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x19
++{
++  AL = GET_CURRENT_DISK();
++}
++
++define pcodeop SET_DISK_TRANSFER_AREA;
++:INT "21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x1a
++{
++  local tmp:4 = segment(DS,DX);
++  AX = SET_DISK_TRANSFER_AREA(tmp);
++}
++
++define pcodeop PARSE_FILENAME;
++:INT "21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x29
++{
++  local tmp1:4 = segment(ES,DI);
++  local tmp2:4 = segment(DS,SI);
++  AL = PARSE_FILENAME(tmp1, tmp2, AL);
++}
++
++define pcodeop GET_DATE;
++:INT "21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x2a
++{
++  GET_DATE(CX, DX);
++}
++
++define pcodeop GET_TIME;
++:INT "21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x2c
++{
++  AL = GET_TIME(CX, DX);
++}
++
++define pcodeop GET_DOS_VERSION_NUMBER;
++:INT "21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x30
++{
++  AX = GET_DOS_VERSION_NUMBER(AL);
++}
++
++define pcodeop GET_INTERRUPT_VECTOR;
++:INT "21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x35
++{
++  local tmp:4 = GET_INTERRUPT_VECTOR(AL);
++  BX = tmp[0,16];
++  ES = tmp[16,16];
++}
++
++define pcodeop CREATE_DIR;
++:INT "21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x39
++{
++  local tmp:4 = segment(DS,DX);
++  AX = CREATE_DIR(tmp);
++}
++
++define pcodeop CREATE_HANDLE;
++:INT "21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x3c
++{
++  local tmp:4 = segment(DS,DX);
++  AX = CREATE_HANDLE(tmp, CX);
++}
++
++define pcodeop OPEN_HANDLE;
++:INT "21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x3d
++{
++  local tmp:4 = segment(DS,DX);
++  AX = OPEN_HANDLE(tmp, AL, CL);
++  CF = (AX != 0);
++}
++
++define pcodeop CLOSE_HANDLE;
++:INT "21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x3e
++{
++  AX = CLOSE_HANDLE(BX);
++}
++
++define pcodeop READ_HANDLE;
++:INT "21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x3f
++{
++  local tmp:4 = segment(DS,DX);
++  AX = READ_HANDLE(BX, tmp, CX);
++}
++
 +define pcodeop WRITE_HANDLE;
++:INT "21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x40
++{
++  local tmp:4 = segment(DS,DX);
++  AX = WRITE_HANDLE(BX, tmp, CX);
++}
++
++define pcodeop DELETE_FILE;
++:INT "21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x41
++{
++  local tmp:4 = segment(DS,DX);
++  AX = DELETE_FILE(tmp);
++}
++
++define pcodeop LSEEK;
++:INT "21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x42
++{
++  local tmp:4 = segment(DS,DX);
++  tmp1:4 = LSEEK(BX, tmp, AL);
++  AX = tmp1[0,16];
++  DX = tmp1[16,16];
++  CF = (AX != 0);
++}
++
++define pcodeop GET_FILE_ATTRIBUTES;
++:INT "21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x43
++{
++  local tmp:4 = segment(DS,DX);
++  CX = GET_FILE_ATTRIBUTES(tmp);
++}
++
++define pcodeop IOCTL;
++:INT "21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x44
++{
++  AX = IOCTL(BX, CX, DX);
++}
++
++define pcodeop GET_CURRENT_DIR;
++:INT "21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x47
++{
++  local tmp:$(SIZE) = segment(DS,SI);
++  tmp = GET_CURRENT_DIR(DL);
++}
++
++define pcodeop ALLOCATE_MEMORY;
++:INT "21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x48
++{
++  AX = ALLOCATE_MEMORY(BX);
++}
++
++define pcodeop FREE_MEMORY;
++:INT "21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x49
++{
++  CF = FREE_MEMORY(ES);
++}
++
++define pcodeop RESIZE_MEMORY_BLOCK;
++:INT "21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x4a
++{
++  AX = RESIZE_MEMORY_BLOCK(BX, ES);
++  CF = (AX != 0);
++}
++
++define pcodeop END_PROCESS;
++:INT "21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x4c
++{
++  AL = END_PROCESS();
++}
++
++define pcodeop FIND_FIRST;
++:INT "21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x4e
++{
++  local tmp:4 = segment(DS,DX);
++  AX = FIND_FIRST(tmp, CX);
++}
++
++define pcodeop FIND_NEXT;
++:INT "21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x4f
++{
++  AX = FIND_NEXT(BX);
++}
++
++define pcodeop GET_EXTENDED_COUNTRY_INFORMATION;
++:INT "21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x65
++{
++  tmp:4 = segment(ES,DI);
++  AX = GET_EXTENDED_COUNTRY_INFORMATION(AL, BX, DX, tmp, CX);
++}
++
++define pcodeop COMMIT_FILE;
++:INT "21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x68
++{
++  AX = COMMIT_FILE(BX);
++}
++
++define pcodeop FILE_SERVER_FILE_COPY;
++:INT "21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0xf3
++{
++  local tmp:$(SIZE) = segment(ES,DI);
++  DX = FILE_SERVER_FILE_COPY(tmp, AX, BX, CX, DX);
++}
++
++define pcodeop TOPWARE_GET_SYSTEM_INFORMATION;
++:INT "21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAX=0xff00
++{
++  BX = TOPWARE_GET_SYSTEM_INFORMATION(CL);
++}
++
++define pcodeop CDROM_INSTALLATION_CHECK;
++:INT "2f"  is vexMode=0 & byte=0xcd; byte=0x2f & ctxAX=0x1500
++{
++  BX = CDROM_INSTALLATION_CHECK();
++}
++
++define pcodeop DPMI_GET_SEGMENT_BASE_ADDRESS;
++:INT "31"  is vexMode=0 & byte=0xcd; byte=0x31 & ctxAX=0x0006
++{
++  local tmp:4 = DPMI_GET_SEGMENT_BASE_ADDRESS(BX);
++  DX = tmp[0,16];
++  CX = tmp[16,16];
++}
++
 +:INT imm8       is vexMode=0 & byte=0xcd; imm8
 +{
-+  tmp:1 = imm8;
-+  if (tmp == 0x10) goto <int_10>;
-+  if (tmp == 0x15) goto <int_15>;
-+  if (tmp == 0x21) goto <int_21>;
-+  if (tmp == 0x2f) goto <int_2f>;
-+  if (tmp == 0x31) goto <int_31>;
-+  goto <not_implemented>;
-+
-+<int_10>
-+  if (AH == 0x1 || AX >> 8 == 0x1) goto <set_textmode_cursor_shape>;
-+  if (AX == 0x4f02 || (AH == 0x4f && AL == 0x02)) goto <vesa_set_supervga_video_mode>;
-+  if (AX == 0x4f05 || (AH == 0x4f && AL == 0x05)) goto <vesa_cpu_video_memory_control>;
-+  if (AH == 0xff || AX >> 8 == 0xff) goto <int10_ff>;
-+  if (AH == 0x0 || AX >> 8 == 0x0) goto <set_video_mode>;
-+  goto <not_implemented>;
-+<set_video_mode>
-+  SET_VIDEO_MODE(AL);
-+  goto <end>;
-+<set_textmode_cursor_shape>
-+  SET_TEXTMODE_CURSOR_SHAPE(CH, CL);
-+  goto <end>;
-+<vesa_set_supervga_video_mode>
-+  VESA_SET_SUPERVGA_VIDEO_MODE(BX);
-+  goto <end>;
-+<vesa_cpu_video_memory_control>
-+  AX = VESA_CPU_VIDEO_MEMORY_CONTROL(BH, DX);
-+  goto <end>;
-+<int10_ff>
-+  esedi10_ff:$(SIZE) = segment(ES, DI);
-+  TOPVIEW_UPDATE_SCREEN_FROM_SHADOW_BUFFER(esedi10_ff, CX);
-+  goto <end>;
-+
-+<int_15>
-+  if (AH == 0x49 || AX >> 8 == 0x49) goto <serial_interface_select>;
-+  goto <not_implemented>;
-+<serial_interface_select>
-+  SELECT_SERIAL_INTERFACE(AL);
-+  goto <end>;
-+
-+<int_21>
-+  if (AH == 0x1 || AX >> 8 == 0x1) goto <stdin_w_echo>;
-+  if (AH == 0x2 || AX >> 8 == 0x2) goto <stdout2>;
-+  if (AH == 0x8 || AX >> 8 == 0x8) goto <stdin_wo_echo>;
-+  if (AH == 0x9 || AX >> 8 == 0x9) goto <stdout9>;
-+  if (AH == 0x19 || AX >> 8 == 0x19) goto <get_current_disk>;
-+  if (AH == 0x1a || AX >> 8 == 0x1a) goto <set_disk_transfer_area>;
-+  if (AH == 0x29 || AX >> 8 == 0x29) goto <parse_filename>;
-+  if (AH == 0x2a || AX >> 8 == 0x2a) goto <get_date>;
-+  if (AH == 0x2c || AX >> 8 == 0x2c) goto <get_time>;
-+  if (AH == 0x30 || AX >> 8 == 0x30) goto <get_dos_version_number>;
-+  if (AH == 0x35 || AX >> 8 == 0x35) goto <get_interrupt_vector>;
-+  if (AH == 0x39 || AX >> 8 == 0x39) goto <create_dir>;
-+  if (AH == 0x3c || AX >> 8 == 0x3c) goto <create_handle>;
-+  if (AH == 0x3d || AX >> 8 == 0x3d) goto <open_handle>;
-+  if (AH == 0x3e || AX >> 8 == 0x3e) goto <close_handle>;
-+  if (AH == 0x3f || AX >> 8 == 0x3f) goto <read_handle>;
-+  if (AH == 0x40 || AX >> 8 == 0x40) goto <write_handle>;
-+  if (AH == 0x41 || AX >> 8 == 0x41) goto <delete_file>;
-+  if (AH == 0x42 || AX >> 8 == 0x42) goto <lseek>;
-+  if (AH == 0x43 || AX >> 8 == 0x43) goto <get_file_attributes>;
-+  if (AH == 0x44 || AX >> 8 == 0x44) goto <ioctl>;
-+  if (AH == 0x47 || AX >> 8 == 0x47) goto <get_current_dir>;
-+  if (AH == 0x48 || AX >> 8 == 0x48) goto <allocate_memory>;
-+  if (AH == 0x49 || AX >> 8 == 0x49) goto <free_memory>;
-+  if (AH == 0x4a || AX >> 8 == 0x4a) goto <resize_memory_block>;
-+  if (AH == 0x4c || AX >> 8 == 0x4c) goto <end_process>;
-+  if (AH == 0x4e || AX >> 8 == 0x4e) goto <find_first>;
-+  if (AH == 0x4f || AX >> 8 == 0x4f) goto <find_next>;
-+  if (AH == 0x65 || AX >> 8 == 0x65) goto <get_extended_country_information>;
-+  if (AH == 0x68 || AX >> 8 == 0x68) goto <commit_file>;
-+  if (AH == 0xf3 || AX >> 8 == 0x3f) goto <file_server_file_copy>;
-+  if (AX == 0xff00 || (AH == 0xff && AL == 0x0)) goto <topware_get_system_information>;
-+  goto <not_implemented>;
-+<stdin_w_echo>
-+  AL = STDIN_W_ECHO();
-+  goto <end>;
-+<stdout2>
-+  STDOUT(DL);
-+  goto <end>;
-+<stdin_wo_echo>
-+  AL = STDIN_WO_ECHO();
-+  goto <end>;
-+<stdout9>
-+  local tmp9:$(SIZE) = segment(DS,DX);
-+  AL = STDOUT(tmp9);
-+  goto <end>;
-+<get_current_disk>
-+  AL = GET_CURRENT_DISK();
-+  goto <end>;
-+<set_disk_transfer_area>
-+  local tmp1a:$(SIZE) = segment(DS,DX);
-+  AX = SET_DISK_TRANSFER_AREA(tmp1a);
-+  goto <end>;
-+<parse_filename>
-+  dsesi29:$(SIZE) = segment(DS,SI);
-+  esedi29:$(SIZE) = segment(ES,DI);
-+  AL = PARSE_FILENAME(esedi29, dsesi29, AL);
-+  goto <end>;
-+<get_date>
-+  GET_DATE(CX, DX);
-+  goto <end>;
-+<get_time>
-+  AL = GET_TIME(CX, DX);
-+  goto <end>;
-+<get_dos_version_number>
-+  AX = GET_DOS_VERSION_NUMBER(AL);
-+  goto <end>;
-+<get_interrupt_vector>
-+  local esbx35:$(SIZE) = segment(ES,BX);
-+  esbx35 = GET_INTERRUPT_VECTOR(AL);
-+  goto <end>;
-+<create_dir>
-+  local tmp39:$(SIZE) = segment(DS,DX);
-+  AX = CREATE_DIR(tmp39);
-+  goto <end>;
-+<create_handle>
-+  local tmp3c:$(SIZE) = segment(DS,DX);
-+  AX = CREATE_HANDLE(tmp3c, CX);
-+  goto <end>;
-+<open_handle>
-+  local tmp3d:$(SIZE) = segment(DS,DX);
-+  AX = OPEN_HANDLE(tmp3d, AL);
-+  goto <end>;
-+<close_handle>
-+  AX = CLOSE_HANDLE(BX);
-+  goto <end>;
-+<read_handle>
-+  local tmp3f:$(SIZE) = segment(DS,DX);
-+  AX = READ_HANDLE(BX, tmp3f, CX);
-+  goto <end>;
-+<write_handle>
-+  local tmp40:$(SIZE) = segment(DS,DX);
-+  AX = WRITE_HANDLE(BX, tmp40, CX);
-+  goto <end>;
-+<delete_file>
-+  local tmp41:$(SIZE) = segment(DS,DX);
-+  AX = DELETE_FILE(tmp41);
-+  goto <end>;
-+<lseek>
-+  local tmp42:$(SIZE) = segment(DS,DX);
-+  AX = LSEEK(BX, tmp42, AL);
-+  goto <end>;
-+<get_file_attributes>
-+  local tmp43:$(SIZE) = segment(DS,DX);
-+  CX = GET_FILE_ATTRIBUTES(tmp43);
-+  goto <end>;
-+<ioctl>
-+  AX = IOCTL(BX, CX, DX);
-+  goto <end>;
-+<get_current_dir>
-+  local tmp47:$(SIZE) = segment(DS,SI);
-+  tmp47 = GET_CURRENT_DIR(DL);
-+  goto <end>;
-+<allocate_memory>
-+  AX = ALLOCATE_MEMORY(BX);
-+  goto <end>;
-+<free_memory>
-+  CF = FREE_MEMORY(ES);
-+  goto <end>;
-+<resize_memory_block>
-+  RESIZE_MEMORY_BLOCK(BX, ES);
-+  goto <end>;
-+<end_process>
-+  AL = END_PROCESS();
-+  goto <end>;
-+<find_first>
-+  local tmp4e:$(SIZE) = segment(DS,DX);
-+  AX = FIND_FIRST(tmp4e, CX);
-+  goto <end>;
-+<find_next>
-+  AX = FIND_NEXT(BX);
-+  goto <end>;
-+<get_extended_country_information>
-+  tmp65:$(SIZE) = segment(ES,DI);
-+  AX = GET_EXTENDED_COUNTRY_INFORMATION(AL, BX, DX, tmp65, CX);
-+  goto <end>;
-+<commit_file>
-+  AX = COMMIT_FILE(BX);
-+  goto <end>;
-+<file_server_file_copy>
-+  local tmpf3:$(SIZE) = segment(ES,DI);
-+  DX = FILE_SERVER_FILE_COPY(tmpf3, AX, BX, CX, DX);
-+  goto <end>;
-+<topware_get_system_information>
-+  BX = TOPWARE_GET_SYSTEM_INFORMATION(CL);
-+  goto <end>;
-+
-+<int_2f>
-+  if (AX == 1500) goto <cdrom_installation_check>;
-+  goto <not_implemented>;
-+<cdrom_installation_check>
-+  BX = CDROM_INSTALLATION_CHECK();
-+  goto <end>;
-+
-+<int_31>
-+  if (AX == 0x0006 || (AH == 0x0 && AL == 0x06)) goto <dpmi_get_segment_base_address>;
-+  goto <not_implemented>;
-+<dpmi_get_segment_base_address>
-+  cxdx31_0006:$(SIZE) = segment(CX,DX);
-+  cxdx31_0006 = DPMI_GET_SEGMENT_BASE_ADDRESS(BX);
-+  goto <end>;
-+
-+<not_implemented>
-+  intloc:$(SIZE) = swi(tmp, AH, AL);
-+  call [intloc];
-+<end>
++  local tmp:1 = imm8;
++  swi(tmp, AH, AL);
 +}
 +
  :INTO           is vexMode=0 & byte=0xce & bit64=0
  {
    tmp:1 = 0x4;
+diff --git a/Ghidra/Processors/x86/ghidra_scripts/InterruptContext.java b/Ghidra/Processors/x86/ghidra_scripts/InterruptContext.java
+new file mode 100644
+index 0000000000..4e1aa4380a
+--- /dev/null
++++ b/Ghidra/Processors/x86/ghidra_scripts/InterruptContext.java
+@@ -0,0 +1,121 @@
++// @category Analysis
++// @author Johannes Obermayr <johannesobermayr@gmx.de> (with Google Gemini)
++
++import ghidra.app.script.GhidraScript;
++import ghidra.program.model.lang.Register;
++import ghidra.program.model.lang.RegisterValue;
++import ghidra.program.model.listing.Instruction;
++import ghidra.program.model.listing.CodeUnit;
++import ghidra.program.model.scalar.Scalar;
++import ghidra.program.model.address.Address;
++import java.math.BigInteger;
++
++public class InterruptContext extends GhidraScript {
++
++    @Override
++    protected void run() throws Exception {
++        if (currentProgram == null) return;
++
++        Register ctxAx = currentProgram.getProgramContext().getRegister("ctxAX");
++        Register ctxAh = currentProgram.getProgramContext().getRegister("ctxAH");
++        Register ctxAl = currentProgram.getProgramContext().getRegister("ctxAL");
++
++        if (ctxAx == null || ctxAh == null || ctxAl == null) {
++            printerr("Error: One of the context registers (ctxAX, ctxAH, ctxAL) wasn't found!\nDo you use correct Sleigh file.");
++            return;
++        }
++
++        Instruction inst = getFirstInstruction();
++        int countAuto = 0;
++        int countManual = 0;
++
++        while (inst != null && !monitor.isCancelled()) {
++            if (inst.getMnemonicString().startsWith("INT")) {
++                Address addr = inst.getAddress();
++
++                Long finalAH = null;
++                Long finalAL = null;
++
++                // Look 15 instructions back
++                Instruction prev = getInstructionBefore(inst);
++                for (int i = 0; i < 15 && prev != null; i++) {
++                    String mnem = prev.getMnemonicString();
++
++                    if (mnem.startsWith("MOV") || mnem.startsWith("XOR")) {
++                        Object[] ops = prev.getOpObjects(0);
++                        if (ops.length > 0 && ops[0] instanceof Register) {
++                            Register reg = (Register) ops[0];
++                            long val = 0;
++                            boolean isValueKnown = false;
++
++                            Scalar s = prev.getScalar(1);
++                            if (s != null) {
++                                val = s.getValue();
++                                isValueKnown = true;
++                            } else if (mnem.startsWith("XOR")) {
++                                Object[] srcOps = prev.getOpObjects(1);
++                                if (srcOps.length > 0 && srcOps[0].equals(reg)) {
++                                    val = 0;
++                                    isValueKnown = true;
++                                }
++                            }
++
++                            if (isValueKnown) {
++                                String regName = reg.getName();
++                                if (regName.equals("AX")) {
++                                    if (finalAH == null) finalAH = (val >> 8) & 0xFF;
++                                    if (finalAL == null) finalAL = val & 0xFF;
++                                } else if (regName.equals("AH")) {
++                                    if (finalAH == null) finalAH = val & 0xFF;
++                                } else if (regName.equals("AL")) {
++                                    if (finalAL == null) finalAL = val & 0xFF;
++                                }
++                            }
++                        }
++                    }
++
++                    if (finalAH != null && finalAL != null) break;
++
++                    // Warn for CALL or JUMP
++                    if (prev.getFlowType().isCall() || (prev.getFlowType().isJump() && !prev.getFlowType().isConditional())) {
++                        break;
++                    }
++                    prev = getInstructionBefore(prev);
++                }
++
++                if (finalAH != null) {
++                    // Automatisches Setzen
++                    long alValue = (finalAL != null) ? finalAL : 0;
++                    long fullAxValue = (finalAH << 8) | alValue;
++
++                    applyContext(addr, ctxAx, ctxAh, ctxAl, fullAxValue, finalAH, alValue);
++                    countAuto++;
++                } else {
++                    // Manuelles Setzen erforderlich: Kommentar schreiben
++                    setPreComment(addr, "!!! MANUAL CONTEXT REQUIRED !!!\n" +
++                                        "AX/AH/AL couldn't be defined due to CALL or JMP.\n" +
++                                        "Set 'ctxAX', 'ctxAH', 'ctxAL' with 'Register Values'.");
++                    countManual++;
++                    println("Warning: Manual customization required at " + addr + ".");
++                }
++            }
++            inst = getInstructionAfter(inst.getAddress());
++        }
++        println(String.format("Analysis finished. Automatically: %d, Manually required: %d", countAuto, countManual));
++    }
++
++    private void applyContext(Address addr, Register ax, Register ah, Register al, long valAx, long valAh, long valAl) throws Exception {
++        // Clear listing to avoid ContextChangeException
++        clearListing(addr, addr.add(currentProgram.getListing().getInstructionAt(addr).getLength() - 1));
++
++        RegisterValue rvAX = new RegisterValue(ax, BigInteger.valueOf(valAx));
++        RegisterValue rvAH = new RegisterValue(ah, BigInteger.valueOf(valAh));
++        RegisterValue rvAL = new RegisterValue(al, BigInteger.valueOf(valAl));
++
++        currentProgram.getProgramContext().setRegisterValue(addr, addr, rvAX);
++        currentProgram.getProgramContext().setRegisterValue(addr, addr, rvAH);
++        currentProgram.getProgramContext().setRegisterValue(addr, addr, rvAL);
++
++        disassemble(addr);
++    }
++}
 -- 
 2.45.1
 
