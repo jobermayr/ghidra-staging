@@ -1,0 +1,125 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Suhyeon Ryu <702fbtngus@kaist.ac.kr>
+Date: Fri, 23 Jan 2026 08:09:06 +0000
+Subject: [PATCH] 8907: Fix AVR32 SLEIGH semantics: CPC, ST.B{cond}, MOV
+
+Fixed some avr32 operations
+
+Fix AVR32 MOV semantic
+---
+ .../avr32a_arithmetic_operations.sinc         |  3 +-
+ .../data/languages/avr32a_data_transfer.sinc  | 44 +++++++++++++++++--
+ 2 files changed, 43 insertions(+), 4 deletions(-)
+
+diff --git a/Ghidra/Processors/Atmel/data/languages/avr32a_arithmetic_operations.sinc b/Ghidra/Processors/Atmel/data/languages/avr32a_arithmetic_operations.sinc
+index 2d120eb1fc..4afb7f9373 100644
+--- a/Ghidra/Processors/Atmel/data/languages/avr32a_arithmetic_operations.sinc
++++ b/Ghidra/Processors/Atmel/data/languages/avr32a_arithmetic_operations.sinc
+@@ -38,7 +38,8 @@ macro cpcflags0(OP1, RES) {
+         #    (OP2[31,1] && RES[31,1]) ||
+         #    (!(OP1[31,1]) && RES[31,1]);
+ 
+-        C = 0;
++        C = !(OP1[31,1]) && RES[31,1];
++        #C = 0;
+         CZNVTOSR();
+ }
+ 
+diff --git a/Ghidra/Processors/Atmel/data/languages/avr32a_data_transfer.sinc b/Ghidra/Processors/Atmel/data/languages/avr32a_data_transfer.sinc
+index e5253aa763..7149802bcc 100644
+--- a/Ghidra/Processors/Atmel/data/languages/avr32a_data_transfer.sinc
++++ b/Ghidra/Processors/Atmel/data/languages/avr32a_data_transfer.sinc
+@@ -17,6 +17,11 @@
+         rd0 = imm4_8;
+ }
+ 
++:MOV rd0, imm4_8 is op13_3=0x1 & op12_1=1 & rd0 & rd0=0xf & imm4_8 {
++        PC = imm4_8;
++        goto [PC];
++}
++
+ # MOV Format II
+ # 111i iii0 011i dddd   iiii iiii iiii iiii
+ 
+@@ -26,6 +31,13 @@
+        rd0 = imm;
+ }       
+ 
++:MOV rd0, imm is op13_3=0x7 & op5_4=0x3 & imm9_4 & imm4_1 & rd0 & rd0=0xf; imm16
++        [ imm = (imm9_4 << 17) | (imm4_1 << 16) | imm16; ]
++{
++        PC = imm;
++        goto [PC];
++}
++
+ # MOV Format III
+ # 000s sss0 1001 dddd
+ 
+@@ -33,6 +45,11 @@
+         rd0 = rs9;
+ }
+ 
++:MOV rd0, rs9 is op13_3=0x0 & op4_5=0x09 & rd0 & rs9 & rd0=0xf {
++        PC = rs9;
++        goto [PC];
++}
++
+ #---------------------------------------------------------------------
+ # MOV{cond4} - Conditional Move Register
+ # I.  {d, s} -> {0, 1, ..., 15}
+@@ -55,6 +72,14 @@
+         rd0 = rs9;
+ }
+ 
++:MOV^{ECOND_4_4} rd0, rs9 is op13_3=0x7 & op4_5=0 & rd0 & rs9 & rd0=0xf;
++        eop8_8=0x17 & eop0_4=0 & ECOND_4_4
++{
++        build ECOND_4_4;
++        PC = rs9;
++        goto [PC];
++}
++
+ # MOV{cond4} Format II
+ # Operation:  if (cond4)
+ #                 Rd <- SE(imm8)
+@@ -68,10 +93,23 @@
+         rd0 = simm0_8;
+ }
+ 
++:MOV^{ECOND_8_4} rd0, simm0_8 is op4_12=0xf9b & rd0 & rd0=0xf ;
++                                 eop12_4=0 & simm0_8 & ECOND_8_4
++{
++        build ECOND_8_4;
++        PC = simm0_8;
++        goto [PC];
++}
++
+ :MOVH	rd0, imm16		is op4_12=0xfc1 & rd0 ; imm16 {
+ 	rd0 = imm16 << 16;
+ }
+ 
++:MOVH	rd0, imm16		is op4_12=0xfc1 & rd0 & rd0=0xf ; imm16 {
++	PC = imm16 << 16;
++        goto [PC];
++}
++
+ #---------------------------------------------------------------------
+ # 8.3.9.2 Load/Store Operations
+ #---------------------------------------------------------------------
+@@ -609,10 +647,10 @@ LDSTSWPW: val		is disp0_12 [ val = disp0_12 << 2; ] { export *[const]:2 val; }
+ # ST.B{cond4} Format I
+ # 111p ppp1 1111 ssss   cccc 111n nnnn nnnn
+ 
+-:ST.B^{COND_e12} RPwDisp9, rs0 is (op13_3=0x7 & op4_5=0x1f & rs0;
+-                                      eop9_3=0x7 & COND_e12) & RPwDisp9 { 
++:ST.B^{COND_e12} RPbDisp9, rs0 is (op13_3=0x7 & op4_5=0x1f & rs0;
++                                      eop9_3=0x7 & COND_e12) & RPbDisp9 {
+         build COND_e12;
+-        *:4 RPwDisp9 = rs0:1;
++        *:1 RPbDisp9 = rs0:1;
+ }
+ 
+ #---------------------------------------------------------------------
+-- 
+2.45.1
+
