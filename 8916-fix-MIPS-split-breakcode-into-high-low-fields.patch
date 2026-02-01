@@ -1,0 +1,59 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Michael Lappas <251896846+michaellappas@users.noreply.github.com>
+Date: Sat, 31 Jan 2026 23:02:10 -0500
+Subject: [PATCH] 8916: fix(MIPS): split breakcode into high/low fields
+
+Refactor the SLEIGH definition for the MIPS `break` instruction to handle split 10-bit code fields (bits 6-15 and 16-25) instead of a single 20-bit block. This change aligns Ghidra's MIPS model with the behavior of modern toolchains that enforce 10-bit limits on operands of the `break` instruction. For example, the MIPS LLVM backend in Clang throws an error when an operand exceeds 10 bits:
+
+```
+michael@laptop:~/Documents$ clang --target=mips-linux-gnu main.c -o program
+main.c:2:6: error: expected 10-bit unsigned immediate
+    2 |         asm("break 0, 0x400");
+```
+
+Similarly, the GNU C Cross-Compiler for MIPS throws an error if an operand exceeds the 10-bit limit:
+
+```
+michael@laptop:~/Documents$ mips-linux-gnu-gcc main.c -o program
+/tmp/ccegYvhZ.s: Assembler messages:
+/tmp/ccegYvhZ.s:25: Error: operand 1 out of range `break 0x400,0'
+```
+---
+ Ghidra/Processors/MIPS/data/languages/mips.sinc            | 2 ++
+ .../Processors/MIPS/data/languages/mips32Instructions.sinc | 7 +++----
+ 2 files changed, 5 insertions(+), 4 deletions(-)
+
+diff --git a/Ghidra/Processors/MIPS/data/languages/mips.sinc b/Ghidra/Processors/MIPS/data/languages/mips.sinc
+index c1e52917de..7ae187bdd0 100644
+--- a/Ghidra/Processors/MIPS/data/languages/mips.sinc
++++ b/Ghidra/Processors/MIPS/data/languages/mips.sinc
+@@ -523,6 +523,8 @@ define token instr(32)
+     acfhi       = (21,22)
+     shift20     = (20,25)
+     breakcode   = (6,25)
++    breakcodelo = (6,15)
++    breakcodehi = (16,25)
+     off26       = (0,25) signed			# 26 bit signed offset, e.g. balc, bc
+     ind26       = (0,25)				# 26 bit unsigned index, e.g. jal
+     copfill     = (6,24)
+diff --git a/Ghidra/Processors/MIPS/data/languages/mips32Instructions.sinc b/Ghidra/Processors/MIPS/data/languages/mips32Instructions.sinc
+index 845514dc2d..72531db395 100644
+--- a/Ghidra/Processors/MIPS/data/languages/mips32Instructions.sinc
++++ b/Ghidra/Processors/MIPS/data/languages/mips32Instructions.sinc
+@@ -92,10 +92,9 @@
+     if delayflag goto Rel16; 
+ }
+ 
+-# 0000 00cc cccc cccc cccc cccc cc00 1101
+-:break breakcode                is $(AMODE) & prime=0 & fct=0xD & breakcode {
+-    tmp:4=breakcode; 
+-    trap(tmp); 
++# 0000 00hh hhhh hhhh llll llll ll00 1101
++:break breakcodehi, breakcodelo is $(AMODE) & prime=0 & fct=0xD & breakcodehi & breakcodelo {
++    trap(breakcodehi:2, breakcodelo:2);
+ }
+ 
+ # 1011 11bb bbbo oooo iiii iiii iiii iiii
+-- 
+2.45.1
+
