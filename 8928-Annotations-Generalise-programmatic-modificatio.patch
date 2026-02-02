@@ -1,0 +1,431 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: hay-mon <234499490+hay-mon@users.noreply.github.com>
+Date: Mon, 2 Feb 2026 16:30:33 +0000
+Subject: [PATCH] 8928: Annotations: Generalise programmatic modification
+
+Add the modify function to the AnnotatedStringHandler interface with a default implementation.
+Remove specific handling of SymbolAnnotatedStringHandler modification and use modify.
+Add Annotation instantiation via List of Strings.
+---
+ .../viewer/field/AnnotatedStringHandler.java  |  12 +-
+ .../app/util/viewer/field/Annotation.java     | 194 ++++++++----------
+ .../app/util/viewer/field/CommentUtils.java   |  40 +---
+ .../viewer/field/EolCommentFieldFactory.java  |   2 +-
+ .../field/SymbolAnnotatedStringHandler.java   |  28 +++
+ 5 files changed, 131 insertions(+), 145 deletions(-)
+
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/viewer/field/AnnotatedStringHandler.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/viewer/field/AnnotatedStringHandler.java
+index 94e176b6ee..7ba2871380 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/viewer/field/AnnotatedStringHandler.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/viewer/field/AnnotatedStringHandler.java
+@@ -115,7 +115,7 @@ public interface AnnotatedStringHandler extends ExtensionPoint {
+ 	 * @return the example of how this is used.
+ 	 */
+ 	String getPrototypeString();
+-	
++
+ 	/**
+ 	 * Returns an example string of how the annotation is used
+ 	 * @param displayText The text that may be wrapped, cannot be null
+@@ -125,4 +125,14 @@ public interface AnnotatedStringHandler extends ExtensionPoint {
+ 		return getPrototypeString();
+ 	}
+ 
++	/**
++	 * Returns an array with modifications by the annotation; null otherwise.
++	 * @param  text An array of strings to modify.
++	 * @param  program The program with which the returned string is associated.
++	 * @return The modified array; null otherwise.
++	 */
++	default String[] modify(String[] test, Program program) {
++		return null;
++	}
++
+ }
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/viewer/field/Annotation.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/viewer/field/Annotation.java
+index 9095d251da..733887c0a0 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/viewer/field/Annotation.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/viewer/field/Annotation.java
+@@ -16,7 +16,11 @@
+ package ghidra.app.util.viewer.field;
+ 
+ import java.util.ArrayList;
++import java.util.Arrays;
+ import java.util.List;
++import java.util.regex.Matcher;
++import java.util.regex.Pattern;
++import java.util.stream.Collectors;
+ 
+ import ghidra.program.model.listing.Program;
+ 
+@@ -24,8 +28,8 @@ public class Annotation {
+ 
+ 	public static final String ESCAPABLE_CHARS = "{}\"\\";
+ 
+-	private String annotationText;
+-	private String[] annotationParts;
++	private final String[] annotationParts;
++	private final String annotationText;
+ 
+ 	/**
+ 	 * Constructor
+@@ -35,10 +39,25 @@ public class Annotation {
+ 	 * text this Annotation can create
+ 	 * @param program the program
+ 	 */
++	public Annotation(String annotationText) {
++		this.annotationParts = parseAnnotationText(annotationText);
++		this.annotationText = annotationText;
++	}
++
++	@Deprecated
+ 	public Annotation(String annotationText, Program program) {
++		this(annotationText);
++	}
+ 
+-		this.annotationText = annotationText;
+-		this.annotationParts = parseAnnotationText(annotationText);
++	/**
++	 * Constructor
++	 *
++	 * @param annotationParts The annotation parts.
++	 * @param program the program
++	 */
++	public Annotation(String[] annotationParts) {
++		this.annotationParts = annotationParts;
++		this.annotationText = buildAnnotationText(annotationParts);
+ 	}
+ 
+ 	public String[] getAnnotationParts() {
+@@ -54,136 +73,97 @@ public class Annotation {
+ 		return annotationText;
+ 	}
+ 
+-	private String[] parseAnnotationText(String text) {
+-
++	private static String[] parseAnnotationText(String text) {
+ 		String trimmed = text.substring(2, text.length() - 1); // remove "{@" and '}' 
+-		List<String> tokens = new ArrayList<>();
+-		List<TextPart> parts = parseText(trimmed);
+-		for (TextPart part : parts) {
+-			part.grabTokens(tokens);
+-		}
+-
+-		return tokens.toArray(new String[tokens.size()]);
++		return parseText(trimmed);
+ 	}
+ 
+-	private List<TextPart> parseText(String text) {
+-
+-		List<TextPart> textParts = new ArrayList<>();
+-		boolean escaped = false;
+-		boolean inQuote = false;
+-		int partStart = 0;
+-		int n = text.length();
+-		for (int i = 0; i < n; i++) {
+-
+-			boolean wasEscaped = escaped;
+-			escaped = false;
+-			char prev = '\0';
+-			if (i != 0 && !wasEscaped) {
+-				prev = text.charAt(i - 1);
+-			}
++	private static String buildAnnotationText(String[] text) {
++		return Arrays.stream(text)
++				.map((t) -> hasEscapeChars(t) ?
++						("\"" + addEscapeChars(t) + "\"") : t)
++				.collect(Collectors.joining(" ", "{@", "}"));
++	}
+ 
+-			char c = text.charAt(i);
+-			if (prev == '\\') {
+-				if (Annotation.ESCAPABLE_CHARS.indexOf(c) != -1) {
+-					escaped = true;
+-					continue;
+-				}
+-			}
++	private static String[] parseText(String text) {
++		List<String> textParts = new ArrayList<>();
++		boolean escape = false;
++		boolean quote = false;
++		StringBuilder buffy = new StringBuilder();
+ 
+-			if (c == '"') {
+-				if (inQuote) {
+-					// end quote
+-					String s = text.substring(partStart, i + 1); // keep the quote
+-					textParts.add(new QuotedTextPart(s));
+-					partStart = i + 1;
+-				}
+-				else {
+-					// end previous word; start quote
+-					if (i != 0) {
+-						String s = text.substring(partStart, i);
+-						textParts.add(new TextPart(s));
+-						partStart = i;
++		for (char c: text.toCharArray()) {
++			if (escape) {
++				escape = false;
++				buffy.append('\\');
++				buffy.append(c);
++			} else {
++				if (c == '\\') {
++					escape = true;
++				} else if (c == '\"') {
++					String s = buffy.toString();
++					if (quote) {
++						textParts.add(s);
++					} else {
++						textParts.addAll(Arrays.asList(s.split("\\s")));
+ 					}
++					buffy.setLength(0);
++					quote = !quote;
++				} else {
++					buffy.append(c);
+ 				}
+-				inQuote = !inQuote;
+ 			}
+ 		}
++		textParts.addAll(Arrays.asList(buffy.toString().split("\\s")));
+ 
+-		if (partStart < n) { // grab trailing text
+-			String s = text.substring(partStart, n);
+-			textParts.add(new TextPart(s));
+-		}
+-
+-		return textParts;
++		return textParts.stream()
++				.filter((t) -> t.length() > 0)
++				.map((t) -> removeEscapeChars(t))
++				.toArray(String[]::new);
+ 	}
+ 
+ 	// remove any backslashes that escape special annotation characters, like '{' and '}'
+ 	private static String removeEscapeChars(String text) {
+-		boolean escaped = false;
++		boolean escape = false;
+ 		StringBuilder buffy = new StringBuilder();
+-		for (int i = 0; i < text.length(); i++) {
+-			char c = text.charAt(i);
+-			boolean wasEscaped = escaped;
+-			escaped = false;
+-			if (c != '\\') {
+-				buffy.append(c);
+-				continue;
+-			}
+-
+-			char next = '\0';
+-			if (i != text.length() - 1 && !wasEscaped) {
+-				next = text.charAt(i + 1);
+-			}
+ 
+-			if (ESCAPABLE_CHARS.indexOf(next) != -1) {
+-				escaped = true;
+-				continue;
++		for (char c: text.toCharArray()) {
++			if (escape) {
++				escape = false;
++				if (ESCAPABLE_CHARS.indexOf(c) == -1) {
++					buffy.append('\\');
++				}
++				buffy.append(c);
++			} else {
++				if (c == '\\') {
++					escape = true;
++				} else {
++					buffy.append(c);
++				}
+ 			}
+-			buffy.append(c);
+ 		}
+ 
+ 		return buffy.toString();
+ 	}
+ 
+-	/**
+-	 * A simple class to hold text and extract tokens 
+-	 */
+-	private class TextPart {
+-
+-		protected String text;
+-
+-		TextPart(String text) {
+-			this.text = text;
+-		}
+-
+-		public void grabTokens(List<String> tokens) {
+-			String escaped = removeEscapeChars(text);
+-			String[] strings = escaped.split("\\s");
+-			for (String string : strings) {
+-				// 0 length strings can happen when 'content' begins with a space
+-				if (string.length() > 0) {
+-					tokens.add(string);
+-				}
++	private static boolean hasEscapeChars(String text) {
++		for (char c: text.toCharArray()) {
++			if (ESCAPABLE_CHARS.indexOf(c) != -1 || Character.isWhitespace(c)) {
++				return true;
+ 			}
+ 		}
+-
+-		@Override
+-		public String toString() {
+-			return text;
+-		}
++		return false;
+ 	}
+ 
+-	private class QuotedTextPart extends TextPart {
+-		QuotedTextPart(String text) {
+-			super(text);
+-		}
++	private static String addEscapeChars(String text) {
++		StringBuilder buffy = new StringBuilder();
+ 
+-		@Override
+-		public void grabTokens(List<String> tokens) {
+-			String unquoted = text.substring(1, text.length() - 1);
+-			String escaped = removeEscapeChars(unquoted);
+-			tokens.add(escaped); // all quoted text is a 'token'
++		for (char c: text.toCharArray()) {
++			if (ESCAPABLE_CHARS.indexOf(c) != -1) {
++				buffy.append('\\');
++			}
++			buffy.append(c);
+ 		}
+-	}
+ 
++		return buffy.toString();
++	}
+ }
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/viewer/field/CommentUtils.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/viewer/field/CommentUtils.java
+index e23c86658a..267469847f 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/viewer/field/CommentUtils.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/viewer/field/CommentUtils.java
+@@ -61,21 +61,15 @@ public class CommentUtils {
+ 		// this function will take any given Symbol annotations and change the text, replacing
+ 		// the symbol name with the address of the symbol
+ 		Function<Annotation, Annotation> symbolFixer = annotation -> {
+-
+ 			String[] annotationParts = annotation.getAnnotationParts();
+ 			AnnotatedStringHandler handler = getAnnotationHandler(annotationParts);
+-			if (!(handler instanceof SymbolAnnotatedStringHandler)) {
+-				return annotation; // nothing to change
+-			}
+ 
+-			String rawText = annotation.getAnnotationText();
+-			String updatedText =
+-				convertAnnotationSymbolToAddress(annotationParts, rawText, program);
+-			if (updatedText == null) {
++			String[] updatedParts = handler.modify(annotationParts, program);
++			if (updatedParts == null) {
+ 				return annotation; // nothing to change
+ 			}
+ 
+-			return new Annotation(updatedText, program);
++			return new Annotation(updatedParts);
+ 		};
+ 
+ 		StringBuilder buffy = new StringBuilder();
+@@ -224,7 +218,7 @@ public class CommentUtils {
+ 			}
+ 
+ 			String annotationText = word.getWord();
+-			Annotation annotation = new Annotation(annotationText, program);
++			Annotation annotation = new Annotation(annotationText);
+ 			annotation = fixerUpper.apply(annotation);
+ 			results.add(new AnnotationCommentPart(annotationText, annotation));
+ 
+@@ -322,32 +316,6 @@ public class CommentUtils {
+ 		return -1;
+ 	}
+ 
+-	private static String convertAnnotationSymbolToAddress(String[] annotationParts, String rawText,
+-			Program program) {
+-		if (annotationParts.length <= 1) {
+-			return null;
+-		}
+-
+-		if (program == null) { // this can happen during merge operations
+-			return null;
+-		}
+-
+-		Address address = program.getAddressFactory().getAddress(annotationParts[1]);
+-		if (address != null) {
+-			return null; // nothing to do
+-		}
+-
+-		String originalValue = annotationParts[1];
+-		List<Symbol> symbols = getSymbols(originalValue, program);
+-		if (symbols.size() != 1) {
+-			// no unique symbol, so leave it as string name
+-			return null;
+-		}
+-
+-		Address symbolAddress = symbols.get(0).getAddress();
+-		return rawText.replaceFirst(Pattern.quote(originalValue), symbolAddress.toString());
+-	}
+-
+ 	/**
+ 	 * Returns all symbols that match the given text or an empty list.
+ 	 * @param rawText the raw symbol text
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/viewer/field/EolCommentFieldFactory.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/viewer/field/EolCommentFieldFactory.java
+index 1370f3b2a2..8b588fa1f8 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/viewer/field/EolCommentFieldFactory.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/viewer/field/EolCommentFieldFactory.java
+@@ -401,7 +401,7 @@ public class EolCommentFieldFactory extends FieldFactory {
+ 			RowColLocation startRowCol = commentElement.getDataLocationForCharacterIndex(0);
+ 			int encodedRow = startRowCol.row();
+ 			int encodedCol = startRowCol.col();
+-			Annotation annotation = new Annotation(refAddrComment, program);
++			Annotation annotation = new Annotation(refAddrComment);
+ 			FieldElement addressElement =
+ 				new AnnotatedTextFieldElement(annotation, currentPrefixString, program, encodedRow,
+ 					encodedCol);
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/viewer/field/SymbolAnnotatedStringHandler.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/viewer/field/SymbolAnnotatedStringHandler.java
+index dd6bd48d71..7e98ec9cec 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/viewer/field/SymbolAnnotatedStringHandler.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/viewer/field/SymbolAnnotatedStringHandler.java
+@@ -16,6 +16,7 @@
+ package ghidra.app.util.viewer.field;
+ 
+ import java.util.List;
++import java.util.regex.Pattern;
+ 
+ import docking.widgets.fieldpanel.field.AttributedString;
+ import generic.theme.GThemeDefaults.Colors.Messages;
+@@ -125,4 +126,31 @@ public class SymbolAnnotatedStringHandler implements AnnotatedStringHandler {
+ 		return "{@symbol " + displayText.trim() + "}";
+ 	}
+ 
++	@Override
++	public String[] modify(String[] text, Program program) {
++		if (text.length <= 1) {
++			return null;
++		}
++
++		if (program == null) { // this can happen during merge operations
++			return null;
++		}
++
++		Address address = program.getAddressFactory().getAddress(text[1]);
++		if (address != null) {
++			return null; // nothing to do
++		}
++
++		String originalValue = text[1];
++		List<Symbol> symbols = CommentUtils.getSymbols(originalValue, program);
++		if (symbols.size() != 1) {
++			// no unique symbol, so leave it as string name
++			return null;
++		}
++
++		Address symbolAddress = symbols.get(0).getAddress();
++		text[1] = symbolAddress.toString();
++
++		return text;
++	}
+ }
+-- 
+2.45.1
+
