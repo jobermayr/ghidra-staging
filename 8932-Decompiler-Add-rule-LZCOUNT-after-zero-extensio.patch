@@ -1,0 +1,123 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Luke=20Sern=C3=A9?= <luke.serne@solconmail.nl>
+Date: Tue, 3 Feb 2026 22:53:08 +0100
+Subject: [PATCH] 8932: Decompiler: Add rule LZCOUNT after zero extension
+
+This commit adds a rule to replace zero-extensions followed by
+leading-zero count. The extension first adds a bunch of zero bits, so we
+can just take the lzcount of the un-extended value and then add the
+number of zero bits the zero extension would have added.
+This also works for sign-extension if the non-zero mask indicates the
+extension is happening with zero bits.
+---
+ .../src/decompile/cpp/coreaction.cc           |  1 +
+ .../cpp/include/ghidra/ruleaction.hh          | 11 ++++
+ .../src/decompile/cpp/ruleaction.cc           | 58 +++++++++++++++++++
+ 3 files changed, 70 insertions(+)
+
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
+index b33a5d5a25..aa5f3d4bf7 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
+@@ -5684,6 +5684,7 @@ void ActionDatabase::universalAction(Architecture *conf)
+ 	actprop->addRule( new RuleTransformCpool("analysis") );
+ 	actprop->addRule( new RulePropagateCopy("analysis") );
+ 	actprop->addRule( new RuleZextEliminate("analysis") );
++	actprop->addRule( new RuleExtLzcount("analysis") );
+ 	actprop->addRule( new RuleSlessToLess("analysis") );
+ 	actprop->addRule( new RuleZextSless("analysis") );
+ 	actprop->addRule( new RuleBitUndistribute("analysis") );
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/ruleaction.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/ruleaction.hh
+index f95f353b88..450a0a8fdb 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/ruleaction.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/ruleaction.hh
+@@ -1541,6 +1541,17 @@ public:
+   static int4 testCompareEquivalence(PcodeOp *lessop,PcodeOp *lessequalop);
+ };
+ 
++class RuleExtLzcount : public Rule {
++public:
++  RuleExtLzcount(const string &g) : Rule( g, 0, "extlzcount") {}	///< Constructor
++  virtual Rule *clone(const ActionGroupList &grouplist) const {
++    if (!grouplist.contains(getGroup())) return (Rule *)0;
++    return new RuleExtLzcount(getGroup());
++  }
++  virtual void getOpList(vector<uint4> &oplist) const;
++  virtual int4 applyOp(PcodeOp *op,Funcdata &data);
++};
++
+ class RulePopcountBoolXor : public Rule {
+ public:
+   RulePopcountBoolXor(const string &g) : Rule( g, 0, "popcountboolxor") {}	///< Constructor
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc
+index fd5418e5e6..95a2f33121 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc
+@@ -10816,6 +10816,64 @@ int4 RuleThreeWayCompare::applyOp(PcodeOp *op,Funcdata &data)
+   return 1;
+ }
+ 
++/// \class RuleExtLzcount
++/// \brief Simplify bit extensions followed by a LZCOUNT
++/// An example form is:
++///  `lzcount(zext(V:#a):#b)  =>  lzcount(V) + (#b - #a) * 8`
++/// A sign-extension instead of ZEXT also qualifies if the top bit of V can be
++/// shown to be 0.
++void RuleExtLzcount::getOpList(vector<uint4> &oplist) const
++
++{
++  oplist.push_back(CPUI_LZCOUNT);
++}
++
++int4 RuleExtLzcount::applyOp(PcodeOp *op,Funcdata &data)
++
++{
++  Varnode *ext_out = op->getIn(0);
++  PcodeOp *ext_def = ext_out->getDef();
++  if (ext_def == (PcodeOp *)0) return 0;
++
++  int4 ext_code = ext_def->code();
++  Varnode *V;
++
++  if (ext_code == CPUI_INT_ZEXT) {
++    V = ext_def->getIn(0);
++  } else if (ext_code == CPUI_INT_SEXT) {
++    V = ext_def->getIn(0);
++    if ((V->getNZMask() >> ((8 * V->getSize()) - 1)) == 1) {
++      // The sign bit might be nonzero, so the extension could be with 1
++      return 0;
++    }
++  } else {
++    return 0;
++  }
++
++  // old:
++  // V -> INT_[SZ]EXT -> LZCOUNT -> ...
++
++  // new:
++  // V    INT_[SZ]EXT ,> LZCOUNT -> [INT_ADD] -> ...
++  // `---------------/    #(b-a)*8 -/
++  int4 a = V->getSize();
++  int4 b = ext_out->getSize();
++
++  Varnode *lz_out = op->getOut();
++  PcodeOp *add = data.newOp(2, op->getAddr());
++  data.opUnsetOutput(op);
++  Varnode *new_lz_out = data.newUniqueOut(lz_out->getSize(), op);
++
++  data.opSetOpcode(add, CPUI_INT_ADD);
++  data.opSetInput(add, new_lz_out, 0);
++  data.opSetInput(add, data.newConstant(lz_out->getSize(), (b - a) * 8), 1);
++  data.opSetOutput(add, lz_out);
++  data.opInsertAfter(add, op);
++
++  data.opSetInput(op, V, 0);
++  return 1;
++}
++
+ /// \class RulePopcountBoolXor
+ /// \brief Simplify boolean expressions that are combined through POPCOUNT
+ ///
+-- 
+2.45.1
+
