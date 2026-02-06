@@ -5,9 +5,9 @@ Subject: [PATCH] 2266: Better decompilation of DOS era interrupts
 
 ---
  Ghidra/Processors/x86/certification.manifest  |   1 +
- Ghidra/Processors/x86/data/languages/ia.sinc  | 841 +++++++++++++++++-
+ Ghidra/Processors/x86/data/languages/ia.sinc  | 928 +++++++++++++++++-
  .../x86/ghidra_scripts/InterruptContext.java  | 118 +++
- 3 files changed, 958 insertions(+), 2 deletions(-)
+ 3 files changed, 1045 insertions(+), 2 deletions(-)
  create mode 100644 Ghidra/Processors/x86/ghidra_scripts/InterruptContext.java
 
 diff --git a/Ghidra/Processors/x86/certification.manifest b/Ghidra/Processors/x86/certification.manifest
@@ -22,7 +22,7 @@ index c150f1550e..62da5d42e3 100644
  src/main/java/ghidra/app/plugin/core/analysis/DOSInterruptAnalyzer.java||GHIDRA||||END|
  src/main/java/ghidra/app/plugin/core/analysis/InterruptAnalyzer.java||GHIDRA||||END|
 diff --git a/Ghidra/Processors/x86/data/languages/ia.sinc b/Ghidra/Processors/x86/data/languages/ia.sinc
-index ebcc9ee2a6..093da404ce 100644
+index ebcc9ee2a6..cd291b9014 100644
 --- a/Ghidra/Processors/x86/data/languages/ia.sinc
 +++ b/Ghidra/Processors/x86/data/languages/ia.sinc
 @@ -468,8 +468,10 @@ define context contextreg
@@ -37,7 +37,7 @@ index ebcc9ee2a6..093da404ce 100644
  ;
  
  
-@@ -3658,7 +3660,842 @@ enterFrames: low5 is low5 { tmp:1 = low5; export tmp; }
+@@ -3658,7 +3660,929 @@ enterFrames: low5 is low5 { tmp:1 = low5; export tmp; }
  
  :INT1           is vexMode=0 & byte=0xf1                            { tmp:1 = 0x1; intloc:$(SIZE) = swi(tmp); call [intloc]; return [0:1]; }
  :INT3           is vexMode=0 & byte=0xcc                            { tmp:1 = 0x3; intloc:$(SIZE) = swi(tmp); call [intloc]; return [0:1]; }
@@ -864,12 +864,99 @@ index ebcc9ee2a6..093da404ce 100644
 +  BX = CDROM_INSTALLATION_CHECK();
 +}
 +
++define pcodeop ALLOCATE_LDT_DESCRIPTORS;
++:INT" 31"  is vexMode=0 & byte=0xcd; byte=0x31 & ctxAX=0x0000
++{
++  # Input: CX=number of descriptors to allocate
++  # Output: AX=base selector, CF=depends on error
++  local res:3 = ALLOCATE_LDT_DESCRIPTORS(CX);
++  AX = res[0,16];
++  CF = res[16,1];
++}
++
++define pcodeop FREE_LDT_DESCRIPTOR;
++:INT" 31"  is vexMode=0 & byte=0xcd; byte=0x31 & ctxAX=0x0001
++{
++  # Input: BX=selector to free
++  # Output: CF=depends on error, AX=error code
++  res:3 = FREE_LDT_DESCRIPTOR(CX);
++  AX = res[0,16];
++  CF = res[16,1];
++}
++
++define pcodeop SEGMENT_TO_DESCRIPTOR;
++:INT" 31"  is vexMode=0 & byte=0xcd; byte=0x31 & ctxAX=0x0002
++{
++  # Input: BX = real mode segment
++  # Output: AX = selector corresponding to real mode segment (64K limit), CF depends on error
++  local res:3 = SEGMENT_TO_DESCRIPTOR(BX);
++  AX = res[0,16];
++  CF = res[16,1];
++}
++
++define pcodeop GET_NEXT_SELECTOR_INCREMENT_VALUE;
++:INT" 31"  is vexMode=0 & byte=0xcd; byte=0x31 & ctxAX=0x0003
++{
++  # Input: None
++  # Output CF=clear, AX=value to add to get next sequential selector
++  AX=GET_NEXT_SELECTOR_INCREMENT_VALUE();
++  CF=0;
++}
++
++define pcodeop LOCK_SELECTOR;
++:INT" 31"  is vexMode=0 & byte=0xcd; byte=0x31 & ctxAX=0x0004
++{
++  # Input: BX=selector to lock (prevent paging)
++  # Output: ???
++  LOCK_SELECTOR(BX);
++}
++
++define pcodeop UNLOCK_SELECTOR;
++:INT" 31"  is vexMode=0 & byte=0xcd; byte=0x31 & ctxAX=0x0005
++{
++  # Input: BX=selector to unlock (permit paging)
++  # Output: ???
++  UNLOCK_SELECTOR(BX);
++}
++
 +define pcodeop DPMI_GET_SEGMENT_BASE_ADDRESS;
 +:INT" 31"  is vexMode=0 & byte=0xcd; byte=0x31 & ctxAX=0x0006
 +{
 +  local res:4 = DPMI_GET_SEGMENT_BASE_ADDRESS(BX);
 +  DX = res[0,16];
 +  CX = res[16,16];
++}
++
++define pcodeop SET_SEGMENT_BASE_ADDRESS;
++:INT" 31" is vexMode=0 & byte=0xcd; byte=0x31 & ctxAX=0x0007
++{
++  # Input: BX = selector, CX:DX = linear base address
++  # CF = error; AX=error code
++  local tmp:4 = segment(CX, DX);
++  res:3 = SET_SEGMENT_BASE_ADDRESS(BX, tmp);
++  AX = res[0,16];
++  CF = res[16,1];
++}
++
++define pcodeop SET_SEGMENT_LIMIT;
++:INT" 31" is vexMode=0 & byte=0xcd; byte=0x31 & ctxAX=0x0008
++{
++  # Input: BX = selector, CX:DX = segment limit
++  # Output: CF = error, AX = error code
++  local tmp:4 = segment(CX, DX);
++  res:3 = SET_SEGMENT_LIMIT(BX, tmp);
++  AX = res[0,16];
++  CF = res[16,1];
++}
++
++define pcodeop SET_DESCRIPTOR_ACCESS_RIGHTS;
++:INT" 31" is vexMode=0 & byte=0xcd; byte=0x31 & ctxAX=0x0009
++{
++  # Input: BX = selector, CL = access rights, CH = extended rights
++  # Output: CF = error, AX = error code
++  res:3 = SET_DESCRIPTOR_ACCESS_RIGHTS(BX, CL, CH);
++  AX = res[0,16];
++  CF = res[16,1];
 +}
 +
 +:INT imm8 is vexMode=0 & byte=0xcd; imm8
@@ -883,7 +970,7 @@ index ebcc9ee2a6..093da404ce 100644
    tmp:1 = 0x4;
 diff --git a/Ghidra/Processors/x86/ghidra_scripts/InterruptContext.java b/Ghidra/Processors/x86/ghidra_scripts/InterruptContext.java
 new file mode 100644
-index 0000000000..dc11fc3ffa
+index 0000000000..79197fe972
 --- /dev/null
 +++ b/Ghidra/Processors/x86/ghidra_scripts/InterruptContext.java
 @@ -0,0 +1,118 @@
@@ -951,7 +1038,7 @@ index 0000000000..dc11fc3ffa
 +
 +                            if (isValueKnown) {
 +                                String regName = reg.getName();
-+                                if (regName.equals("AX")) {
++                                if (regName.equals("AX") || regName.equals("EAX")) {
 +                                    if (finalAH == null) finalAH = (val >> 8) & 0xFF;
 +                                    if (finalAL == null) finalAL = val & 0xFF;
 +                                } else if (regName.equals("AH")) {

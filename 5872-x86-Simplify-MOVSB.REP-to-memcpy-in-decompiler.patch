@@ -4,12 +4,12 @@ Date: Tue, 10 Oct 2023 19:05:17 +0200
 Subject: [PATCH] 5872: x86: Simplify MOVSB.REP to memcpy in decompiler
 
 ---
- Ghidra/Processors/x86/data/languages/ia.sinc  | 420 ++++++++++++++++--
- .../x86/data/languages/lockable.sinc          |  51 ++-
- 2 files changed, 423 insertions(+), 48 deletions(-)
+ Ghidra/Processors/x86/data/languages/ia.sinc  | 594 ++++++++++++++++--
+ .../x86/data/languages/lockable.sinc          |  51 +-
+ 2 files changed, 597 insertions(+), 48 deletions(-)
 
 diff --git a/Ghidra/Processors/x86/data/languages/ia.sinc b/Ghidra/Processors/x86/data/languages/ia.sinc
-index 6f736fc8e4..b7bfdf019b 100644
+index bb8991af30..16bfd07e5c 100644
 --- a/Ghidra/Processors/x86/data/languages/ia.sinc
 +++ b/Ghidra/Processors/x86/data/languages/ia.sinc
 @@ -1450,34 +1450,48 @@ moffs64: segWide^[imm32]  is addrsize=1 & highseg=1 & segWide & imm32   { tmp:8
@@ -90,115 +90,204 @@ index 6f736fc8e4..b7bfdf019b 100644
  rep: ".REP" is ((repprefx=1 & repneprefx=0)|(repprefx=0 & repneprefx=1)) & addrsize=2  { if (RCX==0) goto inst_next; RCX=RCX-1; }
  @endif
  rep:        is repprefx=0 & repneprefx=0			{ }
-+repx: ".REP" is ((repprefx=1 & repneprefx=0)|(repprefx=0 & repneprefx=1)) { }
-+repx:        is repprefx=0 & repneprefx=0			{ }
++repx: ".REP" is ((repprefx=1 & repneprefx=0)|(repprefx=0 & repneprefx=1)) { tmp:1 = 1; export tmp; }
++repx:        is repprefx=0 & repneprefx=0			{ tmp:1 = 0; export tmp; }
  
  reptail:	is ((repprefx=1 & repneprefx=0)|(repprefx=0 & repneprefx=1))			{ goto inst_start; }
  reptail:	is repprefx=0 & repneprefx=0			{ }
-@@ -2351,6 +2367,46 @@ macro fucompe(val1, val2) {
+@@ -2351,6 +2367,35 @@ macro fucompe(val1, val2) {
      SF = 0;
  }
  
-+macro newpos(pos1, pos2, off) {
-+    if (DF == 1) goto <sub>;
-+@ifdef IA64
-+    pos1 = pos1 + zext(off);
-+    pos2 = pos2 + zext(off);
-+    goto <end>;
-+<sub>
-+    pos1 = pos1 - zext(off);
-+    pos2 = pos2 - zext(off);
-+@else
++macro newpos(reg, off) {
++  if (DF) goto <rev>;
++  reg = reg + off;
++  goto <end>;
++<rev>
++  reg = reg - off;
++<end>
++}
++
++macro newpos2(pos1, pos2, off) {
++    if (DF) goto <rev>;
++#@ifdef IA64
++#    pos1 = pos1 + zext(off);
++#    pos2 = pos2 + zext(off);
++#    goto <end>;
++#<rev>
++#    pos1 = pos1 - zext(off);
++#    pos2 = pos2 - zext(off);
++#@else
 +    pos1 = pos1 + off;
 +    pos2 = pos2 + off;
 +    goto <end>;
-+<sub>
++<rev>
 +    pos1 = pos1 - off;
 +    pos2 = pos2 - off;
-+@endif
-+<end>
-+}
-+
-+define pcodeop memcmp;
-+macro do_memcmp(reg1, reg2, size, count) {
-+    total:$(SIZE) = size:$(SIZE) * count:$(SIZE);
-+    if (DF == 1) goto <sub>;
-+    ZF = memcmp(reg1, reg2, total);
-+    goto <end>;
-+<sub>
-+    ZF = memcmp(reg1-total, reg2-total, total);
-+<end>
-+}
-+
-+macro adaptReg(reg, val) {
-+  if (DF == 1) goto <sub>;
-+  reg = reg + val;
-+  goto <end>;
-+<sub>
-+  reg = reg - val;
++#@endif
 +<end>
 +}
 +
  # The base level constructors
  #   The prefixes
  :^instruction is instrPhase=0 & over=0x2e; instruction     [ segover=1; ]  {} # CS override
-@@ -3085,11 +3141,51 @@ define pcodeop clzero;
+@@ -3085,11 +3130,151 @@ define pcodeop clzero;
  :CMP Reg64,rm64     is $(LONGMODE_ON) & vexMode=0 & opsize=2 & byte=0x3b; rm64 & Reg64 ...       { local temp:8 = rm64; subflags(Reg64,temp); local diff = Reg64 - temp; resultflags(diff); }
  @endif
  
 -:CMPSB^repe^repetail eseDI1,dseSI1  is vexMode=0 & repe & repetail & byte=0xa6 & dseSI1 & eseDI1        { build repe; build eseDI1; build dseSI1; local temp_DI1:1 = eseDI1; local temp_SI1:1 = dseSI1;  subflags(temp_SI1,temp_DI1); local diff=temp_SI1 - temp_DI1; resultflags(diff); build repetail; }
 -:CMPSW^repe^repetail eseDI2,dseSI2  is vexMode=0 & repe & repetail & opsize=0 & byte=0xa7 & dseSI2 & eseDI2 { build repe; build eseDI2; build dseSI2; local temp_DI2:2 = eseDI2; local temp_SI2:2 = dseSI2; subflags(temp_SI2,temp_DI2); local diff=temp_SI2 - temp_DI2; resultflags(diff); build repetail; }
 -:CMPSD^repe^repetail eseDI4,dseSI4  is vexMode=0 & repe & repetail & opsize=1 & byte=0xa7 & dseSI4 & eseDI4 { build repe; build eseDI4; build dseSI4; local temp_DI4:4 = eseDI4; local temp_SI4:4 = dseSI4; subflags(temp_SI4,temp_DI4); local diff=temp_SI4 - temp_DI4; resultflags(diff); build repetail; }
++define pcodeop memcmp;
 +:CMPSB^repx eseDI1,dseSI1  is vexMode=0 & repx & byte=0xa6 & dseSI1 & eseDI1
 +{
-+    tmp:$(SIZE) = 1;
-+    do_memcmp(eseDI1,dseSI1,tmp,CX);
-+    newpos(DI,SI,CX);
++  tmpDI = *:1 eseDI1;
++  tmpSI = *:1 dseSI1;
++  subflags(tmpDI, tmpSI);
++  if (repx) goto <loop>;
++  temp = tmpDI - tmpSI;
++  newpos2(DI, SI, 1:2);
++  goto <end>;
++<loop>
++  if (DF) goto <rev>;
++  tmp = CX;
++  goto <apply>;
++<rev>
++  tmp = -CX;
++<apply>
++  temp = memcmp(eseDI1, dseSI1, tmp);
++  newpos2(DI, SI, CX);
++<end>
++  resultflags(temp);
 +}
 +:CMPSB^repx eseDI2,dseSI2  is vexMode=0 & addrsize=0 & repx & byte=0xa6 & dseSI2 & eseDI2
 +{
-+    tmp:$(SIZE) = 1;
-+    do_memcmp(eseDI2,dseSI2,tmp,CX);
-+    newpos(DI,SI,CX);
++  tmpDI = *:1 eseDI2;
++  tmpSI = *:1 dseSI2;
++  subflags(tmpDI, tmpSI);
++  if (repx) goto <loop>;
++  temp = tmpDI - tmpSI;
++  newpos2(DI, SI, 1:2);
++  goto <end>;
++<loop>
++  if (DF) goto <rev>;
++  tmp = CX;
++  goto <apply>;
++<rev>
++  tmp = -CX;
++<apply>
++  temp = memcmp(eseDI2, dseSI2, tmp);
++  newpos2(DI, SI, CX);
++<end>
++  resultflags(temp);
 +}
 +:CMPSB^repx eseDI4,dseSI4  is vexMode=0 & addrsize=1 & repx & byte=0xa6 & dseSI4 & eseDI4
 +{
-+    tmp:$(SIZE) = 1;
-+    do_memcmp(eseDI4,dseSI4,tmp,ECX);
-+    newpos(EDI,ESI,ECX);
++  tmpDI = *:1 eseDI4;
++  tmpSI = *:1 dseSI4;
++  subflags(tmpDI, tmpSI);
++  if (repx) goto <loop>;
++  temp = tmpDI - tmpSI;
++  newpos2(EDI, ESI, 1:4);
++  goto <end>;
++<loop>
++  if (DF) goto <rev>;
++  tmp = CX;
++  goto <apply>;
++<rev>
++  tmp = -CX;
++<apply>
++  temp = memcmp(eseDI4, dseSI4, tmp);
++  newpos2(EDI, ESI, ECX);
++<end>
++  resultflags(temp);
 +}
  @ifdef IA64
 -:CMPSD^repe^repetail eseDI8,dseSI8  is $(LONGMODE_ON) & vexMode=0 & repe & repetail & opsize=2 & byte=0xa7 & dseSI8 & eseDI8 { build repe; build eseDI8; build dseSI8; local temp_DI8:8 = eseDI8; local temp_SI8:8 = dseSI8; subflags(temp_SI8,temp_DI8); local diff=temp_SI8-temp_DI8; resultflags(diff); build repetail; }
 +:CMPSB^repx eseDI8,dseSI8  is vexMode=0 & addrsize=2 & repx & byte=0xa6 & eseDI8 & dseSI8
 +{
-+    tmp:$(SIZE) = 1;
-+    do_memcmp(eseDI8,dseSI8,tmp,RCX);
-+    newpos(RDI,RSI,RCX);
++  tmpDI = *:1 eseDI8;
++  tmpSI = *:1 dseSI8;
++  subflags(tmpDI, tmpSI);
++  if (repx) goto <loop>;
++  temp = tmpDI - tmpSI;
++  newpos2(RDI, RSI, 1:8);
++  goto <end>;
++<loop>
++  if (DF) goto <rev>;
++  tmp = RCX;
++  goto <apply>;
++<rev>
++  tmp = -RCX;
++<apply>
++  temp = memcmp(eseDI8, dseSI8, tmp);
++  newpos2(RDI, RSI, RCX);
++<end>
++  resultflags(temp);
 +}
 +@endif
 +:CMPSW^repx eseDI2,dseSI2  is vexMode=0 & addrsize=0 & repx & opsize=0 & byte=0xa7 & dseSI2 & eseDI2
 +{
-+    tmp:$(SIZE) = 2;
-+    do_memcmp(eseDI2,dseSI2,tmp,CX);
-+    newpos(DI,SI,CX*2);
++  tmpDI = *:2 eseDI2;
++  tmpSI = *:2 dseSI2;
++  subflags(tmpDI, tmpSI);
++  if (repx) goto <loop>;
++  temp = tmpDI - tmpSI;
++  newpos2(DI, SI, 2:2);
++  goto <end>;
++<loop>
++  tmp = CX * 2;
++  if (!DF) goto <apply>;
++  tmp = -tmp;
++<apply>
++  temp = memcmp(eseDI2, dseSI2, tmp);
++  newpos2(DI, SI, CX*2);
++<end>
++  resultflags(temp);
 +}
 +:CMPSD^repx eseDI4,dseSI4  is vexMode=0 & addrsize=1 & repx & opsize=0 & byte=0xa7 & dseSI4 & eseDI4
 +{
-+    tmp:$(SIZE) = 4;
-+    do_memcmp(eseDI4,dseSI4,tmp,ECX);
-+    newpos(EDI,ESI,ECX*4);
++  tmpDI = *:4 eseDI4;
++  tmpSI = *:4 dseSI4;
++  subflags(tmpDI, tmpSI);
++  if (repx) goto <loop>;
++  temp = tmpDI - tmpSI;
++  newpos2(EDI, ESI, 4:4);
++  goto <end>;
++<loop>
++  tmp = ECX * 4;
++  if (!DF) goto <apply>;
++  tmp = -tmp;
++<apply>
++  temp = memcmp(eseDI4, dseSI4, tmp);
++  newpos2(EDI, ESI, ECX*4);
++<end>
++  resultflags(temp);
 +}
 +@ifdef IA64
 +:CMPSD^repx eseDI8,dseSI8  is vexMode=0 & addrsize=2 & repx & opsize=0 & byte=0xa7 & dseSI8 & eseDI8
 +{
-+    tmp:$(SIZE) = 4;
-+    do_memcmp(eseDI8,dseSI8,tmp,RCX);
-+    newpos(RDI,RSI,RCX*4);
++  tmpDI = *:4 eseDI8;
++  tmpSI = *:4 dseSI8;
++  subflags(tmpDI, tmpSI);
++  if (repx) goto <loop>;
++  temp = tmpDI - tmpSI;
++  newpos2(RDI, RSI, 4:8);
++  goto <end>;
++<loop>
++  tmp = RCX * 4;
++  if (!DF) goto <apply>;
++  tmp = -tmp;
++<apply>
++  temp = memcmp(eseDI8, dseSI8, tmp);
++  newpos2(RDI, RSI, RCX);
++<end>
++  resultflags(temp);
 +}
  @endif
  
  # See 'lockable.sinc' for memory destination, lockable variants
-@@ -4695,11 +4791,31 @@ define pcodeop LocalDescriptorTableRegister;
+@@ -4782,11 +4967,79 @@ define pcodeop LocalDescriptorTableRegister;
  }
  @endif
  
@@ -206,35 +295,83 @@ index 6f736fc8e4..b7bfdf019b 100644
 -:LODSW^rep^reptail dseSI2   is vexMode=0 & rep & reptail & opsize=0 & byte=0xAD & dseSI2    { build rep; build dseSI2; AX=dseSI2; build reptail; }
 -:LODSD^rep^reptail dseSI4   is vexMode=0 & rep & reptail & opsize=1 & byte=0xAD & dseSI4    { build rep; build dseSI4; EAX=dseSI4; build reptail; }
 +define pcodeop lodsb;
-+:LODSB^repx dseSI1	is vexMode=0 & repx & repprefx & byte=0xAC & dseSI1
++:LODSB^repx dseSI1	is vexMode=0 & repx & byte=0xAC & dseSI1
 +{
-+  lodsb(AL, dseSI1, CX);
-+  adaptReg(SI, CX);
++  if (repx) goto <loop>;
++  AL = *:1 dseSI1;
++  newpos(SI, 1);
++  goto <end>;
++<loop>
++  if (DF) goto <rev>;
++  tmp = CX;
++  goto <apply>;
++<rev>
++  tmp = -CX;
++<apply>
++  lodsb(AL, dseSI1, tmp);
++  newpos(SI, CX);
++<end>
 +}
-+:LODSW^repx dseSI2	is vexMode=0 & repx & repprefx & opsize=0 & byte=0xAD & dseSI2
++define pcodeop lodsw;
++:LODSW^repx dseSI2	is vexMode=0 & repx & opsize=0 & byte=0xAD & dseSI2
 +{
-+  local tmp = CX * 2;
-+  lodsb(AX, dseSI2, tmp);
-+  adaptReg(SI, tmp);
++  if (repx) goto <loop>;
++  AX = *:2 dseSI2;
++  newpos(SI, 2);
++  goto <end>;
++<loop>
++  if (DF) goto <rev>;
++  tmp = CX;
++  goto <apply>;
++<rev>
++  tmp = -CX;
++<apply>
++  lodsw(AX, dseSI2, tmp);
++  newpos(SI, CX * 2);
++<end>
 +}
-+:LODSD^repx dseSI4	is vexMode=0 & repx & repprefx & opsize=1 & byte=0xAD & dseSI4
++define pcodeop lodsd;
++:LODSD^repx dseSI4	is vexMode=0 & repx & opsize=1 & byte=0xAD & dseSI4
 +{
-+  local tmp = ECX * 4;
-+  lodsb(EAX, dseSI4, tmp);
-+  adaptReg(ESI, tmp);
++  if (repx) goto <loop>;
++  EAX = *:4 dseSI4;
++  newpos(ESI, 4);
++  goto <end>;
++<loop>
++  if (DF) goto <rev>;
++  tmp = ECX;
++  goto <apply>;
++<rev>
++  tmp = -ECX;
++<apply>
++  lodsd(AX, dseSI4, tmp);
++  newpos(ESI, ECX * 4);
++<end>
 +}
  @ifdef IA64
 -:LODSQ^rep^reptail dseSI8   is $(LONGMODE_ON) & vexMode=0 & rep & reptail & opsize=2 & byte=0xAD & dseSI8    { build rep; build dseSI8; RAX=dseSI8; build reptail; }
-+:LODSQ^repx dseSI8	is $(LONGMODE_ON) & vexMode=0 & repx & repprefx & opsize=2 & byte=0xAD & dseSI8
++define pcodeop lodsq;
++:LODSQ^repx dseSI8	is $(LONGMODE_ON) & vexMode=0 & repx & opsize=2 & byte=0xAD & dseSI8
 +{
-+  local tmp = RCX * 8;
-+  lodsb(RAX, dseSI8, tmp);
-+  adaptReg(RSI, tmp);
++  if (repx) goto <loop>;
++  RAX = *:4 dseSI8;
++  newpos(RSI, 8);
++  goto <end>;
++<loop>
++  if (DF) goto <rev>;
++  tmp = RCX;
++  goto <apply>;
++<rev>
++  tmp = -RCX;
++<apply>
++  lodsq(AX, dseSI8, tmp);
++  newpos(RSI, RCX * 8);
++<end>
 +}
  @endif
  
  :LOOP   rel8        is vexMode=0 & addrsize=0 & byte=0xE2; rel8             { CX = CX -1; if (CX!=0) goto rel8; }
-@@ -4917,11 +5033,135 @@ define pcodeop swap_bytes;
+@@ -5004,11 +5257,172 @@ define pcodeop swap_bytes;
  :MOVNTI Mem,Reg64       is $(LONGMODE_ON) & vexMode=0 & opsize = 2; byte=0xf; byte=0xc3; Mem & Reg64 ...     { *Mem = Reg64; }
  @endif
  
@@ -242,139 +379,176 @@ index 6f736fc8e4..b7bfdf019b 100644
 -:MOVSW^rep^reptail eseDI2,dseSI2    is vexMode=0 & rep & reptail & opsize=0 & byte=0xa5 & eseDI2 & dseSI2   { build rep; build eseDI2; build dseSI2; eseDI2 = dseSI2; build reptail; }
 -:MOVSD^rep^reptail eseDI4,dseSI4    is vexMode=0 & rep & reptail & opsize=1 & byte=0xa5 & eseDI4 & dseSI4   { build rep; build eseDI4; build dseSI4; eseDI4 = dseSI4; build reptail; }
 +define pcodeop memmove;
-+:MOVSB^repx eseDI1,dseSI1	is vexMode=0 & repx & repprefx & byte=0xa4 & eseDI1 & dseSI1
++:MOVSB^repx eseDI1,dseSI1	is vexMode=0 & repx & byte=0xa4 & eseDI1 & dseSI1
 +{
-+  local tmp = CX;
-+  repprefx_:1 = repprefx;
-+  if (repprefx_ == 1) goto <code>;
-+  tmp = 1;
-+<code>
-+  memmove(eseDI1, dseSI1, CX);
-+  DI = DI + tmp;
-+  SI = SI + tmp;
++  if (repx) goto <loop>;
++  *:1 eseDI1 = *:1 dseSI1;
++  newpos2(DI, SI, 1:2);
++  goto <end>;
++<loop>
++  if (DF) goto <rev>;
++  tmp = CX;
++  goto <apply>;
++<rev>
++  tmp = -CX;
++<apply>
++  memmove(eseDI1, dseSI1, tmp);
++  newpos2(DI, SI, CX);
++<end>
 +}
-+:MOVSB^repx eseDI2,dseSI2	is vexMode=0 & addrsize=0 & repx & repprefx & byte=0xa4 & eseDI2 & dseSI2
++:MOVSB^repx eseDI2,dseSI2	is vexMode=0 & addrsize=0 & repx & byte=0xa4 & eseDI2 & dseSI2
 +{
-+  local tmp = CX;
-+  repprefx_:1 = repprefx;
-+  if (repprefx_ == 1) goto <code>;
-+  tmp = 1;
-+<code>
++  if (repx) goto <loop>;
++  *:1 eseDI2 = *:1 dseSI2;
++  newpos2(DI, SI, 1:2);
++  goto <end>;
++<loop>
++  if (DF) goto <rev>;
++  tmp = CX;
++  goto <apply>;
++<rev> 
++  tmp = -CX;
++<apply>
 +  memmove(eseDI2, dseSI2, tmp);
-+  DI = DI + tmp;
-+  SI = SI + tmp;
++  newpos2(DI, SI, CX);
++<end>
 +}
-+:MOVSB^repx eseDI4,dseSI4	is vexMode=0 & addrsize=1 & repx & repprefx & byte=0xa4 & eseDI4 & dseSI4
++:MOVSB^repx eseDI4,dseSI4	is vexMode=0 & addrsize=1 & repx & byte=0xa4 & eseDI4 & dseSI4
 +{
-+  local tmp = ECX;
-+  repprefx_:1 = repprefx;
-+  if (repprefx_ == 1) goto <code>;
-+  tmp = 1;
-+<code>
++  if (repx) goto <loop>;
++  *:1 eseDI4 = *:1 dseSI4;
++  newpos2(EDI, ESI, 1:4);
++  goto <end>;
++<loop>
++  if (DF) goto <rev>;
++  tmp = ECX;
++  goto <apply>;
++<rev>
++  tmp = -ECX;
++<apply>
 +  memmove(eseDI4, dseSI4, tmp);
-+  EDI = EDI + tmp;
-+  ESI = ESI + tmp;
++  newpos2(EDI, ESI, ECX);
++<end>
++
 +}
 +@ifdef IA64
-+:MOVSB^repx RDI,RSI	is vexMode=0 & addrsize=2 & repx & repprefx & byte=0xa4 & RDI & RSI
++:MOVSB^repx eseDI8,dseSI8	is vexMode=0 & addrsize=2 & repx & byte=0xa4 & eseDI8 & dseSI8
 +{
-+  local tmp = ECX;
-+  repprefx_:1 = repprefx;
-+  if (repprefx_ == 1) goto <code>;
-+  tmp = 1;
-+<code>
-+  memmove(RDI, RSI, tmp);
-+  RDI = RDI + zext(tmp);
-+  RSI = RSI + zext(tmp);
++  if (repx) goto <loop>;
++  *:1 eseDI8 = *:1 dseSI8;
++  newpos2(RDI, RSI, 1:8);
++  goto <end>;
++<loop>
++  if (DF) goto <rev>;
++  tmp = RCX;
++  goto <apply>;
++<rev>
++  tmp = -RCX;
++<apply>
++  memmove(eseDI8, dseSI8, tmp);
++  newpos2(RDI, RSI, RCX);
++<end>
 +}
 +@endif
 +
-+:MOVSW^repx eseDI2,dseSI2	is vexMode=0 & addrsize=0 & repx & repprefx & opsize=0 & byte=0xa5 & eseDI2 & dseSI2
++:MOVSW^repx eseDI2,dseSI2	is vexMode=0 & addrsize=0 & repx & opsize=0 & byte=0xa5 & eseDI2 & dseSI2
 +{
-+  local tmp = CX * 2;
-+  repprefx_:1 = repprefx;
-+  if (repprefx_ == 1) goto <code>;
-+  tmp = 2;
-+<code>
++  if (repx) goto <loop>;
++  *:2 eseDI2 = *:2 dseSI2;
++  newpos2(DI, SI, 2:2);
++  goto <end>;
++<loop>
++  tmp = CX;
++  if (DF) goto <apply>;
++  tmp = -tmp;
++<apply>
 +  memmove(eseDI2, dseSI2, tmp);
-+  DI = DI + tmp;
-+  SI = SI + tmp;
++  newpos2(DI, SI, CX*2);
++<end>
 +}
-+:MOVSW^repx eseDI4,dseSI4	is vexMode=0 & addrsize=1 & repx & repprefx & opsize=0 & byte=0xa5 & eseDI4 & dseSI4
++:MOVSW^repx eseDI4,dseSI4	is vexMode=0 & addrsize=1 & repx & opsize=0 & byte=0xa5 & eseDI4 & dseSI4
 +{
-+
-+  local tmp = ECX * 2;
-+  repprefx_:1 = repprefx;
-+  if (repprefx_ == 1) goto <code>;
-+  tmp = 2;
-+<code>
++  if (repx) goto <loop>;
++  *:2 eseDI4 = *:2 dseSI4;
++  newpos2(EDI, ESI, 2:4);
++  goto <end>;
++<loop>
++  tmp = ECX * 2;
++  if (DF) goto <apply>;
++  tmp = -tmp;
++<apply>
 +  memmove(eseDI4, dseSI4, tmp);
-+  EDI = EDI + tmp;
-+  ESI = ESI + tmp;
++  newpos2(EDI, ESI, ECX*2);
++<end>
 +}
  @ifdef IA64
 -:MOVSQ^rep^reptail eseDI8,dseSI8    is $(LONGMODE_ON) & vexMode=0 & rep & reptail & opsize=2 & byte=0xa5 & eseDI8 & dseSI8   { build rep; build eseDI8; build dseSI8; eseDI8 = dseSI8; build reptail; }
-+:MOVSW^repx RDI,RSI	is vexMode=0 & addrsize=2 & repx & repprefx & opsize=0 & byte=0xa5 & RDI & RSI
++:MOVSW^repx eseDI8,dseSI8	is vexMode=0 & addrsize=2 & repx & opsize=0 & byte=0xa5 & eseDI8 & dseSI8
 +{
-+  local tmp:8 = zext(ECX) * 2;
-+  repprefx_:1 = repprefx;
-+  if (repprefx_ == 1) goto <code>;
-+  tmp = 2;
-+<code>
-+  memmove(RDI, RSI, tmp);
-+  RDI = RDI + tmp;
-+  RSI = RSI + tmp;
++  if (repx) goto <loop>;
++  *:2 eseDI8 = *:8 dseSI8;
++  newpos2(RDI, RSI, 2:8);
++  goto <end>;
++<loop>
++  tmp = RCX * 2;
++  if (DF) goto <apply>;
++  tmp = -tmp;
++<apply>
++  memmove(eseDI8, dseSI8, tmp);
++  newpos2(RDI, RSI, RCX*2);
++<end>
 +}
 +@endif
-+:MOVSD^repx eseDI2,dseSI2	is vexMode=0 & addrsize=0 & repx & repprefx & opsize=1 & byte=0xa5 & eseDI2 & dseSI2
++:MOVSD^repx eseDI4,dseSI4	is vexMode=0 & addrsize=1 & repx & opsize=1 & byte=0xa5 & eseDI4 & dseSI4
 +{
-+  local tmp = CX * 4;
-+  repprefx_:1 = repprefx;
-+  if (repprefx_ == 1) goto <code>;
-+  tmp = 4;
-+<code>
-+  memmove(eseDI2, dseSI2, tmp);
-+  DI = DI + tmp;
-+  SI = SI + tmp;
-+}
-+:MOVSD^repx eseDI4,dseSI4	is vexMode=0 & addrsize=1 & repx & repprefx & opsize=1 & byte=0xa5 & eseDI4 & dseSI4
-+{
-+  local tmp = ECX * 4;
-+  repprefx_:1 = repprefx;
-+  if (repprefx_ == 1) goto <code>;
-+  tmp = 4;
-+<code>
++  if (repx) goto <loop>;
++  *:4 eseDI4 = *:4 dseSI4;
++  newpos2(EDI, ESI, 4:4);
++  goto <end>;
++<loop>
++  tmp = ECX * 4;
++  if (DF) goto <apply>;
++  tmp = -tmp;
++<apply>
 +  memmove(eseDI4, dseSI4, tmp);
-+  EDI = EDI + tmp;
-+  ESI = ESI + tmp;
++  newpos2(EDI, ESI, ECX*4);
++<end>
 +}
 +@ifdef IA64
-+:MOVSD^repx RDI,RSI	is vexMode=0 & addrsize=2 & repx & repprefx & opsize=1 & byte=0xa5 & RDI & RSI
++:MOVSD^repx eseDI8,dseSI8	is vexMode=0 & addrsize=2 & repx & opsize=1 & byte=0xa5 & eseDI8 & dseSI8
 +{
-+  local tmp:8 = zext(ECX) * 4;
-+  repprefx_:1 = repprefx;
-+  if (repprefx_ == 1) goto <code>;
-+  tmp = 4;
-+<code>
-+  memmove(RDI, RSI, tmp);
-+  RDI = RDI + tmp;
-+  RSI = RSI + tmp;
++  if (repx) goto <loop>;
++  *:4 eseDI8 = *:4 dseSI8;
++  newpos2(RDI, RSI, 4:8);
++  goto <end>;
++<loop>
++  tmp = RCX * 4;
++  if (DF) goto <apply>;
++  tmp = -tmp;
++<apply>
++  memmove(eseDI8, dseSI8, tmp);
++  newpos2(RDI, RSI, RCX*4);
++<end>
 +}
-+:MOVSQ^repx RDI,RSI	is $(LONGMODE_ON) & vexMode=0 & addrsize=2 & repx & repprefx & opsize=2 & byte=0xa5 & RDI & RSI
++:MOVSQ^repx eseDI8,dseSI8	is $(LONGMODE_ON) & vexMode=0 & addrsize=2 & repx & opsize=2 & byte=0xa5 & eseDI8 & dseSI8
 +{
-+  local tmp:8 = zext(ECX) * 8;
-+  repprefx_:1 = repprefx;
-+  if (repprefx_ == 1) goto <code>;
-+  tmp = 8;
-+<code>
-+  memmove(RDI, RSI, tmp);
-+  RDI = RDI + tmp;
-+  RSI = RSI + tmp;
++  if (repx) goto <loop>;
++  *:8 eseDI8 = *:8 dseSI8;
++  newpos2(RDI, RSI, 8:8);
++  goto <end>;
++<loop>
++  tmp = RCX * 8;
++  if (DF) goto <apply>;
++  tmp = -tmp;
++<apply>
++  memmove(eseDI8, dseSI8, tmp);
++  newpos2(RDI, RSI, RCX*8);
++<end>
 +}
  @endif
  
  :MOVSX Reg16,rm8    is vexMode=0 & opsize=0 & byte=0xf; byte=0xbe; rm8 & Reg16 ...  { Reg16 = sext(rm8); }
-@@ -5420,11 +5660,64 @@ define pcodeop smm_restore_state;
+@@ -5507,11 +5921,64 @@ define pcodeop smm_restore_state;
  :SBB  Reg64,rm64       is $(LONGMODE_ON) & vexMode=0 & opsize=2 & byte=0x1b; rm64 & Reg64 ...						{ subCarryFlags( Reg64, rm64 ); resultflags(Reg64); }
  @endif
  
@@ -443,7 +617,7 @@ index 6f736fc8e4..b7bfdf019b 100644
  @endif
  
  :SET^cc rm8     is vexMode=0 & byte=0xf; row=9 & cc; rm8                { rm8 = cc; }
-@@ -5588,11 +5881,48 @@ define pcodeop stac;
+@@ -5675,11 +6142,48 @@ define pcodeop stac;
  
  :STMXCSR m32        is vexMode=0 & byte=0xf; byte=0xae; ( mod != 0b11 & reg_opcode=3 ) ... & m32 { m32 = MXCSR; }
  
@@ -454,44 +628,44 @@ index 6f736fc8e4..b7bfdf019b 100644
 +:STOSB^repx eseDI1,AL	is vexMode=0 & repx & byte=0xaa & eseDI1 & AL
 +{
 +  memset(eseDI1, AL, CX);
-+  adaptReg(DI, CX);
++  newpos(DI, CX);
 +}
 +:STOSB^repx eseDI2,AL	is vexMode=0 & addrsize=0 & repx & byte=0xaa & eseDI2 & AL
 +{
 +  memset(eseDI2, AL, CX);
-+  adaptReg(DI, CX);
++  newpos(DI, CX);
 +}
 +:STOSB^repx eseDI4,AL	is vexMode=0 & addrsize=1 & repx & byte=0xaa & eseDI4 & AL
 +{
 +  memset(eseDI4, AL, ECX);
-+  adaptReg(EDI, ECX);
++  newpos(EDI, ECX);
 +}
- @ifdef IA64
--:STOSQ^rep^reptail eseDI8   is $(LONGMODE_ON) & vexMode=0 & rep & reptail & opsize=2 & byte=0xab & eseDI8    { build rep; build eseDI8; eseDI8=RAX; build reptail; }
++@ifdef IA64
 +:STOSB^repx eseDI8,AL   is vexMode=0 & addrsize=2 & repx & byte=0xaa & eseDI8 & AL
 +{
 +  memset(RDI, RAX, RCX);
-+  adaptReg(RDI, RCX);
++  newpos(RDI, RCX);
 +}
 +@endif
 +:STOSW^repx eseDI2,AX   is vexMode=0 & repx & opsize=0 & byte=0xab & eseDI2 & AX
 +{
 +  local tmp = CX * 2;
 +  memset(eseDI2, AX, tmp);
-+  adaptReg(DI, tmp);
++  newpos(DI, tmp);
 +}
 +:STOSD^repx eseDI4,EAX   is vexMode=0 & repx & opsize=1 & byte=0xab & eseDI4 & EAX
 +{
 +  local tmp = ECX * 4;
 +  memset(eseDI4, EAX, tmp);
-+  adaptReg(EDI, tmp);
++  newpos(EDI, tmp);
 +}
-+@ifdef IA64
+ @ifdef IA64
+-:STOSQ^rep^reptail eseDI8   is $(LONGMODE_ON) & vexMode=0 & rep & reptail & opsize=2 & byte=0xab & eseDI8    { build rep; build eseDI8; eseDI8=RAX; build reptail; }
 +:STOSQ^repx eseDI8,RAX   is $(LONGMODE_ON) & vexMode=0 & repx & opsize=2 & byte=0xab & eseDI8 & RAX
 +{
 +  local tmp = RCX * 8;
 +  memset(eseDI8, RAX, tmp);
-+  adaptReg(RDI, tmp);
++  newpos(RDI, tmp);
 +}
  @endif
  
