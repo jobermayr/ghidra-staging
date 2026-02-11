@@ -1,0 +1,1318 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Matthew White <mehw.is.me@inventati.org>
+Date: Mon, 2 Feb 2026 05:42:20 +0000
+Subject: [PATCH] 8957: proof of concept: reorganize windows spaces by tabs
+ drag-N-drop, and allow to cancel a drag operation anytime
+
+allow to reorganize tabs by drag-N-drop
+
+Components can be moved around dragging headers over tabs, tabs over
+headers, headers over headers, and tabs over tabs.
+
+While moving tabs in the same node, components shift is based on the
+dragging direction.  Moving a tab from left to right will place that
+tab after the component on which it is dropped over.  When moving in
+the opposite direction, going from right to left will place that tab
+before the component on which it is dropped over.
+
+Dropping a component over headers or tabs in a different node, shall
+add a new tab before the component on which it is dropped over.
+
+Dropping a component over a placeholder's window surface, will still
+append a tab as last item.
+
+new logic and cursors for headers and tabs drag-N-drop actions
+
+Title bars (headers) and tabs can be dragged over other headers and
+tabs, and in different window spaces.
+
+Dragging a component into another window space, will append it as a
+last tab.  While dragging it over a header of another window space,
+will prepend that component as a first tab.
+
+A new set of cursors, could highlight these different actions, and
+also when a tab will be put after or before the one dragged over.
+
+use shortcuts to drag-N-drop at the beginning or end of a stack
+
+Dropping a component over any header, will prepend it at the beginning
+of the windows space that the mouse cursor is over.
+
+Dropping a component over any content space, will append it at the end
+of the windows space that the mouse cursor is over.
+
+new transient window popup as drag-N-drop visual feedback
+
+Visual feedback, to inform the user about a component drag-N-drop
+event in progress.  This is for when a header, or tab, is dragged
+around to drop a component in another space, create a split, or a
+new window.
+
+add help for title bars (headers) and tabs drag-N-drop
+
+Describe how a drag-N-drop action is performed, while dragging by
+header or tab, over a window space, or over another header or tab.
+
+allow drag-N-drop interruptions without unexpected results
+
+Pressing the ESC key is expected to cancel the current drag operation.
+
+By design, a drag-N-drop operation might silence some events, with the
+exception of ALT, CTRL, and SHIFT key modifiers.
+
+This patch implements a WORKAROUND to guess ESC key events, and others
+disrupting the drag operation, which had been silenced.  It's range of
+effectiveness is within the region of drop zones.
+
+To allow graceful interruptions, outside of any drop zone, without any
+unexpected result, a drop action is marked as invalid by default.  Key
+modifiers are used to temporarily toggle a different behavior.
+
+CTRL directs a drag to move a component in a new window, and the SHIFT
+key is to temporarily invalidate the drop.  Releasing a modifier would
+revert to the normal drag-N-drop processing.
+---
+ Ghidra/Features/Base/certification.manifest   |   4 +
+ .../topics/DockingWindows/Docking_Windows.htm |  54 ++++--
+ .../DockingWindows/images/header.stack.png    | Bin 0 -> 897 bytes
+ .../DockingWindows/images/hover.stack.png     | Bin 947 -> 900 bytes
+ .../topics/DockingWindows/images/push.png     | Bin 0 -> 910 bytes
+ .../DockingWindows/images/shift.left.png      | Bin 0 -> 887 bytes
+ .../DockingWindows/images/shift.right.png     | Bin 0 -> 885 bytes
+ .../src/main/java/docking/ComponentNode.java  |  48 ++++-
+ .../main/java/docking/DockableComponent.java  | 181 ++++++++++++++----
+ .../src/main/java/docking/DockableHeader.java | 110 ++++++++++-
+ .../java/docking/DockingWindowManager.java    |  19 +-
+ .../src/main/java/docking/DropCode.java       |  22 ++-
+ .../src/main/java/docking/HeaderCursor.java   | 134 +++++++++++++
+ .../main/java/docking/TransientWindow.java    | 119 ++++++++++++
+ .../src/main/java/docking/WindowPosition.java |  44 ++++-
+ .../tabbedpane/DockingTabRenderer.java        |  21 +-
+ 16 files changed, 688 insertions(+), 68 deletions(-)
+ mode change 100644 => 100755 Ghidra/Features/Base/certification.manifest
+ mode change 100644 => 100755 Ghidra/Features/Base/src/main/help/help/topics/DockingWindows/Docking_Windows.htm
+ create mode 100644 Ghidra/Features/Base/src/main/help/help/topics/DockingWindows/images/header.stack.png
+ create mode 100644 Ghidra/Features/Base/src/main/help/help/topics/DockingWindows/images/push.png
+ create mode 100644 Ghidra/Features/Base/src/main/help/help/topics/DockingWindows/images/shift.left.png
+ create mode 100644 Ghidra/Features/Base/src/main/help/help/topics/DockingWindows/images/shift.right.png
+ mode change 100644 => 100755 Ghidra/Framework/Docking/src/main/java/docking/ComponentNode.java
+ create mode 100755 Ghidra/Framework/Docking/src/main/java/docking/TransientWindow.java
+
+diff --git a/Ghidra/Features/Base/certification.manifest b/Ghidra/Features/Base/certification.manifest
+old mode 100644
+new mode 100755
+index a25227089a..5c62be230e
+--- a/Ghidra/Features/Base/certification.manifest
++++ b/Ghidra/Features/Base/certification.manifest
+@@ -383,10 +383,14 @@ src/main/help/help/topics/DockingWindows/Docking_Windows.htm||GHIDRA||||END|
+ src/main/help/help/topics/DockingWindows/images/Tool.png||GHIDRA||||END|
+ src/main/help/help/topics/DockingWindows/images/Window_Menu.png||GHIDRA||||END|
+ src/main/help/help/topics/DockingWindows/images/hover.stack.png||GHIDRA||||END|
++src/main/help/help/topics/DockingWindows/images/header.stack.png||GHIDRA||||END|
+ src/main/help/help/topics/DockingWindows/images/invalid.png||GHIDRA||||END|
+ src/main/help/help/topics/DockingWindows/images/leftArrow.png||GHIDRA||||END|
++src/main/help/help/topics/DockingWindows/images/push.png||GHIDRA||||END|
+ src/main/help/help/topics/DockingWindows/images/resize.png||GHIDRA||||END|
+ src/main/help/help/topics/DockingWindows/images/rightArrow.png||GHIDRA||||END|
++src/main/help/help/topics/DockingWindows/images/shift.left.png||GHIDRA||||END|
++src/main/help/help/topics/DockingWindows/images/shift.right.png||GHIDRA||||END|
+ src/main/help/help/topics/DockingWindows/images/upArrow.png||GHIDRA||||END|
+ src/main/help/help/topics/EclipseIntegration/EclipseIntegration.htm||GHIDRA||||END|
+ src/main/help/help/topics/EquatePlugin/Equates.htm||GHIDRA||||END|
+diff --git a/Ghidra/Features/Base/src/main/help/help/topics/DockingWindows/Docking_Windows.htm b/Ghidra/Features/Base/src/main/help/help/topics/DockingWindows/Docking_Windows.htm
+old mode 100644
+new mode 100755
+index 8584063697..fcb170b312
+--- a/Ghidra/Features/Base/src/main/help/help/topics/DockingWindows/Docking_Windows.htm
++++ b/Ghidra/Features/Base/src/main/help/help/topics/DockingWindows/Docking_Windows.htm
+@@ -96,8 +96,8 @@
+         <LI><I><B>Docked with other components</B></I>: components are side-by-side (or top to
+         bottom) with another component.</LI>
+ 
+-        <LI><I><B>Stacked with other components</B></I>: components share the same space and tabs
+-        are used to display them one at a time.</LI>
++        <LI><I><B>Stacked with other components</B></I>: components share the same window space,
++        and tabs are used to display them one at a time.</LI>
+ 
+         <LI><I><B>In their own window</B></I>: a component can be placed in its own window.</LI>
+       </OL>
+@@ -108,31 +108,53 @@
+       <BLOCKQUOTE>
+ 
+ 	      <P>Components can be rearranged by dragging them in various ways. &nbsp;To drag a component,
+-	      press and hold the left mouse button on the title bar of the component to be moved and begin
+-	      moving the mouse. &nbsp;The mouse cursor will change to indicate what will happen if the
+-	      mouse button is released at that location.<BR>
++	      press and hold the left mouse button on the title bar (header) of the component to be moved,
++	      or on its own tab, and begin moving the mouse. &nbsp;A transient window popup, with the same
++	      text than in the title bar, will appear, to inform that a dragging action is in progrss, and
++	      the mouse cursor will change to indicate what will happen if the mouse button is released at
++	      that location.<BR>
+ 	      &nbsp;&nbsp;&nbsp;<BR>
+-	      &nbsp;&nbsp;&nbsp; <IMG src="images/invalid.png" alt=""> &nbsp; &nbsp;Invalid Location -
+-	      releasing here will cancel the drag operation.<BR>
++	      &nbsp;&nbsp;&nbsp; <IMG src="images/invalid.png" alt=""> &nbsp; Invalid Location -
++	      releasing here will cancel the drag operation. &nbsp;This can be temporarily induced, by keeping
++	      the SHIFT key pressed while dragging. &nbsp;Then, release the mouse button to cancel and conclude
++	      the drag operation, or release the SHIFT key to continue dragging normally.<BR>
+ 	      &nbsp;&nbsp;&nbsp; <IMG src="images/leftArrow.png" alt=""> &nbsp; Will move the component to the
+-	      left of the component that the mouse cursor is over.<BR>
++	      left of the window space that the mouse cursor is over.<BR>
+ 	      &nbsp;&nbsp;&nbsp; <IMG src="images/rightArrow.png" alt=""> &nbsp; &nbsp;Will move the component
+-	      to the right of the component that the mouse cursor is over.<BR>
++	      to the right of the window space that the mouse cursor is over.<BR>
+ 	      &nbsp;&nbsp;&nbsp; <IMG src="images/upArrow.png" alt=""> &nbsp; Will move the component above the
+-	      component that the mouse cursor is over.<BR>
++	      window space that the mouse cursor is over.<BR>
+ 	      &nbsp;&nbsp;&nbsp; <IMG src="images/downArrow.png" alt=""> &nbsp; Will move the component below
+-	      the component that the mouse cursor is over.<BR>
+-	      &nbsp;&nbsp;&nbsp; <IMG src="images/hover.stack.png" alt=""> &nbsp; Will stack the component with
+-	      the component that the mouse is over, creating a tabbed pane effect.<BR>
+-	      &nbsp;&nbsp;&nbsp; <IMG src="images/window.png" alt=""> &nbsp; &nbsp;Will place the component
+-	      in a new window.<BR>
++	      the window space that the mouse cursor is over.<BR>
++	      &nbsp;&nbsp;&nbsp; <IMG src="images/hover.stack.png" alt=""> &nbsp; Will stack the component into
++	      the window space that the mouse is over, creating a tabbed pane effect, effectively appending the
++	      component as a last tab in that window space. &nbsp;This is what would happen when dragging a
++	      component over a content space.<BR>
++	      &nbsp;&nbsp;&nbsp; <IMG src="images/header.stack.png" alt=""> &nbsp; Will stack the component into
++	      the window space that the mouse is over, prepending the component as a first tab in that window
++	      space. &nbsp;This is what would happen when dragging a component over a title bar (header).<BR>
++	      &nbsp;&nbsp;&nbsp; <IMG src="images/push.png" alt=""> &nbsp; Will push the component in between
++	      other tabs, moving the tab dragged over to its right. &nbsp;This is what would happen when dragging
++	      a component over a tab in another window space.<BR>
++	      &nbsp;&nbsp;&nbsp; <IMG src="images/shift.left.png" alt=""> &nbsp; Will shift the component tab
++	      position, moving it before the tab dragged over. &nbsp;This is what would happend when dragging
++	      a component over a tab located at its left in the same window space.<BR>
++	      &nbsp;&nbsp;&nbsp; <IMG src="images/shift.right.png" alt=""> &nbsp; Will shift the component tab
++	      position, moving it after the tab dragged over. &nbsp;This is what would happend when dragging
++	      a component over a tab located at its right in the same window space.<BR>
++	      &nbsp;&nbsp;&nbsp; <IMG src="images/window.png" alt=""> &nbsp; Will place the component in a new
++	      window. &nbsp;This mode is temporarily activated. &nbsp;While keeping the CTRL key pressed, drop
++	      the component to confirm the action, or release the CTRL key to continue dragging normally.<BR>
+ 	      </P>
+ 	
+ 	      <P><IMG src="help/shared/tip.png" border="0"> To get the arrow cursors to appear, move the
+ 	      mouse near the inside edge of another component. &nbsp;To get the stack cursor, move the
+ 	      mouse over the middle area of another component. &nbsp;To get the new window cursor, move the
+ 	      mouse over the desktop. &nbsp;The Invalid location cursor will appear when the mouse is over
+-	      the component being moved.</P>
++	      the tab of the component being moved, or over the same title bar (header) when there is only
++	      one comopnent in the window space. &nbsp;To cancel a drag operation, press the ESC key, while
++	      the SHIFT and CTRL key modifiers are not pressed. &nbsp;Another way to cancel a drag operation,
++	      is to click a different mouse button while dragging a component.</P>
+ 	</BLOCKQUOTE>
+ 
+       <H3>Resizing components</H3>
+diff --git a/Ghidra/Features/Base/src/main/help/help/topics/DockingWindows/images/header.stack.png b/Ghidra/Features/Base/src/main/help/help/topics/DockingWindows/images/header.stack.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..c097b0f50da594c606f1740927f630254dbc7446
+GIT binary patch
+literal 897
+zcmW+!y=qob5S$PKAtd-igdhqF;w#u_G0OL$0gXZO01F}(66`E&9JDc5TiGlkA}N%-
+z!P<(QASf1#Sl9?D1(oZb9Ju#zmOV2&GiPsm>+0Id=@kHLo7ZNydOy|Q$>qiVKlym)
+z46ump>pSy4>gdzaranp8>s!A5a7cq2WC%kV$^gO$5>AK+B8ej4Fb5s(kRu%FC`aR&
+zK*80(2qA@Pu7Cv?@PGml$Up^<umlsHP$CkUs00dDV8IJ2L?H`R0BB<z`XFJ9t1Pgm
+zG$V~}lrfBHEMxa}xtEh7gG{m-z-d0J?vyi}=`3f9G>ujlC5D({iLKmX-1ne@5zJr(
+z+YZYC>PaOdnaN7FM^<bmFRB>DELIW2-G-A7dlW;o3ToHP2Dh7J3R9ZOgrQ~(<YSy>
+zZj#1R`)fX?beCM=N>_P9_U&%$+E^i_R8l8lq1NMF3PmVG73z2_)grz7QjyA3r8+Y!
+zwQ}#vr6^^oN*M2=<#pQK)ERbMoy<tlY<S@|5W_Mp%Q~FSVHo5bG%@UHCq~}p!!`H8
+z9iHh~-e$D!me^{>K%q=E^LQB+!(WdvWkhCVMUyvAL-y@%>{?EL4kKPkn)<O!n2xsH
+z-QE5D{b`ymzFV-aU)r2q-r0D5`}eV>)n)w1`E>5!aPQ^4yZkic`m+beA7XLm`251z
+r8^0cXpS}Nj@aEr5u7A1zbK&VK{%)K&zjW~8bK_uhzBPM$#UK9%yg6z>
+
+literal 0
+HcmV?d00001
+
+diff --git a/Ghidra/Features/Base/src/main/help/help/topics/DockingWindows/images/hover.stack.png b/Ghidra/Features/Base/src/main/help/help/topics/DockingWindows/images/hover.stack.png
+index 3f39ad89d1b925b2959165dabf4bbc87d1ad1681..9daf01d161439d088783cbd813b5205069acafb4 100644
+GIT binary patch
+delta 108
+zcmV-y0F(c-2ZRT(AOmD=ZEdQms{jB0JFfvC0000#Nkl<Z7?orA4+RVe0OY_$AHV<s
+zQ6%liqHwhYL{YWFMd4~G6h-qJ!Y?Rp!YPWZ9a$R6`A<L;O*^tQ3IG71-2ax5tXxz8
+O0000<MNUMnLSTaLg(*z{
+
+delta 156
+zcmZo+-^{*2fw}%a0}z5h#3d6K1_lO|k|4ieumFC7Awq|j7pUIO)5S5Q;#TsH|ME-{
+z0t_d9@(cg%KXORDYu#K%Utz{Tom&$x)^oXToYnWLu4d7RTNj&{R09e+7G=6~I;1c#
+Zi1goK=eV56{1a#tgQu&X%Q~loCICOpQQ80i
+
+diff --git a/Ghidra/Features/Base/src/main/help/help/topics/DockingWindows/images/push.png b/Ghidra/Features/Base/src/main/help/help/topics/DockingWindows/images/push.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..9e2fa925797af2cbeb5c0567ac78f7ef8bd37ec7
+GIT binary patch
+literal 910
+zcmW+!J!_Uh5S$Q%5Qw56#E)VH3kwNiYconh3`p=Jh2;iGKqUwvpyd!7txTc)62u}!
+z6o0{DCBf28!Tkv-1&i0c9Ncr<KD#?RGxzrX>hj#|#aRGzD|Z(k_IbYdxtZzyzW%Xs
+z8JNcXduvO5)ydY$p}tAk>vw)SI;O!5GK3)wWdLCW2`5AZkwg)2n1c>?$Ptcol%xBZ
+zK*80G5kd;pSOE(#-~k09kbw#yVF@NYp+qDyQ3({Rz=9W4h(Z>s0MN!b^Z~*cr7W<g
+zG$V~}lrfBHEMw<(xR;Y6gG{ozfzy0M-6>}{(^<|YX&R|6N(?c@5}UcjsP~|P5zJr(
+zTMo<7)RRg^GLw~TjjY&6UQ{uPS*#+4y4_Ab<WUULDyUU68`y4=DNJc969$_xkdJX1
+zxk0+0T3_=qrMu(`SGvl(Wmk7%$HodNrIOkS3pF3_P$)tfs!-cwsV3>2mx@%TD%GA@
+zshN8hm!g!VDq*~frq^zFQhV5TwKKy-v!R9C=opr1S=Q#X4?`g5fQcbbD>3{wAF8<z
+z?C?y_@)o0cH^pW%1`1`Wk;luh82WmQDI+o?D;m6Ux@A{)V#jjw?>OS4q)9)P2_`4U
+z*4Ea+!NFuQx%GL<I(}wn>G95^7n?gT*S9yYyuH5p>SpXede*-dRu*rs&3}0E_ubr$
+zz3WH9_x&@js}H_hdHnPA`)gnS%<p}hI%|t>_Al(70@j`{%sjnx_^T_ivb4H*c*l4D
+E1E9KVF8}}l
+
+literal 0
+HcmV?d00001
+
+diff --git a/Ghidra/Features/Base/src/main/help/help/topics/DockingWindows/images/shift.left.png b/Ghidra/Features/Base/src/main/help/help/topics/DockingWindows/images/shift.left.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..8d4697108bb68769267aa3bffff70c8333de82cd
+GIT binary patch
+literal 887
+zcmW+!v1(OO5FF7$gfyZcVzF3?h1dpUlovFhQ6wL*Ac9T6!oo@hwNNZfBUmm$B)mfX
+zge@hAm8Hd&R$?irJa=>9-ossXXLe@J%R5`w*G`;00bp(O#^P?Dr~5s5{AholeYt-Q
+zIEp(rw>SD%hp!F~^`Dgee9!j>zi4oS3}Hw^89*38!U+*UBvAw$=AgqJa)cut<!C$;
+zD7YFJA*4{v6|evU9#9|x8K?jfmSDmYN<<<Pl|aD?EO<eMC}g1u0BzQx4+&#NSzvEz
+zMjG8HV;Iv|#_sKMKTe7aGRbNHr}<RfDQ7s-S<V(|npPJjhL~cBt=wYfJ*Z#=Gg!g4
+z!*W19sbnNGS;_Xuip}Ij6{DENDq`GiIQiJ47||-IT{9bQH^~&HG?fXXW)|{Ur<t3i
+z@znmB&zA0zD_rR+Z^)kR#;(m1Qc5Lt5*BJb-lb54GE||C$5JiQyDt@~OjW8gvr;Sf
+z9xg>GOI5<$i<Z}EcT;EBadk42qS<)iHi%)FmSr7I=P(92hbG3Jc4G22AJ^Q6J3P~~
+zyv=CcEwR<iLZM7G^V|%J@z-OvjL3|vX!7Q1$e!-TuI1{_uZVY&R()AkSREcaJ3Gte
+za<y8me>`Gczr4A)x_#!&z2C3bF6~}C5I*nySU!BY_u%@AE03|TOP}`MK6!TG`ToD#
+eJaudR>+Uh^|2)6{=+(EsJ&nzct;L6H{`5cYNoZ>T
+
+literal 0
+HcmV?d00001
+
+diff --git a/Ghidra/Features/Base/src/main/help/help/topics/DockingWindows/images/shift.right.png b/Ghidra/Features/Base/src/main/help/help/topics/DockingWindows/images/shift.right.png
+new file mode 100644
+index 0000000000000000000000000000000000000000..4c02d8d03487d87ed73972c17bc942bd46c70d5c
+GIT binary patch
+literal 885
+zcmW+!v1(OO5F81J1R^R3K`a()i&$GYh8OgKgdmm{3t}Urv=oL2f>>x{zXTCUp}(+L
+zNsxSj#g;Zg3JXExxtk039`3R`vomvE@9o~(SiiOoU}JfI@vzUU{a(4S*58-kpI!&n
+zu=n86PXFrc)!Cu`ld_*5`SJLa1~<qMhBTA`gb^g15D`QYMZjSWI@}>gIMPv$#xsF}
+ztAP<h3e{Wz3ozgT1tO4v3Ls$#COn};Br;J66s*947gUHs7ODWyW*z#FFlLkm_LgR(
+z(Ty^OF^y&H-Y)m!q{twXtOjtJPt~1rhBKYzY>}pEbx~r7DVEsEEoR<>3Pv!46>K{!
+z2h@{FMlzF?Y>%wiOkPwmidn28#@&XKk3EVJt%BM$v*C7=Okqk>nJ{W*A)j@cxk(yN
+z?XUT4=`Oj#m9FxJ?CEao+B_kpR8l8lq1NMF3PmVG73z2_)grz7QjyA3r8+Y!wQ}#_
+zQk1e(CCt5Od7XAQb%q^RCo?IUjTdf%7?x>S*5PyxV~}%bV(e)rCU5g`&3(ATGd;`O
+zjMm)}Tg@yK%2YGY&9E4MJ!Z>@%*cu+Z=Qzi>2B;=uKu1ze2}#2%d*1i?AYJmKRP;E
+ztyZ_coU^WPEf;qmZN7i<=k3PUyPL<tx5J-Dr*9574=%mHc|ME9Wh{T+dHiebaB=J3
+ZtBd%$bK}#=_VbgT#d2qN@p;=1{sZt?WzYZs
+
+literal 0
+HcmV?d00001
+
+diff --git a/Ghidra/Framework/Docking/src/main/java/docking/ComponentNode.java b/Ghidra/Framework/Docking/src/main/java/docking/ComponentNode.java
+old mode 100644
+new mode 100755
+index 896be59193..2ad1c73286
+--- a/Ghidra/Framework/Docking/src/main/java/docking/ComponentNode.java
++++ b/Ghidra/Framework/Docking/src/main/java/docking/ComponentNode.java
+@@ -185,6 +185,43 @@ class ComponentNode extends Node {
+ 		topLevelNode.componentAdded(placeholder);
+ 	}
+ 
++	/**
++	 * Push a component to this node, before or after the selected one.
++	 * Stack the component at the beginning, if the selected one is null.
++	 * @param placeholder the placeholder to push.
++	 * @param selected the selected component of a target window space.
++	 */
++	void push(ComponentPlaceholder placeholder, ComponentPlaceholder selected) {
++		ComponentNode sourceNode = placeholder.getNode();
++		if (selected == null) {
++			sourceNode.remove(placeholder);
++			// Stack the placeholder at the beginning, if the selected
++			// one is null.
++			windowPlaceholders.add(0, placeholder);
++		} else {
++			// Taking the selected component index before removing the
++			// placeholder from its own node, is to properly shift the
++			// position of items when both are in the same space.
++			//
++			// In the same node, shift a component after the selected,
++			// if on its right, otherwise before, if on its left.
++			//
++			// Pushing the component in a new node, will always put it
++			// before the selected one.
++			int index = windowPlaceholders.indexOf(selected);
++			sourceNode.remove(placeholder);
++			windowPlaceholders.add(index, placeholder);
++		}
++		placeholder.setNode(this);
++
++		if (placeholder.isActive()) {
++			top = placeholder;
++			invalidate();
++		}
++		WindowNode topLevelNode = getTopLevelNode();
++		topLevelNode.componentAdded(placeholder);
++	}
++
+ 	/**
+ 	 * Removes the component from this node, but not from the manager. Used when
+ 	 * the component is moved.  If component is active, it will remain active.
+@@ -326,7 +363,16 @@ class ComponentNode extends Node {
+ 
+ 			DockingTabRenderer tabRenderer =
+ 				createTabRenderer(tabbedPane, placeholder, fullTitle, tabText, component);
+-			c.installDragDropTarget(tabbedPane);
++
++			// This is to register tabs as drag-N-drop targets.
++			// c.installDragDropTarget(tabbedPane) is for group
++			// of tabs, and won't allow to track single tabs as
++			// substitutes of a DockableComponent placeholder's
++			// window surface.
++			c.installDragDropTarget(tabRenderer);
++
++			tabRenderer.installDragSource(c.getHeader());
++
+ 			tabRenderer.installPopupMenu(createTabPopupMenu(activeComponents, placeholder));
+ 
+ 			tabbedPane.setTabComponentAt(i, tabRenderer);
+diff --git a/Ghidra/Framework/Docking/src/main/java/docking/DockableComponent.java b/Ghidra/Framework/Docking/src/main/java/docking/DockableComponent.java
+index 3a93106c2d..ccbdbf4bac 100644
+--- a/Ghidra/Framework/Docking/src/main/java/docking/DockableComponent.java
++++ b/Ghidra/Framework/Docking/src/main/java/docking/DockableComponent.java
+@@ -24,6 +24,7 @@ import javax.swing.*;
+ import org.apache.commons.lang3.ArrayUtils;
+ 
+ import docking.action.DockingActionIf;
++import docking.widgets.tabbedpane.DockingTabRenderer;
+ import ghidra.util.*;
+ import help.HelpService;
+ 
+@@ -57,6 +58,21 @@ public class DockableComponent extends JPanel implements ContainerListener {
+ 	public static ComponentPlaceholder SOURCE_INFO;
+ 	public static boolean DROP_CODE_SET;
+ 
++	// FIXME: This is a WORKAROUND to guess if a drag-N-drop operation was
++	// interrupted, by either a key press (ESC) or by another mouse button
++	// clicked.  The caveat is its limit.  A voluntary interruption, while
++	// the cursor is over a drop zone, would generate an uncommon dragExit
++	// triggered by DropTargetEvent alone.  The catch is to confirm that a
++	// DragSourceEvent did not trigger any dragExit counterpart, as it has
++	// to happen when the cursor is moved outside of any drop zone.
++	//
++	// The motive of this workaround is that while a drag-N-drop operation
++	// is in progress, its implementation might silence listening to other
++	// events, except pressing the modifiers ALT, CTRL, and SHIFT, so that
++	// pressing ESC isn't registered, and has to be determined indirectly,
++	// to gracefully cancel the action in progress.
++	public static boolean triggeredDragExit = false;
++
+ 	private DockableHeader header;
+ 	private MouseListener popupListener;
+ 	private ComponentPlaceholder placeholder;
+@@ -105,6 +121,11 @@ public class DockableComponent extends JPanel implements ContainerListener {
+ 				add(header, BorderLayout.NORTH);
+ 			}
+ 
++			// This is to register headers as drag-N-drop targets.
++			// So that a DockableComponent could be dropped over a
++			// header, in place of a placeholder's window surface.
++			installDragDropTarget(header);
++
+ 			providerComp = initializeComponentPlaceholder(placeholder);
+ 
+ 			JPanel contentPanel = new JPanel(new BorderLayout());
+@@ -259,16 +280,6 @@ public class DockableComponent extends JPanel implements ContainerListener {
+ 		return placeholder.getFullTitle();
+ 	}
+ 
+-	/**
+-	 * Translates the given point so that it is relative to the given component
+-	 */
+-	private void translate(Point p, Component c) {
+-		Point cLoc = c.getLocationOnScreen();
+-		Point myLoc = getLocationOnScreen();
+-		p.x = p.x + cLoc.x - myLoc.x;
+-		p.y = p.y + cLoc.y - myLoc.y;
+-	}
+-
+ 	private class DockableComponentDropTarget extends DropTarget {
+ 
+ 		DockableComponentDropTarget(Component comp) {
+@@ -278,69 +289,79 @@ public class DockableComponent extends JPanel implements ContainerListener {
+ 		@Override
+ 		public synchronized void drop(DropTargetDropEvent dtde) {
+ 			clearAutoscroll();
+-			if (dtde.isDataFlavorSupported(ComponentTransferable.localComponentProviderFlavor)) {
+-				Point p = dtde.getLocation();
+-				translate(p, ((DropTarget) dtde.getSource()).getComponent());
+-				setDropCode(p);
++
++			if (!dtde.isDataFlavorSupported(ComponentTransferable.localComponentProviderFlavor)) {
++				dtde.rejectDrop();
++				return;
++			}
++
++			Component dropTarget = ((DropTarget) dtde.getSource()).getComponent();
++			setDropCode(dtde.getLocation(), dropTarget);
++
++			if (DROP_CODE_SET) {
+ 				TARGET_INFO = placeholder;
+ 				dtde.acceptDrop(dtde.getDropAction());
+ 				dtde.dropComplete(true);
++				return;
+ 			}
+-			else {
+-				dtde.rejectDrop();
+-			}
++
++			dtde.rejectDrop();
+ 		}
+ 
+ 		@Override
+ 		public synchronized void dragEnter(DropTargetDragEvent dtde) {
+ 			super.dragEnter(dtde);
+ 
+-			// On Mac, sometimes this component is not showing,
+-			// which causes exception in the translate method.
+-			if (!isShowing()) {
++			triggeredDragExit = false;
++
++			if (!dtde.isDataFlavorSupported(ComponentTransferable.localComponentProviderFlavor)) {
+ 				dtde.rejectDrag();
+ 				return;
+ 			}
+ 
+-			if (dtde.isDataFlavorSupported(ComponentTransferable.localComponentProviderFlavor)) {
+-				Point p = dtde.getLocation();
+-				translate(p, ((DropTarget) dtde.getSource()).getComponent());
+-				setDropCode(p);
++			Component dropTarget = ((DropTarget) dtde.getSource()).getComponent();
++			setDropCode(dtde.getLocation(), dropTarget);
++
++			if (DROP_CODE_SET) {
+ 				DRAGGED_OVER_INFO = placeholder;
+ 				dtde.acceptDrag(dtde.getDropAction());
++				return;
+ 			}
+-			else {
+-				dtde.rejectDrag();
+-			}
++
++			dtde.rejectDrag();
+ 		}
+ 
+ 		@Override
+ 		public synchronized void dragOver(DropTargetDragEvent dtde) {
+ 			super.dragOver(dtde);
+ 
+-			// On Mac, sometimes this component is not showing,
+-			// which causes exception in the translate method.
+-			if (!isShowing()) {
++			triggeredDragExit = false;
++
++			if (!dtde.isDataFlavorSupported(ComponentTransferable.localComponentProviderFlavor)) {
+ 				dtde.rejectDrag();
+ 				return;
+ 			}
+ 
+-			if (dtde.isDataFlavorSupported(ComponentTransferable.localComponentProviderFlavor)) {
+-				Point p = dtde.getLocation();
+-				translate(p, ((DropTarget) dtde.getSource()).getComponent());
+-				setDropCode(p);
++			Component dropTarget = ((DropTarget) dtde.getSource()).getComponent();
++			setDropCode(dtde.getLocation(), dropTarget);
++
++			if (DROP_CODE_SET) {
+ 				DRAGGED_OVER_INFO = placeholder;
+ 				dtde.acceptDrag(dtde.getDropAction());
++				return;
+ 			}
+-			else {
+-				dtde.rejectDrag();
+-			}
++
++			dtde.rejectDrag();
+ 		}
+ 
+ 		@Override
+ 		public synchronized void dragExit(DropTargetEvent dte) {
+ 			super.dragExit(dte);
+-			DROP_CODE = DropCode.WINDOW;
++			triggeredDragExit = true;
++			// FIXME: This is a WORKAROUND to allow the interruption of a drag-N-drop
++			// operation while outside of a drop zone.  The drop should be considered
++			// invalid, unless the CTRL key modifier is kept pressed.
++			DROP_CODE = header.isCtrlModifierDown() ? DropCode.WINDOW : DropCode.INVALID;
+ 			DROP_CODE_SET = true;
+ 			DRAGGED_OVER_INFO = null;
+ 		}
+@@ -426,13 +447,78 @@ public class DockableComponent extends JPanel implements ContainerListener {
+ 		}
+ 	}
+ 
++	/**
++	 * Translates the given point so that it is relative to the given component
++	 */
++	private void translate(Point p, Component c) {
++		Point cLoc = c.getLocationOnScreen();
++		Point myLoc = getLocationOnScreen();
++		p.x = p.x + cLoc.x - myLoc.x;
++		p.y = p.y + cLoc.y - myLoc.y;
++	}
++
+ 	/**
+ 	 * Sets the drop code base on the cursor location.
+ 	 * @param p the cursor location.
++	 * @param c the drop target.
+ 	 */
+-	private void setDropCode(Point p) {
++	private void setDropCode(Point p, Component c) {
+ 		DROP_CODE_SET = true;
+ 
++		// Pressing the CTRL key modifier takes precedence.  It is an override
++		// to enable moving a dragged component in a new window.  This mode is
++		// togglable and disabled by default as a prevention to an involuntary
++		// action when a drag-N-drop operation is interrupted, by either a key
++		// press (ESC), or by another mouse button clicked.
++		if (header.isCtrlModifierDown()) {
++			DROP_CODE = DropCode.WINDOW;
++			return;
++		}
++
++		// Pressing the SHIFT key modifier, temporarily invalidates the action
++		// expected by a drag-N-drop operation in progress.  Releasing the key
++		// should resume the normal processing.
++		if (header.isShiftModifierDown()) {
++			DROP_CODE = DropCode.INVALID;
++			return;
++		}
++
++		// Tabs of components that aren't currently showing, are valid targets
++		// to drop a component on another which isn't showing its own content.
++		if (c instanceof DockingTabRenderer) {
++			if (SOURCE_INFO == placeholder) {
++				// the cursor is over the same tab, just ignore this action
++				DROP_CODE = DropCode.INVALID;
++			}
++			else if (SOURCE_INFO.getNode() != placeholder.getNode()	) {
++				// push the component between others, in another window space
++				DROP_CODE = DropCode.PUSH;
++			}
++			else {
++				// FIXME: assume that there is a tabbed pane
++				JTabbedPane tabbedPane = (JTabbedPane) getParent();
++				int target_index = tabbedPane.indexOfTabComponent(c);
++				int source_index = tabbedPane.indexOfComponent(SOURCE_INFO.getComponent());
++				if (target_index < source_index) {
++					// shift the component to the left, in the same window space
++					DROP_CODE = DropCode.SHIFT_LEFT;
++				}
++				else {
++					// shift the component to the right, in the same window space
++					DROP_CODE = DropCode.SHIFT_RIGHT;
++				}
++			}
++			return;
++		}
++
++		// On Mac, sometimes this component is not showing,
++		// which causes exception in the translate method.
++		if (!isShowing()) {
++			DROP_CODE_SET = false;
++			return;
++		}
++		translate(p, c);
++
+ 		if (placeholder == null) {
+ 			DROP_CODE = DropCode.ROOT;
+ 			return;
+@@ -442,7 +528,7 @@ public class DockableComponent extends JPanel implements ContainerListener {
+ 			return;
+ 		}
+ 		if (SOURCE_INFO.getNode().winMgr != placeholder.getNode().winMgr) {
+-			DROP_CODE = DropCode.WINDOW;
++			DROP_CODE = DropCode.INVALID;
+ 			return;
+ 		}
+ 		if (SOURCE_INFO == placeholder && !placeholder.isStacked()) {
+@@ -455,14 +541,25 @@ public class DockableComponent extends JPanel implements ContainerListener {
+ 		else if (p.x > getWidth() - DROP_EDGE_OFFSET) {
+ 			DROP_CODE = DropCode.RIGHT;
+ 		}
+-		else if (p.y < DROP_EDGE_OFFSET) {
++		// Leave some space to drop over a header.  The TOP drop zone should be
++		// just below the title bar (header).
++		else if (p.y > DROP_EDGE_OFFSET && p.y < DROP_EDGE_OFFSET * 2) {
+ 			DROP_CODE = DropCode.TOP;
+ 		}
+ 		else if (p.y > getHeight() - DROP_EDGE_OFFSET) {
+ 			DROP_CODE = DropCode.BOTTOM;
+ 		}
++		// Dragging a component over a header, is a shortcut to prepend it as a
++		// fist tab in the windows space that the mouse cursor is over.
++		else if (c instanceof DockableHeader) {
++			// place the component at the beginning of the target stack
++			DROP_CODE = DropCode.PREPEND;
++		}
++		// Dragging a component over its own content space, in the same window,
++		// is a shortcut to append it as a last tab.
+ 		else if (SOURCE_INFO == placeholder) {
+-			DROP_CODE = DropCode.INVALID;
++			// place the component at the end of the target stack
++			DROP_CODE = DropCode.STACK;
+ 		}
+ 		else {
+ 			DROP_CODE = DropCode.STACK;
+diff --git a/Ghidra/Framework/Docking/src/main/java/docking/DockableHeader.java b/Ghidra/Framework/Docking/src/main/java/docking/DockableHeader.java
+index 0a59093f52..608f308524 100644
+--- a/Ghidra/Framework/Docking/src/main/java/docking/DockableHeader.java
++++ b/Ghidra/Framework/Docking/src/main/java/docking/DockableHeader.java
+@@ -50,7 +50,7 @@ import help.HelpService;
+  * source functionality.
+  */
+ public class DockableHeader extends GenericHeader
+-		implements DragGestureListener, DragSourceListener {
++		implements DragGestureListener, DragSourceListener, DragSourceMotionListener {
+ 
+ 	private DockableComponent dockComp;
+ 
+@@ -60,6 +60,16 @@ public class DockableHeader extends GenericHeader
+ 
+ 	private Animator focusAnimator;
+ 
++	// drag-N-drop key modifiers flags
++	private static boolean ALT_DOWN = false;
++	private static boolean CTRL_DOWN = false;
++	private static boolean SHIFT_DOWN = false;
++
++	// FIXME: This is a WORKAROUND to guess if a drag-N-drop operation was
++	// interrupted, by either a key press (ESC) or by another mouse button
++	// clicked.  It will work only while over a drop zone.
++	private static boolean confirmedDragExit = false;
++
+ 	/**
+ 	 * Constructs a new DockableHeader for the given dockableComponent.
+ 	 * 
+@@ -82,8 +92,24 @@ public class DockableHeader extends GenericHeader
+ 		toolBarMgr.dispose(); // reset the default manager before we create our own
+ 		toolBarMgr = new DockableToolBarManager(dockableComp, this);
+ 
++		// A drag-N-drop operation can be directed with key modifiers.
++		//
++		// ACTION_MOVE: pressing CTRL triggers dragExit while over a drop zone,
++		// but not pressing SHIFT (CTRL means "copy").
++		//
++		// ACTION_COPY: pressing SHIFT triggers dragExit while over a drop zone,
++		// but not pressing CTRL (SHIFT means "move").
++		//
++		// ACTION_LINK: either CTRL or SHIFT trigger dragExit while over a drop
++		// zone, but not pressing them together.  This helps to detect a toggle
++		// switch kept pressed, while over a drop zone.
++		//
++		// With any of the above, pressing ALT shouldn't trigger dragExit while
++		// over a drop zone.
+ 		dragSource.createDefaultDragGestureRecognizer(titlePanel.getDragComponent(),
+-			DnDConstants.ACTION_MOVE, DockableHeader.this);
++			DnDConstants.ACTION_LINK, DockableHeader.this);
++
++		dragSource.addDragSourceMotionListener(DockableHeader.this);
+ 
+ 		resetComponents();
+ 	}
+@@ -269,10 +295,21 @@ public class DockableHeader extends GenericHeader
+ 			(modifiers & InputEvent.BUTTON3_DOWN_MASK) != 0) {
+ 			return;
+ 		}
+-		DockableComponent.DROP_CODE = DropCode.WINDOW;
++
++		confirmedDragExit = false;
++		DockableComponent.triggeredDragExit = false;
++
++		ALT_DOWN = SHIFT_DOWN = CTRL_DOWN = false;
++
++		// NOTE: This is a remainder to assume an invalid drop action,
++		// to prevent unexpected effects when voluntarily interrupting
++		// a drag-N-drop operation while outside of a drop zone.
++		DockableComponent.DROP_CODE = DropCode.INVALID;
+ 		DockableComponent.DROP_CODE_SET = true;
+ 		DockableComponent.SOURCE_INFO = dockComp.getComponentWindowingPlaceholder();
+ 
++		TransientWindow.showTransientWindow(getTitle());
++
+ 		dragCursorManager.dragStarted();
+ 
+ 		dragSource.startDrag(event, DragSource.DefaultMoveNoDrop,
+@@ -284,6 +321,16 @@ public class DockableHeader extends GenericHeader
+ 		dragCursorManager.restoreCursorOnPreviousDraggedOverComponent();
+ 		dragCursorManager.dragEnded();
+ 
++		TransientWindow.hideTransientWindow();
++
++		// NOTE: This guesses a drag-N-drop voluntary interruption, by
++		// either a key press (ESC) or by another mouse button clicked
++		// while over a drop zone.  Only dragExit from DropTargetEvent
++		// should had been triggered in this context.
++		if (DockableComponent.triggeredDragExit != confirmedDragExit) {
++			return;
++		}
++
+ 		ComponentPlaceholder info = dockComp.getComponentWindowingPlaceholder();
+ 		DockingWindowManager winMgr = info.getNode().winMgr;
+ 		if (DockableComponent.DROP_CODE == DropCode.INVALID) {
+@@ -308,16 +355,19 @@ public class DockableHeader extends GenericHeader
+ 	@Override
+ 	public void dragEnter(DragSourceDragEvent event) {
+ 		setCursor(event);
++		confirmedDragExit = false;
+ 	}
+ 
+ 	@Override
+ 	public void dragExit(DragSourceEvent event) {
+ 		setCursor(event);
++		confirmedDragExit = true;
+ 	}
+ 
+ 	@Override
+ 	public void dragOver(DragSourceDragEvent event) {
+ 		setCursor(event);
++		confirmedDragExit = false;
+ 	}
+ 
+ 	/**
+@@ -336,9 +386,61 @@ public class DockableHeader extends GenericHeader
+ 		dragCursorManager.setCursor(event, c);
+ 	}
+ 
++	// drag-n-drop ALT key modifier flag
++	public boolean isAltModifierDown() {
++		return ALT_DOWN;
++	}
++
++	// drag-n-drop CTRL key modifier flag
++	public boolean isCtrlModifierDown() {
++		return CTRL_DOWN;
++	}
++
++	// drag-n-drop SHIFT key modifier flag
++	public boolean isShiftModifierDown() {
++		return SHIFT_DOWN;
++	}
++
++	/**
++	 * This is executed after a modifier is pressed or released.
++	 */
+ 	@Override
+ 	public void dropActionChanged(DragSourceDragEvent event) {
+-		// don't care
++
++		// Before determining the current state, reset all
++		// key modifiers, and the default drop action too.
++		ALT_DOWN = SHIFT_DOWN = CTRL_DOWN = false;
++		DockableComponent.DROP_CODE = DropCode.INVALID;
++
++		// Check if any key modifier is being pressed.
++		int modifiers = event.getGestureModifiersEx();
++
++		if ((modifiers & InputEvent.ALT_DOWN_MASK) != 0) {
++			ALT_DOWN = true;
++		}
++		if ((modifiers & InputEvent.SHIFT_DOWN_MASK) != 0) {
++			SHIFT_DOWN = true;
++			// Temporarily mark the drag-N-drop as invalid,
++			// as an alternative to a sudden interruption.
++			DockableComponent.DROP_CODE = DropCode.INVALID;
++		}
++		if ((modifiers & InputEvent.CTRL_DOWN_MASK) != 0) {
++			CTRL_DOWN = true;
++			// Temporarily mark the dragged component as to
++			// be moved in a new window.  Releasing the key
++			// press should revert to the default state.
++			DockableComponent.DROP_CODE = DropCode.WINDOW;
++		}
++
++		// Force a mouse cursor update, needed while outside of
++		// any drop zone, since no dragExit, Enter, Over should
++		// take place.
++		setCursor(event);
++	}
++
++	@Override
++	public void dragMouseMoved(DragSourceDragEvent event) {
++		TransientWindow.positionTransientWindow();
+ 	}
+ 
+ 	private DragCursorManager createDragCursorManager() {
+diff --git a/Ghidra/Framework/Docking/src/main/java/docking/DockingWindowManager.java b/Ghidra/Framework/Docking/src/main/java/docking/DockingWindowManager.java
+index 72105f78c4..0b27a631d7 100644
+--- a/Ghidra/Framework/Docking/src/main/java/docking/DockingWindowManager.java
++++ b/Ghidra/Framework/Docking/src/main/java/docking/DockingWindowManager.java
+@@ -1211,11 +1211,28 @@ public class DockingWindowManager implements PropertyChangeListener, Placeholder
+ 		ComponentNode sourceNode = source.getNode();
+ 		if (destination != null) {
+ 			ComponentNode destinationNode = destination.getNode();
+-			sourceNode.remove(source);
+ 			if (windowPosition == WindowPosition.STACK) {
++				sourceNode.remove(source);
+ 				destinationNode.add(source);
+ 			}
++			else if (windowPosition == WindowPosition.PUSH ||
++					windowPosition == WindowPosition.SHIFT_LEFT ||
++					windowPosition == WindowPosition.SHIFT_RIGHT) {
++				// Don't remove the source placeholder from its own node
++				// outside of push(), since that will change the indexes
++				// of components, preventing push() to properly shift an
++				// item position when both source and destination are in
++				// the same node.  push() itself will handle the removal
++				// of the source placeholder from its own node.
++				destinationNode.push(source, destination);
++			}
++			else if (windowPosition == WindowPosition.PREPEND) {
++				// Effectively, move the source placeholder at the start
++				// of the destination node.
++				destinationNode.push(source, null);
++			}
+ 			else {
++				sourceNode.remove(source);
+ 				destinationNode.split(source, windowPosition);
+ 			}
+ 		}
+diff --git a/Ghidra/Framework/Docking/src/main/java/docking/DropCode.java b/Ghidra/Framework/Docking/src/main/java/docking/DropCode.java
+index 6de555096e..18184ba6cb 100644
+--- a/Ghidra/Framework/Docking/src/main/java/docking/DropCode.java
++++ b/Ghidra/Framework/Docking/src/main/java/docking/DropCode.java
+@@ -22,7 +22,7 @@ import java.awt.Cursor;
+  * convenience methods for translating this drop code into a cursor and window position.
+  */
+ enum DropCode {
+-	INVALID, STACK, LEFT, RIGHT, TOP, BOTTOM, ROOT, WINDOW;
++	INVALID, STACK, PREPEND, PUSH, SHIFT_LEFT, SHIFT_RIGHT, LEFT, RIGHT, TOP, BOTTOM, ROOT, WINDOW;
+ 
+ 	public Cursor getCursor() {
+ 		Cursor c = HeaderCursor.NO_DROP;
+@@ -42,6 +42,18 @@ enum DropCode {
+ 			case STACK:
+ 				c = HeaderCursor.STACK;
+ 				break;
++			case PREPEND:
++				c = HeaderCursor.PREPEND;
++				break;
++			case PUSH:
++				c = HeaderCursor.PUSH;
++				break;
++			case SHIFT_LEFT:
++				c = HeaderCursor.SHIFT_LEFT;
++				break;
++			case SHIFT_RIGHT:
++				c = HeaderCursor.SHIFT_RIGHT;
++				break;
+ 			case ROOT:
+ 				c = HeaderCursor.STACK;
+ 				break;
+@@ -65,6 +77,14 @@ enum DropCode {
+ 				return WindowPosition.RIGHT;
+ 			case STACK:
+ 				return WindowPosition.STACK;
++			case PREPEND:
++				return WindowPosition.PREPEND;
++			case PUSH:
++				return WindowPosition.PUSH;
++			case SHIFT_LEFT:
++				return WindowPosition.SHIFT_LEFT;
++			case SHIFT_RIGHT:
++				return WindowPosition.SHIFT_RIGHT;
+ 			case TOP:
+ 				return WindowPosition.TOP;
+ 			default:
+diff --git a/Ghidra/Framework/Docking/src/main/java/docking/HeaderCursor.java b/Ghidra/Framework/Docking/src/main/java/docking/HeaderCursor.java
+index cf88ecc39c..e03b4d039d 100644
+--- a/Ghidra/Framework/Docking/src/main/java/docking/HeaderCursor.java
++++ b/Ghidra/Framework/Docking/src/main/java/docking/HeaderCursor.java
+@@ -38,6 +38,10 @@ public class HeaderCursor {
+ 	static Cursor TOP;
+ 	static Cursor BOTTOM;
+ 	static Cursor STACK;
++	static Cursor PREPEND;
++	static Cursor PUSH;
++	static Cursor SHIFT_LEFT;
++	static Cursor SHIFT_RIGHT;
+ 	static Cursor NEW_WINDOW;
+ 	static Cursor NO_DROP = DragSource.DefaultMoveNoDrop;
+ 
+@@ -65,6 +69,18 @@ public class HeaderCursor {
+ 		image = drawStack();
+ 		STACK = tk.createCustomCursor(image, new Point(8, 8), "STACK");
+ 
++		image = drawPrepend();
++		PREPEND = tk.createCustomCursor(image, new Point(8, 8), "PREPEND");
++
++		image = drawPush();
++		PUSH = tk.createCustomCursor(image, new Point(6, 6), "PUSH");
++
++		image = drawShiftLeft();
++		SHIFT_LEFT = tk.createCustomCursor(image, new Point(6, 6), "SHIFT_LEFT");
++
++		image = drawShiftRight();
++		SHIFT_RIGHT = tk.createCustomCursor(image, new Point(6, 6), "SHIFT_RIGHT");
++
+ 		image = drawNewWindow();
+ 		NEW_WINDOW = tk.createCustomCursor(image, new Point(0, 0), "NEW_WINDOW");
+ 	}
+@@ -145,6 +161,32 @@ public class HeaderCursor {
+ 
+ 	private static Image drawStack() {
+ 
++		BufferedImage image = new BufferedImage(32, 32, BufferedImage.TYPE_INT_ARGB);
++		// highlight the target position in the stack
++		int headerColor = new GColor("color.bg.header.active").getRGB();
++		int offset = 6;
++		for (int x = 1; x < 10; x++) {
++			for (int y = 1; y < 10; y++) {
++				image.setRGB(x + offset, y, headerColor);
++			}
++		}
++		int v = CURSOR_COLOR.getRGB();
++		for (int i = 0; i < 3; i++) {
++			int x = i * 3;
++			int y = 6 - i * 3;
++			for (int j = 0; j < 10; j++) {
++				image.setRGB(x, y + j, v);
++				image.setRGB(x + 10, y + j, v);
++				image.setRGB(x + j, y, v);
++				image.setRGB(x + j, y + 10, v);
++			}
++		}
++
++		return image;
++	}
++
++	private static Image drawPrepend() {
++
+ 		BufferedImage image = new BufferedImage(32, 32, BufferedImage.TYPE_INT_ARGB);
+ 		int v = CURSOR_COLOR.getRGB();
+ 		for (int i = 0; i < 3; i++) {
+@@ -157,6 +199,98 @@ public class HeaderCursor {
+ 				image.setRGB(x + j, y + 10, v);
+ 			}
+ 		}
++		// highlight the target position in the stack
++		int headerColor = new GColor("color.bg.header.active").getRGB();
++		int offset = 6;
++		for (int x = 1; x < 10; x++) {
++			for (int y = 1; y < 10; y++) {
++				image.setRGB(x, y + offset, headerColor);
++			}
++		}
++
++		return image;
++	}
++
++	private static Image drawPush() {
++
++		BufferedImage image = new BufferedImage(32, 32, BufferedImage.TYPE_INT_ARGB);
++		// draw adjacent overlapping boxes
++		int v = CURSOR_COLOR.getRGB();
++		for (int i = 0; i < 2; i++) {
++			int x = i * 3;
++			int y = i%2 != 0 ? 3 : 0;
++			for (int j = 0; j < 10; j++) {
++				image.setRGB(x, y + j, v);
++				image.setRGB(x + 10, y + j, v);
++				image.setRGB(x + j, y, v);
++				image.setRGB(x + j, y + 10, v);
++			}
++		}
++		// highlight the target position in the stack
++		int headerColor = new GColor("color.bg.header.active").getRGB();
++		int x_offset = 0;
++		int y_offset = 0;
++		for (int x = 1; x < 10; x++) {
++			for (int y = 1; y < 10; y++) {
++				image.setRGB(x + x_offset, y + y_offset, headerColor);
++			}
++		}
++
++		return image;
++	}
++
++	private static Image drawShiftLeft() {
++
++		BufferedImage image = new BufferedImage(32, 32, BufferedImage.TYPE_INT_ARGB);
++		// highlight the target position in the stack
++		int headerColor = new GColor("color.bg.header.active").getRGB();
++		int x_offset = 0;
++		int y_offset = 3;
++		for (int x = 1; x < 10; x++) {
++			for (int y = 1; y < 10; y++) {
++				image.setRGB(x + x_offset, y + y_offset, headerColor);
++			}
++		}
++		// draw adjacent overlapping boxes
++		int v = CURSOR_COLOR.getRGB();
++		for (int i = 0; i < 2; i++) {
++			int x = i * 3;
++			int y = i%2 == 0 ? 3 : 0;
++			for (int j = 0; j < 10; j++) {
++				image.setRGB(x, y + j, v);
++				image.setRGB(x + 10, y + j, v);
++				image.setRGB(x + j, y, v);
++				image.setRGB(x + j, y + 10, v);
++			}
++		}
++
++		return image;
++	}
++
++	private static Image drawShiftRight() {
++
++		BufferedImage image = new BufferedImage(32, 32, BufferedImage.TYPE_INT_ARGB);
++		// highlight the target position in the stack
++		int headerColor = new GColor("color.bg.header.active").getRGB();
++		int x_offset = 3;
++		int y_offset = 3;
++		for (int x = 1; x < 10; x++) {
++			for (int y = 1; y < 10; y++) {
++				image.setRGB(x + x_offset, y + y_offset, headerColor); // horizontal line
++			}
++		}
++		// draw adjacent overlapping boxes
++		int v = CURSOR_COLOR.getRGB();
++		for (int i = 0; i < 2; i++) {
++			int x = i * 3;                      // concatenate moving by x offset
++			int y = i%2 != 0 ? 3 : 0;           // alternate y higher and lower
++			for (int j = 0; j < 10; j++) {
++				image.setRGB(x, y + j, v);      // left vertical line
++				image.setRGB(x + 10, y + j, v); // right vertical line
++				image.setRGB(x + j, y, v);      // top horizontal line
++				image.setRGB(x + j, y + 10, v); // bottom horizontal line
++			}
++		}
+ 
+ 		return image;
+ 	}
+diff --git a/Ghidra/Framework/Docking/src/main/java/docking/TransientWindow.java b/Ghidra/Framework/Docking/src/main/java/docking/TransientWindow.java
+new file mode 100755
+index 0000000000..5dcfabb7b1
+--- /dev/null
++++ b/Ghidra/Framework/Docking/src/main/java/docking/TransientWindow.java
+@@ -0,0 +1,119 @@
++/* ###
++ * IP: GHIDRA
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package docking;
++
++import java.awt.Color;
++import java.awt.MouseInfo;
++import java.awt.Point;
++import java.awt.Window;
++
++import javax.swing.BorderFactory;
++import javax.swing.JToolTip;
++import javax.swing.JWindow;
++
++/**
++ * Drag feedback indicator class.
++ *
++ * Once activated, a tool tip will follow the mouse cursor across all the screen.
++ *
++ * The usage is pretty basic:
++ *
++ * TransientWindow.activateTransientWindow("Title", pollingRate);
++ * TransientWindow.deactivateTransientWindow();
++ *
++ * To change parameters, deactivate the transient window, then create a new one.
++ *
++ * To manually control the tool tip:
++ *
++ * TransientWindow.showTransientWindow("Title");
++ * TransientWindow.positionTransientWindow();
++ * TransientWindow.hideTransientWindow();
++ */
++public class TransientWindow {
++
++	private static JWindow transientWindow;
++
++	private static int defaultPollingRate = 20;
++
++	private static void createTransientWindow(String title) {
++		if (transientWindow != null) {
++			return;
++		}
++
++		JToolTip transientTip = new JToolTip();
++		transientTip.setBorder(BorderFactory.createLineBorder(Color.YELLOW));
++		transientTip.setTipText(title);
++		transientTip.setVisible(true);
++		transientTip.setOpaque(false);
++
++		transientWindow = new JWindow();
++		transientWindow.setOpacity(0.7f);
++		transientWindow.setAlwaysOnTop(true);
++		transientWindow.setType(Window.Type.POPUP);
++		transientWindow.setFocusableWindowState(false);
++		transientWindow.getContentPane().add(transientTip);
++
++		transientWindow.pack();
++	}
++
++	private static void transientWindowListener() {
++		while (transientWindow != null) {
++			try {
++				Thread.sleep(defaultPollingRate);
++				positionTransientWindow();
++			} catch (InterruptedException e) {
++				e.printStackTrace();
++			}
++		}
++	}
++
++	public static synchronized void positionTransientWindow() {
++		if (transientWindow == null) {
++			return;
++		}
++		Point p = MouseInfo.getPointerInfo().getLocation();
++		transientWindow.setLocation(p.x + 16, p.y + 16);
++	}
++
++	public static void showTransientWindow(String title) {
++		createTransientWindow(title);
++		positionTransientWindow();
++		transientWindow.setVisible(true);
++	}
++
++	public static synchronized void hideTransientWindow() {
++		if (transientWindow == null) {
++			return;
++		}
++		transientWindow.setVisible(false);
++		transientWindow = null;
++	}
++
++	public static synchronized void activateTransientWindow(String title, int pollingRate) {
++		if (transientWindow != null) {
++			return;
++		}
++		Runnable task = () -> transientWindowListener();
++		Thread thread = new Thread(task);
++		defaultPollingRate = pollingRate;
++		showTransientWindow(title);
++		thread.start();
++	}
++
++	public static void deactivateTransientWindow() {
++		hideTransientWindow();
++	}
++}
+diff --git a/Ghidra/Framework/Docking/src/main/java/docking/WindowPosition.java b/Ghidra/Framework/Docking/src/main/java/docking/WindowPosition.java
+index 938b258d0c..b974cb1d44 100644
+--- a/Ghidra/Framework/Docking/src/main/java/docking/WindowPosition.java
++++ b/Ghidra/Framework/Docking/src/main/java/docking/WindowPosition.java
+@@ -33,7 +33,47 @@ public enum WindowPosition {
+ 
+ 	/** 
+ 	 * Signals that windows should be stacked with other windows within  
+-	 * the same group.
++	 * the same group, appending them at the end of the stack.
+ 	 */
+-	STACK
++	STACK,
++
++	/**
++	 * Signals that windows should be stacked with other windows within
++	 * the same group, prepending them at the beginning of the stack.
++	 *
++	 * NOTE: This should not be used for setDefaultWindowPosition() and
++	 * setIntraGroupPosition(), it's just an action code.  Use STACK to
++	 * mark the real window position, instead.
++	 */
++	PREPEND,
++
++	/**
++	 * Signals that windows should be pushed between other windows, for
++	 * taking a selected window position in the stack.
++	 *
++	 * NOTE: This should not be used for setDefaultWindowPosition() and
++	 * setIntraGroupPosition(), it's just an action code.  Use STACK to
++	 * mark the real window position, instead.
++	 */
++	PUSH,
++
++	/**
++	 * Signals that windows are shifting position within the same group
++	 * of stacked windows, moving over windows preceding them.
++	 *
++	 * NOTE: This should not be used for setDefaultWindowPosition() and
++	 * setIntraGroupPosition(), it's just an action code.  Use STACK to
++	 * mark the real window position, instead.
++	 */
++	SHIFT_LEFT,
++
++	/**
++	 * Signals that windows are shifting position within the same group
++	 * of stacked windows, moving over windows following them.
++	 *
++	 * NOTE: This should not be used for setDefaultWindowPosition() and
++	 * setIntraGroupPosition(), it's just an action code.  Use STACK to
++	 * mark the real window position, instead.
++	 */
++	SHIFT_RIGHT
+ }
+diff --git a/Ghidra/Framework/Docking/src/main/java/docking/widgets/tabbedpane/DockingTabRenderer.java b/Ghidra/Framework/Docking/src/main/java/docking/widgets/tabbedpane/DockingTabRenderer.java
+index bd7cf212c5..4d9a860b19 100644
+--- a/Ghidra/Framework/Docking/src/main/java/docking/widgets/tabbedpane/DockingTabRenderer.java
++++ b/Ghidra/Framework/Docking/src/main/java/docking/widgets/tabbedpane/DockingTabRenderer.java
+@@ -16,7 +16,12 @@
+ package docking.widgets.tabbedpane;
+ 
+ import java.awt.*;
++import java.awt.dnd.DnDConstants;
++import java.awt.dnd.DragGestureListener;
++import java.awt.dnd.DragSource;
++import java.awt.dnd.DragSourceMotionListener;
+ import java.awt.event.*;
++import java.awt.geom.Area;
+ 
+ import javax.swing.*;
+ 
+@@ -37,6 +42,8 @@ public class DockingTabRenderer extends JPanel {
+ 	private JLabel iconLabel;
+ 	private JButton closeButton;
+ 
++	private DragSource dragSource;
++
+ 	private HierarchyListener hierarchyListener;
+ 	private TabContainerForwardingMouseListener forwardingListener;
+ 	private JPopupMenu popupMenu;
+@@ -130,6 +137,12 @@ public class DockingTabRenderer extends JPanel {
+ 		this.popupMenu = popupMenu;
+ 	}
+ 
++	public void installDragSource(DragGestureListener dgl) {
++		dragSource = new DragSource();
++		dragSource.createDefaultDragGestureRecognizer(titleLabel, DnDConstants.ACTION_LINK, dgl);
++		dragSource.addDragSourceMotionListener((DragSourceMotionListener) dgl);
++	}
++
+ 	public void setIcon(Icon icon) {
+ 		iconLabel.setIcon(icon);
+ 	}
+@@ -238,7 +251,13 @@ public class DockingTabRenderer extends JPanel {
+ 				return false;
+ 			}
+ 
+-			popupMenu.show(e.getComponent(), e.getX(), e.getY());
++			// Verify that the cursor was over the component at the moment of the
++			// event.  Suppress cases in which the right mouse button was clicked
++			// outside of the region of the component.  This could happen while a
++			// tab drag-N-drop operation is in progress, misplacing the popup.
++			if (new Area(getVisibleRect()).contains(e.getX(), e.getY())) {
++				popupMenu.show(e.getComponent(), e.getX(), e.getY());
++			}
+ 
+ 			return true;
+ 		}
+-- 
+2.45.1
+

@@ -5,9 +5,9 @@ Subject: [PATCH] 2266: Better decompilation of DOS era interrupts
 
 ---
  Ghidra/Processors/x86/certification.manifest  |    1 +
- Ghidra/Processors/x86/data/languages/ia.sinc  | 1026 ++++++++++++++++-
+ Ghidra/Processors/x86/data/languages/ia.sinc  | 1087 ++++++++++++++++-
  .../x86/ghidra_scripts/InterruptContext.java  |  118 ++
- 3 files changed, 1143 insertions(+), 2 deletions(-)
+ 3 files changed, 1204 insertions(+), 2 deletions(-)
  create mode 100644 Ghidra/Processors/x86/ghidra_scripts/InterruptContext.java
 
 diff --git a/Ghidra/Processors/x86/certification.manifest b/Ghidra/Processors/x86/certification.manifest
@@ -22,7 +22,7 @@ index c150f1550e..62da5d42e3 100644
  src/main/java/ghidra/app/plugin/core/analysis/DOSInterruptAnalyzer.java||GHIDRA||||END|
  src/main/java/ghidra/app/plugin/core/analysis/InterruptAnalyzer.java||GHIDRA||||END|
 diff --git a/Ghidra/Processors/x86/data/languages/ia.sinc b/Ghidra/Processors/x86/data/languages/ia.sinc
-index ebcc9ee2a6..6664447e23 100644
+index ebcc9ee2a6..b7e1df8775 100644
 --- a/Ghidra/Processors/x86/data/languages/ia.sinc
 +++ b/Ghidra/Processors/x86/data/languages/ia.sinc
 @@ -468,8 +468,10 @@ define context contextreg
@@ -37,7 +37,7 @@ index ebcc9ee2a6..6664447e23 100644
  ;
  
  
-@@ -3658,7 +3660,1027 @@ enterFrames: low5 is low5 { tmp:1 = low5; export tmp; }
+@@ -3658,7 +3660,1088 @@ enterFrames: low5 is low5 { tmp:1 = low5; export tmp; }
  
  :INT1           is vexMode=0 & byte=0xf1                            { tmp:1 = 0x1; intloc:$(SIZE) = swi(tmp); call [intloc]; return [0:1]; }
  :INT3           is vexMode=0 & byte=0xcc                            { tmp:1 = 0x3; intloc:$(SIZE) = swi(tmp); call [intloc]; return [0:1]; }
@@ -977,6 +977,67 @@ index ebcc9ee2a6..6664447e23 100644
 +  res:3 = SET_DESCRIPTOR_ACCESS_RIGHTS(BX, CL, CH);
 +  AX = res[0,16];
 +  CF = res[16,1];
++}
++
++define pcodeop ALLOCATE_DOS_MEMORY_BLOCK;
++:INT" 31" is vexMode=0 & byte=0xcd; byte=0x31 & ctxAX=0x0100
++{
++  # Input: BX = number of paragraphs to allocate
++  # Output: AX = real mode segment of allocated block
++  #         DX = first selector for allocated block
++  #         BX = size (in paragraphs) of largest available block
++  #         CF = error, AX = error code
++  res:7 = ALLOCATE_DOS_MEMORY_BLOCK(BX);
++  AX = res[0,16];
++  BX = res[16,16];
++  DX = res[32,16];
++  CF = res[48,1];
++}
++
++define pcodeop FREE_DOS_MEMORY_BLOCK;
++:INT" 31" is vexMode=0 & byte=0xcd; byte=0x31 & ctxAX=0x0101
++{
++  # Input: DX = selector
++  # Output: CF = error, AX = error code
++  res:3 = FREE_DOS_MEMORY_BLOCK(DX);
++  AX = res[0,16];
++  CF = res[16,1];
++}
++
++define pcodeop GET_PROTECTED_MODE_INTERRUPT_VECTOR;
++:INT" 31" is vexMode=0 & byte=0xcd; byte=0x31 & ctxAX=0x0204
++{
++  # Input: BL = interrupt number
++  # Output: CF = 0, CX:(E)DX = selector:offset of handler
++  tmp:4 = segment(CX, DX);
++  tmp = GET_PROTECTED_MODE_INTERRUPT_VECTOR(BL);
++  CF = 0;
++}
++
++define pcodeop SET_PROTECTED_MODE_INTERRUPT_VECTOR;
++:INT" 31" is vexMode=0 & byte=0xcd; byte=0x31 & ctxAX=0x0205
++{
++  # Input: BL = interrupt number
++  #        CX:(E)DX = selector:offset of handler
++  # Output: CF = error, AX = error code
++  tmp:4 = segment(CX, DX);
++  res:3 = SET_PROTECTED_MODE_INTERRUPT_VECTOR(BL, tmp);
++  AX = res[0,16];
++  CF = res[16,1];
++}
++
++define pcodeop SIMULATE_REAL_MODE_INTERRUPT;
++:INT" 31" is vexMode=0 & byte=0xcd; byte=0x31 & eseDI2 & ctxAX=0x0300
++{
++  # Input: BL = interrupt number, BH = flags
++  #        CX = number of words to copy from protected mode to real mode stack
++  #        ES:(E)DI = selector:offset of real mode call structure
++  # Output: ES:(E)DI call structure modified except SS:SP, CS:IP
++  #         CF = error, AX = error code
++  res:7 = SIMULATE_REAL_MODE_INTERRUPT(BL, eseDI2, CX, BH);
++  AX = res[0,16];
++  eseDI2 = zext(res[16,32]);
++  CF = res[48,1];
 +}
 +
 +define pcodeop ALLOCATE_MEMORY_BLOCK;
