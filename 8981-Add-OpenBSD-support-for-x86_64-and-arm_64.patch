@@ -1,0 +1,555 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Kurt Miller <bsdkurt@gmail.com>
+Date: Mon, 16 Feb 2026 19:17:42 -0500
+Subject: [PATCH] 8981: Add OpenBSD support for x86_64 and arm_64.
+
+Add OpenBSD support for x86_64 and arm_64.
+
+Use installed protobuf package for protoc on OpenBSD
+---
+ GPL/DemanglerGnu/build.gradle                 |  4 ++
+ GPL/nativeBuildProperties.gradle              |  4 ++
+ GPL/nativePlatforms.gradle                    | 21 +++++++++-
+ .../src/main/py/src/ghidragdb/arch.py         |  2 +
+ .../src/main/py/src/ghidralldb/arch.py        |  1 +
+ .../Features/Decompiler/buildNatives.gradle   |  4 ++
+ .../Decompiler/src/decompile/cpp/Makefile     |  7 ++++
+ .../Features/FileFormats/buildNatives.gradle  |  2 +
+ Ghidra/Features/FunctionID/build.gradle       | 10 +++--
+ .../main/java/ghidra/framework/Platform.java  | 15 +++++++
+ .../src/main/java/ghidra/pty/PtyFactory.java  |  3 ++
+ .../ghidra/pty/openbsd/OpenBSDIoctls.java     | 38 +++++++++++++++++
+ .../ghidra/pty/openbsd/OpenBSDPtyFactory.java | 40 ++++++++++++++++++
+ .../pty/openbsd/OpenBSDPtySessionLeader.java  | 33 +++++++++++++++
+ .../ghidra/framework/OperatingSystem.java     |  1 +
+ .../application/ApplicationUtilities.java     |  2 +
+ .../main/java/ghidra/launch/AppConfig.java    |  1 +
+ .../main/java/ghidra/launch/JavaFinder.java   |  7 +++-
+ .../java/ghidra/launch/OpenBSDJavaFinder.java | 41 +++++++++++++++++++
+ gradle/hasProtobuf.gradle                     |  3 ++
+ 20 files changed, 233 insertions(+), 6 deletions(-)
+ create mode 100644 Ghidra/Framework/Pty/src/main/java/ghidra/pty/openbsd/OpenBSDIoctls.java
+ create mode 100644 Ghidra/Framework/Pty/src/main/java/ghidra/pty/openbsd/OpenBSDPtyFactory.java
+ create mode 100644 Ghidra/Framework/Pty/src/main/java/ghidra/pty/openbsd/OpenBSDPtySessionLeader.java
+ create mode 100644 GhidraBuild/LaunchSupport/src/main/java/ghidra/launch/OpenBSDJavaFinder.java
+
+diff --git a/GPL/DemanglerGnu/build.gradle b/GPL/DemanglerGnu/build.gradle
+index 47d527c77a..af047bc1fe 100644
+--- a/GPL/DemanglerGnu/build.gradle
++++ b/GPL/DemanglerGnu/build.gradle
+@@ -84,6 +84,8 @@ model {
+ 			targetPlatform "mac_arm_64"
+ 			targetPlatform "freebsd_x86_64"
+ 			targetPlatform "freebsd_arm_64"
++			targetPlatform "openbsd_x86_64"
++			targetPlatform "openbsd_arm_64"
+ 			sources {
+ 				c {
+ 					source {
+@@ -108,6 +110,8 @@ model {
+ 			targetPlatform "mac_arm_64"
+ 			targetPlatform "freebsd_x86_64"
+ 			targetPlatform "freebsd_arm_64"
++			targetPlatform "openbsd_x86_64"
++			targetPlatform "openbsd_arm_64"
+ 			sources {
+ 				c {
+ 					source {
+diff --git a/GPL/nativeBuildProperties.gradle b/GPL/nativeBuildProperties.gradle
+index a8b46b51e3..90b63c89e7 100644
+--- a/GPL/nativeBuildProperties.gradle
++++ b/GPL/nativeBuildProperties.gradle
+@@ -53,6 +53,10 @@ model {
+ 			gcc(Gcc).target(current)
+ 			clang(Clang).target(current)
+ 		}
++		if (isOpenBSD(current)) {
++			gcc(Gcc).target(current)
++			clang(Clang).target(current)
++		}
+ 		if (isWindows(current) && VISUAL_STUDIO_INSTALL_DIR) {
+ 			// https://github.com/gradle/gradle-native/issues/617#issuecomment-575735288
+ 			visualCpp(VisualCpp) {
+diff --git a/GPL/nativePlatforms.gradle b/GPL/nativePlatforms.gradle
+index 3b08da6170..5d832b2b14 100644
+--- a/GPL/nativePlatforms.gradle
++++ b/GPL/nativePlatforms.gradle
+@@ -27,7 +27,9 @@ project.ext.PLATFORMS = [
+ 	[name: "mac_x86_64", os: "osx", arch: "x86_64"],
+ 	[name: "mac_arm_64", os: "osx", arch: "arm64"],
+ 	[name: "freebsd_x86_64", os: "freebsd", arch: "x86_64"],
+-	[name: "freebsd_arm_64", os: "freebsd", arch: "arm64"]
++	[name: "freebsd_arm_64", os: "freebsd", arch: "arm64"],
++	[name: "openbsd_x86_64", os: "openbsd", arch: "x86_64"],
++	[name: "openbsd_arm_64", os: "openbsd", arch: "arm64"]
+ ]
+ 
+ /*********************************************************************************
+@@ -57,6 +59,9 @@ ext.getCurrentPlatformName = {
+ 		case ~/FreeBSD.*/:
+ 			os = "freebsd"
+ 			break
++		case ~/OpenBSD.*/:
++			os = "openbsd"
++			break
+ 		default:
+ 			throw new GradleException("Unrecognized platform operating system: $os")
+ 	}
+@@ -132,6 +137,20 @@ ext.isCurrentFreeBSD = {
+ 	return isFreeBSD(getCurrentPlatformName())
+ }
+ 
++/*********************************************************************************
++ * Returns true if the given platform is OpenBSD.
++ *********************************************************************************/
++ext.isOpenBSD = { platform_name ->
++	return platform_name.startsWith("openbsd")
++}
++
++/*********************************************************************************
++ * Returns true if the current platform is OpenBSD.
++ *********************************************************************************/
++ext.isCurrentOpenBSD = {
++	return isOpenBSD(getCurrentPlatformName())
++}
++
+ /*********************************************************************************
+  * Returns true if the given platform is Windows.
+  *********************************************************************************/
+diff --git a/Ghidra/Debug/Debugger-agent-gdb/src/main/py/src/ghidragdb/arch.py b/Ghidra/Debug/Debugger-agent-gdb/src/main/py/src/ghidragdb/arch.py
+index 28d40395a7..0cdfa5639d 100644
+--- a/Ghidra/Debug/Debugger-agent-gdb/src/main/py/src/ghidragdb/arch.py
++++ b/Ghidra/Debug/Debugger-agent-gdb/src/main/py/src/ghidragdb/arch.py
+@@ -103,6 +103,7 @@ data64_compiler_map: Dict[Optional[str], str] = {
+ 
+ x86_compiler_map: Dict[Optional[str], str] = {
+     'GNU/Linux': 'gcc',
++    'OpenBSD': 'gcc',
+     'Windows': 'windows',
+     # This may seem wrong, but Ghidra cspecs really describe the ABI
+     'Cygwin': 'windows',
+@@ -110,6 +111,7 @@ x86_compiler_map: Dict[Optional[str], str] = {
+ 
+ riscv_compiler_map: Dict[Optional[str], str] = {
+     'GNU/Linux': 'gcc',
++    'OpenBSD': 'gcc',
+     'Cygwin': 'gcc',
+ }
+ 
+diff --git a/Ghidra/Debug/Debugger-agent-lldb/src/main/py/src/ghidralldb/arch.py b/Ghidra/Debug/Debugger-agent-lldb/src/main/py/src/ghidralldb/arch.py
+index d82e6cb596..405d40e389 100644
+--- a/Ghidra/Debug/Debugger-agent-lldb/src/main/py/src/ghidralldb/arch.py
++++ b/Ghidra/Debug/Debugger-agent-lldb/src/main/py/src/ghidralldb/arch.py
+@@ -135,6 +135,7 @@ default_compiler_map: Dict[Optional[str], str] = {
+     'freebsd': 'gcc',
+     'linux': 'gcc',
+     'netbsd': 'gcc',
++    'openbsd': 'gcc',
+     'ps4': 'gcc',
+     'ios': 'gcc',
+     'macosx': 'gcc',
+diff --git a/Ghidra/Features/Decompiler/buildNatives.gradle b/Ghidra/Features/Decompiler/buildNatives.gradle
+index 450af42d5f..c3302399ae 100644
+--- a/Ghidra/Features/Decompiler/buildNatives.gradle
++++ b/Ghidra/Features/Decompiler/buildNatives.gradle
+@@ -206,6 +206,8 @@ model {
+ 			targetPlatform "mac_arm_64"
+ 			targetPlatform "freebsd_x86_64"
+ 			targetPlatform "freebsd_arm_64"
++			targetPlatform "openbsd_x86_64"
++			targetPlatform "openbsd_arm_64"
+ 			sources {
+ 				cpp {
+ 					source {
+@@ -244,6 +246,8 @@ model {
+ 			targetPlatform "mac_arm_64"
+ 			targetPlatform "freebsd_x86_64"
+ 			targetPlatform "freebsd_arm_64"
++			targetPlatform "openbsd_x86_64"
++			targetPlatform "openbsd_arm_64"
+ 			sources {
+ 				cpp {
+ 					source {
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/Makefile b/Ghidra/Features/Decompiler/src/decompile/cpp/Makefile
+index 4dfe20cab1..5f02ed609b 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/Makefile
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/Makefile
+@@ -35,6 +35,13 @@ ifeq ($(OS),Darwin)
+   OSDIR=mac_x86_64
+ endif
+ 
++ifeq ($(OS),OpenBSD)
++ifeq ($(ARCH),amd64)
++  ARCH_TYPE=-m64
++  OSDIR=openbsd_x86_64
++endif
++endif
++
+ CXX=g++ -std=c++11
+ 
+ # Debug flags
+diff --git a/Ghidra/Features/FileFormats/buildNatives.gradle b/Ghidra/Features/FileFormats/buildNatives.gradle
+index d6a4cf3c9f..65414725a6 100644
+--- a/Ghidra/Features/FileFormats/buildNatives.gradle
++++ b/Ghidra/Features/FileFormats/buildNatives.gradle
+@@ -36,6 +36,8 @@ model {
+ 			targetPlatform "mac_arm_64"
+ 			targetPlatform "freebsd_x86_64"
+ 			targetPlatform "freebsd_arm_64"
++			targetPlatform "openbsd_x86_64"
++			targetPlatform "openbsd_arm_64"
+ 		
+ 			sources {
+ 				c {
+diff --git a/Ghidra/Features/FunctionID/build.gradle b/Ghidra/Features/FunctionID/build.gradle
+index 7ea8972d30..34eaf3c786 100644
+--- a/Ghidra/Features/FunctionID/build.gradle
++++ b/Ghidra/Features/FunctionID/build.gradle
+@@ -125,9 +125,10 @@ task buildFidHelpPdf(type: Exec) {
+ 	// Check the OS before executing command.
+ 	doFirst {
+ 		if ( !(org.gradle.internal.os.OperatingSystem.current().isLinux() 
+-			|| org.gradle.internal.os.OperatingSystem.current().isMacOsX())) {
++			|| org.gradle.internal.os.OperatingSystem.current().isMacOsX()
++			|| org.gradle.internal.os.OperatingSystem.current().isOpenBSD())) {
+ 			throw new TaskExecutionException( it,
+-				new Exception( "The '$it.name' task only works on Linux or Mac Os X" ))
++				new Exception( "The '$it.name' task only works on Linux, Mac Os X or OpenBSD" ))
+ 		}
+ 	}
+ 
+@@ -189,8 +190,9 @@ task buildFidHelpHtml(type: Exec) {
+ 
+ 	// Check the OS before executing command.
+ 	doFirst {
+-		if (!getCurrentPlatformName().startsWith("linux")) {
+-			throw new TaskExecutionException( it, new Exception("The '$it.name' task only works on Linux."))
++		if (!(getCurrentPlatformName().startsWith("linux")
++		    || getCurrentPlatformName().startsWith("openbsd"))) {
++			throw new TaskExecutionException( it, new Exception("The '$it.name' task only works on Linux or OpenBSD."))
+ 		}
+ 	}
+ 
+diff --git a/Ghidra/Framework/Generic/src/main/java/ghidra/framework/Platform.java b/Ghidra/Framework/Generic/src/main/java/ghidra/framework/Platform.java
+index 06e37c2afe..6735919ab9 100644
+--- a/Ghidra/Framework/Generic/src/main/java/ghidra/framework/Platform.java
++++ b/Ghidra/Framework/Generic/src/main/java/ghidra/framework/Platform.java
+@@ -80,6 +80,16 @@ public enum Platform {
+ 	 */
+ 	FREEBSD_ARM_64(OperatingSystem.FREE_BSD, Architecture.ARM_64, "freebsd_arm_64", ".so", ""),
+ 
++	/**
++	 * Identifies a OpenBSD x86 64-bit OS.
++	 */
++	OPENBSD_X86_64(OperatingSystem.OPEN_BSD, Architecture.X86_64, "openbsd_x86_64", ".so", ""),
++
++	/**
++	 * Identifies a OpenBSD ARM 64-bit OS.
++	 */
++	OPENBSD_ARM_64(OperatingSystem.OPEN_BSD, Architecture.ARM_64, "openbsd_arm_64", ".so", ""),
++
+ 	/**
+ 	 * Identifies an unsupported OS.
+ 	 */
+@@ -234,6 +244,11 @@ public enum Platform {
+ 			paths.add("/System/Cryptexes/OS/System/Library/dyld/dyld_shared_cache_x86_64");
+ 			paths.add("/System/Cryptexes/OS/System/Library/dyld/dyld_shared_cache_x86_64h");
+ 		}
++		else if (operatingSystem == OperatingSystem.OPEN_BSD) {
++			paths.add("/usr/lib");
++			paths.add("/usr/X11R6/lib");
++			paths.add("/usr/local/lib");
++		}
+ 		else if (CURRENT_PLATFORM == WIN_X86_64) {
+ 			String windir = System.getenv("SystemRoot");
+ 			if (windir != null) {
+diff --git a/Ghidra/Framework/Pty/src/main/java/ghidra/pty/PtyFactory.java b/Ghidra/Framework/Pty/src/main/java/ghidra/pty/PtyFactory.java
+index b9d77e44e8..ea30b93a20 100644
+--- a/Ghidra/Framework/Pty/src/main/java/ghidra/pty/PtyFactory.java
++++ b/Ghidra/Framework/Pty/src/main/java/ghidra/pty/PtyFactory.java
+@@ -19,6 +19,7 @@ import java.io.IOException;
+ 
+ import ghidra.framework.OperatingSystem;
+ import ghidra.pty.linux.LinuxPtyFactory;
++import ghidra.pty.openbsd.OpenBSDPtyFactory;
+ import ghidra.pty.macos.MacosPtyFactory;
+ import ghidra.pty.windows.ConPtyFactory;
+ 
+@@ -40,6 +41,8 @@ public interface PtyFactory {
+ 				return MacosPtyFactory.INSTANCE;
+ 			case LINUX:
+ 				return LinuxPtyFactory.INSTANCE;
++			case OPEN_BSD:
++				return OpenBSDPtyFactory.INSTANCE;
+ 			case WINDOWS:
+ 				return ConPtyFactory.INSTANCE;
+ 			default:
+diff --git a/Ghidra/Framework/Pty/src/main/java/ghidra/pty/openbsd/OpenBSDIoctls.java b/Ghidra/Framework/Pty/src/main/java/ghidra/pty/openbsd/OpenBSDIoctls.java
+new file mode 100644
+index 0000000000..2f2cd7d67c
+--- /dev/null
++++ b/Ghidra/Framework/Pty/src/main/java/ghidra/pty/openbsd/OpenBSDIoctls.java
+@@ -0,0 +1,38 @@
++/* ###
++ * IP: GHIDRA
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package ghidra.pty.openbsd;
++
++import ghidra.pty.unix.PosixC.Ioctls;
++import ghidra.pty.unix.UnixPtySessionLeader;
++
++public enum OpenBSDIoctls implements Ioctls {
++	INSTANCE;
++
++	@Override
++	public Class<? extends UnixPtySessionLeader> leaderClass() {
++		return OpenBSDPtySessionLeader.class;
++	}
++
++	@Override
++	public long TIOCSCTTY() {
++		return 0x20007461L;
++	}
++
++	@Override
++	public long TIOCSWINSZ() {
++		return 0x80087467L;
++	}
++}
+diff --git a/Ghidra/Framework/Pty/src/main/java/ghidra/pty/openbsd/OpenBSDPtyFactory.java b/Ghidra/Framework/Pty/src/main/java/ghidra/pty/openbsd/OpenBSDPtyFactory.java
+new file mode 100644
+index 0000000000..ed196e1958
+--- /dev/null
++++ b/Ghidra/Framework/Pty/src/main/java/ghidra/pty/openbsd/OpenBSDPtyFactory.java
+@@ -0,0 +1,40 @@
++/* ###
++ * IP: GHIDRA
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package ghidra.pty.openbsd;
++
++import java.io.IOException;
++
++import ghidra.pty.Pty;
++import ghidra.pty.PtyFactory;
++import ghidra.pty.unix.UnixPty;
++
++public enum OpenBSDPtyFactory implements PtyFactory {
++	INSTANCE;
++
++	@Override
++	public Pty openpty(short cols, short rows) throws IOException {
++		UnixPty pty = UnixPty.openpty(OpenBSDIoctls.INSTANCE);
++		if (cols != 0 && rows != 0) {
++			pty.getChild().setWindowSize(cols, rows);
++		}
++		return pty;
++	}
++
++	@Override
++	public String getDescription() {
++		return "local (OpenBSD)";
++	}
++}
+diff --git a/Ghidra/Framework/Pty/src/main/java/ghidra/pty/openbsd/OpenBSDPtySessionLeader.java b/Ghidra/Framework/Pty/src/main/java/ghidra/pty/openbsd/OpenBSDPtySessionLeader.java
+new file mode 100644
+index 0000000000..d3d915b92a
+--- /dev/null
++++ b/Ghidra/Framework/Pty/src/main/java/ghidra/pty/openbsd/OpenBSDPtySessionLeader.java
+@@ -0,0 +1,33 @@
++/* ###
++ * IP: GHIDRA
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package ghidra.pty.openbsd;
++
++import ghidra.pty.unix.PosixC.Ioctls;
++import ghidra.pty.unix.UnixPtySessionLeader;
++
++public class OpenBSDPtySessionLeader extends UnixPtySessionLeader {
++
++	public static void main(String[] args) throws Exception {
++		OpenBSDPtySessionLeader leader = new OpenBSDPtySessionLeader();
++		leader.parseArgs(args);
++		leader.run();
++	}
++
++	@Override
++	protected Ioctls ioctls() {
++		return OpenBSDIoctls.INSTANCE;
++	}
++}
+diff --git a/Ghidra/Framework/Utility/src/main/java/ghidra/framework/OperatingSystem.java b/Ghidra/Framework/Utility/src/main/java/ghidra/framework/OperatingSystem.java
+index e803f338a1..215e01a58e 100644
+--- a/Ghidra/Framework/Utility/src/main/java/ghidra/framework/OperatingSystem.java
++++ b/Ghidra/Framework/Utility/src/main/java/ghidra/framework/OperatingSystem.java
+@@ -20,6 +20,7 @@ public enum OperatingSystem {
+ 	LINUX("Linux"),
+ 	MAC_OS_X("Mac OS X"),
+ 	FREE_BSD("FreeBSD"),
++	OPEN_BSD("OpenBSD"),
+ 	UNSUPPORTED("Unsupported Operating System");
+ 
+ 	/**
+diff --git a/Ghidra/Framework/Utility/src/main/java/utility/application/ApplicationUtilities.java b/Ghidra/Framework/Utility/src/main/java/utility/application/ApplicationUtilities.java
+index c47527e807..134c9b6188 100644
+--- a/Ghidra/Framework/Utility/src/main/java/utility/application/ApplicationUtilities.java
++++ b/Ghidra/Framework/Utility/src/main/java/utility/application/ApplicationUtilities.java
+@@ -218,6 +218,7 @@ public class ApplicationUtilities {
+ 				case WINDOWS -> new File(getEnvFile("LOCALAPPDATA", true), appName);
+ 				case LINUX -> new File("/var/tmp/" + userDirName);
+ 				case FREE_BSD -> new File("/var/tmp/" + userDirName);
++				case OPEN_BSD -> new File("/var/tmp/" + userDirName);
+ 				case MAC_OS_X -> new File("/var/tmp/" + userDirName);
+ 				default -> throw new FileNotFoundException(
+ 					"Failed to find the user cache directory: Unsupported operating system.");
+@@ -275,6 +276,7 @@ public class ApplicationUtilities {
+ 			case WINDOWS -> new File(getEnvFile("APPDATA", true), versionedSubdir);
+ 			case LINUX -> new File(userHomeDir, ".config/" + versionedSubdir);
+ 			case FREE_BSD -> new File(userHomeDir, ".config/" + versionedSubdir);
++			case OPEN_BSD -> new File(userHomeDir, ".config/" + versionedSubdir);
+ 			case MAC_OS_X -> new File(userHomeDir, "Library/" + versionedSubdir);
+ 			default -> throw new FileNotFoundException(
+ 				"Failed to find the user settings directory: Unsupported operating system.");
+diff --git a/GhidraBuild/LaunchSupport/src/main/java/ghidra/launch/AppConfig.java b/GhidraBuild/LaunchSupport/src/main/java/ghidra/launch/AppConfig.java
+index fe3a999558..875cdb0682 100644
+--- a/GhidraBuild/LaunchSupport/src/main/java/ghidra/launch/AppConfig.java
++++ b/GhidraBuild/LaunchSupport/src/main/java/ghidra/launch/AppConfig.java
+@@ -453,6 +453,7 @@ public class AppConfig {
+ 					new File(localAppDataDirPath, appName + "/" + userSettingsDirName);
+ 				break;
+ 			case LINUX:
++			case OPEN_BSD:
+ 				userSettingsDir =
+ 					new File(userHomeDir, ".config/" + appName + "/" + userSettingsDirName);
+ 				break;
+diff --git a/GhidraBuild/LaunchSupport/src/main/java/ghidra/launch/JavaFinder.java b/GhidraBuild/LaunchSupport/src/main/java/ghidra/launch/JavaFinder.java
+index 400f26b6fd..8d82e27b0e 100644
+--- a/GhidraBuild/LaunchSupport/src/main/java/ghidra/launch/JavaFinder.java
++++ b/GhidraBuild/LaunchSupport/src/main/java/ghidra/launch/JavaFinder.java
+@@ -36,7 +36,7 @@ public abstract class JavaFinder {
+ 	 * The different supported platforms (operating systems).
+ 	 */
+ 	public enum Platform {
+-		WINDOWS, MACOS, LINUX;
++		WINDOWS, MACOS, LINUX, OPEN_BSD;
+ 	}
+ 
+ 	/**
+@@ -54,6 +54,9 @@ public abstract class JavaFinder {
+ 			if (os.contains("mac")) {
+ 				return Platform.MACOS;
+ 			}
++			if (os.contains("openbsd")) {
++				return Platform.OPEN_BSD;
++			}
+ 		}
+ 		return Platform.LINUX;
+ 	}
+@@ -69,6 +72,8 @@ public abstract class JavaFinder {
+ 				return new WindowsJavaFinder();
+ 			case MACOS:
+ 				return new MacJavaFinder();
++			case OPEN_BSD:
++				return new OpenBSDJavaFinder();
+ 			case LINUX:
+ 			default:
+ 				return new LinuxJavaFinder();
+diff --git a/GhidraBuild/LaunchSupport/src/main/java/ghidra/launch/OpenBSDJavaFinder.java b/GhidraBuild/LaunchSupport/src/main/java/ghidra/launch/OpenBSDJavaFinder.java
+new file mode 100644
+index 0000000000..808a207ce6
+--- /dev/null
++++ b/GhidraBuild/LaunchSupport/src/main/java/ghidra/launch/OpenBSDJavaFinder.java
+@@ -0,0 +1,41 @@
++/* ###
++ * IP: GHIDRA
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package ghidra.launch;
++
++import java.io.File;
++import java.io.FilenameFilter;
++import java.util.ArrayList;
++import java.util.List;
++import java.util.Arrays;
++
++/**
++ * Class responsible for finding Java installations on an OpenBSD system.
++ */
++public class OpenBSDJavaFinder extends LinuxJavaFinder {
++
++	@Override
++	protected List<File> getJavaRootInstallDirs() {
++		File localdir = new File("/usr/local");
++
++		File[] filteredFiles = localdir.listFiles((dir, name) ->
++			name.toLowerCase().startsWith("jdk-")
++		);
++
++		return filteredFiles != null
++			? new ArrayList<>(Arrays.asList(filteredFiles))
++			: new ArrayList<>();
++	}
++}
+diff --git a/gradle/hasProtobuf.gradle b/gradle/hasProtobuf.gradle
+index 7a360b5a4e..537c51fb65 100644
+--- a/gradle/hasProtobuf.gradle
++++ b/gradle/hasProtobuf.gradle
+@@ -53,6 +53,9 @@ dependencies {
+ 			protocArtifact "com.google.protobuf:protoc:${version}:osx-aarch_64@exe"
+ 		}
+ 	}
++	if (isCurrentOpenBSD()) {
++		protocArtifact files('/usr/local/bin/protoc')
++	}
+ }
+ 
+ /*protobuf {
+-- 
+2.45.1
+
