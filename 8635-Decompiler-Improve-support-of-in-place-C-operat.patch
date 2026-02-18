@@ -9,14 +9,14 @@ Add support for in-place float operations This commit is
 
 Add support for in-place operations on memory This commit adds support for in-place operations on values in memory using a LOAD/OP/STORE sequence. The implementation is quite hacky, for two main reasons: 1. CPUI_STORE was never meant as going through PrintC::emitInplaceOp, so it takes a bit of a weird path through the function, which makes the function quite unreadable. 2. If the CPUI_STORE is emitted as an in-place op, there might still be a spurious CPUI_LOAD left, which has already been emitted. If the loaded value is not used elsewhere, the load is now useless. To avoid emitting this load, we need to also detect the structure when the load instruction goes through PrintC::emitInplaceOp. And if we detect the structure, we need to not emit anything. Also avoiding the semi- colon and newline being printed requires abusing the print modifiers by repurposing the 'pending_brace' modifier to also indicate that the previous expression did not emit anything.
 ---
- .../Decompiler/src/decompile/cpp/printc.cc    | 162 +++++++++++++++++-
- 1 file changed, 159 insertions(+), 3 deletions(-)
+ .../Decompiler/src/decompile/cpp/printc.cc    | 163 +++++++++++++++++-
+ 1 file changed, 160 insertions(+), 3 deletions(-)
 
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/printc.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/printc.cc
-index 3d8e20deb2..8dfeb4bb8a 100644
+index 98c66cca50..25af4d3387 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/printc.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/printc.cc
-@@ -2309,7 +2309,11 @@ void PrintC::emitStatement(const PcodeOp *inst)
+@@ -2375,7 +2375,11 @@ void PrintC::emitStatement(const PcodeOp *inst)
    int4 id = emit->beginStatement(inst);
    emitExpression(inst);
    emit->endStatement(id);
@@ -29,7 +29,7 @@ index 3d8e20deb2..8dfeb4bb8a 100644
      emit->print(SEMICOLON);
  }
  
-@@ -2470,6 +2474,37 @@ bool PrintC::emitIncDecOp(const PcodeOp *op)
+@@ -2536,6 +2540,37 @@ bool PrintC::emitIncDecOp(const PcodeOp *op)
    return true;
  }
  
@@ -67,7 +67,7 @@ index 3d8e20deb2..8dfeb4bb8a 100644
  /// Check that the given p-code op has an \e in-place token form and if the first input and the output
  /// are references to  the same variable. If so, emit the expression using the \e in-place token.
  /// \param op is the given PcodeOp
-@@ -2478,12 +2513,84 @@ bool PrintC::emitInplaceOp(const PcodeOp *op)
+@@ -2544,12 +2579,84 @@ bool PrintC::emitInplaceOp(const PcodeOp *op)
  
  {
    OpToken *tok;
@@ -152,7 +152,7 @@ index 3d8e20deb2..8dfeb4bb8a 100644
      tok = &divequal;
      break;
    case CPUI_INT_REM:
-@@ -2491,9 +2598,11 @@ bool PrintC::emitInplaceOp(const PcodeOp *op)
+@@ -2557,9 +2664,11 @@ bool PrintC::emitInplaceOp(const PcodeOp *op)
      tok = &remequal;
      break;
    case CPUI_INT_ADD:
@@ -164,7 +164,7 @@ index 3d8e20deb2..8dfeb4bb8a 100644
      tok = &minusequal;
      break;
    case CPUI_INT_LEFT:
-@@ -2515,8 +2624,45 @@ bool PrintC::emitInplaceOp(const PcodeOp *op)
+@@ -2581,8 +2690,45 @@ bool PrintC::emitInplaceOp(const PcodeOp *op)
    default:
      return false;
    }
@@ -211,17 +211,18 @@ index 3d8e20deb2..8dfeb4bb8a 100644
    pushOp(tok,op);
    pushVnExplicit(vn,op);
    pushVn(op->getIn(1),op,mods);
-@@ -2527,6 +2673,9 @@ bool PrintC::emitInplaceOp(const PcodeOp *op)
+@@ -2593,6 +2739,10 @@ bool PrintC::emitInplaceOp(const PcodeOp *op)
  void PrintC::emitExpression(const PcodeOp *op)
     
  {
 +  if (op->code() == CPUI_STORE) {
 +    if (option_inplace_ops && emitInplaceOp(op)) return;
 +  }
-   const Varnode *outvn = op->getOut();
-   if (outvn != (Varnode *)0) {
-     if (option_inplace_ops && emitIncDecOp(op)) return;
-@@ -2771,7 +2920,14 @@ void PrintC::emitBlockBasic(const BlockBasic *bb)
++
+   if (op->doesSpecialPrinting()) {
+     if (op->isCall()) {
+       emitConstructor(op);
+@@ -2903,7 +3053,14 @@ void PrintC::emitBlockBasic(const BlockBasic *bb)
  	}
  	else {
  	  emitCommentGroup(inst);

@@ -13,11 +13,11 @@ Subject: [PATCH] 3974: Fix Comments -> Set... in the decompiler not defaulting
  5 files changed, 73 insertions(+), 24 deletions(-)
 
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/prettyprint.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/prettyprint.cc
-index ad8a6ded10..6d5b2039ac 100644
+index f85f01854f..016540932f 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/prettyprint.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/prettyprint.cc
-@@ -252,7 +252,7 @@ void EmitMarkup::tagField(const string &name,syntax_highlight hl,const Datatype
-   encoder->closeElement(ELEM_FIELD);
+@@ -271,7 +271,7 @@ void EmitMarkup::tagBitField(const string &name,syntax_highlight hl,const Dataty
+   encoder->closeElement(ELEM_BITFIELD);
  }
  
 -void EmitMarkup::tagComment(const string &name,syntax_highlight hl,const AddrSpace *spc,uintb off)
@@ -25,7 +25,7 @@ index ad8a6ded10..6d5b2039ac 100644
  
  {
    encoder->openElement(ELEM_COMMENT);
-@@ -260,6 +260,7 @@ void EmitMarkup::tagComment(const string &name,syntax_highlight hl,const AddrSpa
+@@ -279,6 +279,7 @@ void EmitMarkup::tagComment(const string &name,syntax_highlight hl,const AddrSpa
      encoder->writeUnsignedInteger(ATTRIB_COLOR,hl);
    encoder->writeSpace(ATTRIB_SPACE, spc);
    encoder->writeUnsignedInteger(ATTRIB_OFF, off);
@@ -33,8 +33,8 @@ index ad8a6ded10..6d5b2039ac 100644
    encoder->writeString(ATTRIB_CONTENT,name);
    encoder->closeElement(ELEM_COMMENT);
  }
-@@ -408,7 +409,7 @@ void TokenSplit::print(Emit *emit) const
-     emit->tagField(tok,hl,ptr_second.ct,(int4)off,op);
+@@ -430,7 +431,7 @@ void TokenSplit::print(Emit *emit) const
+     emit->tagBitField(tok,hl,ptr_second.ct,(int4)off,op);
      break;
    case comm_t:	// tagComment
 -    emit->tagComment(tok,hl,ptr_second.spc,off);
@@ -42,7 +42,7 @@ index ad8a6ded10..6d5b2039ac 100644
      break;
    case label_t:	// tagLabel
      emit->tagLabel(tok,hl,ptr_second.spc,off);
-@@ -1055,12 +1056,12 @@ void EmitPrettyPrint::tagField(const string &name,syntax_highlight hl,const Data
+@@ -1089,12 +1090,12 @@ void EmitPrettyPrint::tagBitField(const string &name,syntax_highlight hl,const D
    scan();
  }
  
@@ -58,10 +58,10 @@ index ad8a6ded10..6d5b2039ac 100644
  }
  
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/prettyprint.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/prettyprint.hh
-index 9f6ac1b999..067f570dda 100644
+index bd65f4e292..40871e14b5 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/prettyprint.hh
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/prettyprint.hh
-@@ -287,7 +287,8 @@ public:
+@@ -298,7 +298,8 @@ public:
    /// \param hl indicates how the comment should be highlighted
    /// \param spc is the address space of the address where the comment is attached
    /// \param off is the offset of the address where the comment is attached
@@ -71,25 +71,25 @@ index 9f6ac1b999..067f570dda 100644
  
    /// \brief Emit a code label identifier
    ///
-@@ -527,7 +528,7 @@ public:
-   virtual void tagFuncName(const string &name,syntax_highlight hl,const Funcdata *fd,const PcodeOp *op);
+@@ -539,7 +540,7 @@ public:
    virtual void tagType(const string &name,syntax_highlight hl,const Datatype *ct);
    virtual void tagField(const string &name,syntax_highlight hl,const Datatype *ct,int4 off,const PcodeOp *op);
+   virtual void tagBitField(const string &name,syntax_highlight hl,const Datatype *ct,int4 id,const PcodeOp *op);
 -  virtual void tagComment(const string &name,syntax_highlight hl,const AddrSpace *spc,uintb off);
 +  virtual void tagComment(const string &name,syntax_highlight hl,const AddrSpace *spc,uintb off,const char *type);
    virtual void tagLabel(const string &name,syntax_highlight hl,const AddrSpace *spc,uintb off);
    virtual void tagCaseLabel(const string &name,syntax_highlight hl,const PcodeOp *op,uintb value);
    virtual void print(const string &data,syntax_highlight hl=no_color);
-@@ -576,7 +577,7 @@ public:
+@@ -590,7 +591,7 @@ public:
      *s << name; }
-   virtual void tagField(const string &name,syntax_highlight hl,const Datatype *ct,int4 off,const PcodeOp *op) {
+   virtual void tagBitField(const string &name,syntax_highlight hl,const Datatype *ct,int4 id,const PcodeOp *op) {
      *s << name; }
 -  virtual void tagComment(const string &name,syntax_highlight hl,const AddrSpace *spc,uintb off) {
 +  virtual void tagComment(const string &name,syntax_highlight hl,const AddrSpace *spc,uintb off,const char *type) {
      *s << name; }
    virtual void tagLabel(const string &name,syntax_highlight hl,const AddrSpace *spc,uintb off) {
      *s << name; }
-@@ -661,13 +662,16 @@ private:
+@@ -676,13 +677,16 @@ private:
    EmitMarkup::syntax_highlight hl;	///< Highlighting for token
    // Additional markup elements for token
    const PcodeOp *op;		///< Pcode-op associated with \b this token
@@ -113,7 +113,7 @@ index 9f6ac1b999..067f570dda 100644
    } ptr_second;			///< Additional markup associated with the token
    uintb off;			///< Offset associated either with address or field markup
    int4 indentbump;		///< Amount to indent if a line breaks
-@@ -821,8 +825,9 @@ public:
+@@ -847,8 +851,9 @@ public:
    /// \param h indicates how the comment should be highlighted
    /// \param s is the address space of the address where the comment is attached
    /// \param o is the offset of the address where the comment is attached
@@ -125,20 +125,20 @@ index 9f6ac1b999..067f570dda 100644
      tagtype=comm_t; delimtype=tokenstring; hl=h; }
  
    /// \brief Create a code label identifier token
-@@ -1088,7 +1093,7 @@ public:
-   virtual void tagFuncName(const string &name,syntax_highlight hl,const Funcdata *fd,const PcodeOp *op);
+@@ -1115,7 +1120,7 @@ public:
    virtual void tagType(const string &name,syntax_highlight hl,const Datatype *ct);
    virtual void tagField(const string &name,syntax_highlight hl,const Datatype *ct,int4 off,const PcodeOp *op);
+   virtual void tagBitField(const string &name,syntax_highlight hl,const Datatype *ct,int4 id,const PcodeOp *op);
 -  virtual void tagComment(const string &name,syntax_highlight hl,const AddrSpace *spc,uintb off);
 +  virtual void tagComment(const string &name,syntax_highlight hl,const AddrSpace *spc,uintb off,const char *type);
    virtual void tagLabel(const string &name,syntax_highlight hl,const AddrSpace *spc,uintb off);
    virtual void tagCaseLabel(const string &name,syntax_highlight hl,const PcodeOp *op,uintb value);
    virtual void print(const string &data,syntax_highlight hl=no_color);
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/printlanguage.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/printlanguage.cc
-index 825a9935de..1a05ed0467 100644
+index 25a1f7c71a..436761f614 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/printlanguage.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/printlanguage.cc
-@@ -609,6 +609,7 @@ void PrintLanguage::emitLineComment(int4 indent,const Comment *comm)
+@@ -613,6 +613,7 @@ void PrintLanguage::emitLineComment(int4 indent,const Comment *comm)
  {
    const string &text( comm->getText() );
    const AddrSpace *spc = comm->getAddr().getSpace();
@@ -146,7 +146,7 @@ index 825a9935de..1a05ed0467 100644
    uintb off = comm->getAddr().getOffset();
    if (line_commentindentalign) {
      emit->tagLine();
-@@ -622,7 +623,7 @@ void PrintLanguage::emitLineComment(int4 indent,const Comment *comm)
+@@ -626,7 +627,7 @@ void PrintLanguage::emitLineComment(int4 indent,const Comment *comm)
    // The comment delimeters should not be printed as
    // comment tags, so that they won't get filled
    emit->tagComment(commentstart,EmitMarkup::comment_color,
@@ -155,7 +155,7 @@ index 825a9935de..1a05ed0467 100644
    int4 pos = 0;
    while(pos < text.size()) {
      char tok = text[pos++];
-@@ -651,7 +652,7 @@ void PrintLanguage::emitLineComment(int4 indent,const Comment *comm)
+@@ -655,7 +656,7 @@ void PrintLanguage::emitLineComment(int4 indent,const Comment *comm)
        }
        // Treat annotation as one token
        string annote = text.substr(pos-count,count);
@@ -164,7 +164,7 @@ index 825a9935de..1a05ed0467 100644
      }
      else {
        int4 count = 1;
-@@ -662,11 +663,11 @@ void PrintLanguage::emitLineComment(int4 indent,const Comment *comm)
+@@ -666,11 +667,11 @@ void PrintLanguage::emitLineComment(int4 indent,const Comment *comm)
  	pos += 1;
        }
        string sub = text.substr(pos-count,count);
