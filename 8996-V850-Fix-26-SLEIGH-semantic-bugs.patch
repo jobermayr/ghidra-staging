@@ -1,0 +1,724 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: mmmorks <mmmorks@mmmorks.net>
+Date: Sat, 21 Feb 2026 22:09:39 -0800
+Subject: [PATCH] 8996: V850: Fix 26 SLEIGH semantic bugs
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+#8995 V850: Fix 26 SLEIGH bugs causing incorrect decompilation and disassembly
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Cross-referenced the V850E2M instruction manual and GCC's V850 backend
+against Ghidra's SLEIGH implementation and fixed every semantic bug found.
+
+Critical (wrong values computed):
+ 1. ST.W 23-bit: wrote halfword instead of word
+ 2. DIVHU: sign-extended unsigned operand via sext instead of zext
+ 3. DIVH (reg,reg): used unsigned sdiv on full 32-bit register instead of
+    signed division on sign-extended lower halfword
+ 4. CVTF.DL: used int2float (int→float) instead of trunc (float→int),
+    completely reversing the operation
+ 5. DIVQ/DIVQU reg2==reg3 overlap: quotient written after remainder, so
+    quotient wins; manual says remainder must persist. Swapped write order
+    to match DIV/DIVU and the architecture manual.
+
+High (significantly degraded decompiler output):
+ 6. CMOV variants: multiply-by-boolean pattern unreadable; replaced with
+    if/goto conditional
+ 7. MMIO not volatile: reads/writes to 0xFF400000-0xFFFFFFFF optimized away;
+    added volatile range to pspec
+ 8. LDSR: dead-code eliminated with no side effect; added pcodeop
+ 9. either_or/either_or1 macros: multiply-by-boolean unreadable; replaced
+    with if/goto
+10. SATADD/SATSUB (all 7 forms): S and Z flags computed on pre-saturation
+    result and opaque __saturate pcodeop hid saturation from decompiler;
+    replaced with inline saturation logic with flags on saturated result
+
+Medium (incorrect but less impactful):
+11. BSH/BSW/HSW: zext of sub-register before shift lost upper bits
+12. MULHI: operated on full 32-bit register instead of lower halfword
+13. CAXI: unmasked write address and multiply-by-boolean pattern
+14. DIVH (3-op): used unsigned sdiv instead of signed s/
+15. DIV: result truncation via & mask instead of proper s/ and s%
+16. DIVU: result truncation via & mask instead of proper / and %
+17. DIVQ/DIVQU: same mask truncation issue as DIV/DIVU
+18. Bit search (SCH0L/SCH0R/SCH1L/SCH1R): missing OV=0 and S=0 flag clears
+19. set_CY_neg2 (SBF borrow flag): single comparison overflowed; replaced
+    with two-step borrow check
+20. FNMAF.S/FNMSF.S: used -1 f* for negation instead of f- unary negate
+
+Low (cosmetic / minor):
+21. TST1 bit,reg: display showed operands in wrong order vs manual
+22. V850.cspec: 64-bit return join had r10/r11 swapped (piece1=r11,piece2=r10)
+23-26. Float mnemonics: ABSF.D/NEGF.D/RECIPF.D/RSQRTF.D displayed wrong name
+
+Reference: https://www.renesas.com/en/document/mah/v850e2m-users-manual-architecture
+---
+ .../V850/data/languages/Helpers/Macros.sinc   |  34 ++--
+ .../languages/Instructions/Arithmetic.sinc    | 167 +++++++++++++-----
+ .../data/languages/Instructions/Float.sinc    |  20 +--
+ .../languages/Instructions/Load_Store.sinc    |  24 ++-
+ .../data/languages/Instructions/Logic.sinc    |   2 +-
+ .../data/languages/Instructions/Special.sinc  |  30 +++-
+ .../Processors/V850/data/languages/V850.cspec |   2 +-
+ .../Processors/V850/data/languages/V850.pspec |   1 +
+ 8 files changed, 194 insertions(+), 86 deletions(-)
+
+diff --git a/Ghidra/Processors/V850/data/languages/Helpers/Macros.sinc b/Ghidra/Processors/V850/data/languages/Helpers/Macros.sinc
+index 5985412f08..8ae5999cb1 100644
+--- a/Ghidra/Processors/V850/data/languages/Helpers/Macros.sinc
++++ b/Ghidra/Processors/V850/data/languages/Helpers/Macros.sinc
+@@ -23,8 +23,10 @@ macro set_CY_neg(var1, var2)
+ 
+ macro set_CY_neg2(var1, var2, var3)
+ {
+-	local var23 = var2 + var3;
+-	$(CY) = (var1 < var23);
++	local borrow1:1 = (var1 < var2);
++	local partial = var1 - var2;
++	local borrow2:1 = (partial < var3);
++	$(CY) = borrow1 || borrow2;
+ }
+ 
+ 
+@@ -121,15 +123,25 @@ macro set_OV0_S_Z(var)
+ ##### General-Macros #####
+ 
+ # if condition is != 0
+-macro either_or(res, cond, true, false)	
++macro either_or(res, cond, true, false)
+ {
+-	res = (true * zext(cond != 0)) + (false * zext(cond == 0));
++	if (cond != 0) goto <true_case>;
++	res = false;
++	goto <done>;
++	<true_case>
++	res = true;
++	<done>
+ }
+ 
+ # if condition is == 1
+ macro either_or1(res, cond, true, false)
+ {
+-	res = (true * zext(cond == 1)) + (false * zext(cond != 1));
++	if (cond == 1) goto <true_case>;
++	res = false;
++	goto <done>;
++	<true_case>
++	res = true;
++	<done>
+ }
+ 
+ macro shift_right_logic(res, var, shift_)
+@@ -182,7 +194,7 @@ macro pop(reg)
+ macro SearchRight(res, var, char)
+ {
+ 	local var_:4 = var;
+-	res = 0;
++	res = 1;
+ 
+ 	<loop>
+ 	if ((var_ & 0x1) == char)
+@@ -191,9 +203,9 @@ macro SearchRight(res, var, char)
+ 	var_ = var_ >> 1;
+ 	res = res + 1;
+ 
+-	if (res < 32)
++	if (res <= 32)
+ 		goto <loop>;
+-	
++
+ 	res = 0;
+ 
+ 	<end>
+@@ -202,16 +214,16 @@ macro SearchRight(res, var, char)
+ macro SearchLeft(res, var, char)
+ {
+ 	local var_:4 = var;
+-	res = 0;
++	res = 1;
+ 
+ 	<loop>
+-	if ((var_ >> 31) == char) 
++	if ((var_ >> 31) == char)
+ 		goto <end>;
+ 
+ 	var_ = var_ << 1;
+ 	res = res + 1;
+ 
+-	if (res < 32) 
++	if (res <= 32)
+ 		goto <loop>;
+ 
+ 	res = 0;
+diff --git a/Ghidra/Processors/V850/data/languages/Instructions/Arithmetic.sinc b/Ghidra/Processors/V850/data/languages/Instructions/Arithmetic.sinc
+index a546e24284..e334edb882 100644
+--- a/Ghidra/Processors/V850/data/languages/Instructions/Arithmetic.sinc
++++ b/Ghidra/Processors/V850/data/languages/Instructions/Arithmetic.sinc
+@@ -44,7 +44,7 @@
+ # MULHI imm16, reg1, reg2 - rrrrr110111RRRRR|iiiiiiiiiiiiiiii
+ :mulhi s1631, R0004, R1115 is op0510=0x37 & R1115 & R0004; s1631
+ {
+-	R1115 = R0004 * s1631;
++	R1115 = sext(R0004:2) * s1631;
+ }
+ 
+ # MULU reg1, reg2, reg3 - rrrrr111111RRRRR|wwwww01000100010
+@@ -175,69 +175,137 @@
+ #####################################################
+ 
+ 
+-define pcodeop __saturate;
+-
+ # SATADD reg1, reg2 - rrrrr000110RRRRR
+ :satadd R0004, R1115 is op0510=0x06 & R0004 & R1115 & op1115!=0
+ {
+-	set_general_flags_pos(R1115, R0004);
++	set_CY_pos(R1115, R0004);
++	set_OV_pos(R1115, R0004);
++	local result:4 = R1115 + R0004;
+ 	$(SAT) = $(SAT) || $(OV);
+-	R1115 = R1115 + R0004;
+-	__saturate(R1115);
++	if (!$(OV)) goto <no_sat>;
++	if (R1115 s< 0) goto <neg_sat>;
++	result = 0x7FFFFFFF;
++	goto <no_sat>;
++	<neg_sat>
++	result = 0x80000000;
++	<no_sat>
++	R1115 = result;
++	set_S(result);
++	set_Z(result);
+ }
+ 
+ #SATADD imm5, reg2 - rrrrr010001iiiii
+ :satadd s0004, R1115 is op0510=0x11 & s0004 & R1115 & op1115!=0
+ {
+-	set_general_flags_pos(R1115, s0004);
++	set_CY_pos(R1115, s0004);
++	set_OV_pos(R1115, s0004);
++	local result:4 = R1115 + s0004;
+ 	$(SAT) = $(SAT) || $(OV);
+-	R1115 = R1115 + s0004;
+-	__saturate(R1115);
++	if (!$(OV)) goto <no_sat>;
++	if (R1115 s< 0) goto <neg_sat>;
++	result = 0x7FFFFFFF;
++	goto <no_sat>;
++	<neg_sat>
++	result = 0x80000000;
++	<no_sat>
++	R1115 = result;
++	set_S(result);
++	set_Z(result);
+ }
+ 
+ # SATADD reg1, reg2, reg3 - rrrrr111111RRRRR|wwwww01110111010
+ :satadd R0004, R1115, R2731 is op0510=0x3F & R0004 & R1115; op1626=0x3BA & R2731
+ {
+-	set_general_flags_pos(R1115, R0004);
++	set_CY_pos(R1115, R0004);
++	set_OV_pos(R1115, R0004);
++	local result:4 = R1115 + R0004;
+ 	$(SAT) = $(SAT) || $(OV);
+-	R2731 = R1115 + R0004;
+-	__saturate(R2731);
++	if (!$(OV)) goto <no_sat>;
++	if (R1115 s< 0) goto <neg_sat>;
++	result = 0x7FFFFFFF;
++	goto <no_sat>;
++	<neg_sat>
++	result = 0x80000000;
++	<no_sat>
++	R2731 = result;
++	set_S(result);
++	set_Z(result);
+ }
+ 
+ # SATSUB reg1, reg2 - rrrrr000101RRRRR
+-:satsub R0004, R1115 is op0510=0x05 & R0004 & R1115 & op1115!=0 
++:satsub R0004, R1115 is op0510=0x05 & R0004 & R1115 & op1115!=0
+ {
+-	set_general_flags_neg(R1115, R0004);
++	set_CY_neg(R1115, R0004);
++	set_OV_neg(R1115, R0004);
++	local result:4 = R1115 - R0004;
+ 	$(SAT) = $(SAT) || $(OV);
+-	R1115 = R1115 - R0004;
+-	__saturate(R1115);
++	if (!$(OV)) goto <no_sat>;
++	if (R1115 s< 0) goto <neg_sat>;
++	result = 0x7FFFFFFF;
++	goto <no_sat>;
++	<neg_sat>
++	result = 0x80000000;
++	<no_sat>
++	R1115 = result;
++	set_S(result);
++	set_Z(result);
+ }
+ 
+ # SATSUB reg1, reg2, reg3 - rrrrr111111RRRRR|wwwww01110011010
+ :satsub R0004, R1115, R2731 is op0510=0x3F & R0004 & R1115; op1626=0x39A & R2731
+ {
+-	set_general_flags_neg(R1115, R0004);
++	set_CY_neg(R1115, R0004);
++	set_OV_neg(R1115, R0004);
++	local result:4 = R1115 - R0004;
+ 	$(SAT) = $(SAT) || $(OV);
+-	R2731 = R1115 - R0004;
+-	__saturate(R2731);
++	if (!$(OV)) goto <no_sat>;
++	if (R1115 s< 0) goto <neg_sat>;
++	result = 0x7FFFFFFF;
++	goto <no_sat>;
++	<neg_sat>
++	result = 0x80000000;
++	<no_sat>
++	R2731 = result;
++	set_S(result);
++	set_Z(result);
+ }
+ 
+ # SATSUBI imm16, reg1, reg2
+ :satsubi s1631, R0004, R1115 is op0510=0x33 & op1115!=0 & R0004 & R1115; s1631
+ {
+-	set_general_flags_neg(R0004, s1631);
++	set_CY_neg(R0004, s1631);
++	set_OV_neg(R0004, s1631);
++	local result:4 = R0004 - s1631;
+ 	$(SAT) = $(SAT) || $(OV);
+-	R1115 = R0004 - s1631;
+-	__saturate(R1115);
++	if (!$(OV)) goto <no_sat>;
++	if (R0004 s< 0) goto <neg_sat>;
++	result = 0x7FFFFFFF;
++	goto <no_sat>;
++	<neg_sat>
++	result = 0x80000000;
++	<no_sat>
++	R1115 = result;
++	set_S(result);
++	set_Z(result);
+ }
+ 
+ # SATSUBR reg1, reg2
+ :satsubr R0004, R1115 is op0510=0x04 & R0004 & R1115 & op1115!=0
+ {
+-	set_general_flags_neg(R0004, R1115);
++	set_CY_neg(R0004, R1115);
++	set_OV_neg(R0004, R1115);
++	local result:4 = R0004 - R1115;
+ 	$(SAT) = $(SAT) || $(OV);
+-	R1115 = R0004 - R1115;
+-	__saturate(R1115);
++	if (!$(OV)) goto <no_sat>;
++	if (R0004 s< 0) goto <neg_sat>;
++	result = 0x7FFFFFFF;
++	goto <no_sat>;
++	<neg_sat>
++	result = 0x80000000;
++	<no_sat>
++	R1115 = result;
++	set_S(result);
++	set_Z(result);
+ }
+ 
+ 
+@@ -253,17 +321,18 @@ define pcodeop __saturate;
+ 	local quot:4 = R1115 s/ R0004;
+ 	local mod:4 = R1115 s% R0004;
+ 	$(OV) = ((R1115 == 0x80000000 && R0004 == 0xFFFFFFFF) || R0004 == 0x0);
+-	set_Z(R1115);
+-	set_S(R1115);
++	set_Z(quot);
++	set_S(quot);
+ 	R1115 = quot;
+- 	R2731 = mod;
++	R2731 = mod;
+ }
+ 
+ # DIVH reg1, reg2 - rrrrr000010RRRRR
+ :divh R0004, R1115 is op0510=0x02 & R0004 & R1115
+ {
+-	$(OV) = ((R1115 == 0x80000000 && R0004 == 0xFFFFFFFF) || R0004 == 0x0);
+-	R1115 = R1115 / R0004;
++	local divisor:4 = sext(R0004:2);
++	$(OV) = ((R1115 == 0x80000000 && divisor == 0xFFFFFFFF) || divisor == 0x0);
++	R1115 = R1115 s/ divisor;
+ 	set_Z(R1115);
+ 	set_S(R1115);
+ }
+@@ -271,11 +340,12 @@ define pcodeop __saturate;
+ # DIVH reg1, reg2, reg3 - rrrrr111111RRRRR|wwwww01010000000
+ :divh R0004, R1115, R2731 is op0510=0x3F & R0004 & R1115; op1626=0x280 & R2731
+ {
+-	local quot:4 = R1115 s/ sext(R0004:2);
+-	local mod:4 = R1115 s% sext(R0004:2);
+-	$(OV) = ((R1115 == 0x80000000 && R0004 == 0xFFFFFFFF) || R0004 == 0x0);
+-	set_Z(R1115);
+-	set_S(R1115);
++	local divisor:4 = sext(R0004:2);
++	local quot:4 = R1115 s/ divisor;
++	local mod:4 = R1115 s% divisor;
++	$(OV) = ((R1115 == 0x80000000 && divisor == 0xFFFFFFFF) || divisor == 0x0);
++	set_Z(quot);
++	set_S(quot);
+ 	R1115 = quot;
+ 	R2731 = mod;
+ }
+@@ -283,11 +353,12 @@ define pcodeop __saturate;
+ # DIVHU reg1, reg2, reg3 - rrrrr111111RRRRR|wwwww01010000010
+ :divhu R0004, R1115, R2731 is op0510=0x3F & R0004 & R1115; op1626=0x282 & R2731
+ {
+-	local quot:4 = R1115 / sext(R0004:2);
+-	local mod:4 = R1115 % sext(R0004:2);
+-	$(OV) = (R0004 == 0);
+-	set_Z(R1115);
+-	set_S(R1115);
++	local divisor:4 = zext(R0004:2);
++	local quot:4 = R1115 / divisor;
++	local mod:4 = R1115 % divisor;
++	$(OV) = (divisor == 0);
++	set_Z(quot);
++	set_S(quot);
+ 	R1115 = quot;
+ 	R2731 = mod;
+ }
+@@ -298,8 +369,8 @@ define pcodeop __saturate;
+ 	local quot:4 = R1115 / R0004;
+ 	local mod:4 = R1115 % R0004;
+ 	$(OV) = (R0004 == 0);
+-	set_Z(R1115);
+-	set_S(R1115);
++	set_Z(quot);
++	set_S(quot);
+ 	R1115 = quot;
+ 	R2731 = mod;
+ }
+@@ -317,10 +388,10 @@ define pcodeop __saturate;
+ 	local quot:4 = R1115 s/ R0004;
+ 	local mod:4 = R1115 s% R0004;
+ 	$(OV) = ((R1115 == 0x80000000 && R0004 == 0xFFFFFFFF) || R0004 == 0x0);
+-	set_Z(R1115);
+-	set_S(R1115);
+-	R2731 = mod;
++	set_Z(quot);
++	set_S(quot);
+ 	R1115 = quot;
++	R2731 = mod;
+ }
+ 
+ # DIVQU reg1, reg2, reg3 - rrrrr111111RRRRR|wwwww01011111110
+@@ -329,8 +400,8 @@ define pcodeop __saturate;
+ 	local quot:4 = R1115 / R0004;
+ 	local mod:4 = R1115 % R0004;
+ 	$(OV) = (R0004 == 0);
+-	set_Z(R1115);
+-	set_S(R1115);
+-	R2731 = mod;
++	set_Z(quot);
++	set_S(quot);
+ 	R1115 = quot;
++	R2731 = mod;
+ }
+diff --git a/Ghidra/Processors/V850/data/languages/Instructions/Float.sinc b/Ghidra/Processors/V850/data/languages/Instructions/Float.sinc
+index d708864c4e..9f6d61411c 100644
+--- a/Ghidra/Processors/V850/data/languages/Instructions/Float.sinc
++++ b/Ghidra/Processors/V850/data/languages/Instructions/Float.sinc
+@@ -68,7 +68,7 @@
+ }
+ 
+ # CEILF.SUW reg2, reg3 - rrrrr11111110010|wwwww10001000000
+-:ceilf.sul R1115, R2731 is R1115 & op0510=0x3F & op0004=0b10010; R2731 & op2126=0b100010 & op1620=0b00000
++:ceilf.suw R1115, R2731 is R1115 & op0510=0x3F & op0004=0b10010; R2731 & op2126=0b100010 & op1620=0b00000
+ {
+ 	R2731 = trunc(ceil(R1115));
+ }
+@@ -125,7 +125,7 @@
+ # CVTF.DL reg2, reg3 - rrrr011111100100|wwww010001010100
+ :cvtf.dl R1115x2, R2731x2 is R1115x2 & op0510=0x3F & op0004=0b00100; R2731x2 & op2126=0b100010 & op1620=0b10100
+ {
+-	R2731x2 = int2float(R1115x2);
++	R2731x2 = trunc(R1115x2);
+ }
+ 
+ # CVTF.DS reg2, reg3 - rrrr011111100011|wwww010001010010
+@@ -147,13 +147,13 @@
+ }
+ 
+ # CVTF.DW reg2, reg3 - rrrrr11111100100|wwwww10001010000
+-:cvtf.sw R1115x2, R2731 is R1115x2 & op0510=0x3F & op0004=0b00100; R2731 & op2126=0b100010 & op1620=0b10000
++:cvtf.dw R1115x2, R2731 is R1115x2 & op0510=0x3F & op0004=0b00100; R2731 & op2126=0b100010 & op1620=0b10000
+ {
+ 	R2731 = trunc(R1115x2);
+ }
+ 
+ # CVTF.LD reg2, reg3 - rrrr011111100001|wwww010001010010
+-:cvtf.ls R1115x2, R2731x2 is R1115x2 & op0510=0x3F & op0004=0b00001; R2731x2 & op2126=0b100010 & op1620=0b10010
++:cvtf.ld R1115x2, R2731x2 is R1115x2 & op0510=0x3F & op0004=0b00001; R2731x2 & op2126=0b100010 & op1620=0b10010
+ {
+ 	R2731x2 = int2float(R1115x2);
+ }
+@@ -195,7 +195,7 @@
+ }
+ 
+ # CVTF.ULD reg2, reg3 - rrrr011111100001|wwww010001010010
+-:cvtf.uls R1115x2, R2731x2 is R1115x2 & op0510=0x3F & op0004=0b10001; R2731x2 & op2126=0b100010 & op1620=0b10010
++:cvtf.uld R1115x2, R2731x2 is R1115x2 & op0510=0x3F & op0004=0b10001; R2731x2 & op2126=0b100010 & op1620=0b10010
+ {
+ 	R2731x2 = int2float(R1115x2);
+ }
+@@ -231,7 +231,7 @@
+ }
+ 
+ # DIVF.D reg1, reg2, reg3 - rrrr0111111RRRR0|wwww010001111110
+-:divf.s R0004x2, R1115x2, R2731x2 is R0004x2 & op0510=0x3F & R1115x2; R2731x2 & op2126=0b100011 & op1620=0b11110
++:divf.d R0004x2, R1115x2, R2731x2 is R0004x2 & op0510=0x3F & R1115x2; R2731x2 & op2126=0b100011 & op1620=0b11110
+ {
+ 	R2731x2 = R1115x2 f/ R0004x2;
+ }
+@@ -289,7 +289,7 @@
+ }
+ 
+ # FLOORF.SW reg2, reg3 - rrrrr11111100011|wwwww10001000000
+-:floorf.suw R1115, R2731 is R1115 & op0510=0x3F & op0004=0b00011; R2731 & op2126=0b100010 & op1620=0b00000
++:floorf.sw R1115, R2731 is R1115 & op0510=0x3F & op0004=0b00011; R2731 & op2126=0b100010 & op1620=0b00000
+ {
+ 	R2731 = trunc(floor(R1115));
+ }
+@@ -309,13 +309,13 @@
+ # FNMAF.S reg1, reg2, reg3 - rrrrr111111RRRRR|wwwww10011100100
+ :fnmaf.s R0004, R1115, R2731 is R0004 & op0510=0x3F & R1115; R2731 & op2126=0b100111 & op1620=0b00100
+ {
+-	R2731 = -1 f* ((R1115 f* R0004) f+ R2731);
++	R2731 = f-((R1115 f* R0004) f+ R2731);
+ }
+ 
+ # FNMSF.S reg1, reg2, reg3 - rrrrr111111RRRRR|wwwww10011100110
+-:fnmfs.s R0004, R1115, R2731 is R0004 & op0510=0x3F & R1115; R2731 & op2126=0b100111 & op1620=0b00110
++:fnmsf.s R0004, R1115, R2731 is R0004 & op0510=0x3F & R1115; R2731 & op2126=0b100111 & op1620=0b00110
+ {
+-	R2731 = -1 f* ((R1115 f* R0004) f- R2731);
++	R2731 = f-((R1115 f* R0004) f- R2731);
+ }
+ 
+ # MADDF.S reg1, reg2, reg3, reg4 - rrrrr111111RRRRR|wwwww101W00WWWW0
+diff --git a/Ghidra/Processors/V850/data/languages/Instructions/Load_Store.sinc b/Ghidra/Processors/V850/data/languages/Instructions/Load_Store.sinc
+index 4ec2889166..42968cc48b 100644
+--- a/Ghidra/Processors/V850/data/languages/Instructions/Load_Store.sinc
++++ b/Ghidra/Processors/V850/data/languages/Instructions/Load_Store.sinc
+@@ -207,7 +207,7 @@
+ {
+ 	local adr:4 = R0004 + disp23;
+ 	local tmp:4 = R2731;
+-	*:2 adr = tmp:2;
++	*:4 adr = tmp;
+ }
+ 
+ 
+@@ -224,7 +224,7 @@
+ 	local x2 = R1115[8,8];
+ 	local x3 = R1115[16,8];
+ 	local x4 = R1115[24,8];
+-	R2731 = zext(x3 << 24) | zext(x4 << 16) | zext(x1 << 8) | zext(x2);
++	R2731 = (zext(x3) << 24) | (zext(x4) << 16) | (zext(x1) << 8) | zext(x2);
+ 	set_S(R2731);
+ 	$(OV) = 0;
+ 	$(Z) = (x1 == 0) && (x2 == 0);
+@@ -238,7 +238,7 @@
+ 	local x2 = R1115[8,8];
+ 	local x3 = R1115[16,8];
+ 	local x4 = R1115[24,8];
+-	R2731 = zext(x1 << 24) | zext(x2 << 16) | zext(x3 << 8) | zext(x4);
++	R2731 = (zext(x1) << 24) | (zext(x2) << 16) | (zext(x3) << 8) | zext(x4);
+ 	set_OV0_S_Z(R2731);
+ 	$(CY) = (x1 == 0) || (x2 == 0) || (x3 == 0) || (x4 == 0);
+ }
+@@ -246,15 +246,23 @@
+ # CMOV cccc, reg1, reg2, reg3 - rrrrr111111RRRRR|wwwww011001cccc0
+ :cmov^c1720 R0004, R1115, R2731 is op0510=0x3F & R0004 & R1115; op2126=0x19 & op1616=0 & c1720 & R2731
+ {
+-	local result:4 = zext(c1720);
+-	R2731 = R0004 * zext(result != 0) + R1115 * zext(result == 0);
++	if (c1720) goto <true>;
++	R2731 = R1115;
++	goto <done>;
++	<true>
++	R2731 = R0004;
++	<done>
+ }
+ 
+ # CMOV cccc, imm5, reg2, reg3 - rrrrr111111iiiii|wwwww011000cccc0
+ :cmov^c1720 s0004, R1115, R2731 is op0510=0x3F & s0004 & R1115; op2126=0x18 & op1616=0 & c1720 & R2731
+ {
+-	local result:4 = zext(c1720);
+-	R2731 = s0004 * zext(result != 0) + R1115 * zext(result == 0);
++	if (c1720) goto <true>;
++	R2731 = R1115;
++	goto <done>;
++	<true>
++	R2731 = s0004;
++	<done>
+ }
+ 
+ # HSH reg2, reg3 - rrrrr11111100000|wwwww01101000110
+@@ -272,7 +280,7 @@
+ {
+ 	local x1 = R1115:2;
+ 	local x2 = R1115[16,16];
+-	R2731 = zext(x1 << 16) | zext(x2);
++	R2731 = (zext(x1) << 16) | zext(x2);
+ 	set_OV0_S_Z(R2731);
+ 	$(CY) = (x1 == 0) || (x2 == 0);
+ }
+diff --git a/Ghidra/Processors/V850/data/languages/Instructions/Logic.sinc b/Ghidra/Processors/V850/data/languages/Instructions/Logic.sinc
+index e0a511220c..c641065169 100644
+--- a/Ghidra/Processors/V850/data/languages/Instructions/Logic.sinc
++++ b/Ghidra/Processors/V850/data/languages/Instructions/Logic.sinc
+@@ -160,7 +160,7 @@
+ }
+ 
+ # TST1 reg2, [reg1] - rrrrr111111RRRRR|0000000011100110
+-:tst1 R0004, [R1115] is op0510=0x3F & R0004 & R1115; op1631=0xE6
++:tst1 R1115, [R0004] is op0510=0x3F & R0004 & R1115; op1631=0xE6
+ {
+ 	local tkn = *:1 R0004;
+ 	set_Z(tkn & (1 << R1115));
+diff --git a/Ghidra/Processors/V850/data/languages/Instructions/Special.sinc b/Ghidra/Processors/V850/data/languages/Instructions/Special.sinc
+index f94250e4da..3f3d3b1822 100644
+--- a/Ghidra/Processors/V850/data/languages/Instructions/Special.sinc
++++ b/Ghidra/Processors/V850/data/languages/Instructions/Special.sinc
+@@ -14,6 +14,8 @@
+ {
+ 	SearchLeft(R2731, R1115, 0);
+ 	$(CY) = (R1115 != 0xFFFFFFFF);		# zero bit found
++	$(OV) = 0;
++	$(S)  = 0;
+ 	$(Z)  = (R1115 == 0xFFFFFFFF);		# zero bit not found
+ }
+ 
+@@ -22,6 +24,8 @@
+ {
+ 	SearchRight(R2731, R1115, 0);
+ 	$(CY) = (R1115 != 0xFFFFFFFF);		# zero bit found
++	$(OV) = 0;
++	$(S)  = 0;
+ 	$(Z)  = (R1115 == 0xFFFFFFFF);		# zero bit not found
+ }
+ 
+@@ -30,6 +34,8 @@
+ {
+ 	SearchLeft(R2731, R1115, 1);
+ 	$(CY) = (R1115 != 0x0);		# one bit found
++	$(OV) = 0;
++	$(S)  = 0;
+ 	$(Z)  = (R1115 == 0x0);		# one bit not found
+ }
+ 
+@@ -38,6 +44,8 @@
+ {
+ 	SearchRight(R2731, R1115, 1);
+ 	$(CY) = (R1115 != 0x0);		# one bit found
++	$(OV) = 0;
++	$(S)  = 0;
+ 	$(Z)  = (R1115 == 0x0);		# one bit not found
+ }
+ 
+@@ -80,7 +88,7 @@
+ }
+ :jmp [R0004] is op0515=0x03 & R0004 & op0004!=0x1F
+ {
+-	call [R0004];
++	goto [R0004];
+ }
+ 
+ # JMP disp32[reg1] - 00000110111RRRRR|ddddddddddddddd0|DDDDDDDDDDDDDDDD
+@@ -122,9 +130,15 @@
+ # CAXI [reg1], reg2, reg3 - rrrrr111111RRRRR|wwwww00011101110
+ :caxi [R0004], R1115, R2731 is op0510=0x3F & R0004 & R1115; op1626=0xEE & R2731
+ {
+-	local tkn = *:4 (R0004 & ~(0x3));
++	local adr:4 = R0004 & ~(0x3);
++	local tkn = *:4 adr;
+ 	local result = R1115 - tkn;
+-	*:4 R0004 = tkn * zext(result != 0) + R2731 * zext(result == 0);
++	if (result != 0) goto <not_equal>;
++	*:4 adr = R2731;
++	goto <done>;
++	<not_equal>
++	*:4 adr = tkn;
++	<done>
+ 	R2731 = tkn;
+ 	set_general_flags_neg(R1115, tkn);
+ }
+@@ -207,9 +221,11 @@ define pcodeop __halt;
+ }
+ 
+ # LDSR reg2, regID - rrrrr111111RRRRR|0000000000100000
++define pcodeop __load_system_register;
+ :ldsr R0004, SR1115 is op0510=0x3F & SR1115 & R0004; op1631=0x20
+ {
+ 	SR1115 = R0004;
++	__load_system_register(SR1115);
+ }
+ 
+ # NOP - 0000000000000000
+@@ -262,21 +278,21 @@ define pcodeop __halt;
+ :reti is op0515=0x3F; op1631=0x140
+ {
+ 	if($(EP)!=1)
+-		goto <false>;
++		goto <not_ep>;
+ 
+ 	PC = EIPC;
+ 	PSW = EIPSW;
+ 	goto <end>;
+ 
+-	<false>
++	<not_ep>
+ 	if($(NP)!=1)
+-		goto <false2>;
++		goto <not_np>;
+ 
+ 	PC = FEPC;
+ 	PSW = FEPSW;
+ 	goto <end>;
+ 
+-	<false2>
++	<not_np>
+ 	PC = EIPC;
+ 	PSW = EIPSW;
+ 
+diff --git a/Ghidra/Processors/V850/data/languages/V850.cspec b/Ghidra/Processors/V850/data/languages/V850.cspec
+index 80555113d7..d65b6c209a 100644
+--- a/Ghidra/Processors/V850/data/languages/V850.cspec
++++ b/Ghidra/Processors/V850/data/languages/V850.cspec
+@@ -44,7 +44,7 @@
+         </pentry>
+ 
+          <pentry minsize="5" maxsize="8">
+-          <addr space="join" piece1="r10" piece2="r11"/>
++          <addr space="join" piece1="r11" piece2="r10"/>
+         </pentry>
+       </output>
+       
+diff --git a/Ghidra/Processors/V850/data/languages/V850.pspec b/Ghidra/Processors/V850/data/languages/V850.pspec
+index 02fa9403d9..7165b8ecc3 100644
+--- a/Ghidra/Processors/V850/data/languages/V850.pspec
++++ b/Ghidra/Processors/V850/data/languages/V850.pspec
+@@ -8,6 +8,7 @@
+ 
+   <volatile outputop="write" inputop="read">
+     <range space="ram" first="0x0" last="0x20"/>
++    <range space="ram" first="0xFF400000" last="0xFFFFFFFF"/>
+   </volatile>
+ 
+ </processor_spec>
+-- 
+2.45.1
+

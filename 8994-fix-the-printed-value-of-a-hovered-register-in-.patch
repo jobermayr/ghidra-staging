@@ -1,0 +1,54 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Matthew White <mehw.is.me@inventati.org>
+Date: Fri, 20 Feb 2026 06:23:42 +0000
+Subject: [PATCH] 8994: fix the printed value of a hovered register in the
+ 32-bit static listing while debugging under a 64-bit host
+
+fix reading static listing hovered register from host platform
+
+A 32-bit program debugged in a 64-bit host platform, might have static
+and dynamic listing registers set to different offsets, respectively 8
+vs 16 for the "DL" register on x86.
+
+Cases in which hovering a register in the static listing could require
+to query the dynamic listing of the host platform, should use the host
+platform address for that register.
+---
+ .../gui/stack/vars/VariableValueHoverService.java   | 13 +++++++++----
+ 1 file changed, 9 insertions(+), 4 deletions(-)
+
+diff --git a/Ghidra/Debug/Debugger/src/main/java/ghidra/app/plugin/core/debug/gui/stack/vars/VariableValueHoverService.java b/Ghidra/Debug/Debugger/src/main/java/ghidra/app/plugin/core/debug/gui/stack/vars/VariableValueHoverService.java
+index f950bf19fa..0759bf9ad6 100644
+--- a/Ghidra/Debug/Debugger/src/main/java/ghidra/app/plugin/core/debug/gui/stack/vars/VariableValueHoverService.java
++++ b/Ghidra/Debug/Debugger/src/main/java/ghidra/app/plugin/core/debug/gui/stack/vars/VariableValueHoverService.java
+@@ -339,9 +339,14 @@ public class VariableValueHoverService extends AbstractConfigurableHover
+ 		}
+ 
+ 		public VariableValueTable fillRegisterNoFrame(Register register) {
+-			TraceData data = eval.getRegisterUnit(register);
++			// Getting a register by name from the default view, is to fix its offset when
++			// the register is of a program which uses a different platform than the host.
++			// This should be easier than mapping Guest to Host addresses, and vice-versa.
++			String registerName = register.getName();
++			Register registerFromView = current.getTrace().getProgramView().getRegister(registerName);
++			TraceData data = eval.getRegisterUnit(registerFromView);
+ 			if (data != null) {
+-				table.add(new NameRow(register.getName()));
++				table.add(new NameRow(registerName));
+ 				table.add(new TypeRow(data.getDataType()));
+ 				IntegerRow intRow = IntegerRow.fromCodeUnit(data, current.getSnap());
+ 				table.add(intRow);
+@@ -349,8 +354,8 @@ public class VariableValueHoverService extends AbstractConfigurableHover
+ 				return table;
+ 			}
+ 			// Just display the raw register value
+-			table.add(new NameRow(register.getName()));
+-			WatchValue raw = eval.getRawRegisterValue(register);
++			table.add(new NameRow(registerName));
++			WatchValue raw = eval.getRawRegisterValue(registerFromView);
+ 			table.add(new IntegerRow(raw));
+ 			return table;
+ 		}
+-- 
+2.45.1
+
