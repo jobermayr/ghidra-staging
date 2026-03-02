@@ -1,0 +1,198 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: widberg <widberg@widberg.me>
+Date: Mon, 23 Feb 2026 22:26:27 -0500
+Subject: [PATCH] 9015: Pyghidra from __main__ import ... improvement
+
+Fix from __main__ import
+
+Test from __main__ import
+---
+ .../py/src/pyghidra/internal/plugin/plugin.py |  7 +++-
+ .../src/main/py/src/pyghidra/script.py        | 39 ++++++++++++++++++-
+ .../main/py/tests/data/main_import_helper.py  | 20 ++++++++++
+ .../main/py/tests/data/main_import_script.py  | 20 ++++++++++
+ .../PyGhidra/src/main/py/tests/test_core.py   |  9 +++++
+ 5 files changed, 91 insertions(+), 4 deletions(-)
+ create mode 100644 Ghidra/Features/PyGhidra/src/main/py/tests/data/main_import_helper.py
+ create mode 100644 Ghidra/Features/PyGhidra/src/main/py/tests/data/main_import_script.py
+
+diff --git a/Ghidra/Features/PyGhidra/src/main/py/src/pyghidra/internal/plugin/plugin.py b/Ghidra/Features/PyGhidra/src/main/py/src/pyghidra/internal/plugin/plugin.py
+index b19cc0f06d..92d32519d4 100644
+--- a/Ghidra/Features/PyGhidra/src/main/py/src/pyghidra/internal/plugin/plugin.py
++++ b/Ghidra/Features/PyGhidra/src/main/py/src/pyghidra/internal/plugin/plugin.py
+@@ -38,7 +38,7 @@ from java.util.function import Consumer # type:ignore @UnresolvedImport
+ from jpype import JClass, JImplements, JOverride
+ 
+ from pyghidra.internal.plugin.completions import PythonCodeCompleter
+-from pyghidra.script import PyGhidraScript
++from pyghidra.script import PyGhidraScript, _bind_main_module, _create_main_module
+ 
+ 
+ logger = logging.getLogger(__name__)
+@@ -303,11 +303,14 @@ class PyConsole(InteractiveConsole):
+     def _run_context(self) -> Generator[None, None, None]:
+         self._script.start()
+         success = False
++        main_module = _create_main_module(self.locals)
+         try:
+             self._state = ConsoleState.RUNNING
+             sys.settrace(_interpreter_trace)
+             # NOTE: redirect stdout to self so we can flush after each write
+-            with contextlib.redirect_stdout(self), contextlib.redirect_stderr(self._err):
++            with _bind_main_module(main_module), \
++                 contextlib.redirect_stdout(self), \
++                 contextlib.redirect_stderr(self._err):
+                 yield
+                 success = True
+         except KeyboardInterrupt:
+diff --git a/Ghidra/Features/PyGhidra/src/main/py/src/pyghidra/script.py b/Ghidra/Features/PyGhidra/src/main/py/src/pyghidra/script.py
+index 200e4fdb4b..9edce9edef 100644
+--- a/Ghidra/Features/PyGhidra/src/main/py/src/pyghidra/script.py
++++ b/Ghidra/Features/PyGhidra/src/main/py/src/pyghidra/script.py
+@@ -13,6 +13,7 @@
+ # See the License for the specific language governing permissions and
+ # limitations under the License.
+ ##
++import contextlib
+ import functools
+ import importlib.util
+ import inspect
+@@ -29,6 +30,7 @@ from typing import List
+ from pyghidra import debug_callback
+ 
+ _NO_ATTRIBUTE = object()
++_NO_MAIN_MODULE = object()
+ 
+ _headless_interpreter = None
+ 
+@@ -106,12 +108,44 @@ class _GhidraScriptModule:
+     def __init__(self, spec: ModuleSpec):
+         super().__setattr__("__dict__", spec.loader_state["script"])
+ 
++    def __getattr__(self, attr):
++        try:
++            return self.__dict__[attr]
++        except KeyError as exc:
++            raise AttributeError(attr) from exc
++
+     def __setattr__(self, attr, value):
+-        if hasattr(self, attr):
++        if attr in self.__dict__:
+             raise AttributeError(f"readonly attribute {attr}")
+         super().__setattr__(attr, value)
+ 
+ 
++@contextlib.contextmanager
++def _bind_main_module(module):
++    existing = sys.modules.get("__main__", _NO_MAIN_MODULE)
++    sys.modules["__main__"] = module
++    try:
++        yield
++    finally:
++        if existing is _NO_MAIN_MODULE:
++            sys.modules.pop("__main__", None)
++        else:
++            sys.modules["__main__"] = existing
++
++
++def _create_main_module(script: "PyGhidraScript"):
++    spec = ModuleSpec("__main__", None)
++    spec.loader_state = {"script": script}
++    script.setdefault("__name__", "__main__")
++    script.setdefault("__loader__", None)
++    script.setdefault("__package__", None)
++    script.setdefault("__spec__", None)
++    script.setdefault("__doc__", None)
++    script.setdefault("__annotations__", {})
++    script.setdefault("__builtins__", __builtins__)
++    return _GhidraScriptModule(spec)
++
++
+ class _GhidraScriptLoader(SourceFileLoader):
+ 
+     def __init__(self, script: "PyGhidraScript", spec: ModuleSpec):
+@@ -252,7 +286,8 @@ class PyGhidraScript(dict):
+             spec.loader = _GhidraScriptLoader(self, spec)
+             m = importlib.util.module_from_spec(spec)
+             try:
+-                spec.loader.exec_module(m)
++                with _bind_main_module(m):
++                    spec.loader.exec_module(m)
+             # pylint: disable=bare-except
+             except:
+                 # filter the traceback so that it stops at the script
+diff --git a/Ghidra/Features/PyGhidra/src/main/py/tests/data/main_import_helper.py b/Ghidra/Features/PyGhidra/src/main/py/tests/data/main_import_helper.py
+new file mode 100644
+index 0000000000..f6bfcdae81
+--- /dev/null
++++ b/Ghidra/Features/PyGhidra/src/main/py/tests/data/main_import_helper.py
+@@ -0,0 +1,20 @@
++## ###
++# IP: GHIDRA
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#      http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++##
++from __main__ import getCurrentProgram
++
++
++def print_program_name():
++    print(getCurrentProgram().getName())
+diff --git a/Ghidra/Features/PyGhidra/src/main/py/tests/data/main_import_script.py b/Ghidra/Features/PyGhidra/src/main/py/tests/data/main_import_script.py
+new file mode 100644
+index 0000000000..c870347cca
+--- /dev/null
++++ b/Ghidra/Features/PyGhidra/src/main/py/tests/data/main_import_script.py
+@@ -0,0 +1,20 @@
++## ###
++# IP: GHIDRA
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#      http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++##
++import main_import_helper
++
++
++if __name__ == "__main__":
++    main_import_helper.print_program_name()
+diff --git a/Ghidra/Features/PyGhidra/src/main/py/tests/test_core.py b/Ghidra/Features/PyGhidra/src/main/py/tests/test_core.py
+index 6feb9aa440..d374462f99 100644
+--- a/Ghidra/Features/PyGhidra/src/main/py/tests/test_core.py
++++ b/Ghidra/Features/PyGhidra/src/main/py/tests/test_core.py
+@@ -171,6 +171,15 @@ def test_import_script(capsys, shared_datadir: Path):
+     assert captured.out.rstrip() == "imported successfully"
+ 
+ 
++def test_import_from_main(capsys, shared_datadir: Path):
++    strings_exe = shared_datadir / EXE_NAME
++    script_path = shared_datadir / "main_import_script.py"
++    pyghidra.run_script(strings_exe, script_path, analyze=False)
++    captured = capsys.readouterr()
++    assert captured.err == ""
++    assert captured.out.rstrip() == EXE_NAME
++
++
+ def test_import_ghidra_base_java_packages():
+ 
+     def get_runtime_top_level_java_packages(launcher) -> set:
+-- 
+2.45.1
+
