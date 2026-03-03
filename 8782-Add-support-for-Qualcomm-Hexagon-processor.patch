@@ -6,7 +6,7 @@ Subject: [PATCH] 8782: Add support for Qualcomm Hexagon processor
 Add initial Hexagon processor support (resolves #8741)
 ---
  GPL/Hexagon/Module.manifest                   |    0
- GPL/Hexagon/README.md                         |   23 +
+ GPL/Hexagon/README.md                         |   22 +
  GPL/Hexagon/build.gradle                      |   19 +
  GPL/Hexagon/certification.manifest            |   60 +
  GPL/Hexagon/data/languages/alu32_alu.sinc     |  198 ++
@@ -43,7 +43,7 @@ Add initial Hexagon processor support (resolves #8741)
  .../data/languages/system_monitor.sinc        |  350 +++
  GPL/Hexagon/data/languages/system_user.sinc   |  180 ++
  GPL/Hexagon/data/languages/xtype_alu.sinc     |  920 +++++++
- GPL/Hexagon/data/languages/xtype_bit.sinc     |  232 ++
+ GPL/Hexagon/data/languages/xtype_bit.sinc     |  230 ++
  GPL/Hexagon/data/languages/xtype_complex.sinc |  291 +++
  GPL/Hexagon/data/languages/xtype_fp.sinc      |  346 +++
  GPL/Hexagon/data/languages/xtype_mpy.sinc     |  772 ++++++
@@ -69,7 +69,7 @@ Add initial Hexagon processor support (resolves #8741)
  GPL/Hexagon/test_files/random/Makefile        |    6 +
  GPL/Hexagon/test_files/random/test.c          |   53 +
  GPL/Hexagon/test_files/test.c                 |   73 +
- 64 files changed, 17998 insertions(+)
+ 64 files changed, 17995 insertions(+)
  create mode 100644 GPL/Hexagon/Module.manifest
  create mode 100644 GPL/Hexagon/README.md
  create mode 100644 GPL/Hexagon/build.gradle
@@ -140,33 +140,32 @@ new file mode 100644
 index 0000000000..e69de29bb2
 diff --git a/GPL/Hexagon/README.md b/GPL/Hexagon/README.md
 new file mode 100644
-index 0000000000..bf08277071
+index 0000000000..e302158d69
 --- /dev/null
 +++ b/GPL/Hexagon/README.md
-@@ -0,0 +1,23 @@
+@@ -0,0 +1,22 @@
 +### Ghidra Hexagon SLEIGH
 +
-+This is a WIP implementation of the Qualcomm Hexagon "QDSP6" architecture in Ghidra SLEIGH
++This is an implementation of the Qualcomm Hexagon "QDSP6" architecture in Ghidra SLEIGH
 +
 +
-+Supports:
-+- Dissassembly up to v73, all instructions supported
++Features:
++- Dissassembly of v66/v67/v68/v73/v75/v79, all instructions supported
++- Supports HVX up to v79
 +- Most commonly used constant extenders supported
 +- No broken java plugins needed
-+- Support for hardware loops
++- Support for hardware loops (The first implementation to do so)
 +- Includes support for redacted System/Monitor and System/Guest instructions
 +- Pcode implemented for most ops, (Only a few never-seen MPY and NV instructions are missing)
 +- Function start recovery
++- Builtin scripts:
++- - Q6ZIP and DELTA/DLPAGER decompression via emulation
++- - Annotation of hashed log messages
 +
 +Currently broken / unimplemented:
-+- Some immediate extensions are missing for less common ops and most duplexes
++- Some immediate extensions are missing for less common ops and duplexes
 +
-+
-+(See notes at top of `Hexagon/data/languages/skel.slaspec`) for up to date details:
-+
-+
-+### How to install
-+Copy `Hexagon` into `./<ghidra_root>/Ghidra/Processors/` (Confirmed to work on 11.4)
++(See notes at top of `Hexagon/data/languages/Hexagon.slaspec`) for up to date details:
 diff --git a/GPL/Hexagon/build.gradle b/GPL/Hexagon/build.gradle
 new file mode 100644
 index 0000000000..1b8337ef71
@@ -14435,13 +14434,12 @@ index 0000000000..74cc36cc42
 +}
 diff --git a/GPL/Hexagon/data/languages/xtype_bit.sinc b/GPL/Hexagon/data/languages/xtype_bit.sinc
 new file mode 100644
-index 0000000000..5a3e8df15a
+index 0000000000..5930eb6e55
 --- /dev/null
 +++ b/GPL/Hexagon/data/languages/xtype_bit.sinc
-@@ -0,0 +1,232 @@
+@@ -0,0 +1,230 @@
 +# XTYPE/BIT
 +# XTYPE/BIT:Count leading
-+define pcodeop count_leading_zeros;
 +define pcodeop count_leading_ones;
 +define pcodeop count_leading_bits;
 +define pcodeop normamt;
@@ -14451,7 +14449,7 @@ index 0000000000..5a3e8df15a
 +        D5 = count_leading_bits(S5_pairi);
 +    }
 +    :D5 "=cl0(" S5_pair ")" is imm_21_27=0b1000010 & S5_pair & S5_pairi & imm_8_13=0 & imm_5_7=0b010 & D5 & OUTPUT_D5 {
-+        D5 = count_leading_zeros(S5_pairi);
++        D5 = lzcount(S5_pairi);
 +    }
 +    :D5 "=cl1(" S5_pair ")" is imm_21_27=0b1000010 & S5_pair & S5_pairi & imm_8_13=0 & imm_5_7=0b100 & D5 & OUTPUT_D5 {
 +        D5 = count_leading_ones(S5_pairi);
@@ -14471,7 +14469,7 @@ index 0000000000..5a3e8df15a
 +        D5 = count_leading_bits(S5i);
 +    }
 +    :D5 "=cl0(" S5 ")" is imm_21_27=0b1100000 & S5 & S5i & imm_8_13=0 & imm_5_7=0b101 & D5 & OUTPUT_D5 {
-+        D5 = count_leading_zeros(S5i);
++        D5 = lzcount(S5i);
 +    }
 +    :D5 "=cl1(" S5 ")" is imm_21_27=0b1100000 & S5 & S5i & imm_8_13=0 & imm_5_7=0b110 & D5 & OUTPUT_D5 {
 +        D5 = count_leading_ones(S5i);
@@ -14482,10 +14480,9 @@ index 0000000000..5a3e8df15a
 +}
 +
 +# XTYPE/BIT:Count pop
-+define pcodeop popcnt;
 +with slot: iclass=0b1000  {
 +    :D5 "=popcnt(" S5_pair ")" is imm_21_27=0b1000011 & S5_pair & S5_pairi & imm_8_13=0 & imm_5_7=0b011 & D5 & OUTPUT_D5 {
-+        D5 = popcnt(S5_pairi);
++        D5 = popcount(S5_pairi);
 +    }
 +}
 +

@@ -1,27 +1,24 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: hay-mon <234499490+hay-mon@users.noreply.github.com>
 Date: Fri, 13 Feb 2026 15:24:19 +0000
-Subject: [PATCH] 8993: Annotations: Local variable handler
+Subject: [PATCH] 8993: Annotations: Variable handler
 
 Two possible forms are supported:
-	{@local <func_sym> <var_sym>}
+	{@var <var_sym> [<func_sym>]}
 and
-	{@local <func_sym> <hash_marker> <var_hash>}
-
-The <hash_marker> can be any string that starts with a space
-e.g. " USER" or " AUTO". Quotes are required.
+	{@var_hash <var_hash> <func_sym>}
 ---
- .../field/LocalAnnotatedStringHandler.java    | 230 ++++++++++++++++++
+ .../field/VariableAnnotatedStringHandler.java | 216 ++++++++++++++++++
  .../app/util/viewer/field/AnnotationTest.java |  36 ++-
- 2 files changed, 265 insertions(+), 1 deletion(-)
- create mode 100644 Ghidra/Features/Base/src/main/java/ghidra/app/util/viewer/field/LocalAnnotatedStringHandler.java
+ 2 files changed, 251 insertions(+), 1 deletion(-)
+ create mode 100644 Ghidra/Features/Base/src/main/java/ghidra/app/util/viewer/field/VariableAnnotatedStringHandler.java
 
-diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/viewer/field/LocalAnnotatedStringHandler.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/viewer/field/LocalAnnotatedStringHandler.java
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/viewer/field/VariableAnnotatedStringHandler.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/viewer/field/VariableAnnotatedStringHandler.java
 new file mode 100644
-index 0000000000..3a116c22f3
+index 0000000000..4e641b9c60
 --- /dev/null
-+++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/viewer/field/LocalAnnotatedStringHandler.java
-@@ -0,0 +1,230 @@
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/viewer/field/VariableAnnotatedStringHandler.java
+@@ -0,0 +1,216 @@
 +/* ###
 + * IP: GHIDRA
 + *
@@ -39,12 +36,10 @@ index 0000000000..3a116c22f3
 + */
 +package ghidra.app.util.viewer.field;
 +
-+import java.util.Arrays;
-+
 +import docking.widgets.fieldpanel.field.AttributedString;
-+import generic.stl.Pair;
 +import generic.theme.GThemeDefaults.Colors.Palette;
 +import ghidra.app.nav.Navigatable;
++import ghidra.app.services.GoToService;
 +import ghidra.app.util.NamespaceUtils;
 +import ghidra.framework.plugintool.ServiceProvider;
 +import ghidra.program.model.address.Address;
@@ -56,14 +51,15 @@ index 0000000000..3a116c22f3
 + * {@link #SUPPORTED_ANNOTATIONS}.  This class expects one string following the annotation
 + * text that is the name of a script.
 + */
-+public class LocalAnnotatedStringHandler implements AnnotatedStringHandler {
++public class VariableAnnotatedStringHandler implements AnnotatedStringHandler {
++
++	private static final String DEFAULT_ANO = "var";
++	private static final String HASH_ANO = DEFAULT_ANO + "_hash";
++	private static final String[] SUPPORTED_ANNOTATIONS = { "variable", DEFAULT_ANO, HASH_ANO };
 +
 +	private static final String INVALID_SYMBOL_TEXT =
-+		"@local annotation must have form: <func_sym> <local_sym> or <func_sym> \" USER\" <local_hash>";
-+	private static final String[] SUPPORTED_ANNOTATIONS = { "local", "lcl" };
++		"@" + DEFAULT_ANO + " annotation must have form: <var_sym> [<func_sym>]";
 +
-+	/* Function and local symbols or addresses cannot contain spaces. */
-+	private static final String HASH_MARKER_START = " ";
 +
 +	@Override
 +	public AttributedString createAnnotatedString(AttributedString prototypeString, String[] text,
@@ -78,17 +74,24 @@ index 0000000000..3a116c22f3
 +				prototypeString.getFontMetrics(0));
 +		}
 +
-+		final String[] s = Arrays.copyOfRange(text, 1, text.length);
-+
-+		final Pair<Function,String[]> func = getFunction(program, s);
-+		final Pair<Variable,String[]> var = getVariable(func.first, func.second);
-+
-+		/* Should be no more annotation to consume */
-+		if (var.second.length != 0) {
++		if (text.length != 3) {
++			if (text.length == 2) {
++				throw new AnnotationException("Function symbol is not optional when rendering.");
++			}
 +			throw new AnnotationException(INVALID_SYMBOL_TEXT);
 +		}
 +
-+		return new AttributedString(var.first.getName(), prototypeString.getColor(0),
++		final Function func = getFunction(program, text[2]);
++		if (func == null) {
++			throw new AnnotationException("Could not find function matching \"" + text[2] + "\"");
++		}
++		final Variable var = getVariable(func, getFilterGenerator(text[0]).apply(text[1]));
++		if (var == null) {
++			throw new AnnotationException("Could not find variable in function \"" +
++					func.getName() + "\" matching \"" + text[1] + "\".");
++		}
++
++		return new AttributedString(var.getName(), prototypeString.getColor(0),
 +				prototypeString.getFontMetrics(0), true, prototypeString.getColor(0));
 +	}
 +
@@ -98,26 +101,31 @@ index 0000000000..3a116c22f3
 +			return null;
 +		}
 +
-+		final String[] s = Arrays.copyOfRange(text, 1, text.length);
++		Function func = null;
++		Variable var = null;
 +
-+		try {
-+			final Pair<Function,String[]> func = getFunction(program, s);
-+			final Pair<Variable,String[]> var = getVariable(func.first, func.second);
-+
-+			/* Should be no more annotation to consume */
-+			if (var.second.length != 0) {
++		switch (text.length) {
++		case 3:
++			func = getFunction(program, text[2]);
++		case 2:
++			if (func == null) {
 +				return null;
 +			}
-+
-+			return new String[] {
-+					text[0],
-+					func.first.getEntryPoint().toString(),
-+					HASH_MARKER_START + "AUTO",
-+					Integer.toUnsignedString(var.first.hashCode(), 16)
-+			};
-+		} catch(AnnotationException e) {
++			var = getVariable(func, getFilterGenerator(text[0]).apply(text[1]));
++			break;
++		default:
++			return null;
 +		}
-+		return null;
++
++		if (var == null) {
++			return null;
++		}
++
++		return new String[] {
++				HASH_ANO,
++				Integer.toUnsignedString(var.hashCode(), 16),
++				func.getEntryPoint().toString()
++		};
 +	}
 +
 +	@Override
@@ -128,112 +136,88 @@ index 0000000000..3a116c22f3
 +	@Override
 +	public boolean handleMouseClick(String[] annotationParts, Navigatable sourceNavigatable,
 +			ServiceProvider serviceProvider) {
-+		return false;
++		final Program program = sourceNavigatable.getProgram();
++
++		if (annotationParts.length != 3) {
++			return false;
++		}
++		final Function func = getFunction(program, annotationParts[2]);
++		if (func == null) {
++			return false;
++		}
++		final Variable var = getVariable(func, getFilterGenerator(annotationParts[0]).apply(annotationParts[1]));
++		if (var == null) {
++			return false;
++		}
++		Symbol sym = var.getSymbol();
++		if (sym == null) {
++			sym = func.getSymbol();
++		}
++
++		final GoToService goToService = serviceProvider.getService(GoToService.class);
++		return goToService.goTo(sym.getProgramLocation());
 +	}
 +
 +	@Override
 +	public String getDisplayString() {
-+		return "Local";
++		return "Variable";
 +	}
 +
 +	@Override
 +	public String getPrototypeString() {
-+		return "{@local function_sym local_sym}";
++		return "{@" + DEFAULT_ANO + " var_sym [func_sym]}";
 +	}
 +
 +	@Override
 +	public String getPrototypeString(String displayText) {
-+		return "{@local " + displayText.trim() + "}";
++		return "{@" + DEFAULT_ANO + " " + displayText.trim() + "}";
 +	}
 +
-+	/**
-+	 * Ensure that a minimum number of elements exist in an array.
-+	 *
-+	 * @param s the array to check
-+	 * @param n the minimum number of elements
-+	 * @return the new array without the first n elements
-+	 */
-+	private static String[] enforceRemaining(String[] s, int n) {
-+		final int s_len = s.length;
-+		if (s_len < n) {
-+			throw new AnnotationException(INVALID_SYMBOL_TEXT);
-+		}
-+		return Arrays.copyOfRange(s, n, s_len);
-+	}
-+
-+	/**
-+	 * Parse a function from the annotation text.
-+	 *
-+	 * @param program the program the function is a part of
-+	 * @param text the remaining annotation to parse
-+	 * @return a pair containing the function and any remaining annotation
-+	 */
-+	private static Pair<Function, String[]> getFunction(final Program program, final String[] text) {
-+		final String[] out = enforceRemaining(text, 1);
-+		final String search = text[0];
-+
++	private static Function getFunction(final Program program, final String name) {
 +		final FunctionManager func_manager = program.getFunctionManager();
 +
-+		for (Symbol sym : NamespaceUtils.getSymbols(search, program)) {
++		for (Symbol sym : NamespaceUtils.getSymbols(name, program)) {
 +			final Function func = func_manager.getFunctionAt(sym.getAddress());
 +			if (func != null) {
-+				return new Pair<>(func, out);
++				return func;
 +			}
 +		}
 +
 +		// if we get here, then see if the value is an address
-+		final Address addr = program.getAddressFactory().getAddress(search);
++		final Address addr = program.getAddressFactory().getAddress(name);
 +		if (addr != null) {
 +			final Function func = func_manager.getFunctionAt(addr);
 +			if (func != null) {
-+				return new Pair<>(func, out);
++				return func;
 +			}
 +		}
 +
-+		throw new AnnotationException("Could not find function matching \"" + search + "\"");
++		return null;
 +	}
 +
-+	/**
-+	 * Parse a local variable from the annotation text.
-+	 *
-+	 * @param func the function the local variable is a part of
-+	 * @param text the remaining annotation to parse
-+	 * @return a pair containing the local variable and any remaining annotation
-+	 */
-+	private static Pair<Variable,String[]> getVariable(final Function func, final String[] text)
-+			throws AnnotationException {
-+		final Pair<JFunction<String,JFunction<Variable, Boolean>>, String[]> filter_gen =
-+				getFilterGenerator(text);
-+
-+		final String[] filter_gen_text = filter_gen.second;
-+		final String[] out = enforceRemaining(filter_gen_text, 1);
-+		final String s_var = filter_gen_text[0];
-+		final JFunction<Variable, Boolean> filter = filter_gen.first.apply(s_var);
-+
-+		for (Variable var : func.getLocalVariables()) {
-+			if (filter.apply(var)) {
-+				return new Pair<>(var, out);
++	private static Variable getVariable(final Function func, JFunction<Variable, Boolean> name_filter) {
++		for (Variable var : func.getAllVariables()) {
++			if (name_filter.apply(var)) {
++				return var;
 +			}
 +		}
 +
-+		throw new AnnotationException("Could not find local variable in function \"" +
-+				func.getName() + "\" matching \"" + s_var + "\".");
++		return null;
 +	}
 +
 +	/**
 +	 * Get the correct filter generator for parsing the local variable.
 +	 *
-+	 * @param text the remaining annotation to parse
-+	 * @return a pair containing the filter generator and any remaining annotation
++	 * @param name the name of the annotation
++	 * @return the filter generator
 +	 */
-+	private static Pair<JFunction<String,JFunction<Variable, Boolean>>, String[]>
-+			getFilterGenerator(final String[] text) {
-+		if (text.length != 0 && text[0].startsWith(HASH_MARKER_START)) {
-+			final String[] out = enforceRemaining(text, 1);
-+			return new Pair<>(LocalAnnotatedStringHandler::hashFilterGen, out);
++	private static JFunction<String,JFunction<Variable, Boolean>> getFilterGenerator(final String name) {
++		switch (name) {
++		case HASH_ANO:
++			return VariableAnnotatedStringHandler::hashFilterGen;
++		default:
++			return VariableAnnotatedStringHandler::nameFilterGen;
 +		}
-+
-+		return new Pair<>(LocalAnnotatedStringHandler::nameFilterGen, text);
 +	}
 +
 +	private static JFunction<Variable, Boolean> hashFilterGen(String s) {
@@ -241,8 +225,7 @@ index 0000000000..3a116c22f3
 +			final int hash = Integer.parseUnsignedInt(s, 16);
 +			return (x) -> x.hashCode() == hash;
 +		} catch (NumberFormatException e) {
-+			throw new AnnotationException("Could not parse hash \"" +
-+					s + "\".");
++			return (x) -> false;
 +		}
 +	}
 +
@@ -253,7 +236,7 @@ index 0000000000..3a116c22f3
 +	private interface JFunction<T, R> extends java.util.function.Function<T, R> {}
 +}
 diff --git a/Ghidra/Features/Base/src/test.slow/java/ghidra/app/util/viewer/field/AnnotationTest.java b/Ghidra/Features/Base/src/test.slow/java/ghidra/app/util/viewer/field/AnnotationTest.java
-index 66c2cc8dee..0c76e5f692 100644
+index 66c2cc8dee..56db31aff9 100644
 --- a/Ghidra/Features/Base/src/test.slow/java/ghidra/app/util/viewer/field/AnnotationTest.java
 +++ b/Ghidra/Features/Base/src/test.slow/java/ghidra/app/util/viewer/field/AnnotationTest.java
 @@ -15,7 +15,7 @@
@@ -290,31 +273,31 @@ index 66c2cc8dee..0c76e5f692 100644
  	}
  
 +	@Test
-+	public void testLocalAnnotation_Basic() {
-+		String rawComment = "{@local test_func test_var}";
++	public void tesVariableAnnotation_Basic() {
++		String rawComment = "{@var test_var test_func}";
 +		String display = CommentUtils.getDisplayString(rawComment, program);
 +		assertEquals("test_var", display);
 +	}
 +
 +	@Test
-+	public void testLocalAnnotation_BasicModify() {
-+		String rawComment = "{@local test_func test_var}";
++	public void testVariableAnnotation_BasicModify() {
++		String rawComment = "{@var test_var test_func}";
 +		String display = CommentUtils.fixupAnnotations(rawComment, program);
-+		assertEquals("{@local 01002000 \" AUTO\" a016221}", display);
++		assertEquals("{@var_hash a016221 01002000}", display);
 +	}
 +
 +	@Test
 +	public void testLocalAnnotation_UserMarked() {
-+		String rawComment = "{@local test_func \" USER\" a016221}";
++		String rawComment = "{@var_hash a016221 test_func}";
 +		String display = CommentUtils.getDisplayString(rawComment, program);
 +		assertEquals("test_var", display);
 +	}
 +
 +	@Test
 +	public void testLocalAnnotation_UserMarkedModify() {
-+		String rawComment = "{@local test_func \" USER\" a016221}";
++		String rawComment = "{@var_hash a016221 test_func}";
 +		String display = CommentUtils.fixupAnnotations(rawComment, program);
-+		assertEquals("{@local 01002000 \" AUTO\" a016221}", display);
++		assertEquals("{@var_hash a016221 01002000}", display);
 +	}
 +
  	@Test
