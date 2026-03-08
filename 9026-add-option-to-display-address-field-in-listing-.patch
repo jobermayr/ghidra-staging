@@ -1,0 +1,255 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Kyler Cain <kyler.cain@yahoo.com>
+Date: Fri, 6 Mar 2026 16:59:22 -0500
+Subject: [PATCH] 9026: add option to display address field in listing as
+ uppercase
+
+add option to display address field in listing as
+ uppercase
+
+only capitilize the address portion
+
+add tests
+---
+ .../viewer/field/AddressFieldFactory.java     | 21 +++++++++++++++++--
+ .../AddressFieldOptionsPropertyEditor.java    | 21 +++++++++++++++++--
+ .../AddressFieldOptionsWrappedOption.java     | 17 ++++++++++++++-
+ .../codebrowser/CodeBrowserOptionsTest.java   | 17 +++++++++++++++
+ 4 files changed, 71 insertions(+), 5 deletions(-)
+
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/viewer/field/AddressFieldFactory.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/viewer/field/AddressFieldFactory.java
+index 9d29e56038..3306cb2dbb 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/viewer/field/AddressFieldFactory.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/viewer/field/AddressFieldFactory.java
+@@ -46,6 +46,7 @@ public class AddressFieldFactory extends FieldFactory {
+ 	private boolean padZeros;
+ 	private int minHexDigits;
+ 	private boolean rightJustify;
++	private boolean displayUpperCase;
+ 
+ 	/**
+ 	 * Default Constructor
+@@ -87,6 +88,7 @@ public class AddressFieldFactory extends FieldFactory {
+ 		minHexDigits = afowo.getMinimumHexDigits();
+ 		displayBlockName = afowo.showBlockName();
+ 		rightJustify = afowo.rightJustify();
++		displayUpperCase = afowo.displayUpperCase();
+ 
+ 		fieldOptions.getOptions(GROUP_TITLE).setOptionsHelpLocation(helpLoc);
+ 	}
+@@ -100,6 +102,7 @@ public class AddressFieldFactory extends FieldFactory {
+ 			minHexDigits = afowo.getMinimumHexDigits();
+ 			displayBlockName = afowo.showBlockName();
+ 			rightJustify = afowo.rightJustify();
++			displayUpperCase = afowo.displayUpperCase();
+ 			model.update();
+ 		}
+ 	}
+@@ -132,14 +135,28 @@ public class AddressFieldFactory extends FieldFactory {
+ 	private String getAddressString(CodeUnit cu) {
+ 		Address addr = cu.getMinAddress();
+ 		AddressSpace space = addr.getAddressSpace();
++		String text;
+ 		if (displayBlockName) {
+-			String text = addr.toString(false, padZeros ? 16 : minHexDigits);
++			text = addr.toString(false, padZeros ? 16 : minHexDigits);
+ 			MemoryBlock block = cu.getProgram().getMemory().getBlock(addr);
+ 			if (block != null) {
++				if (displayUpperCase) {
++					text = text.toUpperCase();
++				}
+ 				return block.getName() + ":" + text;
+ 			}
+ 		}
+-		return addr.toString(space.showSpaceName(), padZeros ? 16 : minHexDigits);
++		text = addr.toString(space.showSpaceName(), padZeros ? 16 : minHexDigits);
++		if (displayUpperCase) {
++			int colonIdx = text.lastIndexOf(':');
++			if (colonIdx >= 0) {
++				text = text.substring(0, colonIdx + 1) + text.substring(colonIdx + 1).toUpperCase();
++			}
++			else {
++				text = text.toUpperCase();
++			}
++		}
++		return text;
+ 	}
+ 
+ 	@Override
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/viewer/field/AddressFieldOptionsPropertyEditor.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/viewer/field/AddressFieldOptionsPropertyEditor.java
+index ba597aaad8..5b5ebe9a52 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/viewer/field/AddressFieldOptionsPropertyEditor.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/viewer/field/AddressFieldOptionsPropertyEditor.java
+@@ -38,9 +38,11 @@ public class AddressFieldOptionsPropertyEditor extends PropertyEditorSupport
+ 	private static final String ADDRESS_DIGITS_LABEL = "Minimum Number of Address digits";
+ 	private static final String PADDING_LABEL = "Fully Pad With Leading Zeros";
+ 	private static final String JUSTIFICATION_LABEL = "Justification";
++	private static final String UPPER_CASE_LABEL = "Display in Upper Case";
+ 
+ 	private static final String[] NAMES =
+-		{ SHOW_BLOCK_NAME_LABEL, ADDRESS_DIGITS_LABEL, PADDING_LABEL, JUSTIFICATION_LABEL };
++		{ SHOW_BLOCK_NAME_LABEL, ADDRESS_DIGITS_LABEL, PADDING_LABEL, JUSTIFICATION_LABEL,
++			UPPER_CASE_LABEL };
+ 
+ 	// help tooltips
+ 	private static final String ADDRESS_PADDING_TOOLTIP = HTMLUtilities.toWrappedHTML(
+@@ -56,9 +58,11 @@ public class AddressFieldOptionsPropertyEditor extends PropertyEditorSupport
+ 		"Specifies the justification for address text in the address field. The address " +
+ 			"text will clip on the opposite side of the justification.",
+ 		75);
++	private static final String UPPER_CASE_TOOLTIP = HTMLUtilities.toWrappedHTML(
++		"Displays the hex digits of addresses in upper case in the address field.", 75);
+ 
+ 	private static final String[] DESCRIPTIONS = { ADDRESS_PADDING_TOOLTIP, MIN_HEX_DIGITS_TOOLTIP,
+-		SHOW_BLOCKNAME_TOOLTIP, RIGHT_JUSTIFY_TOOLTIP };
++		SHOW_BLOCKNAME_TOOLTIP, RIGHT_JUSTIFY_TOOLTIP, UPPER_CASE_TOOLTIP };
+ 
+ 	private AddressFieldOptionsWrappedOption addressFieldOptionsWrappedOption;
+ 
+@@ -67,6 +71,7 @@ public class AddressFieldOptionsPropertyEditor extends PropertyEditorSupport
+ 	private IntegerTextField minDigitsField;
+ 	private GCheckBox showBlocknameCheckbox;
+ 	private GhidraComboBox<String> justificationCombobox;
++	private GCheckBox upperCaseCheckbox;
+ 
+ 	public AddressFieldOptionsPropertyEditor() {
+ 		editorComponent = buildEditor();
+@@ -110,8 +115,16 @@ public class AddressFieldOptionsPropertyEditor extends PropertyEditorSupport
+ 		justificationCombobox.setToolTipText(RIGHT_JUSTIFY_TOOLTIP);
+ 		panel.add(justificationCombobox);
+ 
++		label = new GDLabel(UPPER_CASE_LABEL, SwingConstants.RIGHT);
++		label.setToolTipText(UPPER_CASE_TOOLTIP);
++		panel.add(label);
++		upperCaseCheckbox = new GCheckBox();
++		upperCaseCheckbox.setToolTipText(UPPER_CASE_TOOLTIP);
++		panel.add(upperCaseCheckbox);
++
+ 		showBlocknameCheckbox.addItemListener(evt -> firePropertyChange());
+ 		justificationCombobox.addItemListener(evt -> firePropertyChange());
++		upperCaseCheckbox.addItemListener(evt -> firePropertyChange());
+ 
+ 		padCheckBox.addItemListener(evt -> {
+ 			boolean enabled = !padCheckBox.isSelected();
+@@ -154,6 +167,9 @@ public class AddressFieldOptionsPropertyEditor extends PropertyEditorSupport
+ 		}
+ 		boolean enabled = !padCheckBox.isSelected();
+ 		minDigitsField.setEnabled(enabled);
++		if (addressPaddingOption.displayUpperCase() != upperCaseCheckbox.isSelected()) {
++			upperCaseCheckbox.setSelected(addressPaddingOption.displayUpperCase());
++		}
+ 	}
+ 
+ 	private AddressFieldOptionsWrappedOption cloneAddressPadValues() {
+@@ -162,6 +178,7 @@ public class AddressFieldOptionsPropertyEditor extends PropertyEditorSupport
+ 		newOption.setMinimumHexDigits(getMinNumberOfDigits());
+ 		newOption.setShowBlockName(showBlocknameCheckbox.isSelected());
+ 		newOption.setRightJustify(justificationCombobox.getSelectedItem().equals("Right"));
++		newOption.setDisplayUpperCase(upperCaseCheckbox.isSelected());
+ 		return newOption;
+ 	}
+ 
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/viewer/field/AddressFieldOptionsWrappedOption.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/viewer/field/AddressFieldOptionsWrappedOption.java
+index bfcc047f8b..e7c48e2587 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/viewer/field/AddressFieldOptionsWrappedOption.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/viewer/field/AddressFieldOptionsWrappedOption.java
+@@ -27,17 +27,20 @@ public class AddressFieldOptionsWrappedOption implements CustomOption {
+ 	private static final String MIN_HEXL_DIGITS = "MinHexDigits";
+ 	private static final String RIGHT_JUSTIFY = "RightJustify";
+ 	private static final String SHOW_BLOCK_NAME = "ShowBlockName";
++	private static final String DISPLAY_UPPER_CASE = "DisplayUpperCase";
+ 
+ 	private static final boolean DEFAULT_PAD_WITH_ZEROS = false;
+ 	private static final boolean DEFAULT_SHOW_BLOCK_NAME = false;
+ 	private static final boolean DEFAULT_RIGHT_JUSTIFY = true;
+ 	private static final int DEFAULT_MIN_HEX_DIGITS = 8;
++	private static final boolean DEFAULT_DISPLAY_UPPER_CASE = false;
+ 
+ 	// init with default values
+ 	private boolean padWithZeros = DEFAULT_PAD_WITH_ZEROS;
+ 	private boolean showBlockName = DEFAULT_SHOW_BLOCK_NAME;
+ 	private boolean rightJustify = DEFAULT_RIGHT_JUSTIFY;
+ 	private int minHexDigits = DEFAULT_MIN_HEX_DIGITS;
++	private boolean displayUpperCase = DEFAULT_DISPLAY_UPPER_CASE;
+ 
+ 	public AddressFieldOptionsWrappedOption() {
+ 		// required for persistence
+@@ -75,6 +78,14 @@ public class AddressFieldOptionsWrappedOption implements CustomOption {
+ 		rightJustify = b;
+ 	}
+ 
++	public boolean displayUpperCase() {
++		return displayUpperCase;
++	}
++
++	public void setDisplayUpperCase(boolean b) {
++		displayUpperCase = b;
++	}
++
+ 	@Override
+ 	public boolean equals(Object obj) {
+ 		if (!(obj instanceof AddressFieldOptionsWrappedOption)) {
+@@ -89,7 +100,8 @@ public class AddressFieldOptionsWrappedOption implements CustomOption {
+ 		return (padWithZeros == otherOption.padWithZeros) &&
+ 			(minHexDigits == otherOption.minHexDigits) &&
+ 			(rightJustify == otherOption.rightJustify) &&
+-			(showBlockName == otherOption.showBlockName);
++			(showBlockName == otherOption.showBlockName) &&
++			(displayUpperCase == otherOption.displayUpperCase);
+ 	}
+ 
+ 	@Override
+@@ -99,6 +111,7 @@ public class AddressFieldOptionsWrappedOption implements CustomOption {
+ 		result = prime * result + (padWithZeros ? 1 : 0);
+ 		result = prime * result + (rightJustify ? 1 : 0);
+ 		result = prime * result + (showBlockName ? 1 : 0);
++		result = prime * result + (displayUpperCase ? 1 : 0);
+ 		result = prime * result + minHexDigits;
+ 		return result;
+ 	}
+@@ -112,6 +125,7 @@ public class AddressFieldOptionsWrappedOption implements CustomOption {
+ 		minHexDigits = properties.getInt(MIN_HEXL_DIGITS, minHexDigits);
+ 		rightJustify = properties.getBoolean(RIGHT_JUSTIFY, rightJustify);
+ 		showBlockName = properties.getBoolean(SHOW_BLOCK_NAME, showBlockName);
++		displayUpperCase = properties.getBoolean(DISPLAY_UPPER_CASE, displayUpperCase);
+ 	}
+ 
+ 	@Override
+@@ -120,5 +134,6 @@ public class AddressFieldOptionsWrappedOption implements CustomOption {
+ 		properties.putInt(MIN_HEXL_DIGITS, minHexDigits);
+ 		properties.putBoolean(RIGHT_JUSTIFY, rightJustify);
+ 		properties.putBoolean(SHOW_BLOCK_NAME, showBlockName);
++		properties.putBoolean(DISPLAY_UPPER_CASE, displayUpperCase);
+ 	}
+ }
+diff --git a/Ghidra/Features/Base/src/test.slow/java/ghidra/app/plugin/core/codebrowser/CodeBrowserOptionsTest.java b/Ghidra/Features/Base/src/test.slow/java/ghidra/app/plugin/core/codebrowser/CodeBrowserOptionsTest.java
+index 35a0ff822c..97bbbc5c6c 100644
+--- a/Ghidra/Features/Base/src/test.slow/java/ghidra/app/plugin/core/codebrowser/CodeBrowserOptionsTest.java
++++ b/Ghidra/Features/Base/src/test.slow/java/ghidra/app/plugin/core/codebrowser/CodeBrowserOptionsTest.java
+@@ -256,6 +256,23 @@ public class CodeBrowserOptionsTest extends AbstractGhidraHeadedIntegrationTest
+ 		s = btf.getText();
+ 		assertEquals("01001000", s);
+ 
++		// Test displayUpperCase - navigate to an address whose hex offset contains A-F
++		cb.goToField(addr("0x100100a"), "Address", 0, 0);
++		btf = (ListingTextField) cb.getCurrentField();
++		assertEquals("0100100a", btf.getText());
++
++		afowo.setDisplayUpperCase(true);
++		options.setCustomOption(names.get(0), afowo);
++		cb.updateNow();
++		btf = (ListingTextField) cb.getCurrentField();
++		assertEquals("0100100A", btf.getText());
++
++		afowo.setDisplayUpperCase(false);
++		options.setCustomOption(names.get(0), afowo);
++		cb.updateNow();
++		btf = (ListingTextField) cb.getCurrentField();
++		assertEquals("0100100a", btf.getText());
++
+ 	}
+ 
+ 	@Test
+-- 
+2.45.1
+
