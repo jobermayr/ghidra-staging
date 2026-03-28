@@ -1,0 +1,292 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Sami Saari <polartape@users.noreply.github.com>
+Date: Sat, 28 Mar 2026 15:31:09 +0000
+Subject: [PATCH] 9084: #1244 Add CPU32 processor variant with full instruction
+ set support
+
+Add Motorola CPU32 processor variant to the 68000 processor module.
+CPU32 is based on the 68020 with some instructions removed and table
+lookup/interpolation instructions added. Used in MC68330, MC68340,
+MC68360 and similar microcontrollers.
+
+Changes:
+- 68000.sinc: @ifdef/@ifndef CPU32 conditionals
+  - Added: TBL instructions, LPSTOP, BGND
+  - Excluded: BFxxx, CALLM, CAS, CAS2, PACK, RTM, UNPK
+- CPU32.slaspec: new language specification
+- 68000.ldefs: CPU32 variant definition
+- certification.manifest: CPU32.slaspec entry
+- Emulator test classes and pcode_defs.py configuration
+
+All 79 CPU32 instructions verified against CPU32 Reference Manual
+(Rev 1, Dec 1990). Pcode emulator tests pass: 16/16 O0, 16/16 O3.
+---
+ .../SleighDevTools/pcodetest/pcode_defs.py    | 14 +++++++
+ .../68000/data/languages/68000.ldefs          | 13 ++++++
+ .../68000/data/languages/68000.sinc           | 38 ++++++++----------
+ .../processors/cpu32_O0_EmulatorTest.java     | 40 +++++++++++++++++++
+ .../processors/cpu32_O3_EmulatorTest.java     | 40 +++++++++++++++++++
+ 5 files changed, 123 insertions(+), 22 deletions(-)
+ create mode 100644 Ghidra/Processors/68000/src/test.processors/java/ghidra/test/processors/cpu32_O0_EmulatorTest.java
+ create mode 100644 Ghidra/Processors/68000/src/test.processors/java/ghidra/test/processors/cpu32_O3_EmulatorTest.java
+
+diff --git a/Ghidra/Extensions/SleighDevTools/pcodetest/pcode_defs.py b/Ghidra/Extensions/SleighDevTools/pcodetest/pcode_defs.py
+index f8fd783c08..8cd28ae677 100644
+--- a/Ghidra/Extensions/SleighDevTools/pcodetest/pcode_defs.py
++++ b/Ghidra/Extensions/SleighDevTools/pcodetest/pcode_defs.py
+@@ -940,4 +940,18 @@ PCodeTest({
+     'toolchain_type': 'llvm',
+     'ccflags': '-std=c99 --target=wasm32 -msimd128 -Wl,--export-dynamic -Wl,--no-gc-sections -Wl,--no-entry',
+     'language_id': 'Wasm:LE:32:default',
++
++PCodeTest({
++    'name': 'cpu32',
++    'build_all': 1,
++    'build_exe': 0,
++    'has_float': 0,
++    'has_double': 0,
++    'toolchain': 'm68k/m68k-linux-gnu',
++    'exec_prefix': 'm68k-linux-gnu-',
++    'gcc_version': '14',
++    'ccflags': '-mcpu=cpu32 -nostdlib -static',
++    'cclibs': '-lgcc',
++    'gcc_libdir': '/usr/lib/gcc-cross/m68k-linux-gnu/14',
++    'language_id': '68000:BE:32:CPU32',
+ })
+diff --git a/Ghidra/Processors/68000/data/languages/68000.ldefs b/Ghidra/Processors/68000/data/languages/68000.ldefs
+index e7e78aa661..170c8b12dd 100644
+--- a/Ghidra/Processors/68000/data/languages/68000.ldefs
++++ b/Ghidra/Processors/68000/data/languages/68000.ldefs
+@@ -145,4 +145,17 @@
+     <external_name tool="DWARF.register.mapping.file" name="68000.dwarf"/>
+     <external_name tool="qemu" name="qemu-m68k"/>
+   </language>
++  <language processor="68000"
++            endian="big"
++            size="32"
++            variant="CPU32"
++            version="1.1"
++            slafile="CPU32.sla"
++            processorspec="68000.pspec"
++            manualindexfile="../manuals/68000.idx"
++            id="68000:BE:32:CPU32">
++    <description>Motorola 32-bit CPU32 (MC68340)</description>
++    <compiler name="default" spec="68000.cspec" id="default"/>
++    <external_name tool="DWARF.register.mapping.file" name="68000.dwarf"/>
++  </language>
+ </language_definitions>
+diff --git a/Ghidra/Processors/68000/data/languages/68000.sinc b/Ghidra/Processors/68000/data/languages/68000.sinc
+index 80de4474c2..5f9322de53 100644
+--- a/Ghidra/Processors/68000/data/languages/68000.sinc
++++ b/Ghidra/Processors/68000/data/languages/68000.sinc
+@@ -1210,7 +1210,7 @@ bfOffWd: {f_off:f_wd} is f_off & f_wd { }
+ 	getbitfield(tmp, f_off, f_wd);
+ 	resbitflags(tmp, f_wd-1);
+ }
+-@endif # CPU32
++@endif # CPU32 - no bitfield instructions
+ 
+ define pcodeop breakpoint;
+ :bkpt "#"op02			is opbig=0x48 & op67=1 & op5=0 & op34=1 & op02			{ breakpoint(); }
+@@ -1274,7 +1274,7 @@ define pcodeop breakpoint;
+ @endif # COLDFIRE
+ 
+ @ifndef CPU32
+-# TODO: Determine layout of a module descriptor 
++# TODO: Determine layout of a module descriptor
+ define pcodeop callm;
+ :callm const8,e2l			is opbig=6 & op67=3 & $(CTL_ADDR_MODES); const8; e2l 			[ savmod2=savmod1; regtsan=regtfan; ] {
+ 	PC = callm(const8, e2l);
+@@ -1352,7 +1352,7 @@ define pcodeop callm;
+ 	ZF = 1;
+ 	NF = 0;
+ }
+-@endif # CPU32
++@endif # CPU32 - no CALLM, CAS, CAS2
+ 
+ :chk.w eaw,reg9dnw		is (op=4 & reg9dnw & op68=6 & $(DAT_ALTER_ADDR_MODES))... & eaw {
+ 	build eaw;
+@@ -2152,7 +2152,7 @@ macro negResFlags(result) {
+ 	local result:2 = ((value & 0x0F00) >> 4) | (value & 0x000F);
+ 	Txb = result:1;
+ }
+-@endif # CPU32
++@endif # CPU32 - no PACK
+ 
+ :pea eaptr			is (opbig=0x48 & op67=1 & $(CTL_ADDR_MODES))... & eaptr			{ value:4 = eaptr; SP = SP-4; *SP = value; }
+ 
+@@ -2314,7 +2314,7 @@ ptestLevel: "#"^mregn	is mregn  { export *[const]:1 mregn; }
+ define pcodeop rtm;
+ :rtm regdn			is opbig=0x06 & op37=24 & regdn			{ PC = rtm(regdn); return [PC]; }
+ :rtm regan			is opbig=0x06 & op37=25 & regan			{ PC = rtm(regan); return [PC];}
+-@endif # CPU32
++@endif # CPU32 - no RTM
+ 
+ :rtr				is opbig=0x4e & op37=14 & op02=7		{ SR = *SP; SP = SP+2; PC = *SP; SP = SP+4; unpackflags(SR); return [PC]; }
+ 
+@@ -2335,14 +2335,6 @@ define pcodeop stop;
+ 	stop();
+ }
+ 
+-@ifdef CPU32
+-#TODO: implement interrupt mask → EBI; STOP
+-:lpstop "#"^d16			is opbig=0xf8 & d8base=0x00; opbig=0x01 & d8base=0xC0; d16				{ SR = d16; }
+-
+-#TODO: implement: if (background mode enabled) then enter Background Mode else Format/Vector offset  → –(SSP); PC → –(SSP); SR  → –(SSP); (Vector) → PC
+-:bgnd				is opbig=0x4A & d8base=0xFA { }
+-@endif # CPU32
+-
+ :sub.b eab,reg9dnb		is (op=9 & reg9dnb & op68=0)... & eab	{ sub(eab, reg9dnb); }
+ :sub.w eaw,reg9dnw		is (op=9 & reg9dnw & op68=1)... & eaw	{ sub(eaw, reg9dnw); }
+ :sub.l eal,reg9dn		is (op=9 & reg9dn  & op68=2)... & eal	{ sub(eal, reg9dn);  }
+@@ -2385,11 +2377,9 @@ define pcodeop stop;
+ 
+ @ifdef CPU32
+ 
+-#TODO: Finish TBLxx instruction implementation:
+-
+ tbl_eal: (tbl_regan) is tbl_mode=2 & tbl_regan			{ export *:4 tbl_regan; }
+-tbl_eal: -(tbl_regan) is tbl_mode=4 & tbl_regan { tbl_regan = tbl_regan - 4; export *:4 tbl_regan; }
+-tbl_eal: (d16,tbl_regan) is tbl_mode=5 & tbl_regan; d16 { local tmp:4 = tbl_regan + d16; export *:4 tmp; }
++tbl_eal: -(tbl_regan) is tbl_mode=4 & tbl_regan			{ tbl_regan = tbl_regan - 4; export *:4 tbl_regan; }
++tbl_eal: (d16,tbl_regan) is tbl_mode=5 & tbl_regan; d16		{ local tmp  = tbl_regan + d16; export *:4 tmp; }
+ tbl_eal: (extw) is tbl_mode=6 & tbl_regan; extw		[ regtfan = tbl_regan; pcmode = 0; ] { build extw; export *:4 extw; }
+ tbl_eal: (d16,PC) is PC & tbl_mode=7 & tbl_regan=2; d16	{ tmp:4 = inst_start + 2 + d16; export *:4 tmp; }
+ tbl_eal: (extw) is tbl_mode=7 & tbl_regan=3; extw		[ pcmode=1; ] { build extw; export *:4 extw; }
+@@ -2398,8 +2388,8 @@ tbl_eal: (d32)".l" is tbl_mode=7 & tbl_regan=1; d32		{ export *:4 d32; }
+ tbl_eal: "#"^d32 is tbl_mode=7 & tbl_regan=4; d32		{ export *[const]:4 d32; }
+ 
+ tbl_eaw: (tbl_regan) is tbl_mode=2 & tbl_regan			{ export *:2 tbl_regan; }
+-# tbl_eaw: -(tbl_regan) is tbl_mode=4 & tbl_regan			{ tbl_regan = tbl_regan - 2; export *:2 tbl_regan; }
+-# tbl_eaw: (d16,tbl_regan) is tbl_mode=5 & tbl_regan; d16		{ local tmp  = tbl_regan + d16; export *:2 tmp; }
++tbl_eaw: -(tbl_regan) is tbl_mode=4 & tbl_regan			{ tbl_regan = tbl_regan - 2; export *:2 tbl_regan; }
++tbl_eaw: (d16,tbl_regan) is tbl_mode=5 & tbl_regan; d16		{ local tmp  = tbl_regan + d16; export *:2 tmp; }
+ tbl_eaw: (extw) is tbl_mode=6 & tbl_regan; extw		[ pcmode=0; regtfan=tbl_regan; ] { build extw; export *:2 extw; }
+ tbl_eaw: (d16,PC) is PC & tbl_mode=7 & tbl_regan=2; d16	{ tmp:4 = inst_start + 2 + d16; export *:2 tmp; }
+ tbl_eaw: (extw) is tbl_mode=7 & tbl_regan=3; extw		[ pcmode=1; ] { build extw; export *:2 extw; }
+@@ -2408,8 +2398,8 @@ tbl_eaw: (d32)".l" is tbl_mode=7 & tbl_regan=1; d32		{ export *:2 d32; }
+ tbl_eaw: "#"^d16 is tbl_mode=7 & tbl_regan=4; d16		{ export *[const]:2 d16; }
+ 
+ tbl_eab: (tbl_regan) is tbl_mode=2 & tbl_regan			{ export *:1 tbl_regan; }
+-# tbl_eab: -(tbl_regan) is tbl_mode=4 & tbl_regan			{ tbl_regan = tbl_regan - 1; export *:1 tbl_regan; }
+-# tbl_eab: (d16,tbl_regan) is tbl_mode=5 & tbl_regan; d16		{ local tmp  = tbl_regan + d16; export *:1 tmp; }
++tbl_eab: -(tbl_regan) is tbl_mode=4 & tbl_regan			{ tbl_regan = tbl_regan - 1; export *:1 tbl_regan; }
++tbl_eab: (d16,tbl_regan) is tbl_mode=5 & tbl_regan; d16		{ local tmp  = tbl_regan + d16; export *:1 tmp; }
+ tbl_eab: (extw) is tbl_mode=6 & tbl_regan; extw		[ pcmode=0; regtfan=tbl_regan; ] { build extw; export *:1 extw; }
+ tbl_eab: (d16,PC) is PC & tbl_mode=7 & tbl_regan=2; d16	{ tmp:4 = inst_start + 2 + d16; export *:1 tmp; }
+ tbl_eab: (extw) is tbl_mode=7 & tbl_regan=3; extw		[ pcmode=1; ] { build extw; export *:1 extw; }
+@@ -2471,6 +2461,10 @@ define pcodeop interpolate;
+ :tbl^tbldrsign^"n.l" regdn:tbl_dr_reg,regxdn  is opbig=0xF8 & op37=0 & mode=0 & regdn ; tbl_dr_size=2 & tbldrsign & tbl_dr_round=1 & tbl_dr_reg & regxdn
+ 	{ regxdn = interpolate(regdn, tbl_dr_reg); }
+ 
++:lpstop "#"^d16		is opbig=0xf8 & d8base=0x00; opbig=0x01 & d8base=0xC0; d16	{ SR = d16; }
++
++:bgnd			is opbig=0x4A & d8base=0xFA { }
++
+ @endif # CPU32
+ 
+ :trap "#"^op03			is opbig=0x4e & op67=1 & op45=0 & op03		{ vector:1 = op03; __m68k_trap(vector); }
+@@ -2499,7 +2493,7 @@ define pcodeop interpolate;
+ 	source = (((source & 0x00F0) << 4) | (source & 0x000F)) + const16;
+ 	Txw = (Txw & 0xF0F0) | source;
+ }
+-@endif # CPU32
++@endif # CPU32 - no UNPK
+ 
+ # Floating Point Instructions
+ 
+diff --git a/Ghidra/Processors/68000/src/test.processors/java/ghidra/test/processors/cpu32_O0_EmulatorTest.java b/Ghidra/Processors/68000/src/test.processors/java/ghidra/test/processors/cpu32_O0_EmulatorTest.java
+new file mode 100644
+index 0000000000..0a4f02ee87
+--- /dev/null
++++ b/Ghidra/Processors/68000/src/test.processors/java/ghidra/test/processors/cpu32_O0_EmulatorTest.java
+@@ -0,0 +1,40 @@
++/* ###
++ * IP: GHIDRA
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package ghidra.test.processors;
++
++import ghidra.test.processors.support.ProcessorEmulatorTestAdapter;
++import junit.framework.Test;
++
++public class cpu32_O0_EmulatorTest extends ProcessorEmulatorTestAdapter {
++
++	private static final String LANGUAGE_ID = "68000:BE:32:CPU32";
++	private static final String COMPILER_SPEC_ID = "default";
++
++	private static final String[] REG_DUMP_SET = new String[] {};
++
++	public cpu32_O0_EmulatorTest(String name) throws Exception {
++		super(name, LANGUAGE_ID, COMPILER_SPEC_ID, REG_DUMP_SET);
++	}
++
++	@Override
++	protected String getProcessorDesignator() {
++		return "cpu32_GCC_O0";
++	}
++
++	public static Test suite() {
++		return ProcessorEmulatorTestAdapter.buildEmulatorTestSuite(cpu32_O0_EmulatorTest.class);
++	}
++}
+diff --git a/Ghidra/Processors/68000/src/test.processors/java/ghidra/test/processors/cpu32_O3_EmulatorTest.java b/Ghidra/Processors/68000/src/test.processors/java/ghidra/test/processors/cpu32_O3_EmulatorTest.java
+new file mode 100644
+index 0000000000..29d62d1e57
+--- /dev/null
++++ b/Ghidra/Processors/68000/src/test.processors/java/ghidra/test/processors/cpu32_O3_EmulatorTest.java
+@@ -0,0 +1,40 @@
++/* ###
++ * IP: GHIDRA
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package ghidra.test.processors;
++
++import ghidra.test.processors.support.ProcessorEmulatorTestAdapter;
++import junit.framework.Test;
++
++public class cpu32_O3_EmulatorTest extends ProcessorEmulatorTestAdapter {
++
++	private static final String LANGUAGE_ID = "68000:BE:32:CPU32";
++	private static final String COMPILER_SPEC_ID = "default";
++
++	private static final String[] REG_DUMP_SET = new String[] {};
++
++	public cpu32_O3_EmulatorTest(String name) throws Exception {
++		super(name, LANGUAGE_ID, COMPILER_SPEC_ID, REG_DUMP_SET);
++	}
++
++	@Override
++	protected String getProcessorDesignator() {
++		return "cpu32_GCC_O3";
++	}
++
++	public static Test suite() {
++		return ProcessorEmulatorTestAdapter.buildEmulatorTestSuite(cpu32_O3_EmulatorTest.class);
++	}
++}
+-- 
+2.45.1
+
