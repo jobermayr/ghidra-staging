@@ -1,17 +1,18 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Liam <byteslice@airmail.cc>
 Date: Sat, 28 Mar 2026 01:08:03 -0400
-Subject: [PATCH] 9078: Decompiler: add and use new RBIT and TZCOUNT PCode ops
+Subject: [PATCH] 9078: Decompiler: add and use new BITREV and TZCOUNT PCode
+ ops
 
-Decompiler: add new RBIT and TZCOUNT PCode ops
+Decompiler: add new BITREV and TZCOUNT PCode ops
 
 Decompiler: run generateParsers
 
-SoftwareModeling: integrate basic support for RBIT and TZCOUNT ops
+SoftwareModeling: integrate basic support for BITREV and TZCOUNT ops
 
-AArch64: use new RBIT Pcode op to implement rbit instruction semantic
+AArch64: use BITREV and TZCOUNT to implement rbit and ctz instruction semantics
 
-Decompiler: add RuleTzcountFromRbitLzcount
+Decompiler: add RuleTzcountFromBitrevLzcount
 ---
  .../Decompiler/src/decompile/cpp/address.cc   |   45 +
  .../src/decompile/cpp/coreaction.cc           |    3 +
@@ -30,20 +31,21 @@ Decompiler: add RuleTzcountFromRbitLzcount
  .../src/decompile/cpp/slgh_compile.cc         |    6 +
  .../Decompiler/src/decompile/cpp/slghparse.cc | 2098 +++++++++--------
  .../Decompiler/src/decompile/cpp/slghparse.y  |    4 +-
- .../Decompiler/src/decompile/cpp/slghscan.cc  |  655 ++---
+ .../Decompiler/src/decompile/cpp/slghscan.cc  |  677 +++---
  .../Decompiler/src/decompile/cpp/slghscan.l   |    2 +
  .../Decompiler/src/decompile/cpp/typeop.cc    |   16 +
  .../src/decompile/cpp/unionresolve.cc         |    4 +
+ .../pcode/opbehavior/OpBehaviorBitrev.java    |   49 +
  .../pcode/opbehavior/OpBehaviorFactory.java   |    2 +
- .../pcode/opbehavior/OpBehaviorRbit.java      |   49 +
  .../pcode/opbehavior/OpBehaviorTzcount.java   |   62 +
  .../ghidra/pcodeCPort/opcodes/OpCode.java     |    2 +
  .../pcodeCPort/slgh_compile/PcodeCompile.java |   12 +
  .../program/model/pcode/DynamicHash.java      |    2 +-
  .../ghidra/program/model/pcode/PcodeOp.java   |    8 +-
- .../AARCH64/data/languages/AARCH64base.sinc   |   17 +-
- 29 files changed, 1770 insertions(+), 1438 deletions(-)
- create mode 100644 Ghidra/Framework/Emulation/src/main/java/ghidra/pcode/opbehavior/OpBehaviorRbit.java
+ .../AARCH64/data/languages/AARCH64base.sinc   |   37 +-
+ .../VideoCore/data/languages/vc4.slaspec      |    1 -
+ 30 files changed, 1784 insertions(+), 1467 deletions(-)
+ create mode 100644 Ghidra/Framework/Emulation/src/main/java/ghidra/pcode/opbehavior/OpBehaviorBitrev.java
  create mode 100644 Ghidra/Framework/Emulation/src/main/java/ghidra/pcode/opbehavior/OpBehaviorTzcount.java
 
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/address.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/address.cc
@@ -103,14 +105,14 @@ index 2fbd50a35b..eb7c1b859e 100644
  /// \param val is the given value
  /// \return the mask
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
-index 608abc624a..d9896d60e0 100644
+index 608abc624a..bf4d5b2851 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
 @@ -3769,6 +3769,7 @@ void ActionDeadCode::propagateConsumed(vector<Varnode *> &worklist)
      }
      break;
    case CPUI_COPY:
-+  case CPUI_RBIT:
++  case CPUI_BITREV:
    case CPUI_INT_NEGATE:
      pushConsumed(outc,op->getIn(0),worklist);
      break;
@@ -126,12 +128,12 @@ index 608abc624a..d9896d60e0 100644
  	actprop->addRule( new RuleXorSwap("analysis") );
  	actprop->addRule( new RuleLzcountShiftBool("analysis") );
  	actprop->addRule( new RuleLzcntZeroTest("analysis") );
-+	actprop->addRule( new RuleTzcountFromRbitLzcount("analysis") );
++	actprop->addRule( new RuleTzcountFromBitrevLzcount("analysis") );
  	actprop->addRule( new RuleFloatSign("analysis") );
  	actprop->addRule( new RuleOrCompare("analysis") );
  	actprop->addRule( new RuleSimplifyConstantLUT("analysis") );
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/dynamic.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/dynamic.cc
-index e269700db2..30620d1ffa 100644
+index e269700db2..e6ac92ada1 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/dynamic.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/dynamic.cc
 @@ -58,7 +58,7 @@ const uint4 DynamicHash::transtable[] = {
@@ -139,7 +141,7 @@ index e269700db2..30620d1ffa 100644
    CPUI_INT_ADD,  CPUI_INT_ADD, 	// PTRADD and PTRSUB hash same as INT_ADD
    CPUI_SEGMENTOP, CPUI_CPOOLREF, CPUI_NEW, CPUI_INSERT, CPUI_ZPULL,
 -  CPUI_POPCOUNT, CPUI_LZCOUNT, CPUI_SPULL
-+  CPUI_POPCOUNT, CPUI_LZCOUNT, CPUI_SPULL, CPUI_RBIT, CPUI_TZCOUNT,
++  CPUI_POPCOUNT, CPUI_LZCOUNT, CPUI_SPULL, CPUI_BITREV, CPUI_TZCOUNT,
    
  };
  
@@ -157,17 +159,17 @@ index af56f41c32..f03367c36c 100644
  extern uintb coveringmask(uintb val);			///< Return a mask that \e covers the given value
  extern int4 bit_transitions(uintb val,int4 sz);		///< Calculate the number of bit transitions in the sized value
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/opbehavior.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/opbehavior.hh
-index 3e8013ae65..410b2af4d8 100644
+index 3e8013ae65..d4cb1b54ba 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/opbehavior.hh
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/opbehavior.hh
 @@ -537,5 +537,19 @@ public:
    virtual uintb evaluateUnary(int4 sizeout,int4 sizein,uintb in1) const;
  };
  
-+/// CPUI_RBIT behavior
-+class OpBehaviorRbit : public OpBehavior {
++/// CPUI_BITREV behavior
++class OpBehaviorBitrev : public OpBehavior {
 +public:
-+  OpBehaviorRbit(void) : OpBehavior(CPUI_RBIT,true) {}	///< Constructor
++  OpBehaviorBitrev(void) : OpBehavior(CPUI_BITREV,true) {}	///< Constructor
 +  virtual uintb evaluateUnary(int4 sizeout,int4 sizein,uintb in1) const;
 +};
 +
@@ -181,14 +183,14 @@ index 3e8013ae65..410b2af4d8 100644
  } // End namespace ghidra
  #endif
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/opcodes.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/opcodes.hh
-index ba5812135e..47183ba685 100644
+index ba5812135e..56ed76a0c9 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/opcodes.hh
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/opcodes.hh
 @@ -127,8 +127,10 @@ enum OpCode {
    CPUI_POPCOUNT = 72,		///< Count the 1-bits
    CPUI_LZCOUNT = 73,		///< Count the leading 0-bits
    CPUI_SPULL = 74,		///< Extract a signed bit-range
-+  CPUI_RBIT = 75,		///< Reverse bits
++  CPUI_BITREV = 75,		///< Reverse bits
 +  CPUI_TZCOUNT = 76,		///< Count the trailing 0-bits
  
 -  CPUI_MAX = 75			///< Value indicating the end of the op-code values
@@ -197,45 +199,45 @@ index ba5812135e..47183ba685 100644
  
  extern const char *get_opname(OpCode opc);		///< Convert an OpCode to the name as a string
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/printc.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/printc.hh
-index 2a216518b8..de59c402ad 100644
+index 2a216518b8..f7e364f543 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/printc.hh
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/printc.hh
 @@ -352,6 +352,8 @@ public:
    virtual void opSpullOp(const PcodeOp *op);
    virtual void opPopcountOp(const PcodeOp *op) { opFunc(op); }
    virtual void opLzcountOp(const PcodeOp *op) { opFunc(op); }
-+  virtual void opRbitOp(const PcodeOp* op) { opFunc(op); }
++  virtual void opBitrevOp(const PcodeOp* op) { opFunc(op); }
 +  virtual void opTzcountOp(const PcodeOp* op) { opFunc(op); }
  };
  
  /// \brief Set of print commands for displaying an open brace '{' and setting a new indent level
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/printlanguage.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/printlanguage.hh
-index 9db78a5e9d..9b21cfcb28 100644
+index 9db78a5e9d..9f1240728f 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/printlanguage.hh
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/printlanguage.hh
 @@ -606,6 +606,8 @@ public:
    virtual void opPopcountOp(const PcodeOp *op)=0;			///< Emit a POPCOUNT operator
    virtual void opLzcountOp(const PcodeOp *op)=0;			///< Emit a LZCOUNT operator
    virtual void opSpullOp(const PcodeOp *op)=0;				///< Emit an SPULL operator
-+  virtual void opRbitOp(const PcodeOp *op)=0;				///< Emit an RBIT operator
++  virtual void opBitrevOp(const PcodeOp *op)=0;				///< Emit a BITREV operator
 +  virtual void opTzcountOp(const PcodeOp* op)=0;			///< Emit a TZCOUNT operator
    virtual string unnamedField(int4 off,int4 size);			///< Generate an artificial field name
  
    static int4 mostNaturalBase(uintb val); 			///< Determine the most natural base for an integer
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/ruleaction.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/ruleaction.hh
-index 450a0a8fdb..1e8defc319 100644
+index 450a0a8fdb..0c19e5e091 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/ruleaction.hh
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/ruleaction.hh
 @@ -1610,6 +1610,17 @@ public:
    virtual int4 applyOp(PcodeOp *op,Funcdata &data);
  };
  
-+class RuleTzcountFromRbitLzcount : public Rule {
++class RuleTzcountFromBitrevLzcount : public Rule {
 +public:
-+  RuleTzcountFromRbitLzcount(const string &g) : Rule( g, 0, "tzcountfromrbitlzcount") {}	///< Constructor
++  RuleTzcountFromBitrevLzcount(const string &g) : Rule( g, 0, "tzcountfrombitrevlzcount") {}	///< Constructor
 +  virtual Rule *clone(const ActionGroupList &grouplist) const {
 +    if (!grouplist.contains(getGroup())) return (Rule *)0;
-+    return new RuleTzcountFromRbitLzcount(getGroup());
++    return new RuleTzcountFromBitrevLzcount(getGroup());
 +  }
 +  virtual void getOpList(vector<uint4> &oplist) const;
 +  virtual int4 applyOp(PcodeOp *op,Funcdata &data);
@@ -245,7 +247,7 @@ index 450a0a8fdb..1e8defc319 100644
  public:
    RuleFloatSign(const string &g) : Rule( g, 0, "floatsign") {}	///< Constructor
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/slghparse.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/slghparse.hh
-index 92ad05c0a3..76940fc3cc 100644
+index 92ad05c0a3..7eda38b4c8 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/slghparse.hh
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/slghparse.hh
 @@ -110,71 +110,73 @@ extern int sleighdebug;
@@ -317,7 +319,7 @@ index 92ad05c0a3..76940fc3cc 100644
 -    MACROSYM = 368,                /* MACROSYM  */
 -    LABELSYM = 369,                /* LABELSYM  */
 -    SUBTABLESYM = 370              /* SUBTABLESYM  */
-+    OP_RBIT = 306,                 /* OP_RBIT  */
++    OP_BITREV = 306,               /* OP_BITREV  */
 +    OP_TZCOUNT = 307,              /* OP_TZCOUNT  */
 +    BADINTEGER = 308,              /* BADINTEGER  */
 +    GOTO_KEY = 309,                /* GOTO_KEY  */
@@ -388,18 +390,18 @@ index 92ad05c0a3..76940fc3cc 100644
    typedef enum sleightokentype sleightoken_kind_t;
  #endif
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/typeop.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/typeop.hh
-index 653ac1ee46..a3bcafd3b9 100644
+index 653ac1ee46..23b0b4bff1 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/typeop.hh
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/typeop.hh
 @@ -940,5 +940,20 @@ public:
    virtual void push(PrintLanguage *lng,const PcodeOp *op,const PcodeOp *readOp) const { lng->opLzcountOp(op); }
  };
  
-+/// \brief Information about the RBIT op-code
-+class TypeOpRbit : public TypeOpFunc {
++/// \brief Information about the BITREV op-code
++class TypeOpBitrev : public TypeOpFunc {
 +public:
-+  TypeOpRbit(TypeFactory *t);			///< Constructor
-+  virtual void push(PrintLanguage *lng,const PcodeOp *op,const PcodeOp *readOp) const { lng->opRbitOp(op); }
++  TypeOpBitrev(TypeFactory *t);			///< Constructor
++  virtual void push(PrintLanguage *lng,const PcodeOp *op,const PcodeOp *readOp) const { lng->opBitrevOp(op); }
 +};
 +
 +/// \brief Information about the TZCOUNT op-code
@@ -413,14 +415,14 @@ index 653ac1ee46..a3bcafd3b9 100644
  } // End namespace ghidra
  #endif
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/op.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/op.cc
-index 93db0cf000..af3db02558 100644
+index 93db0cf000..e7dd904ee1 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/op.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/op.cc
 @@ -576,6 +576,7 @@ uintb PcodeOp::getNZMaskLocal(bool cliploop) const
      resmask=1;			// Only 1 bit not guaranteed to be 0
      break;
    case CPUI_COPY:
-+  case CPUI_RBIT:
++  case CPUI_BITREV:
    case CPUI_INT_ZEXT:
      resmask = getIn(0)->getNZMask();
      break;
@@ -433,14 +435,14 @@ index 93db0cf000..af3db02558 100644
      resmask &= fullmask;
      break;
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/opbehavior.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/opbehavior.cc
-index edb2a435d3..44abbcd32b 100644
+index edb2a435d3..d2a24c023e 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/opbehavior.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/opbehavior.cc
 @@ -106,6 +106,8 @@ void OpBehavior::registerInstructions(vector<OpBehavior *> &inst,const Translate
    inst[CPUI_POPCOUNT] = new OpBehaviorPopcount();
    inst[CPUI_LZCOUNT] = new OpBehaviorLzcount();
    inst[CPUI_SPULL] = new OpBehavior(CPUI_SPULL,false);
-+  inst[CPUI_RBIT] = new OpBehaviorRbit();
++  inst[CPUI_BITREV] = new OpBehaviorBitrev();
 +  inst[CPUI_TZCOUNT] = new OpBehaviorTzcount();
  }
  
@@ -449,7 +451,7 @@ index edb2a435d3..44abbcd32b 100644
    return (uintb)(count_leading_zeros(in1) - 8*(sizeof(uintb) - sizein));
  }
  
-+uintb OpBehaviorRbit::evaluateUnary(int4 sizeout,int4 sizein,uintb in1) const
++uintb OpBehaviorBitrev::evaluateUnary(int4 sizeout,int4 sizein,uintb in1) const
 +
 +{
 +  return bit_reverse(in1, 8*sizein);
@@ -464,30 +466,30 @@ index edb2a435d3..44abbcd32b 100644
 +
  } // End namespace ghidra
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc
-index a041b794d5..956bc211de 100644
+index a041b794d5..b0d339962d 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc
 @@ -11423,6 +11423,26 @@ int4 RuleLzcntZeroTest::applyOp(PcodeOp *op,Funcdata &data)
      return 1;
  }
  
-+/// \class RuleTzcountFromRbitLzcount
++/// \class RuleTzcountFromBitrevLzcount
 +/// \brief Simplify combination of bit reverse and leading-zero count into trailing-zero count
-+void RuleTzcountFromRbitLzcount::getOpList(vector<uint4> &oplist) const
++void RuleTzcountFromBitrevLzcount::getOpList(vector<uint4> &oplist) const
 +
 +{
 +  oplist.push_back(CPUI_LZCOUNT);
 +}
 +
-+int4 RuleTzcountFromRbitLzcount::applyOp(PcodeOp *op,Funcdata &data)
++int4 RuleTzcountFromBitrevLzcount::applyOp(PcodeOp *op,Funcdata &data)
 +
 +{
-+  Varnode *rbitvn = op->getIn(0);
-+  PcodeOp *rbitop = rbitvn->getDef();
-+  if (!rbitop || rbitop->code() != CPUI_RBIT) return 0;
++  Varnode *bitrevvn = op->getIn(0);
++  PcodeOp *bitrevop = bitrevvn->getDef();
++  if (!bitrevop || bitrevop->code() != CPUI_BITREV) return 0;
 +
 +  data.opSetOpcode(op, CPUI_TZCOUNT);
-+  data.opSetInput(op, rbitop->getIn(0), 0);
++  data.opSetInput(op, bitrevop->getIn(0), 0);
 +  return 1;
 +}
 +
@@ -495,15 +497,15 @@ index a041b794d5..956bc211de 100644
  /// \brief Convert floating-point \e sign bit manipulation into FLOAT_ABS or FLOAT_NEG
  ///
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/slgh_compile.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/slgh_compile.cc
-index d1f2fbc4f0..ef091b0d49 100644
+index d1f2fbc4f0..b11814c976 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/slgh_compile.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/slgh_compile.cc
 @@ -865,6 +865,12 @@ void ConsistencyChecker::printOpName(ostream &s,OpTpl *op)
    case CPUI_LZCOUNT:
      s << "Count leading zero bits(lzcount)";
      break;
-+  case CPUI_RBIT:
-+    s << "Reverse bits(rbit)";
++  case CPUI_BITREV:
++    s << "Reverse bits(bitrev)";
 +    break;
 +  case CPUI_TZCOUNT:
 +    s << "Count trailing zero bits(tzcount)";
@@ -512,7 +514,7 @@ index d1f2fbc4f0..ef091b0d49 100644
      break;
    }
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/slghparse.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/slghparse.cc
-index 4d64bf0de3..ddc289649f 100644
+index 4d64bf0de3..6eac8ea5bf 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/slghparse.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/slghparse.cc
 @@ -179,152 +179,154 @@ enum yysymbol_kind_t
@@ -665,7 +667,7 @@ index 4d64bf0de3..ddc289649f 100644
 -  YYSYMBOL_paramlist = 207,                /* paramlist  */
 -  YYSYMBOL_oplist = 208,                   /* oplist  */
 -  YYSYMBOL_anysymbol = 209                 /* anysymbol  */
-+  YYSYMBOL_OP_RBIT = 64,                   /* OP_RBIT  */
++  YYSYMBOL_OP_BITREV = 64,                 /* OP_BITREV  */
 +  YYSYMBOL_OP_TZCOUNT = 65,                /* OP_TZCOUNT  */
 +  YYSYMBOL_BADINTEGER = 66,                /* BADINTEGER  */
 +  YYSYMBOL_GOTO_KEY = 67,                  /* GOTO_KEY  */
@@ -924,7 +926,7 @@ index 4d64bf0de3..ddc289649f 100644
 -  "spacedef", "spaceprop", "varnodedef", "bitrangedef", "bitrangelist",
 -  "bitrangesingle", "pcodeopdef", "valueattach", "nameattach", "varattach",
 -  "macrodef", "withblockstart", "withblockmid", "withblock", "id_or_nil",
-+  "OP_LZCOUNT", "OP_RBIT", "OP_TZCOUNT", "BADINTEGER", "GOTO_KEY",
++  "OP_LZCOUNT", "OP_BITREV", "OP_TZCOUNT", "BADINTEGER", "GOTO_KEY",
 +  "CALL_KEY", "RETURN_KEY", "IF_KEY", "DEFINE_KEY", "ATTACH_KEY",
 +  "MACRO_KEY", "SPACE_KEY", "TYPE_KEY", "RAM_KEY", "DEFAULT_KEY",
 +  "REGISTER_KEY", "ENDIAN_KEY", "WITH_KEY", "ALIGN_KEY", "OP_UNIMPL",
@@ -2578,8 +2580,8 @@ index 4d64bf0de3..ddc289649f 100644
      break;
  
 -  case 239: /* expr: specificsymbol '(' integervarnode ')'  */
-+  case 239: /* expr: OP_RBIT '(' expr ')'  */
-+                         { (yyval.tree) = slgh->pcode.createOp(CPUI_RBIT,(yyvsp[-1].tree)); }
++  case 239: /* expr: OP_BITREV '(' expr ')'  */
++                           { (yyval.tree) = slgh->pcode.createOp(CPUI_BITREV,(yyvsp[-1].tree)); }
 +    break;
 +
 +  case 240: /* expr: OP_TZCOUNT '(' expr ')'  */
@@ -3100,7 +3102,7 @@ index 4d64bf0de3..ddc289649f 100644
      break;
  
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/slghparse.y b/Ghidra/Features/Decompiler/src/decompile/cpp/slghparse.y
-index 8912d3a3cc..d8e6bf10dc 100644
+index 8912d3a3cc..4d17400e11 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/slghparse.y
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/slghparse.y
 @@ -94,7 +94,7 @@ extern int sleigherror(const char *str );
@@ -3108,7 +3110,7 @@ index 8912d3a3cc..d8e6bf10dc 100644
  %token OP_ZEXT OP_CARRY OP_BORROW OP_SEXT OP_SCARRY OP_SBORROW OP_NAN OP_ABS
  %token OP_SQRT OP_CEIL OP_FLOOR OP_ROUND OP_INT2FLOAT OP_FLOAT2FLOAT
 -%token OP_TRUNC OP_CPOOLREF OP_NEW OP_POPCOUNT OP_LZCOUNT
-+%token OP_TRUNC OP_CPOOLREF OP_NEW OP_POPCOUNT OP_LZCOUNT OP_RBIT OP_TZCOUNT
++%token OP_TRUNC OP_CPOOLREF OP_NEW OP_POPCOUNT OP_LZCOUNT OP_BITREV OP_TZCOUNT
  
  %token BADINTEGER GOTO_KEY CALL_KEY RETURN_KEY IF_KEY
  %token DEFINE_KEY ATTACH_KEY MACRO_KEY SPACE_KEY TYPE_KEY RAM_KEY DEFAULT_KEY
@@ -3116,13 +3118,13 @@ index 8912d3a3cc..d8e6bf10dc 100644
    | OP_NEW '(' expr ',' expr ')' { $$ = slgh->pcode.createOp(CPUI_NEW,$3,$5); }
    | OP_POPCOUNT '(' expr ')' { $$ = slgh->pcode.createOp(CPUI_POPCOUNT,$3); }
    | OP_LZCOUNT '(' expr ')' { $$ = slgh->pcode.createOp(CPUI_LZCOUNT,$3); }
-+  | OP_RBIT '(' expr ')' { $$ = slgh->pcode.createOp(CPUI_RBIT,$3); }
++  | OP_BITREV '(' expr ')' { $$ = slgh->pcode.createOp(CPUI_BITREV,$3); }
 +  | OP_TZCOUNT '(' expr ')' { $$ = slgh->pcode.createOp(CPUI_TZCOUNT,$3); }
    | specificsymbol '(' integervarnode ')' { $$ = slgh->pcode.createOp(CPUI_SUBPIECE,new ExprTree($1->getVarnode()),new ExprTree($3)); }
    | specificsymbol ':' INTEGER	{ $$ = slgh->pcode.createBitRange($1,0,(uint4)(*$3 * 8)); delete $3; }
    | specificsymbol '[' INTEGER ',' INTEGER ']' { $$ = slgh->pcode.createBitRange($1,(uint4)*$3,(uint4)*$5); delete $3, delete $5; }
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/slghscan.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/slghscan.cc
-index cc0388026c..97bc9e468f 100644
+index cc0388026c..a12838c292 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/slghscan.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/slghscan.cc
 @@ -626,8 +626,8 @@ static void yynoreturn yy_fatal_error ( const char* msg  );
@@ -3141,7 +3143,7 @@ index cc0388026c..97bc9e468f 100644
  	flex_int32_t yy_nxt;
  	};
 -static const flex_int16_t yy_accept[536] =
-+static const flex_int16_t yy_accept[545] =
++static const flex_int16_t yy_accept[547] =
      {   0,
          0,    0,    0,    0,    0,    0,    0,    0,    0,    0,
 -        0,    0,    0,    0,  168,   14,    7,    8,    6,   14,
@@ -3183,8 +3185,8 @@ index cc0388026c..97bc9e468f 100644
 +       79,   80,   76,   92,   92,   71,   71,  164,  108,  159,
 +        0,  103,  160,    0,    0,  161,  106,  109,  107,  110,
 +      105,  104,  160,  160,  160,  160,  160,  160,  160,  160,
-+      160,    0,  120,  118,  119,  121,  124,    0,  125,  160,
-+      160,  149,  160,  160,  160,  160,  160,  160,  160,  160,
++      160,  160,    0,  120,  118,  119,  121,  124,    0,  125,
++      160,  160,  149,  160,  160,  160,  160,  160,  160,  160,
 +      160,  112,  111,  114,  115,  160,  160,  160,  160,  160,
 +      160,  160,  102,   99,   99,    0,  168,  167,  167,    0,
 +       13,   13,   13,   13,    0,   56,   55,   53,   43,   40,
@@ -3219,31 +3221,31 @@ index cc0388026c..97bc9e468f 100644
 -      141,   53,   53,   31,    0
 +       53,   53,    0,    0,    0,    0,   82,    0,   84,   95,
 +       94,   92,   92,    0,  163,  162,  135,  160,  160,  160,
-+      160,  160,  160,  160,  160,  160,  123,  126,  122,  127,
-+      160,  160,  160,  160,  160,  134,  160,  160,  160,  160,
++      160,  160,  160,  160,  160,  160,  160,  123,  126,  122,
++      127,  160,  160,  160,  160,  160,  134,  160,  160,  160,
 +      160,  116,  117,  113,  160,  160,  160,  160,  160,  160,
 +      160,    2,    0,   13,   13,   13,   12,   24,    0,   53,
 +       53,   53,   53,   53,   53,   53,   53,   53,   53,   53,
 +       53,   53,   45,   53,   53,   28,   53,   53,   53,   16,
 +        0,   62,    0,   72,    0,   81,   83,   92,   92,  100,
-+        0,  160,  160,  151,  160,  137,  160,  160,  160,  160,
++        0,  160,  160,  160,  151,  160,  137,  160,  160,  160,
 +
-+      160,  160,  150,  160,  160,  160,  160,  160,  147,  160,
++      160,  160,  160,  150,  160,  160,  160,  160,  160,  160,
 +      160,  160,  160,  131,  136,  160,  160,  128,   13,   13,
 +        9,   53,   53,   53,   53,   53,   53,   48,   53,   53,
 +       53,   53,   53,   53,   27,   32,   53,   53,   53,   92,
-+       92,  160,  156,  129,  143,  160,  160,  160,  160,  138,
-+      160,  157,  160,  160,  160,  160,  139,  160,  160,  142,
-+      160,   11,   10,   53,   53,   53,   53,   41,   44,   36,
-+       47,   53,   53,   53,   35,   49,   53,   53,   92,   74,
-+      130,  160,  160,  155,  160,  160,  160,  160,  160,  152,
-+      160,  132,  160,   53,   53,   33,   30,   51,   53,   53,
++       92,  160,  160,  156,  129,  143,  160,  160,  160,  160,
++      138,  160,  157,  160,  160,  160,  160,  139,  160,  160,
++      142,  160,   11,   10,   53,   53,   53,   53,   41,   44,
++       36,   47,   53,   53,   53,   35,   49,   53,   53,   92,
++       74,  147,  130,  160,  160,  155,  160,  160,  160,  160,
++      160,  152,  160,  132,  160,   53,   53,   33,   30,   51,
 +
-+       53,   53,   92,  160,  160,  160,  160,  146,  160,  160,
-+      133,  148,   53,   34,   53,   53,   53,   46,   92,  160,
-+      160,  160,  160,  160,  145,   42,   29,   53,   50,   75,
-+      160,  153,  160,  140,  144,   53,  154,  160,   53,  141,
-+       53,   53,   31,    0
++       53,   53,   53,   53,   92,  160,  160,  160,  160,  146,
++      160,  160,  133,  148,   53,   34,   53,   53,   53,   46,
++       92,  160,  160,  160,  160,  160,  145,   42,   29,   53,
++       50,   75,  160,  153,  160,  140,  144,   53,  154,  160,
++       53,  141,   53,   53,   31,    0
      } ;
  
  static const YY_CHAR yy_ec[256] =
@@ -3252,7 +3254,7 @@ index cc0388026c..97bc9e468f 100644
      } ;
  
 -static const flex_int16_t yy_base[573] =
-+static const flex_int16_t yy_base[582] =
++static const flex_int16_t yy_base[584] =
      {   0,
 -        0,  940,   66,  939,  132,  938,  198,  937,  264,  936,
 -      330,  935,    0,  394,  964,  971,  396,  971,    0,  951,
@@ -3317,74 +3319,74 @@ index cc0388026c..97bc9e468f 100644
 -      611,  617,  623,  625,  631,  637,  643,  645,  647,  458,
 -      649,  651,  653,  453,  655,  421,  658,  661,  664,  667,
 -      670,  673
-+        0,  949,   66,  948,  132,  947,  198,  946,  264,  945,
-+      330,  944,    0,  394,  973,  980,  396,  980,    0,  960,
-+      980,    0,  980,  915,  929,  932,  923,  980,  964,  980,
-+      397,  980,  960,    0,  953,  980,    0,  365,  384,  980,
-+      916,  918,  911,  920,  910,  918,  913,  365,  369,  918,
-+      372,  365,  361,  919,  904,  951,  980,  416,  980,  941,
-+      980,    0,  980,  949,  980,  417,  980,  980,  945,  938,
-+        0,  980,  894,  945,  980,  424,  980,  920,    0,  402,
-+      980,  980,  928,  377,  409,  407,  408,    0,  980,  980,
-+      980,  897,  894,  980,  980,  940,  980,  436,  980,  915,
++        0,  951,   66,  950,  132,  949,  198,  948,  264,  947,
++      330,  946,    0,  394,  975,  982,  396,  982,    0,  962,
++      982,    0,  982,  917,  931,  934,  925,  982,  966,  982,
++      397,  982,  962,    0,  955,  982,    0,  365,  384,  982,
++      918,  920,  913,  922,  912,  920,  915,  365,  369,  920,
++      372,  365,  361,  921,  906,  953,  982,  416,  982,  943,
++      982,    0,  982,  951,  982,  417,  982,  982,  947,  940,
++        0,  982,  896,  947,  982,  424,  982,  922,    0,  402,
++      982,  982,  930,  377,  409,  407,  408,    0,  982,  982,
++      982,  899,  896,  982,  982,  942,  982,  436,  982,  917,
 +
-+        0,  929,  980,  930,    0,  385,  421,  420,  912,  421,
-+      903,  899,  399,  414,  895,  875,  455,  883,  415,  401,
-+      417,  882,  426,  452,  422,  891,  867,  980,  927,  980,
-+      926,  980,  925,  471,    0,    0,    0,  871,  884,  886,
-+      868,  920,  980,  483,  916,  915,    0,    0,    0,  468,
-+        0,  474,  875,  436,  869,  459,  878,  857,  860,  866,
-+      872,  857,  870,  860,  861,  866,  456,  871,  860,  854,
-+      452,  851,  901,  980,  500,    0,    0,  900,  980,  505,
-+      896,  895,    0,    0,    0,  897,  980,  506,  980,    0,
-+        0,  849,  844,  846,  878,    0,  491,    0,  493,  980,
++        0,  931,  982,  932,    0,  385,  421,  420,  914,  421,
++      905,  901,  406,  413,  897,  877,  454,  885,  410,  404,
++      433,  884,  434,  467,  402,  893,  869,  982,  929,  982,
++      928,  982,  927,  475,    0,    0,    0,  873,  886,  888,
++      870,  922,  982,  485,  918,  917,    0,    0,    0,  463,
++        0,  476,  877,  451,  871,  419,  880,  859,  862,  868,
++      874,  859,  872,  862,  863,  868,  429,  873,  862,  856,
++      455,  853,  903,  982,  486,    0,    0,  902,  982,  508,
++      898,  897,    0,    0,    0,  899,  982,  509,  982,    0,
++        0,  851,  846,  848,  880,    0,  494,    0,  496,  982,
 +
-+      980,  980,  980,  844,  849,  890,  980,  515,  980,    0,
-+        0,  980,    0,  500,    0,  502,  980,  980,  980,  980,
-+      980,  980,  837,  837,  845,  478,  844,  837,  836,  838,
-+      833,  857,  980,  980,  980,  980,  856,  855,  854,  829,
-+      823,    0,  822,  838,  837,  825,  815,  821,  827,  815,
-+      813,  980,  980,  842,  500,  817,  830,  806,  811,  807,
-+      824,  802,  980,  858,  980,  857,  980,  856,  980,  845,
-+      820,  811,  801,  810,  840,  509,    0,  809,    0,    0,
-+      797,  794,    0,  812,  803,    0,  791,  805,  797,    0,
-+      789,  803,  806,  796,  790,  798,  799,  796,  795,  778,
++      982,  982,  982,  846,  851,  892,  982,  519,  982,    0,
++        0,  982,    0,  504,    0,  506,  982,  982,  982,  982,
++      982,  982,  839,  837,  838,  846,  482,  845,  838,  837,
++      839,  834,  858,  982,  982,  982,  982,  857,  856,  855,
++      830,  824,    0,  823,  839,  838,  826,  816,  822,  817,
++      815,  982,  982,  844,  504,  819,  832,  808,  813,  809,
++      826,  804,  982,  860,  982,  859,  982,  858,  982,  847,
++      822,  813,  803,  812,  842,  513,    0,  811,    0,    0,
++      799,  796,    0,  814,  805,    0,  793,  807,  799,    0,
++      791,  805,  808,  798,  792,  800,  801,  798,  797,  780,
 +
-+      789,  793,  819,  818,  817,  789,  980,  774,    0,  513,
-+        0,  789,  777,  812,  515,    0,    0,  770,  775,  774,
-+      767,  772,  768,  763,  780,  765,  980,  980,  980,  980,
-+      494,  764,  792,  776,  761,    0,  760,  771,  753,  751,
-+      757,  980,  980,  980,  752,  751,  748,  747,  752,  750,
-+      744,  980,  786,  759,  747,  745,    0,  980,  782,  744,
-+      756,  751,  734,  753,  741,  733,  736,  745,  744,  729,
-+      728,  741,    0,  740,  730,    0,  738,  741,  722,  980,
-+      763,  980,  762,  980,  761,  980,  980,  736,  720,  980,
-+      758,  719,  729,    0,  707,    0,  719,  711,  704,  710,
++      791,  795,  821,  820,  819,  791,  982,  776,    0,  517,
++        0,  791,  779,  814,  519,    0,    0,  772,  771,  776,
++      775,  768,  773,  769,  764,  781,  766,  982,  982,  982,
++      982,  441,  765,  793,  777,  762,    0,  761,  772,  753,
++      759,  982,  982,  982,  754,  753,  750,  749,  754,  752,
++      746,  982,  788,  761,  749,  747,    0,  982,  784,  746,
++      758,  753,  736,  755,  743,  735,  738,  747,  746,  731,
++      730,  743,    0,  742,  732,    0,  740,  743,  724,  982,
++      765,  982,  764,  982,  763,  982,  982,  738,  722,  982,
++      760,  731,  720,  730,    0,  708,    0,  720,  712,  705,
 +
-+      707,  708,    0,  719,  712,  702,  720,  706,    0,  702,
-+      715,  700,  699,    0,    0,  713,  694,    0,  706,  708,
-+        0,  699,  697,  686,  697,  694,  702,    0,  683,  685,
-+      689,  687,  682,  697,    0,    0,  681,  697,  689,  685,
-+      684,  672,    0,    0,    0,  692,  674,  672,  705,    0,
-+      678,    0,  675,  678,  666,  672,    0,  670,  659,    0,
-+      669,    0,    0,  677,  674,  660,  659,    0,    0,    0,
-+        0,  662,  676,  671,    0,    0,  663,  648,  654,    0,
-+        0,  651,  659,    0,  664,  654,  648,  662,  652,    0,
-+      642,    0,  644,  649,  657,    0,    0,    0,  658,  642,
++      711,  708,  709,    0,  720,  713,  703,  721,  707,  703,
++      716,  701,  700,    0,    0,  714,  695,    0,  707,  709,
++        0,  700,  698,  687,  698,  695,  703,    0,  684,  686,
++      690,  688,  683,  698,    0,    0,  682,  698,  690,  686,
++      685,  674,  672,    0,    0,    0,  692,  674,  672,  705,
++        0,  678,    0,  675,  678,  666,  672,    0,  670,  659,
++        0,  669,    0,    0,  677,  674,  660,  659,    0,    0,
++        0,    0,  662,  676,  671,    0,    0,  663,  648,  654,
++        0,    0,    0,  651,  659,    0,  664,  654,  648,  662,
++      652,    0,  642,    0,  644,  649,  657,    0,    0,    0,
 +
-+      654,  653,  652,  647,  640,  642,  652,    0,  649,  631,
-+        0,    0,  630,    0,  644,  648,  628,    0,  626,  633,
-+      624,  574,  555,  521,    0,    0,    0,  504,    0,    0,
-+      504,    0,  506,    0,    0,  490,    0,  485,  503,    0,
-+      500,  497,    0,  980,  545,  551,  557,  559,  565,  569,
-+      575,  577,  583,  585,  591,  595,  597,  603,  609,  611,
-+      617,  623,  625,  631,  637,  643,  645,  647,  531,  649,
-+      651,  653,  453,  655,  421,  658,  661,  664,  667,  670,
-+      673
++      658,  642,  654,  653,  652,  647,  640,  642,  652,    0,
++      649,  631,    0,    0,  630,    0,  644,  648,  628,    0,
++      626,  633,  624,  628,  622,  621,    0,    0,    0,  621,
++        0,    0,  635,    0,  583,    0,    0,  554,    0,  516,
++      517,    0,  496,  481,    0,  982,  540,  546,  552,  554,
++      560,  564,  570,  572,  578,  580,  586,  590,  592,  598,
++      604,  606,  612,  618,  620,  626,  632,  638,  640,  642,
++      498,  644,  646,  648,  494,  650,  421,  653,  656,  659,
++      662,  665,  668
      } ;
  
 -static const flex_int16_t yy_def[573] =
-+static const flex_int16_t yy_def[582] =
++static const flex_int16_t yy_def[584] =
      {   0,
 -      535,    1,  535,    3,  535,    5,  535,    7,  535,    9,
 -      535,   11,  536,  537,  535,  535,  535,  535,  538,  535,
@@ -3412,7 +3414,11 @@ index cc0388026c..97bc9e468f 100644
 -      565,  535,  554,  535,  566,  535,  535,  535,  535,  535,
 -      535,  535,  554,  554,  554,  554,  554,  554,  554,  554,
 -      554,  535,  535,  535,  535,  535,  535,  535,  535,  554,
--      554,  554,  554,  554,  554,  554,  554,  554,  554,  554,
++      546,    1,  546,    3,  546,    5,  546,    7,  546,    9,
++      546,   11,  547,  548,  546,  546,  546,  546,  549,  546,
++      546,  550,  546,  550,  550,  550,  550,  546,  551,  546,
++      546,  546,  552,  553,  546,  546,  554,  546,  546,  546,
+       554,  554,  554,  554,  554,  554,  554,  554,  554,  554,
 -      535,  535,  535,  535,  554,  554,  554,  554,  554,  554,
 -      535,  555,  535,  556,  535,  557,  535,  567,  539,  539,
 -      539,  539,  568,  535,  560,  543,  543,  543,  543,  543,
@@ -3428,13 +3434,45 @@ index cc0388026c..97bc9e468f 100644
 -      543,  543,  543,  543,  543,  543,  543,  543,  543,  543,
 -      543,  543,  543,  543,  543,  535,  569,  535,  570,  535,
 -      571,  535,  535,  551,  551,  535,  572,  554,  554,  554,
--      554,  554,  554,  554,  554,  554,  554,  554,  554,  554,
++      554,  554,  554,  554,  554,  555,  546,  546,  546,  546,
++      546,  556,  546,  557,  546,  546,  546,  546,  558,  546,
++      559,  546,  559,  560,  546,  546,  546,  546,  561,  546,
++      546,  546,  562,  546,  546,  546,  546,  562,  546,  546,
++      546,  562,  562,  546,  546,  563,  546,  546,  546,  546,
++
++      564,  546,  546,  546,  565,  546,  546,  546,  546,  546,
++      546,  565,  565,  565,  565,  565,  565,  565,  565,  565,
++      565,  565,  565,  565,  565,  565,  546,  546,  566,  546,
++      567,  546,  568,  546,  549,  569,  550,  550,  550,  550,
++      550,  551,  546,  546,  552,  546,  553,  570,  554,  546,
++      571,  546,  554,  554,  554,  554,  554,  554,  554,  554,
++      554,  554,  554,  554,  554,  554,  554,  554,  554,  554,
++      554,  554,  555,  546,  546,  572,  556,  557,  546,  546,
++      558,  546,  573,  559,  559,  560,  546,  546,  546,  561,
++      574,  546,  546,  546,  562,  562,  546,  575,  546,  546,
++
++      546,  546,  546,  562,  562,  563,  546,  546,  546,  564,
++      576,  546,  565,  546,  577,  546,  546,  546,  546,  546,
++      546,  546,  565,  565,  565,  565,  565,  565,  565,  565,
++      565,  565,  546,  546,  546,  546,  546,  546,  546,  546,
++      565,  565,  565,  565,  565,  565,  565,  565,  565,  565,
++      565,  546,  546,  546,  546,  565,  565,  565,  565,  565,
++      565,  565,  546,  566,  546,  567,  546,  568,  546,  578,
++      550,  550,  550,  550,  579,  546,  571,  554,  554,  554,
+       554,  554,  554,  554,  554,  554,  554,  554,  554,  554,
 -
--      554,  554,  554,  554,  554,  554,  554,  554,  554,  554,
+       554,  554,  554,  554,  554,  554,  554,  554,  554,  554,
 -      554,  554,  539,  539,  539,  543,  543,  543,  543,  543,
 -      543,  543,  543,  543,  543,  543,  543,  543,  543,  543,
 -      543,  543,  543,  551,  551,  554,  554,  554,  554,  554,
--      554,  554,  554,  554,  554,  554,  554,  554,  554,  554,
++
++      554,  554,  580,  581,  582,  546,  546,  546,  562,  546,
++      575,  562,  562,  583,  546,  577,  565,  565,  565,  565,
++      565,  565,  565,  565,  565,  565,  565,  546,  546,  546,
++      546,  565,  565,  565,  565,  565,  565,  565,  565,  565,
++      565,  546,  546,  546,  565,  565,  565,  565,  565,  565,
++      565,  546,  578,  550,  550,  550,  550,  546,  579,  554,
+       554,  554,  554,  554,  554,  554,  554,  554,  554,  554,
 -      554,  554,  554,  554,  539,  539,  543,  543,  543,  543,
 -      543,  543,  543,  543,  543,  543,  543,  543,  543,  543,
 -      543,  551,  551,  554,  554,  554,  554,  554,  554,  554,
@@ -3449,74 +3487,34 @@ index cc0388026c..97bc9e468f 100644
 -      535,  535,  535,  535,  535,  535,  535,  535,  535,  535,
 -      535,  535,  535,  535,  535,  535,  535,  535,  535,  535,
 -      535,  535
-+      544,    1,  544,    3,  544,    5,  544,    7,  544,    9,
-+      544,   11,  545,  546,  544,  544,  544,  544,  547,  544,
-+      544,  548,  544,  548,  548,  548,  548,  544,  549,  544,
-+      544,  544,  550,  551,  544,  544,  552,  544,  544,  544,
-+      552,  552,  552,  552,  552,  552,  552,  552,  552,  552,
-+      552,  552,  552,  552,  552,  553,  544,  544,  544,  544,
-+      544,  554,  544,  555,  544,  544,  544,  544,  556,  544,
-+      557,  544,  557,  558,  544,  544,  544,  544,  559,  544,
-+      544,  544,  560,  544,  544,  544,  544,  560,  544,  544,
-+      544,  560,  560,  544,  544,  561,  544,  544,  544,  544,
++      554,  554,  554,  554,  554,  554,  554,  554,  554,  546,
++      580,  546,  581,  546,  582,  546,  546,  562,  562,  546,
++      583,  565,  565,  565,  565,  565,  565,  565,  565,  565,
 +
-+      562,  544,  544,  544,  563,  544,  544,  544,  544,  544,
-+      544,  563,  563,  563,  563,  563,  563,  563,  563,  563,
-+      563,  563,  563,  563,  563,  563,  544,  544,  564,  544,
-+      565,  544,  566,  544,  547,  567,  548,  548,  548,  548,
-+      548,  549,  544,  544,  550,  544,  551,  568,  552,  544,
-+      569,  544,  552,  552,  552,  552,  552,  552,  552,  552,
-+      552,  552,  552,  552,  552,  552,  552,  552,  552,  552,
-+      552,  552,  553,  544,  544,  570,  554,  555,  544,  544,
-+      556,  544,  571,  557,  557,  558,  544,  544,  544,  559,
-+      572,  544,  544,  544,  560,  560,  544,  573,  544,  544,
++      565,  565,  565,  565,  565,  565,  565,  565,  565,  565,
++      565,  565,  565,  565,  565,  565,  565,  565,  550,  550,
++      550,  554,  554,  554,  554,  554,  554,  554,  554,  554,
++      554,  554,  554,  554,  554,  554,  554,  554,  554,  562,
++      562,  565,  565,  565,  565,  565,  565,  565,  565,  565,
++      565,  565,  565,  565,  565,  565,  565,  565,  565,  565,
++      565,  565,  550,  550,  554,  554,  554,  554,  554,  554,
++      554,  554,  554,  554,  554,  554,  554,  554,  554,  562,
++      562,  565,  565,  565,  565,  565,  565,  565,  565,  565,
++      565,  565,  565,  565,  565,  554,  554,  554,  554,  554,
 +
-+      544,  544,  544,  560,  560,  561,  544,  544,  544,  562,
-+      574,  544,  563,  544,  575,  544,  544,  544,  544,  544,
-+      544,  544,  563,  563,  563,  563,  563,  563,  563,  563,
-+      563,  544,  544,  544,  544,  544,  544,  544,  544,  563,
-+      563,  563,  563,  563,  563,  563,  563,  563,  563,  563,
-+      563,  544,  544,  544,  544,  563,  563,  563,  563,  563,
-+      563,  563,  544,  564,  544,  565,  544,  566,  544,  576,
-+      548,  548,  548,  548,  577,  544,  569,  552,  552,  552,
-+      552,  552,  552,  552,  552,  552,  552,  552,  552,  552,
-+      552,  552,  552,  552,  552,  552,  552,  552,  552,  552,
-+
-+      552,  552,  578,  579,  580,  544,  544,  544,  560,  544,
-+      573,  560,  560,  581,  544,  575,  563,  563,  563,  563,
-+      563,  563,  563,  563,  563,  563,  544,  544,  544,  544,
-+      563,  563,  563,  563,  563,  563,  563,  563,  563,  563,
-+      563,  544,  544,  544,  563,  563,  563,  563,  563,  563,
-+      563,  544,  576,  548,  548,  548,  548,  544,  577,  552,
-+      552,  552,  552,  552,  552,  552,  552,  552,  552,  552,
-+      552,  552,  552,  552,  552,  552,  552,  552,  552,  544,
-+      578,  544,  579,  544,  580,  544,  544,  560,  560,  544,
-+      581,  563,  563,  563,  563,  563,  563,  563,  563,  563,
-+
-+      563,  563,  563,  563,  563,  563,  563,  563,  563,  563,
-+      563,  563,  563,  563,  563,  563,  563,  563,  548,  548,
-+      548,  552,  552,  552,  552,  552,  552,  552,  552,  552,
-+      552,  552,  552,  552,  552,  552,  552,  552,  552,  560,
-+      560,  563,  563,  563,  563,  563,  563,  563,  563,  563,
-+      563,  563,  563,  563,  563,  563,  563,  563,  563,  563,
-+      563,  548,  548,  552,  552,  552,  552,  552,  552,  552,
-+      552,  552,  552,  552,  552,  552,  552,  552,  560,  560,
-+      563,  563,  563,  563,  563,  563,  563,  563,  563,  563,
-+      563,  563,  563,  552,  552,  552,  552,  552,  552,  552,
-+
-+      552,  552,  560,  563,  563,  563,  563,  563,  563,  563,
-+      563,  563,  552,  552,  552,  552,  552,  552,  560,  563,
-+      563,  563,  563,  563,  563,  552,  552,  552,  552,  560,
-+      563,  563,  563,  563,  563,  552,  563,  563,  552,  563,
-+      552,  552,  552,    0,  544,  544,  544,  544,  544,  544,
-+      544,  544,  544,  544,  544,  544,  544,  544,  544,  544,
-+      544,  544,  544,  544,  544,  544,  544,  544,  544,  544,
-+      544,  544,  544,  544,  544,  544,  544,  544,  544,  544,
-+      544
++      554,  554,  554,  554,  562,  565,  565,  565,  565,  565,
++      565,  565,  565,  565,  554,  554,  554,  554,  554,  554,
++      562,  565,  565,  565,  565,  565,  565,  554,  554,  554,
++      554,  562,  565,  565,  565,  565,  565,  554,  565,  565,
++      554,  565,  554,  554,  554,    0,  546,  546,  546,  546,
++      546,  546,  546,  546,  546,  546,  546,  546,  546,  546,
++      546,  546,  546,  546,  546,  546,  546,  546,  546,  546,
++      546,  546,  546,  546,  546,  546,  546,  546,  546,  546,
++      546,  546,  546
      } ;
  
 -static const flex_int16_t yy_nxt[1038] =
-+static const flex_int16_t yy_nxt[1047] =
++static const flex_int16_t yy_nxt[1049] =
      {   0,
         16,   17,   18,   17,   16,   16,   19,   20,   16,   16,
         16,   21,   21,   16,   16,   21,   21,   22,   16,   16,
@@ -3527,7 +3525,7 @@ index cc0388026c..97bc9e468f 100644
 -      180,  170,  214,  133,  151,  188,  314,  188,  199,  199,
 +      180,  170,  214,  133,  151,  188,  316,  188,  199,  199,
        199,  199,  200,  201,  202,  203,  198,  208,  192,  208,
-       216,  216,  216,  216,  215,  217,  218,  220,  221,  224,
+-      216,  216,  216,  216,  215,  217,  218,  220,  221,  224,
 -      226,  244,  193,  246,  227,  225,  242,  247,  309,  232,
 -      249,  194,  245,  275,  243,  228,  251,  229,  233,  234,
 -      250,  235,  134,  236,  134,  144,  252,  144,  274,  274,
@@ -3540,25 +3538,12 @@ index cc0388026c..97bc9e468f 100644
 -      397,  319,  308,  308,  313,  313,  532,  531,  530,  529,
 -      528,  527,  526,  525,  398,  130,  130,  130,  130,  130,
 -      130,  131,  131,  131,  131,  131,  131,  135,  524,  135,
-+      226,  244,  193,  246,  227,  225,  242,  247,  311,  232,
-+      252,  194,  245,  249,  243,  228,  250,  229,  233,  234,
-+      253,  235,  134,  236,  134,  260,  251,  254,  279,  255,
-+      237,  238,  239,  261,  144,  280,  144,  276,  276,  256,
-+      257,  281,  258,  152,  152,  152,  152,  283,  295,  300,
-+
-+      284,  175,  240,  175,  259,  301,  180,  188,  180,  188,
-+      310,  310,  199,  199,  199,  199,  208,  296,  208,  315,
-+      315,  216,  216,  216,  216,  320,  343,  344,  276,  276,
-+      401,  321,  310,  310,  315,  315,  277,  543,  542,  541,
-+      540,  539,  538,  537,  402,  130,  130,  130,  130,  130,
-+      130,  131,  131,  131,  131,  131,  131,  135,  536,  135,
-       135,  135,  135,  137,  137,  142,  142,  142,  142,  142,
+-      135,  135,  135,  137,  137,  142,  142,  142,  142,  142,
 -      142,  145,  145,  145,  145,  147,  523,  147,  147,  147,
-+      142,  145,  145,  145,  145,  147,  535,  147,  147,  147,
-       147,  149,  149,  173,  173,  173,  173,  173,  173,  177,
-       177,  178,  178,  178,  178,  178,  178,  181,  181,  181,
- 
-       181,  184,  184,  186,  186,  186,  186,  186,  186,  190,
+-      147,  149,  149,  173,  173,  173,  173,  173,  173,  177,
+-      177,  178,  178,  178,  178,  178,  178,  181,  181,  181,
+-
+-      181,  184,  184,  186,  186,  186,  186,  186,  186,  190,
 -      522,  190,  190,  190,  190,  196,  196,  206,  206,  206,
 -      206,  206,  206,  210,  521,  210,  210,  210,  210,  213,
 -      213,  262,  262,  262,  262,  262,  262,  264,  264,  264,
@@ -3606,58 +3591,77 @@ index cc0388026c..97bc9e468f 100644
 -      535,  535,  535,  535,  535,  535,  535,  535,  535,  535,
 -      535,  535,  535,  535,  535,  535,  535,  535,  535,  535,
 -      535,  535,  535,  535,  535,  535,  535
-+      534,  190,  190,  190,  190,  196,  196,  206,  206,  206,
-+      206,  206,  206,  210,  533,  210,  210,  210,  210,  213,
-+      213,  264,  264,  264,  264,  264,  264,  266,  266,  266,
-+      266,  266,  266,  268,  268,  268,  268,  268,  268,  270,
-+      270,  275,  275,  303,  303,  304,  304,  305,  305,  314,
-+      314,  353,  353,  353,  359,  359,  359,  381,  381,  381,
-+      383,  383,  383,  385,  385,  385,  391,  391,  391,  532,
-+      531,  530,  529,  528,  527,  526,  525,  524,  523,  522,
-+      521,  520,  519,  518,  517,  516,  515,  514,  513,  512,
++      216,  216,  216,  216,  215,  217,  218,  220,  221,  227,
++      224,  243,  193,  228,  245,  260,  225,  283,  233,  244,
++      284,  194,  226,  261,  229,  246,  230,  234,  235,  247,
++      236,  295,  237,  248,  250,  252,  134,  402,  134,  238,
++      239,  240,  276,  276,  251,  253,  144,  175,  144,  175,
++      296,  403,  254,  279,  255,  152,  152,  152,  152,  311,
 +
-+      511,  510,  509,  508,  507,  506,  505,  504,  503,  502,
-+      501,  500,  499,  498,  497,  496,  495,  494,  493,  492,
-+      491,  490,  489,  488,  487,  486,  485,  484,  483,  482,
-+      481,  480,  479,  478,  477,  476,  475,  474,  473,  472,
-+      471,  470,  469,  468,  467,  466,  465,  464,  463,  462,
-+      461,  460,  459,  458,  457,  456,  455,  454,  453,  452,
-+      451,  450,  449,  448,  447,  446,  445,  444,  443,  442,
-+      390,  441,  440,  384,  382,  380,  439,  438,  437,  436,
-+      435,  434,  433,  432,  431,  430,  429,  428,  427,  426,
-+      425,  424,  423,  422,  358,  421,  420,  419,  352,  418,
++      280,  241,  300,  277,  256,  257,  281,  258,  301,  180,
++      188,  180,  188,  310,  310,  199,  199,  199,  199,  259,
++      208,  545,  208,  315,  315,  216,  216,  216,  216,  321,
++      343,  344,  276,  276,  544,  322,  310,  310,  315,  315,
++      130,  130,  130,  130,  130,  130,  131,  131,  131,  131,
++      131,  131,  135,  543,  135,  135,  135,  135,  137,  137,
++      142,  142,  142,  142,  142,  142,  145,  145,  145,  145,
++      147,  542,  147,  147,  147,  147,  149,  149,  173,  173,
++      173,  173,  173,  173,  177,  177,  178,  178,  178,  178,
++      178,  178,  181,  181,  181,  181,  184,  184,  186,  186,
 +
-+      417,  416,  415,  414,  413,  412,  411,  410,  409,  408,
-+      407,  406,  405,  404,  403,  400,  399,  398,  397,  396,
-+      395,  394,  393,  392,  390,  389,  388,  387,  386,  384,
-+      382,  380,  379,  378,  377,  376,  375,  374,  373,  372,
-+      371,  370,  369,  368,  367,  366,  365,  364,  363,  362,
-+      361,  360,  358,  357,  356,  355,  354,  352,  269,  267,
-+      265,  351,  350,  349,  348,  347,  346,  345,  342,  341,
-+      340,  339,  338,  337,  336,  335,  334,  333,  332,  331,
-+      330,  329,  328,  327,  326,  325,  324,  323,  322,  319,
-+      318,  317,  207,  313,  312,  309,  308,  307,  306,  187,
++      186,  186,  186,  186,  190,  541,  190,  190,  190,  190,
++      196,  196,  206,  206,  206,  206,  206,  206,  210,  540,
++      210,  210,  210,  210,  213,  213,  264,  264,  264,  264,
++      264,  264,  266,  266,  266,  266,  266,  266,  268,  268,
++      268,  268,  268,  268,  270,  270,  275,  275,  303,  303,
++      304,  304,  305,  305,  314,  314,  353,  353,  353,  359,
++      359,  359,  381,  381,  381,  383,  383,  383,  385,  385,
++      385,  391,  391,  391,  539,  538,  537,  536,  535,  534,
++      533,  532,  531,  530,  529,  528,  527,  526,  525,  524,
++      523,  522,  521,  520,  519,  518,  517,  516,  515,  514,
 +
-+      181,  182,  179,  174,  302,  299,  298,  297,  294,  293,
-+      292,  291,  290,  289,  288,  287,  286,  285,  282,  278,
-+      145,  146,  143,  274,  273,  272,  271,  269,  267,  265,
-+      263,  262,  248,  241,  231,  230,  223,  222,  219,  212,
-+      211,  209,  207,  205,  204,  195,  189,  187,  185,  183,
-+      182,  179,  176,  174,  172,  171,  164,  159,  158,  157,
-+      156,  155,  154,  153,  148,  146,  143,  141,  140,  139,
-+      138,  136,  544,  129,   96,   74,   64,   56,   29,   15,
-+      544,  544,  544,  544,  544,  544,  544,  544,  544,  544,
-+      544,  544,  544,  544,  544,  544,  544,  544,  544,  544,
++      513,  512,  511,  510,  509,  508,  507,  506,  505,  504,
++      503,  502,  501,  500,  499,  498,  497,  496,  495,  494,
++      493,  492,  491,  490,  489,  488,  487,  486,  485,  484,
++      483,  482,  481,  480,  479,  478,  477,  476,  475,  474,
++      473,  472,  471,  470,  469,  468,  467,  466,  465,  464,
++      463,  462,  461,  460,  459,  458,  457,  456,  455,  454,
++      453,  452,  451,  450,  449,  448,  447,  446,  445,  444,
++      443,  442,  390,  441,  440,  384,  382,  380,  439,  438,
++      437,  436,  435,  434,  433,  432,  431,  430,  429,  428,
++      427,  426,  425,  424,  423,  422,  358,  421,  420,  419,
 +
-+      544,  544,  544,  544,  544,  544,  544,  544,  544,  544,
-+      544,  544,  544,  544,  544,  544,  544,  544,  544,  544,
-+      544,  544,  544,  544,  544,  544,  544,  544,  544,  544,
-+      544,  544,  544,  544,  544,  544,  544,  544,  544,  544,
-+      544,  544,  544,  544,  544,  544
++      352,  418,  417,  416,  415,  414,  413,  412,  411,  410,
++      409,  408,  407,  406,  405,  404,  401,  400,  399,  398,
++      397,  396,  395,  394,  393,  392,  390,  389,  388,  387,
++      386,  384,  382,  380,  379,  378,  377,  376,  375,  374,
++      373,  372,  371,  370,  369,  368,  367,  366,  365,  364,
++      363,  362,  361,  360,  358,  357,  356,  355,  354,  352,
++      269,  267,  265,  351,  350,  349,  348,  347,  346,  345,
++      342,  341,  340,  339,  338,  337,  336,  335,  334,  333,
++      332,  331,  330,  329,  328,  327,  326,  325,  324,  323,
++      320,  319,  318,  317,  207,  313,  312,  309,  308,  307,
++
++      306,  187,  181,  182,  179,  174,  302,  299,  298,  297,
++      294,  293,  292,  291,  290,  289,  288,  287,  286,  285,
++      282,  278,  145,  146,  143,  274,  273,  272,  271,  269,
++      267,  265,  263,  262,  249,  242,  232,  231,  223,  222,
++      219,  212,  211,  209,  207,  205,  204,  195,  189,  187,
++      185,  183,  182,  179,  176,  174,  172,  171,  164,  159,
++      158,  157,  156,  155,  154,  153,  148,  146,  143,  141,
++      140,  139,  138,  136,  546,  129,   96,   74,   64,   56,
++       29,   15,  546,  546,  546,  546,  546,  546,  546,  546,
++      546,  546,  546,  546,  546,  546,  546,  546,  546,  546,
++
++      546,  546,  546,  546,  546,  546,  546,  546,  546,  546,
++      546,  546,  546,  546,  546,  546,  546,  546,  546,  546,
++      546,  546,  546,  546,  546,  546,  546,  546,  546,  546,
++      546,  546,  546,  546,  546,  546,  546,  546,  546,  546,
++      546,  546,  546,  546,  546,  546,  546,  546
      } ;
  
 -static const flex_int16_t yy_chk[1038] =
-+static const flex_int16_t yy_chk[1047] =
++static const flex_int16_t yy_chk[1049] =
      {   0,
          1,    1,    1,    1,    1,    1,    1,    1,    1,    1,
          1,    1,    1,    1,    1,    1,    1,    1,    1,    1,
@@ -3666,9 +3670,9 @@ index cc0388026c..97bc9e468f 100644
         31,   48,   38,   39,   39,   39,   39,   49,   51,   52,
         49,   53,   51,   80,   84,   48,   52,   58,   66,   58,
 -       66,   53,  106,   14,   38,   76,  566,   76,   85,   85,
-+       66,   53,  106,   14,   38,   76,  575,   76,   85,   85,
++       66,   53,  106,   14,   38,   76,  577,   76,   85,   85,
         85,   85,   86,   86,   87,   87,   84,   98,   80,   98,
-       107,  107,  107,  107,  106,  108,  108,  110,  110,  113,
+-      107,  107,  107,  107,  106,  108,  108,  110,  110,  113,
 -      114,  120,   80,  121,  114,  113,  119,  121,  564,  117,
 -      123,   80,  120,  560,  119,  114,  124,  114,  117,  117,
 -      123,  117,  134,  117,  134,  144,  124,  144,  150,  150,
@@ -3689,22 +3693,7 @@ index cc0388026c..97bc9e468f 100644
 -      547,  548,  548,  549,  549,  549,  549,  549,  549,  550,
 -      511,  550,  550,  550,  550,  551,  551,  552,  552,  552,
 -      552,  552,  552,  553,  510,  553,  553,  553,  553,  554,
-+      114,  120,   80,  121,  114,  113,  119,  121,  573,  117,
-+      124,   80,  120,  123,  119,  114,  123,  114,  117,  117,
-+      124,  117,  134,  117,  134,  125,  123,  124,  154,  124,
-+      117,  117,  117,  125,  144,  154,  144,  150,  150,  124,
-+      124,  154,  124,  152,  152,  152,  152,  156,  167,  171,
-+
-+      156,  175,  117,  175,  124,  171,  180,  188,  180,  188,
-+      197,  197,  199,  199,  199,  199,  208,  167,  208,  214,
-+      214,  216,  216,  216,  216,  226,  255,  255,  276,  276,
-+      331,  226,  310,  310,  315,  315,  569,  542,  541,  539,
-+      538,  536,  533,  531,  331,  545,  545,  545,  545,  545,
-+      545,  546,  546,  546,  546,  546,  546,  547,  528,  547,
-+      547,  547,  547,  548,  548,  549,  549,  549,  549,  549,
-+      549,  550,  550,  550,  550,  551,  524,  551,  551,  551,
-+      551,  552,  552,  553,  553,  553,  553,  553,  553,  554,
-       554,  555,  555,  555,  555,  555,  555,  556,  556,  556,
+-      554,  555,  555,  555,  555,  555,  555,  556,  556,  556,
 -      556,  556,  556,  557,  557,  557,  557,  557,  557,  558,
 -      558,  559,  559,  561,  561,  562,  562,  563,  563,  565,
 -      565,  567,  567,  567,  568,  568,  568,  569,  569,  569,
@@ -3725,47 +3714,17 @@ index cc0388026c..97bc9e468f 100644
 -
 -      337,  336,  335,  333,  332,  331,  330,  324,  323,  322,
 -      321,  320,  319,  318,  317,  316,  312,  311,  310,  306,
-+
-+      556,  557,  557,  558,  558,  558,  558,  558,  558,  559,
-+      523,  559,  559,  559,  559,  560,  560,  561,  561,  561,
-+      561,  561,  561,  562,  522,  562,  562,  562,  562,  563,
-+      563,  564,  564,  564,  564,  564,  564,  565,  565,  565,
-+      565,  565,  565,  566,  566,  566,  566,  566,  566,  567,
-+      567,  568,  568,  570,  570,  571,  571,  572,  572,  574,
-+      574,  576,  576,  576,  577,  577,  577,  578,  578,  578,
-+      579,  579,  579,  580,  580,  580,  581,  581,  581,  521,
-+      520,  519,  517,  516,  515,  513,  510,  509,  507,  506,
-+      505,  504,  503,  502,  501,  500,  499,  495,  494,  493,
-+
-+      491,  489,  488,  487,  486,  485,  483,  482,  479,  478,
-+      477,  474,  473,  472,  467,  466,  465,  464,  461,  459,
-+      458,  456,  455,  454,  453,  451,  449,  448,  447,  446,
-+      442,  441,  440,  439,  438,  437,  434,  433,  432,  431,
-+      430,  429,  427,  426,  425,  424,  423,  422,  420,  419,
-+      417,  416,  413,  412,  411,  410,  408,  407,  406,  405,
-+      404,  402,  401,  400,  399,  398,  397,  395,  393,  392,
-+      391,  389,  388,  385,  383,  381,  379,  378,  377,  375,
-+      374,  372,  371,  370,  369,  368,  367,  366,  365,  364,
-+      363,  362,  361,  360,  359,  356,  355,  354,  353,  351,
-+
-+      350,  349,  348,  347,  346,  345,  341,  340,  339,  338,
-+      337,  335,  334,  333,  332,  326,  325,  324,  323,  322,
-+      321,  320,  319,  318,  314,  313,  312,  308,  306,  305,
-       304,  303,  302,  301,  300,  299,  298,  297,  296,  295,
+-      304,  303,  302,  301,  300,  299,  298,  297,  296,  295,
 -      294,  293,  292,  291,  290,  289,  287,  286,  285,  283,
 -      282,  280,  279,  276,  273,  272,  271,  270,  269,  268,
 -      266,  264,  262,  260,  259,  258,  257,  256,  255,  253,
-+      294,  293,  292,  291,  289,  288,  287,  285,  284,  282,
-+      281,  278,  275,  274,  273,  272,  271,  270,  268,  266,
-+      264,  262,  261,  260,  259,  258,  257,  256,  254,  251,
-       250,  249,  248,  247,  246,  245,  244,  243,  241,  240,
-       239,  238,  237,  232,  231,  230,  229,  228,  227,  225,
-       224,  223,  206,  205,  204,  195,  194,  193,  192,  186,
+-      250,  249,  248,  247,  246,  245,  244,  243,  241,  240,
+-      239,  238,  237,  232,  231,  230,  229,  228,  227,  225,
+-      224,  223,  206,  205,  204,  195,  194,  193,  192,  186,
 -      182,  181,  178,  173,  172,  170,  169,  168,  166,  165,
- 
-+      182,  181,  178,  173,  172,  170,  169,  168,  166,  165,
-       164,  163,  162,  161,  160,  159,  158,  157,  155,  153,
-       146,  145,  142,  141,  140,  139,  138,  133,  131,  129,
+-
+-      164,  163,  162,  161,  160,  159,  158,  157,  155,  153,
+-      146,  145,  142,  141,  140,  139,  138,  133,  131,  129,
 -      127,  126,  125,  122,  118,  116,  115,  112,  111,  109,
 -      104,  102,  100,   96,   93,   92,   83,   78,   74,   73,
 -       70,   69,   64,   60,   56,   55,   54,   50,   47,   46,
@@ -3779,19 +3738,73 @@ index cc0388026c..97bc9e468f 100644
 -      535,  535,  535,  535,  535,  535,  535,  535,  535,  535,
 -      535,  535,  535,  535,  535,  535,  535,  535,  535,  535,
 -      535,  535,  535,  535,  535,  535,  535
-+      127,  126,  122,  118,  116,  115,  112,  111,  109,  104,
-+      102,  100,   96,   93,   92,   83,   78,   74,   73,   70,
-+       69,   64,   60,   56,   55,   54,   50,   47,   46,   45,
-+       44,   43,   42,   41,   35,   33,   29,   27,   26,   25,
-+       24,   20,   15,   12,   10,    8,    6,    4,    2,  544,
-+      544,  544,  544,  544,  544,  544,  544,  544,  544,  544,
-+      544,  544,  544,  544,  544,  544,  544,  544,  544,  544,
++      107,  107,  107,  107,  106,  108,  108,  110,  110,  114,
++      113,  119,   80,  114,  120,  125,  113,  156,  117,  119,
++      156,   80,  113,  125,  114,  120,  114,  117,  117,  121,
++      117,  167,  117,  121,  123,  124,  134,  332,  134,  117,
++      117,  117,  150,  150,  123,  124,  144,  175,  144,  175,
++      167,  332,  124,  154,  124,  152,  152,  152,  152,  575,
 +
-+      544,  544,  544,  544,  544,  544,  544,  544,  544,  544,
-+      544,  544,  544,  544,  544,  544,  544,  544,  544,  544,
-+      544,  544,  544,  544,  544,  544,  544,  544,  544,  544,
-+      544,  544,  544,  544,  544,  544,  544,  544,  544,  544,
-+      544,  544,  544,  544,  544,  544
++      154,  117,  171,  571,  124,  124,  154,  124,  171,  180,
++      188,  180,  188,  197,  197,  199,  199,  199,  199,  124,
++      208,  544,  208,  214,  214,  216,  216,  216,  216,  227,
++      255,  255,  276,  276,  543,  227,  310,  310,  315,  315,
++      547,  547,  547,  547,  547,  547,  548,  548,  548,  548,
++      548,  548,  549,  541,  549,  549,  549,  549,  550,  550,
++      551,  551,  551,  551,  551,  551,  552,  552,  552,  552,
++      553,  540,  553,  553,  553,  553,  554,  554,  555,  555,
++      555,  555,  555,  555,  556,  556,  557,  557,  557,  557,
++      557,  557,  558,  558,  558,  558,  559,  559,  560,  560,
++
++      560,  560,  560,  560,  561,  538,  561,  561,  561,  561,
++      562,  562,  563,  563,  563,  563,  563,  563,  564,  535,
++      564,  564,  564,  564,  565,  565,  566,  566,  566,  566,
++      566,  566,  567,  567,  567,  567,  567,  567,  568,  568,
++      568,  568,  568,  568,  569,  569,  570,  570,  572,  572,
++      573,  573,  574,  574,  576,  576,  578,  578,  578,  579,
++      579,  579,  580,  580,  580,  581,  581,  581,  582,  582,
++      582,  583,  583,  583,  533,  530,  526,  525,  524,  523,
++      522,  521,  519,  518,  517,  515,  512,  511,  509,  508,
++      507,  506,  505,  504,  503,  502,  501,  497,  496,  495,
++
++      493,  491,  490,  489,  488,  487,  485,  484,  480,  479,
++      478,  475,  474,  473,  468,  467,  466,  465,  462,  460,
++      459,  457,  456,  455,  454,  452,  450,  449,  448,  447,
++      443,  442,  441,  440,  439,  438,  437,  434,  433,  432,
++      431,  430,  429,  427,  426,  425,  424,  423,  422,  420,
++      419,  417,  416,  413,  412,  411,  410,  409,  408,  407,
++      406,  405,  403,  402,  401,  400,  399,  398,  396,  394,
++      393,  392,  391,  389,  388,  385,  383,  381,  379,  378,
++      377,  375,  374,  372,  371,  370,  369,  368,  367,  366,
++      365,  364,  363,  362,  361,  360,  359,  356,  355,  354,
++
++      353,  351,  350,  349,  348,  347,  346,  345,  341,  340,
++      339,  338,  336,  335,  334,  333,  327,  326,  325,  324,
++      323,  322,  321,  320,  319,  318,  314,  313,  312,  308,
++      306,  305,  304,  303,  302,  301,  300,  299,  298,  297,
++      296,  295,  294,  293,  292,  291,  289,  288,  287,  285,
++      284,  282,  281,  278,  275,  274,  273,  272,  271,  270,
++      268,  266,  264,  262,  261,  260,  259,  258,  257,  256,
++      254,  251,  250,  249,  248,  247,  246,  245,  244,  242,
++      241,  240,  239,  238,  233,  232,  231,  230,  229,  228,
++      226,  225,  224,  223,  206,  205,  204,  195,  194,  193,
++
++      192,  186,  182,  181,  178,  173,  172,  170,  169,  168,
++      166,  165,  164,  163,  162,  161,  160,  159,  158,  157,
++      155,  153,  146,  145,  142,  141,  140,  139,  138,  133,
++      131,  129,  127,  126,  122,  118,  116,  115,  112,  111,
++      109,  104,  102,  100,   96,   93,   92,   83,   78,   74,
++       73,   70,   69,   64,   60,   56,   55,   54,   50,   47,
++       46,   45,   44,   43,   42,   41,   35,   33,   29,   27,
++       26,   25,   24,   20,   15,   12,   10,    8,    6,    4,
++        2,  546,  546,  546,  546,  546,  546,  546,  546,  546,
++      546,  546,  546,  546,  546,  546,  546,  546,  546,  546,
++
++      546,  546,  546,  546,  546,  546,  546,  546,  546,  546,
++      546,  546,  546,  546,  546,  546,  546,  546,  546,  546,
++      546,  546,  546,  546,  546,  546,  546,  546,  546,  546,
++      546,  546,  546,  546,  546,  546,  546,  546,  546,  546,
++      546,  546,  546,  546,  546,  546,  546,  546
      } ;
  
  /* Table of booleans, true if rule could match eol. */
@@ -3814,14 +3827,14 @@ index cc0388026c..97bc9e468f 100644
  				{
  				yy_current_state = (int) yy_def[yy_current_state];
 -				if ( yy_current_state >= 536 )
-+				if ( yy_current_state >= 545 )
++				if ( yy_current_state >= 547 )
  					yy_c = yy_meta[yy_c];
  				}
  			yy_current_state = yy_nxt[yy_base[yy_current_state] + yy_c];
  			++yy_cp;
  			}
 -		while ( yy_base[yy_current_state] != 971 );
-+		while ( yy_base[yy_current_state] != 980 );
++		while ( yy_base[yy_current_state] != 982 );
  
  yy_find_action:
  		yy_act = yy_accept[yy_current_state];
@@ -3830,7 +3843,7 @@ index cc0388026c..97bc9e468f 100644
  case 147:
  YY_RULE_SETUP
 -{ return IF_KEY; }
-+{ return OP_RBIT; }
++{ return OP_BITREV; }
  	YY_BREAK
  case 148:
  YY_RULE_SETUP
@@ -3952,7 +3965,7 @@ index cc0388026c..97bc9e468f 100644
  			{
  			yy_current_state = (int) yy_def[yy_current_state];
 -			if ( yy_current_state >= 536 )
-+			if ( yy_current_state >= 545 )
++			if ( yy_current_state >= 547 )
  				yy_c = yy_meta[yy_c];
  			}
  		yy_current_state = yy_nxt[yy_base[yy_current_state] + yy_c];
@@ -3961,37 +3974,37 @@ index cc0388026c..97bc9e468f 100644
  		{
  		yy_current_state = (int) yy_def[yy_current_state];
 -		if ( yy_current_state >= 536 )
-+		if ( yy_current_state >= 545 )
++		if ( yy_current_state >= 547 )
  			yy_c = yy_meta[yy_c];
  		}
  	yy_current_state = yy_nxt[yy_base[yy_current_state] + yy_c];
 -	yy_is_jam = (yy_current_state == 535);
-+	yy_is_jam = (yy_current_state == 544);
++	yy_is_jam = (yy_current_state == 546);
  
  		return yy_is_jam ? 0 : yy_current_state;
  }
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/slghscan.l b/Ghidra/Features/Decompiler/src/decompile/cpp/slghscan.l
-index 2387c15c14..9c64d5194c 100644
+index 2387c15c14..b47cbdfbcb 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/slghscan.l
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/slghscan.l
 @@ -651,6 +651,8 @@ with   { BEGIN(pattern); withsection = 1; slgh->calcContextLayout(); return WITH
  <sem>newobject     { return OP_NEW; }
  <sem>popcount      { return OP_POPCOUNT; }
  <sem>lzcount       { return OP_LZCOUNT; }
-+<sem>rbit          { return OP_RBIT; }
++<sem>bitrev        { return OP_BITREV; }
 +<sem>tzcount       { return OP_TZCOUNT; }
  <sem>if            { return IF_KEY; }
  <sem>goto          { return GOTO_KEY; }
  <sem>call          { return CALL_KEY; }
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/typeop.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/typeop.cc
-index 3d753042ff..dfd08774d0 100644
+index 3d753042ff..2bb49723b5 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/typeop.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/typeop.cc
 @@ -106,6 +106,8 @@ void TypeOp::registerInstructions(vector<TypeOp *> &inst,TypeFactory *tlst,
    inst[CPUI_POPCOUNT] = new TypeOpPopcount(tlst);
    inst[CPUI_LZCOUNT] = new TypeOpLzcount(tlst);
    inst[CPUI_SPULL] = new TypeOpSpull(tlst);
-+  inst[CPUI_RBIT] = new TypeOpRbit(tlst);
++  inst[CPUI_BITREV] = new TypeOpBitrev(tlst);
 +  inst[CPUI_TZCOUNT] = new TypeOpTzcount(tlst);
  }
  
@@ -4000,15 +4013,15 @@ index 3d753042ff..dfd08774d0 100644
    behave = new OpBehaviorLzcount();
  }
  
-+TypeOpRbit::TypeOpRbit(TypeFactory *t)
-+  : TypeOpFunc(t,CPUI_RBIT,"RBIT",TYPE_INT,TYPE_UNKNOWN)
++TypeOpBitrev::TypeOpBitrev(TypeFactory *t)
++  : TypeOpFunc(t,CPUI_BITREV,"BITREV",TYPE_INT,TYPE_UNKNOWN)
 +{
 +  opflags = PcodeOp::unary;
-+  behave = new OpBehaviorRbit();
++  behave = new OpBehaviorBitrev();
 +}
 +
 +TypeOpTzcount::TypeOpTzcount(TypeFactory *t)
-+  : TypeOpFunc(t,CPUI_RBIT,"TZCOUNT",TYPE_INT,TYPE_UNKNOWN)
++  : TypeOpFunc(t,CPUI_TZCOUNT,"TZCOUNT",TYPE_INT,TYPE_UNKNOWN)
 +{
 +  opflags = PcodeOp::unary;
 +  behave = new OpBehaviorTzcount();
@@ -4016,14 +4029,14 @@ index 3d753042ff..dfd08774d0 100644
 +
  } // End namespace ghidra
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/unionresolve.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/unionresolve.cc
-index 568eec4528..1bc2990690 100644
+index 568eec4528..1a14363df6 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/unionresolve.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/unionresolve.cc
 @@ -478,6 +478,8 @@ void ScoreUnionFields::scoreTrialDown(const Trial &trial,bool lastLevel)
      case CPUI_INT_OR:
      case CPUI_POPCOUNT:
      case CPUI_LZCOUNT:
-+    case CPUI_RBIT:
++    case CPUI_BITREV:
 +    case CPUI_TZCOUNT:
        if (meta == TYPE_ARRAY || meta == TYPE_STRUCT || meta == TYPE_UNION || meta == TYPE_CODE || meta == TYPE_FLOAT)
  	score = -5;
@@ -4032,29 +4045,16 @@ index 568eec4528..1bc2990690 100644
      case CPUI_INT_OR:
      case CPUI_POPCOUNT:
      case CPUI_LZCOUNT:
-+    case CPUI_RBIT:
++    case CPUI_BITREV:
 +    case CPUI_TZCOUNT:
        if (meta == TYPE_ARRAY || meta == TYPE_STRUCT || meta == TYPE_UNION || meta == TYPE_CODE || meta == TYPE_FLOAT)
  	score = -5;
        else if (meta == TYPE_PTR || meta == TYPE_BOOL)
-diff --git a/Ghidra/Framework/Emulation/src/main/java/ghidra/pcode/opbehavior/OpBehaviorFactory.java b/Ghidra/Framework/Emulation/src/main/java/ghidra/pcode/opbehavior/OpBehaviorFactory.java
-index 83eb771d1d..e787d2a415 100644
---- a/Ghidra/Framework/Emulation/src/main/java/ghidra/pcode/opbehavior/OpBehaviorFactory.java
-+++ b/Ghidra/Framework/Emulation/src/main/java/ghidra/pcode/opbehavior/OpBehaviorFactory.java
-@@ -107,6 +107,8 @@ public class OpBehaviorFactory {
- 		opBehaviorMap.put(PcodeOp.POPCOUNT, new OpBehaviorPopcount());
- 		opBehaviorMap.put(PcodeOp.LZCOUNT, new OpBehaviorLzcount());
- 		opBehaviorMap.put(PcodeOp.SPULL, new SpecialOpBehavior(PcodeOp.SPULL));
-+		opBehaviorMap.put(PcodeOp.RBIT, new OpBehaviorRbit());
-+		opBehaviorMap.put(PcodeOp.TZCOUNT, new OpBehaviorTzcount());
- 	}
- 
- 	private OpBehaviorFactory() {
-diff --git a/Ghidra/Framework/Emulation/src/main/java/ghidra/pcode/opbehavior/OpBehaviorRbit.java b/Ghidra/Framework/Emulation/src/main/java/ghidra/pcode/opbehavior/OpBehaviorRbit.java
+diff --git a/Ghidra/Framework/Emulation/src/main/java/ghidra/pcode/opbehavior/OpBehaviorBitrev.java b/Ghidra/Framework/Emulation/src/main/java/ghidra/pcode/opbehavior/OpBehaviorBitrev.java
 new file mode 100644
-index 0000000000..a0184ce16c
+index 0000000000..83a46dcc24
 --- /dev/null
-+++ b/Ghidra/Framework/Emulation/src/main/java/ghidra/pcode/opbehavior/OpBehaviorRbit.java
++++ b/Ghidra/Framework/Emulation/src/main/java/ghidra/pcode/opbehavior/OpBehaviorBitrev.java
 @@ -0,0 +1,49 @@
 +/* ###
 + * IP: GHIDRA
@@ -4077,10 +4077,10 @@ index 0000000000..a0184ce16c
 +
 +import java.math.BigInteger;
 +
-+public class OpBehaviorRbit extends UnaryOpBehavior {
++public class OpBehaviorBitrev extends UnaryOpBehavior {
 +
-+	public OpBehaviorRbit() {
-+		super(PcodeOp.RBIT);
++	public OpBehaviorBitrev() {
++		super(PcodeOp.BITREV);
 +	}
 +
 +	@Override
@@ -4105,6 +4105,19 @@ index 0000000000..a0184ce16c
 +		return new BigInteger(1, resbytes);
 +	}
 +}
+diff --git a/Ghidra/Framework/Emulation/src/main/java/ghidra/pcode/opbehavior/OpBehaviorFactory.java b/Ghidra/Framework/Emulation/src/main/java/ghidra/pcode/opbehavior/OpBehaviorFactory.java
+index 83eb771d1d..e567dc5476 100644
+--- a/Ghidra/Framework/Emulation/src/main/java/ghidra/pcode/opbehavior/OpBehaviorFactory.java
++++ b/Ghidra/Framework/Emulation/src/main/java/ghidra/pcode/opbehavior/OpBehaviorFactory.java
+@@ -107,6 +107,8 @@ public class OpBehaviorFactory {
+ 		opBehaviorMap.put(PcodeOp.POPCOUNT, new OpBehaviorPopcount());
+ 		opBehaviorMap.put(PcodeOp.LZCOUNT, new OpBehaviorLzcount());
+ 		opBehaviorMap.put(PcodeOp.SPULL, new SpecialOpBehavior(PcodeOp.SPULL));
++		opBehaviorMap.put(PcodeOp.BITREV, new OpBehaviorBitrev());
++		opBehaviorMap.put(PcodeOp.TZCOUNT, new OpBehaviorTzcount());
+ 	}
+ 
+ 	private OpBehaviorFactory() {
 diff --git a/Ghidra/Framework/Emulation/src/main/java/ghidra/pcode/opbehavior/OpBehaviorTzcount.java b/Ghidra/Framework/Emulation/src/main/java/ghidra/pcode/opbehavior/OpBehaviorTzcount.java
 new file mode 100644
 index 0000000000..7b8d1ef8a5
@@ -4174,28 +4187,28 @@ index 0000000000..7b8d1ef8a5
 +	}
 +}
 diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/opcodes/OpCode.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/opcodes/OpCode.java
-index 3b558109a7..7a41d5b3db 100644
+index 3b558109a7..ac90a04eac 100644
 --- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/opcodes/OpCode.java
 +++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/opcodes/OpCode.java
 @@ -122,6 +122,8 @@ public enum OpCode {
  	CPUI_POPCOUNT("POPCOUNT"),
  	CPUI_LZCOUNT("LZCOUNT"),
  	CPUI_SPULL("SPULL"),
-+	CPUI_RBIT("RBIT"),
++	CPUI_BITREV("BITREV"),
 +	CPUI_TZCOUNT("TZCOUNT"),
  
  	CPUI_MAX(null);
  
 diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/slgh_compile/PcodeCompile.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/slgh_compile/PcodeCompile.java
-index fb04e1f4df..f3eee28104 100644
+index fb04e1f4df..7d8bc0912f 100644
 --- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/slgh_compile/PcodeCompile.java
 +++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/slgh_compile/PcodeCompile.java
 @@ -1001,6 +1001,12 @@ public abstract class PcodeCompile {
  		if ("lzcount".equals(name) && hasOperands(1, operands, location, name)) {
  			return createOp(location, OpCode.CPUI_LZCOUNT, r);
  		}
-+		if ("rbit".equals(name) && hasOperands(1, operands, location, name)) {
-+			return createOp(location, OpCode.CPUI_RBIT, r);
++		if ("bitrev".equals(name) && hasOperands(1, operands, location, name)) {
++			return createOp(location, OpCode.CPUI_BITREV, r);
 +		}
 +		if ("tzcount".equals(name) && hasOperands(1, operands, location, name)) {
 +			return createOp(location, OpCode.CPUI_TZCOUNT, r);
@@ -4207,7 +4220,7 @@ index fb04e1f4df..f3eee28104 100644
  		if ("lzcount".equals(name)) {
  			return true;
  		}
-+		if ("rbit".equals(name)) {
++		if ("bitrev".equals(name)) {
 +			return true;
 +		}
 +		if ("tzcount".equals(name)) {
@@ -4217,7 +4230,7 @@ index fb04e1f4df..f3eee28104 100644
  		return false;
  	}
 diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/DynamicHash.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/DynamicHash.java
-index 4452cf0f2f..37ad0c173d 100644
+index 4452cf0f2f..563f02ab14 100644
 --- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/DynamicHash.java
 +++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/DynamicHash.java
 @@ -76,7 +76,7 @@ public class DynamicHash {
@@ -4225,19 +4238,19 @@ index 4452cf0f2f..37ad0c173d 100644
  		PcodeOp.INT_ADD, PcodeOp.INT_ADD,		// PTRADD and PTRSUB hash same as INT_ADD
  		PcodeOp.SEGMENTOP, PcodeOp.CPOOLREF, PcodeOp.NEW, PcodeOp.INSERT, PcodeOp.ZPULL,
 -		PcodeOp.POPCOUNT, PcodeOp.LZCOUNT, PcodeOp.SPULL };
-+		PcodeOp.POPCOUNT, PcodeOp.LZCOUNT, PcodeOp.SPULL, PcodeOp.RBIT, PcodeOp.TZCOUNT };
++		PcodeOp.POPCOUNT, PcodeOp.LZCOUNT, PcodeOp.SPULL, PcodeOp.BITREV, PcodeOp.TZCOUNT };
  
  	/**
  	 * An edge between a Varnode and a PcodeOp
 diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/PcodeOp.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/PcodeOp.java
-index 713ebfdef4..bdd64dff67 100644
+index 713ebfdef4..88fee738c9 100644
 --- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/PcodeOp.java
 +++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/PcodeOp.java
 @@ -134,8 +134,10 @@ public class PcodeOp {
  	public static final int POPCOUNT = 72;
  	public static final int LZCOUNT = 73;
  	public static final int SPULL = 74;
-+	public static final int RBIT = 75;
++	public static final int BITREV = 75;
 +	public static final int TZCOUNT = 76;
  
 -	public static final int PCODE_MAX = 75;
@@ -4249,18 +4262,18 @@ index 713ebfdef4..bdd64dff67 100644
  				return "LZCOUNT";
  			case SPULL:
  				return "SPULL";
-+			case RBIT:
-+				return "RBIT";
++			case BITREV:
++				return "BITREV";
 +			case TZCOUNT:
 +				return "TZCOUNT";
  			default:
  				return "INVALID_OP";
  		}
 diff --git a/Ghidra/Processors/AARCH64/data/languages/AARCH64base.sinc b/Ghidra/Processors/AARCH64/data/languages/AARCH64base.sinc
-index 041ea4bcec..b9c062e3b3 100644
+index a10a3c2ac9..98a5b73481 100644
 --- a/Ghidra/Processors/AARCH64/data/languages/AARCH64base.sinc
 +++ b/Ghidra/Processors/AARCH64/data/languages/AARCH64base.sinc
-@@ -5238,13 +5238,7 @@ is size.ldstr=3 & b_2729=7 & v=0 & b_2425=0 & b_2223=2 & b_2121=0 & addr_SIMM9 &
+@@ -5237,13 +5237,7 @@ is size.ldstr=3 & b_2729=7 & v=0 & b_2425=0 & b_2223=2 & b_2121=0 & addr_SIMM9 &
  :rbit Rd_GPR32, Rn_GPR32
  is sf=0 & b_3030=1 & S=0 & b_2428=0x1a & b_2123=6 & dp1.opcode2=0x0 & b_1015=0x0 & Rn_GPR32 & Rd_GPR32 & Rd_GPR64
  {
@@ -4271,11 +4284,11 @@ index 041ea4bcec..b9c062e3b3 100644
 -	tmp = (((tmp & 0xf0f0f0f0) >> 4) | ((tmp & 0x0f0f0f0f) << 4));
 -	tmp = (((tmp & 0xff00ff00) >> 8) | ((tmp & 0x00ff00ff) << 8));
 -	tmp = ((tmp >> 16) | (tmp << 16));
-+	local tmp:4 = rbit(Rn_GPR32);
++	local tmp:4 = bitrev(Rn_GPR32);
  	Rd_GPR64 = zext(tmp);
  }
  
-@@ -5255,14 +5249,7 @@ is sf=0 & b_3030=1 & S=0 & b_2428=0x1a & b_2123=6 & dp1.opcode2=0x0 & b_1015=0x0
+@@ -5254,14 +5248,7 @@ is sf=0 & b_3030=1 & S=0 & b_2428=0x1a & b_2123=6 & dp1.opcode2=0x0 & b_1015=0x0
  :rbit Rd_GPR64, Rn_GPR64
  is sf=1 & b_3030=1 & S=0 & b_2428=0x1a & b_2123=6 & dp1.opcode2=0x0 & b_1015=0x0 & Rn_GPR64 & Rd_GPR64
  {
@@ -4287,10 +4300,54 @@ index 041ea4bcec..b9c062e3b3 100644
 -	tmp = (((tmp & 0xff00ff00ff00ff00) >> 8) | ((tmp & 0x00ff00ff00ff00ff) << 8));
 -	tmp = (((tmp & 0xffff0000ffff0000) >> 16) | ((tmp & 0x0000ffff0000ffff) << 16));
 -	Rd_GPR64 = ((tmp >> 32) | (tmp << 32));
-+	Rd_GPR64 = rbit(Rn_GPR64);
++	Rd_GPR64 = bitrev(Rn_GPR64);
  }
  
  # C6.2.254 RET page C6-1730 line 102090 MATCH xd65f0000/mask=xfffffc1f
+@@ -8806,28 +8793,14 @@ is sf=1 & b_30=1 & S=0 & b_2428=0x1a & b_2123=0x6 & b_1620=0x0 & b_1015=0x7 & Rd
+ :ctz Rd_GPR32, Rn_GPR32
+ is sf=0 & b_3030=1 & S=0 & b_2428=0x1a & b_2123=6 & dp1.opcode2=0x0 & b_1015=0x6 & Rn_GPR32 & Rd_GPR32 & Rd_GPR64
+ {
+-	# equivalent to RBIT; CLZ
+-	local tmp = Rn_GPR32;
+-	tmp = (((tmp & 0xaaaaaaaa) >> 1) | ((tmp & 0x55555555) << 1));
+-	tmp = (((tmp & 0xcccccccc) >> 2) | ((tmp & 0x33333333) << 2));
+-	tmp = (((tmp & 0xf0f0f0f0) >> 4) | ((tmp & 0x0f0f0f0f) << 4));
+-	tmp = (((tmp & 0xff00ff00) >> 8) | ((tmp & 0x00ff00ff) << 8));
+-	tmp = ((tmp >> 16) | (tmp << 16));
+-	Rd_GPR64 = lzcount(tmp);
++	local tmp:4 = tzcount(Rn_GPR32);
++	Rd_GPR64 = zext(tmp);
+ }
+ 
+ :ctz Rd_GPR64, Rn_GPR64
+ is sf=1 & b_3030=1 & S=0 & b_2428=0x1a & b_2123=6 & dp1.opcode2=0x0 & b_1015=0x6 & Rn_GPR64 & Rd_GPR64
+ {
+-	# equivalent to RBIT; CLZ
+-	local tmp = Rn_GPR64;
+-	tmp = (((tmp & 0xaaaaaaaaaaaaaaaa) >> 1) | ((tmp & 0x5555555555555555) << 1));
+-	tmp = (((tmp & 0xcccccccccccccccc) >> 2) | ((tmp & 0x3333333333333333) << 2));
+-	tmp = (((tmp & 0xf0f0f0f0f0f0f0f0) >> 4) | ((tmp & 0x0f0f0f0f0f0f0f0f) << 4));
+-	tmp = (((tmp & 0xff00ff00ff00ff00) >> 8) | ((tmp & 0x00ff00ff00ff00ff) << 8));
+-	tmp = (((tmp & 0xffff0000ffff0000) >> 16) | ((tmp & 0x0000ffff0000ffff) << 16));
+-	tmp = ((tmp >> 32) | (tmp << 32));
+-	Rd_GPR64 = lzcount(tmp);
++	Rd_GPR64 = tzcount(Rn_GPR64);
+ }
+ 
+ cssc_simm32: "#"^val is simm8 [ val = simm8 * 1; ] { export *[const]:4 val; }
+diff --git a/Ghidra/Processors/VideoCore/data/languages/vc4.slaspec b/Ghidra/Processors/VideoCore/data/languages/vc4.slaspec
+index 41c37122d2..31cc9abb3f 100644
+--- a/Ghidra/Processors/VideoCore/data/languages/vc4.slaspec
++++ b/Ghidra/Processors/VideoCore/data/languages/vc4.slaspec
+@@ -1042,7 +1042,6 @@ ldstcond: ldstinst is ldstinst & cond
+ # Arithmetic and Logical Operations
+ ################################################################
+ 
+-define pcodeop bitrev;
+ define pcodeop adds;
+ define pcodeop subs;
+ define pcodeop shls;
 -- 
 2.45.1
 

@@ -1,0 +1,191 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Liam <byteslice@airmail.cc>
+Date: Tue, 31 Mar 2026 22:33:10 -0400
+Subject: [PATCH] 9092: Decompiler: implement operator associativity handling
+
+---
+ .../cpp/include/ghidra/printlanguage.hh       |   8 +-
+ .../Decompiler/src/decompile/cpp/printc.cc    | 110 +++++++++---------
+ .../Decompiler/src/decompile/cpp/printjava.cc |   2 +-
+ .../src/decompile/cpp/printlanguage.cc        |   4 +-
+ 4 files changed, 66 insertions(+), 58 deletions(-)
+
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/printlanguage.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/printlanguage.hh
+index 9f1240728f..97bf7cc706 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/printlanguage.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/printlanguage.hh
+@@ -94,11 +94,17 @@ public:
+     hiddenfunction,		///< Operation that isn't explicitly printed
+     unary_postfix		///< Unary operator form (printed after its input)
+   };
++  enum tokenassoc {
++    unspec,			///< Unspecified associativity (for where it doesn't make sense)
++    none,			///< Associativity disallowed (parentheses always required)
++    ltr,			///< Left-to-right associativity (parentheses required for right subexpression)
++    rtl,			///< Right-to-left associativity (parentheses required for left subexpression)
++  };
+   string print1;		///< Printing characters for the token
+   string print2;		///< (terminating) characters for the token
+   int4 stage;			///< Additional elements consumed from the RPN stack when emitting this token
+   int4 precedence;		///< Precedence level of this token (higher binds more tightly)
+-  bool associative;		///< True if the operator is associative
++  tokenassoc assoc;		///< The token's associativity
+   tokentype type;		///< The basic token type
+   int4 spacing;			///< Spaces to print around operator
+   int4 bump;			///< Spaces to indent if we break here
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/printc.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/printc.cc
+index 151c177edd..db2a9cd341 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/printc.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/printc.cc
+@@ -20,65 +20,65 @@ namespace ghidra {
+ 
+ // Operator tokens for expressions
+ //                        token #in prec assoc   optype       space bump negate
+-OpToken PrintC::hidden = { "", "", 1, 70, false, OpToken::hiddenfunction, 0, 0, (OpToken *)0 };
+-OpToken PrintC::scope = { "::", "", 2, 70, true, OpToken::binary, 0, 0, (OpToken *)0 };
+-OpToken PrintC::object_member = { ".", "", 2, 66, true, OpToken::binary, 0, 0, (OpToken *)0  };
+-OpToken PrintC::pointer_member = { "->", "", 2, 66, true, OpToken::binary, 0, 0, (OpToken *)0 };
+-OpToken PrintC::subscript = { "[", "]", 2, 66, false, OpToken::postsurround, 0, 0, (OpToken *)0 };
+-OpToken PrintC::function_call = { "(", ")", 2, 66, false, OpToken::postsurround, 0, 10, (OpToken *)0 };
+-OpToken PrintC::bitwise_not = { "~", "", 1, 62, false, OpToken::unary_prefix, 0, 0, (OpToken *)0 };
+-OpToken PrintC::boolean_not = { "!", "", 1, 62, false, OpToken::unary_prefix, 0, 0, (OpToken *)0 };
+-OpToken PrintC::unary_minus = { "-", "", 1, 62, false, OpToken::unary_prefix, 0, 0, (OpToken *)0 };
+-OpToken PrintC::unary_plus = { "+", "", 1, 62, false, OpToken::unary_prefix, 0, 0, (OpToken *)0 };
+-OpToken PrintC::pre_increment = { "++", "",  1, 66, false, OpToken::unary_prefix, 0, 0, (OpToken *)0 };
+-OpToken PrintC::pre_decrement = { "--", "", 1, 66, false, OpToken::unary_prefix, 0, 0, (OpToken *)0 };
+-OpToken PrintC::post_increment = { "++", "", 1, 66, false, OpToken::unary_postfix, 0, 0, (OpToken *)0 };
+-OpToken PrintC::post_decrement = { "--", "", 1, 66, false, OpToken::unary_postfix, 0, 0, (OpToken *)0 };
+-OpToken PrintC::addressof = { "&", "", 1, 62, false, OpToken::unary_prefix, 0, 0, (OpToken *)0 };
+-OpToken PrintC::dereference = { "*", "", 1, 62, false, OpToken::unary_prefix, 0, 0, (OpToken *)0 };
+-OpToken PrintC::typecast = { "(", ")", 2, 62, false, OpToken::presurround, 0, 0, (OpToken *)0 };
+-OpToken PrintC::multiply = { "*", "", 2, 54, true, OpToken::binary, 1, 0, (OpToken *)0 };
+-OpToken PrintC::divide = { "/", "", 2, 54, false, OpToken::binary, 1, 0, (OpToken *)0 };
+-OpToken PrintC::modulo = { "%", "", 2, 54, false, OpToken::binary, 1, 0, (OpToken *)0 };
+-OpToken PrintC::binary_plus = { "+", "", 2, 50, true, OpToken::binary, 1, 0, (OpToken *)0 };
+-OpToken PrintC::binary_minus = { "-", "", 2, 50, false, OpToken::binary, 1, 0, (OpToken *)0 };
+-OpToken PrintC::shift_left = { "<<", "", 2, 46, false, OpToken::binary, 1, 0, (OpToken *)0 };
+-OpToken PrintC::shift_right = { ">>", "", 2, 46, false, OpToken::binary, 1, 0, (OpToken *)0 };
+-OpToken PrintC::shift_sright = { ">>", "", 2, 46, false, OpToken::binary, 1, 0, (OpToken *)0 };
+-OpToken PrintC::less_than = { "<", "", 2, 42, false, OpToken::binary, 1, 0, (OpToken *)0 };
+-OpToken PrintC::less_equal = { "<=", "", 2, 42, false, OpToken::binary, 1, 0, (OpToken *)0 };
+-OpToken PrintC::greater_than = { ">", "", 2, 42, false, OpToken::binary, 1, 0, (OpToken *)0 };
+-OpToken PrintC::greater_equal = { ">=", "", 2, 42, false, OpToken::binary, 1, 0, (OpToken *)0 };
+-OpToken PrintC::equal = { "==", "", 2, 38, false, OpToken::binary, 1, 0, (OpToken *)0 };
+-OpToken PrintC::not_equal = { "!=", "", 2, 38, false, OpToken::binary, 1, 0, (OpToken *)0 };
+-OpToken PrintC::bitwise_and = { "&", "", 2, 34, true, OpToken::binary, 1, 0, (OpToken *)0 };
+-OpToken PrintC::bitwise_xor = { "^", "", 2, 30, true, OpToken::binary, 1, 0, (OpToken *)0 };
+-OpToken PrintC::bitwise_or = { "|", "", 2, 26, true, OpToken::binary, 1, 0, (OpToken *)0 };
+-OpToken PrintC::boolean_and = { "&&", "", 2, 22, false, OpToken::binary, 1, 0, (OpToken *)0 };
+-OpToken PrintC::boolean_xor = { "^^", "", 2, 20, false, OpToken::binary, 1, 0, (OpToken *)0 };
+-OpToken PrintC::boolean_or = { "||", "", 2, 18, false, OpToken::binary, 1, 0, (OpToken *)0 };
+-OpToken PrintC::assignment = { "=", "", 2, 14, false, OpToken::binary, 1, 5, (OpToken *)0 };
+-OpToken PrintC::comma = { ",", "", 2, 2, true, OpToken::binary_trailspace, 1, 0, (OpToken *)0 };
+-OpToken PrintC::new_op = { "", "", 2, 62, false, OpToken::space, 1, 0, (OpToken *)0 };
++OpToken PrintC::hidden = { "", "", 1, 70, OpToken::unspec, OpToken::hiddenfunction, 0, 0, (OpToken *)0 };
++OpToken PrintC::scope = { "::", "", 2, 70, OpToken::unspec, OpToken::binary, 0, 0, (OpToken *)0 };
++OpToken PrintC::object_member = { ".", "", 2, 66, OpToken::ltr, OpToken::binary, 0, 0, (OpToken *)0  };
++OpToken PrintC::pointer_member = { "->", "", 2, 66, OpToken::ltr, OpToken::binary, 0, 0, (OpToken *)0 };
++OpToken PrintC::subscript = { "[", "]", 2, 66, OpToken::ltr, OpToken::postsurround, 0, 0, (OpToken *)0 };
++OpToken PrintC::function_call = { "(", ")", 2, 66, OpToken::ltr, OpToken::postsurround, 0, 10, (OpToken *)0 };
++OpToken PrintC::bitwise_not = { "~", "", 1, 62, OpToken::rtl, OpToken::unary_prefix, 0, 0, (OpToken *)0 };
++OpToken PrintC::boolean_not = { "!", "", 1, 62, OpToken::rtl, OpToken::unary_prefix, 0, 0, (OpToken *)0 };
++OpToken PrintC::unary_minus = { "-", "", 1, 62, OpToken::rtl, OpToken::unary_prefix, 0, 0, (OpToken *)0 };
++OpToken PrintC::unary_plus = { "+", "", 1, 62, OpToken::rtl, OpToken::unary_prefix, 0, 0, (OpToken *)0 };
++OpToken PrintC::pre_increment = { "++", "",  1, 66, OpToken::ltr, OpToken::unary_prefix, 0, 0, (OpToken *)0 };
++OpToken PrintC::pre_decrement = { "--", "", 1, 66, OpToken::ltr, OpToken::unary_prefix, 0, 0, (OpToken *)0 };
++OpToken PrintC::post_increment = { "++", "", 1, 66, OpToken::rtl, OpToken::unary_postfix, 0, 0, (OpToken *)0 };
++OpToken PrintC::post_decrement = { "--", "", 1, 66, OpToken::rtl, OpToken::unary_postfix, 0, 0, (OpToken *)0 };
++OpToken PrintC::addressof = { "&", "", 1, 62, OpToken::rtl, OpToken::unary_prefix, 0, 0, (OpToken *)0 };
++OpToken PrintC::dereference = { "*", "", 1, 62, OpToken::rtl, OpToken::unary_prefix, 0, 0, (OpToken *)0 };
++OpToken PrintC::typecast = { "(", ")", 2, 62, OpToken::rtl, OpToken::presurround, 0, 0, (OpToken *)0 };
++OpToken PrintC::multiply = { "*", "", 2, 54, OpToken::ltr, OpToken::binary, 1, 0, (OpToken *)0 };
++OpToken PrintC::divide = { "/", "", 2, 54, OpToken::ltr, OpToken::binary, 1, 0, (OpToken *)0 };
++OpToken PrintC::modulo = { "%", "", 2, 54, OpToken::ltr, OpToken::binary, 1, 0, (OpToken *)0 };
++OpToken PrintC::binary_plus = { "+", "", 2, 50, OpToken::ltr, OpToken::binary, 1, 0, (OpToken *)0 };
++OpToken PrintC::binary_minus = { "-", "", 2, 50, OpToken::ltr, OpToken::binary, 1, 0, (OpToken *)0 };
++OpToken PrintC::shift_left = { "<<", "", 2, 46, OpToken::ltr, OpToken::binary, 1, 0, (OpToken *)0 };
++OpToken PrintC::shift_right = { ">>", "", 2, 46, OpToken::ltr, OpToken::binary, 1, 0, (OpToken *)0 };
++OpToken PrintC::shift_sright = { ">>", "", 2, 46, OpToken::ltr, OpToken::binary, 1, 0, (OpToken *)0 };
++OpToken PrintC::less_than = { "<", "", 2, 42, OpToken::ltr, OpToken::binary, 1, 0, (OpToken *)0 };
++OpToken PrintC::less_equal = { "<=", "", 2, 42, OpToken::ltr, OpToken::binary, 1, 0, (OpToken *)0 };
++OpToken PrintC::greater_than = { ">", "", 2, 42, OpToken::ltr, OpToken::binary, 1, 0, (OpToken *)0 };
++OpToken PrintC::greater_equal = { ">=", "", 2, 42, OpToken::ltr, OpToken::binary, 1, 0, (OpToken *)0 };
++OpToken PrintC::equal = { "==", "", 2, 38, OpToken::ltr, OpToken::binary, 1, 0, (OpToken *)0 };
++OpToken PrintC::not_equal = { "!=", "", 2, 38, OpToken::ltr, OpToken::binary, 1, 0, (OpToken *)0 };
++OpToken PrintC::bitwise_and = { "&", "", 2, 34, OpToken::ltr, OpToken::binary, 1, 0, (OpToken *)0 };
++OpToken PrintC::bitwise_xor = { "^", "", 2, 30, OpToken::ltr, OpToken::binary, 1, 0, (OpToken *)0 };
++OpToken PrintC::bitwise_or = { "|", "", 2, 26, OpToken::ltr, OpToken::binary, 1, 0, (OpToken *)0 };
++OpToken PrintC::boolean_and = { "&&", "", 2, 22, OpToken::ltr, OpToken::binary, 1, 0, (OpToken *)0 };
++OpToken PrintC::boolean_xor = { "^^", "", 2, 20, OpToken::ltr, OpToken::binary, 1, 0, (OpToken *)0 };
++OpToken PrintC::boolean_or = { "||", "", 2, 18, OpToken::ltr, OpToken::binary, 1, 0, (OpToken *)0 };
++OpToken PrintC::assignment = { "=", "", 2, 14, OpToken::rtl, OpToken::binary, 1, 5, (OpToken *)0 };
++OpToken PrintC::comma = { ",", "", 2, 2, OpToken::ltr, OpToken::binary_trailspace, 0, 0, (OpToken *)0 };
++OpToken PrintC::new_op = { "", "", 2, 62, OpToken::unspec, OpToken::space, 1, 0, (OpToken *)0 };
+ 
+ // Inplace assignment operators
+-OpToken PrintC::multequal = { "*=", "", 2, 14, false, OpToken::binary, 1, 5, (OpToken *)0 };
+-OpToken PrintC::divequal = { "/=", "", 2, 14, false, OpToken::binary, 1, 5, (OpToken *)0 };
+-OpToken PrintC::remequal = { "%=", "", 2, 14, false, OpToken::binary, 1, 5, (OpToken *)0 };
+-OpToken PrintC::plusequal = { "+=", "", 2, 14, false, OpToken::binary, 1, 5, (OpToken *)0 };
+-OpToken PrintC::minusequal = { "-=", "", 2, 14, false, OpToken::binary, 1, 5, (OpToken *)0 };
+-OpToken PrintC::leftequal = { "<<=", "", 2, 14, false, OpToken::binary, 1, 5, (OpToken *)0 };
+-OpToken PrintC::rightequal = { ">>=", "", 2, 14, false, OpToken::binary, 1, 5, (OpToken *)0 };
+-OpToken PrintC::andequal = { "&=", "", 2, 14, false, OpToken::binary, 1, 5, (OpToken *)0 };
+-OpToken PrintC::orequal = { "|=", "", 2, 14, false, OpToken::binary, 1, 5, (OpToken *)0 };
+-OpToken PrintC::xorequal = { "^=", "", 2, 14, false, OpToken::binary, 1, 5, (OpToken *)0 };
++OpToken PrintC::multequal = { "*=", "", 2, 14, OpToken::rtl, OpToken::binary, 1, 5, (OpToken *)0 };
++OpToken PrintC::divequal = { "/=", "", 2, 14, OpToken::rtl, OpToken::binary, 1, 5, (OpToken *)0 };
++OpToken PrintC::remequal = { "%=", "", 2, 14, OpToken::rtl, OpToken::binary, 1, 5, (OpToken *)0 };
++OpToken PrintC::plusequal = { "+=", "", 2, 14, OpToken::rtl, OpToken::binary, 1, 5, (OpToken *)0 };
++OpToken PrintC::minusequal = { "-=", "", 2, 14, OpToken::rtl, OpToken::binary, 1, 5, (OpToken *)0 };
++OpToken PrintC::leftequal = { "<<=", "", 2, 14, OpToken::rtl, OpToken::binary, 1, 5, (OpToken *)0 };
++OpToken PrintC::rightequal = { ">>=", "", 2, 14, OpToken::rtl, OpToken::binary, 1, 5, (OpToken *)0 };
++OpToken PrintC::andequal = { "&=", "", 2, 14, OpToken::rtl, OpToken::binary, 1, 5, (OpToken *)0 };
++OpToken PrintC::orequal = { "|=", "", 2, 14, OpToken::rtl, OpToken::binary, 1, 5, (OpToken *)0 };
++OpToken PrintC::xorequal = { "^=", "", 2, 14, OpToken::rtl, OpToken::binary, 1, 5, (OpToken *)0 };
+ 
+ // Operator tokens for type expressions
+-OpToken PrintC::type_expr_space = { "", "", 2, 10, false, OpToken::space, 1, 0, (OpToken *)0 };
+-OpToken PrintC::type_expr_nospace = { "", "", 2, 10, false, OpToken::space, 0, 0, (OpToken *)0 };
+-OpToken PrintC::ptr_expr = { "*", "", 1, 62, false, OpToken::unary_prefix, 0, 0, (OpToken *)0 };
+-OpToken PrintC::array_expr = { "[", "]", 2, 66, false, OpToken::postsurround, 1, 0, (OpToken *)0 };
+-OpToken PrintC::enum_cat = { "|", "", 2, 26, true, OpToken::binary, 0, 0, (OpToken *)0 };
++OpToken PrintC::type_expr_space = { "", "", 2, 10, OpToken::unspec, OpToken::space, 1, 0, (OpToken *)0 };
++OpToken PrintC::type_expr_nospace = { "", "", 2, 10, OpToken::unspec, OpToken::space, 0, 0, (OpToken *)0 };
++OpToken PrintC::ptr_expr = { "*", "", 1, 62, OpToken::unspec, OpToken::unary_prefix, 0, 0, (OpToken *)0 };
++OpToken PrintC::array_expr = { "[", "]", 2, 66, OpToken::ltr, OpToken::postsurround, 1, 0, (OpToken *)0 };
++OpToken PrintC::enum_cat = { "|", "", 2, 26, OpToken::ltr, OpToken::binary, 0, 0, (OpToken *)0 };
+ 
+ const string PrintC::EMPTY_STRING = "";
+ const string PrintC::OPEN_CURLY = "{";
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/printjava.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/printjava.cc
+index ac16394fc5..2ecefa1b8c 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/printjava.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/printjava.cc
+@@ -18,7 +18,7 @@
+ 
+ namespace ghidra {
+ 
+-OpToken PrintJava::instanceof = { "instanceof", "", 2, 60, true, OpToken::binary, 1, 0, (OpToken *)0 };
++OpToken PrintJava::instanceof = { "instanceof", "", 2, 60, OpToken::ltr, OpToken::binary, 1, 0, (OpToken *)0 };
+ 
+ // Constructing this registers the capability
+ PrintJavaCapability PrintJavaCapability::printJavaCapability;
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/printlanguage.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/printlanguage.cc
+index 6bcabc9dfe..e797bf16ca 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/printlanguage.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/printlanguage.cc
+@@ -285,7 +285,9 @@ bool PrintLanguage::parentheses(const OpToken *op2)
+   case OpToken::binary_trailspace:
+     if (topToken->precedence > op2->precedence) return true;
+     if (topToken->precedence < op2->precedence) return false;
+-    if (topToken->associative && (topToken == op2)) return false;
++    if (topToken->assoc == OpToken::none) return true;
++    if (topToken->assoc == OpToken::ltr && stage == 0) return false;
++    if (topToken->assoc == OpToken::rtl && stage == 1) return false;
+     // If operators are adjacent to each other, the
+     // operator printed first must be evaluated first
+     // In this case op2 must be evaluated first, so we
+-- 
+2.45.1
+
