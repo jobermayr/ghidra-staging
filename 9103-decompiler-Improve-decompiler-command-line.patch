@@ -1,0 +1,187 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Viktor Horsmanheimo <viktor.horsmanheimo@gmail.com>
+Date: Sun, 5 Apr 2026 20:09:49 +0300
+Subject: [PATCH] 9103: decompiler: Improve decompiler command line
+
+Fix discover ghidra root discovery
+
+Bug occurred when it reached an empty string and didn't exit early
+enough.
+
+interface: Add help command
+
+Add help command to print out all available commands.
+
+interface: Support tilde
+
+Expand tilde in `load` commands to $HOME.
+---
+ .../src/decompile/cpp/consolemain.cc          | 17 +++++++--
+ .../src/decompile/cpp/filemanage.cc           |  2 ++
+ .../src/decompile/cpp/ifacedecomp.cc          |  1 +
+ .../decompile/cpp/include/ghidra/interface.hh | 10 ++++--
+ .../Decompiler/src/decompile/cpp/interface.cc | 35 +++++++++++++++++++
+ 5 files changed, 61 insertions(+), 4 deletions(-)
+
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/consolemain.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/consolemain.cc
+index f5f12d799d..863e292e9a 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/consolemain.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/consolemain.cc
+@@ -23,6 +23,17 @@ using std::cin;
+ using std::cout;
+ using std::cerr;
+ 
++/// \brief Expand a leading ~ to the user's home directory
++static void expandTilde(string &path)
++
++{
++  if (path.empty() || path[0] != '~') return;
++  if (path.size() > 1 && path[1] != '/') return;	// ~user syntax not supported
++  const char *home = getenv("HOME");
++  if (home == (const char *)0) return;
++  path.replace(0, 1, home);
++}
++
+ class IfcLoadFile : public IfaceDecompCommand {
+ public:
+   virtual void execute(istream &s);
+@@ -57,6 +68,7 @@ void IfcLoadFile::execute(istream &s)
+   }
+   else
+     target = "default";
++  expandTilde(filename);
+ 
+   ArchitectureCapability *capa = ArchitectureCapability::findCapability(filename);
+   if (capa == (ArchitectureCapability *)0)
+@@ -116,6 +128,7 @@ void IfcAddpath::execute(istream &s)
+   s >> newpath;
+   if (newpath.empty())
+     throw IfaceParseError("Missing path name");
++  expandTilde(newpath);
+   SleighArchitecture::specpaths.addDir2Path(newpath);
+ }
+ 
+@@ -132,7 +145,7 @@ void IfcSave::execute(istream &s)
+ 
+   if (savefile.size()==0)
+     throw IfaceParseError("Missing savefile name");
+-
++  expandTilde(savefile);
+   fs.open( savefile.c_str() );
+   if (!fs)
+     throw IfaceExecutionError("Unable to open file: "+savefile);
+@@ -148,7 +161,7 @@ void IfcRestore::execute(istream &s)
+   s >> savefile;
+   if (savefile.size()==0)
+     throw IfaceParseError("Missing file name");
+-
++  expandTilde(savefile);
+   DocumentStorage store;
+   Document *doc = store.openDocument(savefile);
+   store.registerTag(doc->getRoot());
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/filemanage.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/filemanage.cc
+index 07babcc47a..2402ab16c3 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/filemanage.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/filemanage.cc
+@@ -355,6 +355,8 @@ string FileManage::discoverGhidraRoot(const char *argv0)
+   bool isAbs = isAbsolutePath(cur);
+ 
+   for(;;) {
++    if (cur.empty())
++        return "";
+     int sizebefore = cur.size();
+     if (sizebefore == 0) break;
+     splitPath(cur,cur,base);
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/ifacedecomp.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/ifacedecomp.cc
+index 638fa13a20..018e20f2fa 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/ifacedecomp.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/ifacedecomp.cc
+@@ -39,6 +39,7 @@ void IfaceDecompCapability::registerCommands(IfaceStatus *status)
+   status->registerCom(new IfcComment(),"%"); //Note: A space must follow this when used.
+   status->registerCom(new IfcQuit(),"quit");
+   status->registerCom(new IfcHistory(),"history");
++  status->registerCom(new IfcHelp(), "help");
+   status->registerCom(new IfcOpenfile(),"openfile", "write");
+   status->registerCom(new IfcOpenfileAppend(),"openfile","append");
+   status->registerCom(new IfcClosefile(),"closefile");
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/interface.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/interface.hh
+index d516c15a92..3cd5eb3f12 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/interface.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/interface.hh
+@@ -210,8 +210,6 @@ class IfaceStatus {
+   vector<string> history;	///< History of commands executed through this interface
+   bool sorted;			///< Set to \b true if commands are sorted
+   bool errorisdone;		///< Set to \b true if any error terminates the process
+-  void restrictCom(vector<IfaceCommand *>::const_iterator &first,
+-		   vector<IfaceCommand *>::const_iterator &last,vector<string> &input);
+ 
+   /// \brief Read the next command line
+   ///
+@@ -245,6 +243,9 @@ public:
+ 		   const char *nm4 = (const char *)0,
+ 		   const char *nm5 = (const char *)0);
+   IfaceData *getData(const string &nm) const;	///< Get data associated with a IfaceCommand module
++  void restrictCom(vector<IfaceCommand *>::const_iterator &first,
++		   vector<IfaceCommand *>::const_iterator &last,vector<string> &input);	///< Restrict the set of matching commands given input tokens
++  const vector<IfaceCommand *> &getCommandList(void) const { return comlist; }	///< Get the full list of registered commands
+   bool runCommand(void);			///< Run the next command
+   void getHistory(string &line,int4 i) const;	///< Get the i-th command line from history
+   int4 getHistorySize(void) const { return history.size(); }	///< Get the number of command lines in history
+@@ -297,5 +298,10 @@ public:
+   virtual void execute(istream &s);
+ };
+ 
++class IfcHelp : public IfaceBaseCommand {
++public:
++  virtual void execute(istream &s);
++};
++
+ } // End namespace ghidra
+ #endif
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/interface.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/interface.cc
+index 8a2eb9c784..e280138d3d 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/interface.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/interface.cc
+@@ -601,4 +601,39 @@ void IfcEcho::execute(istream &s)
+   *status->fileoptr << endl;
+ }
+ 
++/// \class IfcHelp
++/// \brief Help command to list all registered commands or describe a specific command
++void IfcHelp::execute(istream &s)
++
++{
++  const vector<IfaceCommand *> &cmds( status->getCommandList() );
++  vector<IfaceCommand *>::const_iterator first = cmds.begin();
++  vector<IfaceCommand *>::const_iterator last = cmds.end();
++
++  s >> ws;
++  if (!s.eof()) {
++    // Search for commands matching input
++    vector<string> words;
++
++    string tok;
++    while(!s.eof()) {
++      s >> tok >> ws;
++      if (!tok.empty())
++        words.push_back(tok);
++    }
++
++    status->restrictCom(first, last, words);
++    if (first == last) {
++      *status->optr << "ERROR: No commands match" << "\n";
++      return;
++    }
++  }
++
++  for(;first != last;++first) {
++    string cmdstr;
++    (*first)->commandString(cmdstr);
++    *status->optr << cmdstr << "\n";
++  }
++}
++
+ } // End namespace ghidra
+-- 
+2.45.1
+

@@ -1,0 +1,1144 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: clearbluejar <3752074+clearbluejar@users.noreply.github.com>
+Date: Tue, 7 Apr 2026 15:45:06 -0600
+Subject: [PATCH] 9107: #9106: Add PDiff similarity score to Version Tracking
+
+Store PDiff similarity score in database
+
+Compute the PDiff similarity score (95% basic-block mnemonic hash
+similarity + 5% stack frame size similarity) once at match creation
+time and persist it in the match table DB. This eliminates expensive
+on-the-fly recomputation every time the Similarity column renders or
+the Similarity filter runs.
+
+Schema changes:
+- Add PDIFF_SIMILARITY_SCORE_COL to match table (schema v0 -> v1)
+- Auto-upgrade v0 tables on session open (recreate with new column)
+- Backfill scores for migrated matches once programs are loaded
+
+Key files:
+- VTMatchSetDB.addMatch(): computes score for all FUNCTION matches
+- VTMatchTableDBAdapterV0: v0->v1 schema migration
+- VTSessionDB.backfillPdiffScores(): one-time backfill on open
+- BulkBBSimilarityTableColumn: reads stored score instead of computing
+- SimilarityFilter: reads stored score, passes null scores through
+- BasicBlockMnemonicFunctionBulker: adjusted weights to 95/5
+- BestPDiffMatchFilter: deduplicates matches across correlators
+---
+ .../BasicBlockMnemonicFunctionBulker.java     | 167 ++++++++++++++++
+ .../correlator/program/FunctionBulker.java    |  38 ++++
+ .../ghidra/feature/vt/api/db/VTMatchDB.java   |  25 +++
+ .../feature/vt/api/db/VTMatchSetDB.java       |  48 +++++
+ .../vt/api/db/VTMatchTableDBAdapter.java      |  11 +-
+ .../vt/api/db/VTMatchTableDBAdapterV0.java    |  85 +++++++-
+ .../ghidra/feature/vt/api/db/VTSessionDB.java | 119 ++++++++++-
+ .../ghidra/feature/vt/api/main/VTMatch.java   |   7 +
+ .../feature/vt/api/main/VTMatchInfo.java      |  14 ++
+ .../provider/impliedmatches/MatchMapper.java  |  13 ++
+ .../matchtable/BestPDiffMatchFilter.java      | 188 ++++++++++++++++++
+ .../provider/matchtable/SimilarityFilter.java |  61 ++++++
+ .../matchtable/VTMatchTableModel.java         |   1 +
+ .../matchtable/VTMatchTableProvider.java      |  18 ++
+ .../gui/util/AbstractVTMatchTableModel.java   |  64 ++++++
+ 15 files changed, 846 insertions(+), 13 deletions(-)
+ create mode 100644 Ghidra/Features/VersionTracking/src/main/java/ghidra/feature/vt/api/correlator/program/BasicBlockMnemonicFunctionBulker.java
+ create mode 100644 Ghidra/Features/VersionTracking/src/main/java/ghidra/feature/vt/api/correlator/program/FunctionBulker.java
+ create mode 100644 Ghidra/Features/VersionTracking/src/main/java/ghidra/feature/vt/gui/provider/matchtable/BestPDiffMatchFilter.java
+ create mode 100644 Ghidra/Features/VersionTracking/src/main/java/ghidra/feature/vt/gui/provider/matchtable/SimilarityFilter.java
+
+diff --git a/Ghidra/Features/VersionTracking/src/main/java/ghidra/feature/vt/api/correlator/program/BasicBlockMnemonicFunctionBulker.java b/Ghidra/Features/VersionTracking/src/main/java/ghidra/feature/vt/api/correlator/program/BasicBlockMnemonicFunctionBulker.java
+new file mode 100644
+index 0000000000..21e15a475b
+--- /dev/null
++++ b/Ghidra/Features/VersionTracking/src/main/java/ghidra/feature/vt/api/correlator/program/BasicBlockMnemonicFunctionBulker.java
+@@ -0,0 +1,167 @@
++/* ###
++ * IP: GHIDRA
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package ghidra.feature.vt.api.correlator.program;
++
++import java.util.*;
++
++import ghidra.program.model.address.AddressSetView;
++import ghidra.program.model.block.*;
++import ghidra.program.model.listing.*;
++import ghidra.util.exception.CancelledException;
++import ghidra.util.task.TaskMonitor;
++
++/**
++ * Computes per-basic-block mnemonic hashes for a function. For each basic block,
++ * mnemonic hashes are collected, sorted (to tolerate instruction reordering by
++ * the compiler), and combined into a single per-block hash.
++ *
++ * <p>Also provides {@link #getBulkSimilarity(List, List)} for comparing two
++ * functions' block-hash lists via sorted-merge counting.</p>
++ */
++public class BasicBlockMnemonicFunctionBulker implements FunctionBulker {
++
++	public static final BasicBlockMnemonicFunctionBulker INSTANCE =
++		new BasicBlockMnemonicFunctionBulker();
++
++	@Override
++	public List<Long> hashes(Function func, TaskMonitor monitor) throws CancelledException {
++		List<Long> bbhashes = new ArrayList<>();
++
++		CodeBlockModel blockModel = new BasicBlockModel(func.getProgram());
++		AddressSetView addresses = func.getBody();
++		CodeBlockIterator bbiter = blockModel.getCodeBlocksContaining(addresses, monitor);
++
++		while (!monitor.isCancelled() && bbiter.hasNext()) {
++			CodeBlock block = bbiter.next();
++			List<Long> mnemonicHashes = new ArrayList<>();
++			CodeUnitIterator iter = func.getProgram().getListing().getCodeUnits(block, true);
++			while (!monitor.isCancelled() && iter.hasNext()) {
++				CodeUnit next = iter.next();
++				mnemonicHashes.add((long) next.getMnemonicString().hashCode());
++			}
++			// Sort mnemonics so compiler instruction reordering doesn't affect the hash
++			Collections.sort(mnemonicHashes);
++
++			long bbhash = 0;
++			for (long hash : mnemonicHashes) {
++				bbhash = bbhash * 31 + hash;
++			}
++			bbhashes.add(bbhash);
++		}
++		return bbhashes;
++	}
++
++	/**
++	 * Compute the similarity between two functions' block-hash lists.
++	 * Uses a sorted-merge to count common elements.
++	 *
++	 * @param srcList block hashes for the source function
++	 * @param dstList block hashes for the destination function
++	 * @return similarity score in [0.0, 1.0], or 0.0 if both lists are empty
++	 */
++	public static double getBulkSimilarity(List<Long> srcList, List<Long> dstList) {
++		int total = Math.max(srcList.size(), dstList.size());
++		if (total == 0) {
++			return 0.0;
++		}
++
++		List<Long> sortedSrc = new ArrayList<>(srcList);
++		List<Long> sortedDst = new ArrayList<>(dstList);
++		Collections.sort(sortedSrc);
++		Collections.sort(sortedDst);
++
++		// Count matching basic-block hashes via sorted-merge
++		int common = 0;
++		int s = 0;
++		int d = 0;
++		while (s < sortedSrc.size() && d < sortedDst.size()) {
++			int c = sortedSrc.get(s).compareTo(sortedDst.get(d));
++			if (c < 0) {
++				s++;
++			}
++			else if (c > 0) {
++				d++;
++			}
++			else {
++				common++;
++				s++;
++				d++;
++			}
++		}
++		return (double) common / (double) total;
++	}
++
++	/**
++	 * Compute a combined similarity score that accounts for both mnemonic
++	 * block-hash overlap and stack frame size differences.
++	 *
++	 * <p>The combined score is a weighted blend:
++	 * <ul>
++	 *   <li><b>Mnemonic similarity (80%)</b> – sorted-merge count of matching
++	 *       per-basic-block mnemonic hashes, as computed by
++	 *       {@link #getBulkSimilarity(List, List)}.</li>
++	 *   <li><b>Stack frame similarity (20%)</b> – measures how similar the two
++	 *       functions' stack frame sizes are. Uses the formula
++	 *       {@code min(a,b) / max(a,b)} when both are nonzero, giving 1.0 for
++	 *       identical sizes and approaching 0.0 as they diverge. When both sizes
++	 *       are zero the score is 1.0 (perfect match); when only one is zero the
++	 *       score is 0.0 (one function uses stack, the other does not).</li>
++	 * </ul>
++	 *
++	 * @param srcHashes block hashes for the source function
++	 * @param dstHashes block hashes for the destination function
++	 * @param srcFrameSize stack frame size (bytes) of the source function
++	 * @param dstFrameSize stack frame size (bytes) of the destination function
++	 * @return combined similarity score in [0.0, 1.0]
++	 */
++	public static double getCombinedSimilarity(List<Long> srcHashes, List<Long> dstHashes,
++			int srcFrameSize, int dstFrameSize) {
++
++		// Mnemonic block-hash similarity (core structural comparison)
++		double mnemonicScore = getBulkSimilarity(srcHashes, dstHashes);
++
++		// Stack frame size similarity (detects differences in local variable allocation)
++		double stackScore = getStackSizeSimilarity(srcFrameSize, dstFrameSize);
++
++		// Weighted combination (95/5): mnemonics are the primary structural signal;
++		// stack size is a subtle tiebreaker that distinguishes otherwise-identical matches
++		// (e.g. two functions with the same mnemonic sequence but different local buffers).
++		return 0.95 * mnemonicScore + 0.05 * stackScore;
++	}
++
++	/**
++	 * Compute how similar two stack frame sizes are.
++	 *
++	 * <p>Returns {@code min / max} when both are positive, 1.0 when both are
++	 * zero, and 0.0 when exactly one is zero. This captures cases like patch
++	 * diffs that add/remove local buffers (changing stack size) even when the
++	 * mnemonic sequence is nearly identical.
++	 *
++	 * @param srcSize stack frame size of the source function
++	 * @param dstSize stack frame size of the destination function
++	 * @return similarity in [0.0, 1.0]
++	 */
++	private static double getStackSizeSimilarity(int srcSize, int dstSize) {
++		if (srcSize == 0 && dstSize == 0) {
++			return 1.0; // Both leaf/no-stack functions — perfect match
++		}
++		if (srcSize == 0 || dstSize == 0) {
++			return 0.0; // One uses stack, the other doesn't — maximum penalty
++		}
++		// Ratio of smaller to larger; e.g. 64/128 = 0.5
++		return (double) Math.min(srcSize, dstSize) / (double) Math.max(srcSize, dstSize);
++	}
++}
+diff --git a/Ghidra/Features/VersionTracking/src/main/java/ghidra/feature/vt/api/correlator/program/FunctionBulker.java b/Ghidra/Features/VersionTracking/src/main/java/ghidra/feature/vt/api/correlator/program/FunctionBulker.java
+new file mode 100644
+index 0000000000..aa45513ec4
+--- /dev/null
++++ b/Ghidra/Features/VersionTracking/src/main/java/ghidra/feature/vt/api/correlator/program/FunctionBulker.java
+@@ -0,0 +1,38 @@
++/* ###
++ * IP: GHIDRA
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package ghidra.feature.vt.api.correlator.program;
++
++import java.util.List;
++
++import ghidra.program.model.listing.Function;
++import ghidra.util.exception.CancelledException;
++import ghidra.util.task.TaskMonitor;
++
++/**
++ * Interface for computing a list of hashes that characterize a function's structure.
++ * Used for bulk similarity comparison between function pairs.
++ */
++public interface FunctionBulker {
++	/**
++	 * Compute a list of hashes representing the structure of the given function.
++	 *
++	 * @param function the function to hash
++	 * @param monitor task monitor for cancellation
++	 * @return list of hashes characterizing the function
++	 * @throws CancelledException if the operation is cancelled
++	 */
++	public List<Long> hashes(Function function, TaskMonitor monitor) throws CancelledException;
++}
+diff --git a/Ghidra/Features/VersionTracking/src/main/java/ghidra/feature/vt/api/db/VTMatchDB.java b/Ghidra/Features/VersionTracking/src/main/java/ghidra/feature/vt/api/db/VTMatchDB.java
+index 2e9aa74dc0..3600e25dd0 100644
+--- a/Ghidra/Features/VersionTracking/src/main/java/ghidra/feature/vt/api/db/VTMatchDB.java
++++ b/Ghidra/Features/VersionTracking/src/main/java/ghidra/feature/vt/api/db/VTMatchDB.java
+@@ -88,6 +88,31 @@ public class VTMatchDB extends DatabaseObject implements VTMatch {
+ 		return new VTScore(record.getString(CONFIDENCE_SCORE_COL.column()));
+ 	}
+ 
++	/**
++	 * Reads the precomputed PDiff similarity score from the DB record.
++	 * Returns null if the score was never computed (empty string in DB),
++	 * which happens for DATA matches or matches migrated from schema v0.
++	 */
++	@Override
++	public VTScore getPdiffSimilarityScore() {
++		String stored = record.getString(PDIFF_SIMILARITY_SCORE_COL.column());
++		if (stored == null || stored.isEmpty()) {
++			return null;
++		}
++		return new VTScore(stored);
++	}
++
++	/**
++	 * Updates the stored PDiff similarity score in the DB record.
++	 * Package-private: called by VTSessionDB.backfillPdiffScores() during
++	 * session open to populate scores for migrated matches.
++	 */
++	void setPdiffSimilarityScore(VTScore score) {
++		record.setString(PDIFF_SIMILARITY_SCORE_COL.column(),
++			score != null ? score.toStorageString() : "");
++		updateRecord();
++	}
++
+ 	public String getLengthType() {
+ 		return record.getString(LENGTH_TYPE.column());
+ 	}
+diff --git a/Ghidra/Features/VersionTracking/src/main/java/ghidra/feature/vt/api/db/VTMatchSetDB.java b/Ghidra/Features/VersionTracking/src/main/java/ghidra/feature/vt/api/db/VTMatchSetDB.java
+index 2cbd3d6236..b774417996 100644
+--- a/Ghidra/Features/VersionTracking/src/main/java/ghidra/feature/vt/api/db/VTMatchSetDB.java
++++ b/Ghidra/Features/VersionTracking/src/main/java/ghidra/feature/vt/api/db/VTMatchSetDB.java
+@@ -25,6 +25,7 @@ import org.jdom2.JDOMException;
+ import org.jdom2.input.SAXBuilder;
+ 
+ import db.*;
++import ghidra.feature.vt.api.correlator.program.BasicBlockMnemonicFunctionBulker;
+ import ghidra.feature.vt.api.impl.*;
+ import ghidra.feature.vt.api.main.*;
+ import ghidra.framework.data.OpenMode;
+@@ -34,9 +35,11 @@ import ghidra.program.database.DBObjectCache;
+ import ghidra.program.database.DatabaseObject;
+ import ghidra.program.model.address.Address;
+ import ghidra.program.model.address.AddressSet;
++import ghidra.program.model.listing.Function;
+ import ghidra.program.model.listing.Program;
+ import ghidra.util.Lock;
+ import ghidra.util.Msg;
++import ghidra.util.exception.CancelledException;
+ import ghidra.util.exception.VersionException;
+ import ghidra.util.task.TaskMonitor;
+ import ghidra.util.xml.XmlUtilities;
+@@ -158,6 +161,51 @@ public class VTMatchSetDB extends DatabaseObject implements VTMatchSet {
+ 
+ 	@Override
+ 	public VTMatch addMatch(VTMatchInfo info) {
++
++		// --- PDiff score computation (before lock) ---
++		// For FUNCTION matches, compute the combined PDiff similarity score so it can be
++		// persisted in the DB alongside the correlator's own similarity/confidence scores.
++		// This is done here (central location) so ALL correlators benefit automatically —
++		// no per-correlator code changes needed.
++		//
++		// The score is a weighted blend:
++		//   95% basic-block mnemonic hash similarity (structural comparison)
++		//   5% stack frame size similarity (detects local variable allocation changes)
++		//
++		// Computed before lock.acquire() since hashing can be slow for large functions.
++		// Skipped for DATA matches (leave null) or if already set by the caller.
++		if (info.getAssociationType() == VTAssociationType.FUNCTION &&
++				info.getPdiffSimilarityScore() == null) {
++			Program srcProg = session.getSourceProgram();
++			Program dstProg = session.getDestinationProgram();
++			if (srcProg != null && dstProg != null) {
++				Function srcFunc =
++					srcProg.getFunctionManager().getFunctionAt(info.getSourceAddress());
++				Function dstFunc =
++					dstProg.getFunctionManager().getFunctionAt(info.getDestinationAddress());
++				if (srcFunc != null && dstFunc != null) {
++					try {
++						List<Long> srcHashes =
++							BasicBlockMnemonicFunctionBulker.INSTANCE.hashes(srcFunc,
++								TaskMonitor.DUMMY);
++						List<Long> dstHashes =
++							BasicBlockMnemonicFunctionBulker.INSTANCE.hashes(dstFunc,
++								TaskMonitor.DUMMY);
++						int srcFrameSize = srcFunc.getStackFrame().getFrameSize();
++						int dstFrameSize = dstFunc.getStackFrame().getFrameSize();
++						double similarity = BasicBlockMnemonicFunctionBulker
++							.getCombinedSimilarity(srcHashes, dstHashes,
++								srcFrameSize, dstFrameSize);
++						info.setPdiffSimilarityScore(new VTScore(similarity));
++					}
++					catch (CancelledException e) {
++						// leave null — score column will show N/A
++					}
++				}
++			}
++		}
++
++		// --- Standard match insertion (under lock) ---
+ 		AssociationDatabaseManager associationManager = session.getAssociationManagerDBM();
+ 		VTAssociationDB associationDB = associationManager.getOrCreateAssociationDB(
+ 			info.getSourceAddress(), info.getDestinationAddress(), info.getAssociationType());
+diff --git a/Ghidra/Features/VersionTracking/src/main/java/ghidra/feature/vt/api/db/VTMatchTableDBAdapter.java b/Ghidra/Features/VersionTracking/src/main/java/ghidra/feature/vt/api/db/VTMatchTableDBAdapter.java
+index c04b93681e..00841ff893 100644
+--- a/Ghidra/Features/VersionTracking/src/main/java/ghidra/feature/vt/api/db/VTMatchTableDBAdapter.java
++++ b/Ghidra/Features/VersionTracking/src/main/java/ghidra/feature/vt/api/db/VTMatchTableDBAdapter.java
+@@ -35,7 +35,11 @@ public abstract class VTMatchTableDBAdapter {
+ 		LENGTH_TYPE(StringField.INSTANCE),
+ 		SOURCE_LENGTH_COL(IntField.INSTANCE),
+ 		DESTINATION_LENGTH_COL(IntField.INSTANCE),
+-		ASSOCIATION_COL(LongField.INSTANCE);
++		ASSOCIATION_COL(LongField.INSTANCE),
++
++		// Added in schema v1: stores the precomputed PDiff similarity score as a string.
++		// Empty string means "not yet computed"; actual scores are stored via VTScore.toStorageString().
++		PDIFF_SIMILARITY_SCORE_COL(StringField.INSTANCE);
+ 
+ 		private final Field columnField;
+ 
+@@ -71,7 +75,10 @@ public abstract class VTMatchTableDBAdapter {
+ 	}
+ 
+ 	static String TABLE_NAME = "MatchTable";
+-	static Schema TABLE_SCHEMA = new Schema(0, "Key", ColumnDescription.getColumnFields(),
++	// Schema version history:
++	//   v0 - Original schema (8 columns, no PDiff score)
++	//   v1 - Added PDIFF_SIMILARITY_SCORE_COL; auto-upgraded from v0 on session open
++	static Schema TABLE_SCHEMA = new Schema(1, "Key", ColumnDescription.getColumnFields(),
+ 		ColumnDescription.getColumnNames());
+ 
+ 	static VTMatchTableDBAdapter createAdapter(DBHandle dbHandle, long tableID) throws IOException {
+diff --git a/Ghidra/Features/VersionTracking/src/main/java/ghidra/feature/vt/api/db/VTMatchTableDBAdapterV0.java b/Ghidra/Features/VersionTracking/src/main/java/ghidra/feature/vt/api/db/VTMatchTableDBAdapterV0.java
+index e4c891d9a2..6911b8fd4f 100644
+--- a/Ghidra/Features/VersionTracking/src/main/java/ghidra/feature/vt/api/db/VTMatchTableDBAdapterV0.java
++++ b/Ghidra/Features/VersionTracking/src/main/java/ghidra/feature/vt/api/db/VTMatchTableDBAdapterV0.java
+@@ -18,9 +18,12 @@ package ghidra.feature.vt.api.db;
+ import static ghidra.feature.vt.api.db.VTMatchTableDBAdapter.ColumnDescription.*;
+ 
+ import java.io.IOException;
++import java.util.ArrayList;
++import java.util.List;
+ 
+ import db.*;
+ import ghidra.feature.vt.api.main.VTMatchInfo;
++import ghidra.feature.vt.api.main.VTScore;
+ import ghidra.framework.data.OpenMode;
+ import ghidra.util.exception.VersionException;
+ 
+@@ -33,15 +36,85 @@ public class VTMatchTableDBAdapterV0 extends VTMatchTableDBAdapter {
+ 			new int[] { ASSOCIATION_COL.column() });
+ 	}
+ 
++	/**
++	 * Opens an existing match table. If the table is schema v0 (pre-PDiff column),
++	 * it is automatically upgraded to v1 by recreating the table with the new schema
++	 * and copying all records. The new PDIFF_SIMILARITY_SCORE_COL is initialized to
++	 * empty; actual scores are backfilled later by {@code VTSessionDB.backfillPdiffScores()}
++	 * once source/destination programs are available.
++	 *
++	 * <p>Requires an active DB transaction (provided by VTSessionDB constructor).</p>
++	 */
+ 	public VTMatchTableDBAdapterV0(DBHandle dbHandle, long tableID, OpenMode openMode)
+ 			throws VersionException {
+ 		table = dbHandle.getTable(TABLE_NAME + tableID);
+ 		if (table == null) {
+ 			throw new VersionException("Missing Table: " + TABLE_NAME);
+ 		}
+-		else if (table.getSchema().getVersion() != 0) {
+-			throw new VersionException("Expected version 0 for table " + TABLE_NAME + " but got " +
+-				table.getSchema().getVersion());
++		int version = table.getSchema().getVersion();
++		if (version == 0) {
++			// Auto-upgrade: v0 tables lack the PDIFF column — migrate to v1
++			upgradeFromV0(dbHandle, tableID);
++		}
++		else if (version != 1) {
++			throw new VersionException("Expected version 0 or 1 for table " + TABLE_NAME +
++				" but got " + version);
++		}
++	}
++
++	/**
++	 * Upgrades a v0 match table to v1 by:
++	 * 1. Reading all existing records into memory
++	 * 2. Deleting the old v0 table
++	 * 3. Creating a new v1 table (with PDIFF_SIMILARITY_SCORE_COL)
++	 * 4. Re-inserting all records with the new column set to empty string
++	 *
++	 * <p>Column indices 0-7 are identical between v0 and v1, so field values
++	 * are copied directly by column ordinal. The new column 8 (PDIFF) is set
++	 * to empty, meaning "not yet computed".</p>
++	 */
++	private void upgradeFromV0(DBHandle dbHandle, long tableID) throws VersionException {
++		try {
++			// Step 1: Snapshot all existing v0 records before we destroy the table
++			List<DBRecord> oldRecords = new ArrayList<>();
++			RecordIterator iter = table.iterator();
++			while (iter.hasNext()) {
++				oldRecords.add(iter.next());
++			}
++
++			// Step 2: Delete old v0 table and recreate with v1 schema
++			String tableName = TABLE_NAME + tableID;
++			dbHandle.deleteTable(tableName);
++			table = dbHandle.createTable(tableName, TABLE_SCHEMA,
++				new int[] { ASSOCIATION_COL.column() });
++
++			// Step 3: Copy each record into the new table, preserving keys and all
++			// existing fields. The new PDIFF column is initialized to empty string.
++			for (DBRecord oldRecord : oldRecords) {
++				DBRecord newRecord = TABLE_SCHEMA.createRecord(oldRecord.getKey());
++				newRecord.setLongValue(TAG_KEY_COL.column(),
++					oldRecord.getLongValue(TAG_KEY_COL.column()));
++				newRecord.setLongValue(MATCH_SET_COL.column(),
++					oldRecord.getLongValue(MATCH_SET_COL.column()));
++				newRecord.setString(SIMILARITY_SCORE_COL.column(),
++					oldRecord.getString(SIMILARITY_SCORE_COL.column()));
++				newRecord.setString(CONFIDENCE_SCORE_COL.column(),
++					oldRecord.getString(CONFIDENCE_SCORE_COL.column()));
++				newRecord.setString(LENGTH_TYPE.column(),
++					oldRecord.getString(LENGTH_TYPE.column()));
++				newRecord.setIntValue(SOURCE_LENGTH_COL.column(),
++					oldRecord.getIntValue(SOURCE_LENGTH_COL.column()));
++				newRecord.setIntValue(DESTINATION_LENGTH_COL.column(),
++					oldRecord.getIntValue(DESTINATION_LENGTH_COL.column()));
++				newRecord.setLongValue(ASSOCIATION_COL.column(),
++					oldRecord.getLongValue(ASSOCIATION_COL.column()));
++				newRecord.setString(PDIFF_SIMILARITY_SCORE_COL.column(), "");
++				table.putRecord(newRecord);
++			}
++		}
++		catch (IOException e) {
++			throw new VersionException(
++				"Failed to upgrade " + TABLE_NAME + tableID + ": " + e.getMessage());
+ 		}
+ 	}
+ 
+@@ -60,6 +133,12 @@ public class VTMatchTableDBAdapterV0 extends VTMatchTableDBAdapter {
+ 		record.setIntValue(SOURCE_LENGTH_COL.column(), info.getSourceLength());
+ 		record.setIntValue(DESTINATION_LENGTH_COL.column(), info.getDestinationLength());
+ 
++		// Write PDiff score: the combined mnemonic + stack-frame similarity computed in
++		// VTMatchSetDB.addMatch(). Null for DATA matches or if computation was skipped.
++		VTScore pdiffScore = info.getPdiffSimilarityScore();
++		record.setString(PDIFF_SIMILARITY_SCORE_COL.column(),
++			pdiffScore != null ? pdiffScore.toStorageString() : "");
++
+ 		table.putRecord(record);
+ 		return record;
+ 	}
+diff --git a/Ghidra/Features/VersionTracking/src/main/java/ghidra/feature/vt/api/db/VTSessionDB.java b/Ghidra/Features/VersionTracking/src/main/java/ghidra/feature/vt/api/db/VTSessionDB.java
+index 3e08dbd370..824f0c3c97 100644
+--- a/Ghidra/Features/VersionTracking/src/main/java/ghidra/feature/vt/api/db/VTSessionDB.java
++++ b/Ghidra/Features/VersionTracking/src/main/java/ghidra/feature/vt/api/db/VTSessionDB.java
+@@ -21,6 +21,7 @@ import java.util.*;
+ import db.*;
+ import ghidra.app.util.task.OpenProgramRequest;
+ import ghidra.app.util.task.OpenProgramTask;
++import ghidra.feature.vt.api.correlator.program.BasicBlockMnemonicFunctionBulker;
+ import ghidra.feature.vt.api.correlator.program.ImpliedMatchProgramCorrelator;
+ import ghidra.feature.vt.api.correlator.program.ManualMatchProgramCorrelator;
+ import ghidra.feature.vt.api.impl.*;
+@@ -36,6 +37,7 @@ import ghidra.program.database.DBObjectCache;
+ import ghidra.program.database.map.AddressMap;
+ import ghidra.program.model.address.Address;
+ import ghidra.program.model.address.AddressSet;
++import ghidra.program.model.listing.Function;
+ import ghidra.program.model.listing.Program;
+ import ghidra.util.*;
+ import ghidra.util.exception.*;
+@@ -204,14 +206,24 @@ public class VTSessionDB extends DomainObjectAdapterDB implements VTSession {
+ 			changed = true;
+ 		}
+ 
+-		// NOTE: code below will not make changes (no transaction is open)
+-		// Additional supported required to facilitate schema change during upgrade if needed.
+-
+-		matchSetTableAdapter = VTMatchSetTableDBAdapter.getAdapter(dbHandle, openMode, monitor);
+-		associationManager =
+-			AssociationDatabaseManager.getAssociationManager(dbHandle, this, openMode, monitor);
+-		matchTagAdapter = VTMatchTagDBAdapter.getAdapter(dbHandle, openMode, monitor);
+-		loadMatchSets(openMode, monitor);
++		// --- Adapter initialization (within transaction for schema upgrades) ---
++		// The original code ran this WITHOUT a transaction, but the v0→v1 match-table
++		// schema upgrade needs deleteTable/createTable which require an active transaction.
++		// We wrap the entire adapter + match-set loading phase in a transaction, then
++		// clear undo so the upgrade isn't user-reversible.
++		int txId = startTransaction("Upgrade match table schemas");
++		try {
++			matchSetTableAdapter =
++				VTMatchSetTableDBAdapter.getAdapter(dbHandle, openMode, monitor);
++			associationManager = AssociationDatabaseManager.getAssociationManager(dbHandle,
++				this, openMode, monitor);
++			matchTagAdapter = VTMatchTagDBAdapter.getAdapter(dbHandle, openMode, monitor);
++			loadMatchSets(openMode, monitor);
++		}
++		finally {
++			endTransaction(txId, true);
++		}
++		clearUndo(false);
+ 	}
+ 
+ 	private void updateVersion() throws IOException {
+@@ -309,6 +321,12 @@ public class VTSessionDB extends DomainObjectAdapterDB implements VTSession {
+ 
+ 		associationManager.sessionInitialized();
+ 
++		// After programs are loaded, compute PDiff scores for any function matches
++		// that don't have one yet (migrated from v0, or created before this feature).
++		// This is a one-time operation — subsequent opens find all scores populated
++		// and bail out immediately.
++		backfillPdiffScores();
++
+ 		try {
+ 			addSynchronizedDomainObject(destinationProgram);
+ 		}
+@@ -321,6 +339,91 @@ public class VTSessionDB extends DomainObjectAdapterDB implements VTSession {
+ 		}
+ 	}
+ 
++	/**
++	 * Compute and store PDiff similarity scores for any function matches that
++	 * don't have one yet. This handles two cases:
++	 *
++	 * <ol>
++	 *   <li><b>Schema migration:</b> v0 → v1 upgrade adds the PDIFF column but
++	 *       initializes it to empty (programs aren't available yet at upgrade time).
++	 *       This method fills in the actual scores once programs are loaded.</li>
++	 *   <li><b>N/A detection:</b> any match with a null PDiff score (e.g. if a
++	 *       correlator was run before this feature existed) gets backfilled.</li>
++	 * </ol>
++	 *
++	 * <p>Performance: does a quick scan first — if all function matches already have
++	 * scores, returns immediately with zero overhead. The computation is one-time;
++	 * subsequent session opens skip this entirely.</p>
++	 */
++	private void backfillPdiffScores() {
++		// --- Quick scan: check if any function match lacks a PDiff score ---
++		boolean needed = false;
++		for (VTMatchSet matchSet : getMatchSets()) {
++			for (VTMatch match : matchSet.getMatches()) {
++				if (match.getAssociation().getType() == VTAssociationType.FUNCTION &&
++						match.getPdiffSimilarityScore() == null) {
++					needed = true;
++					break;
++				}
++			}
++			if (needed) {
++				break;
++			}
++		}
++		if (!needed) {
++			return;
++		}
++
++		// --- Compute and persist scores for all unscored function matches ---
++		int txId = startTransaction("Backfill PDiff similarity scores");
++		try {
++			for (VTMatchSet matchSet : getMatchSets()) {
++				for (VTMatch match : matchSet.getMatches()) {
++					// Skip non-function matches (PDiff is only meaningful for functions)
++					if (match.getAssociation().getType() != VTAssociationType.FUNCTION) {
++						continue;
++					}
++					// Skip matches that already have a computed score
++					if (match.getPdiffSimilarityScore() != null) {
++						continue;
++					}
++
++					// Look up source and destination functions by address
++					VTAssociation assoc = match.getAssociation();
++					Function srcFunc = sourceProgram.getFunctionManager()
++						.getFunctionAt(assoc.getSourceAddress());
++					Function dstFunc = destinationProgram.getFunctionManager()
++						.getFunctionAt(assoc.getDestinationAddress());
++					if (srcFunc == null || dstFunc == null) {
++						continue; // function not found — leave score as null
++					}
++
++					// Compute combined similarity (95% mnemonic hashes + 5% stack frame)
++					// and persist directly into the match's DB record
++					try {
++						List<Long> srcHashes = BasicBlockMnemonicFunctionBulker.INSTANCE
++							.hashes(srcFunc, TaskMonitor.DUMMY);
++						List<Long> dstHashes = BasicBlockMnemonicFunctionBulker.INSTANCE
++							.hashes(dstFunc, TaskMonitor.DUMMY);
++						int srcFrame = srcFunc.getStackFrame().getFrameSize();
++						int dstFrame = dstFunc.getStackFrame().getFrameSize();
++						double similarity = BasicBlockMnemonicFunctionBulker
++							.getCombinedSimilarity(srcHashes, dstHashes, srcFrame, dstFrame);
++						((VTMatchDB) match).setPdiffSimilarityScore(new VTScore(similarity));
++					}
++					catch (CancelledException e) {
++						// skip this match — score remains null (shows as N/A)
++					}
++				}
++			}
++		}
++		finally {
++			endTransaction(txId, true);
++		}
++		// Clear undo so the backfill isn't user-reversible
++		clearUndo(false);
++	}
++
+ 	private Program openProgram(DomainFile domainFile, boolean isSource) {
+ 
+ 		String type = isSource ? "VT Source Program" : "VT Destination Program";
+diff --git a/Ghidra/Features/VersionTracking/src/main/java/ghidra/feature/vt/api/main/VTMatch.java b/Ghidra/Features/VersionTracking/src/main/java/ghidra/feature/vt/api/main/VTMatch.java
+index b0e60a6f02..100e9c034c 100644
+--- a/Ghidra/Features/VersionTracking/src/main/java/ghidra/feature/vt/api/main/VTMatch.java
++++ b/Ghidra/Features/VersionTracking/src/main/java/ghidra/feature/vt/api/main/VTMatch.java
+@@ -73,6 +73,13 @@ public interface VTMatch {
+ 	 */
+ 	public VTScore getConfidenceScore();
+ 
++	/**
++	 * Returns the PDiff similarity score (basic-block mnemonic hash similarity)
++	 * that was computed at match creation time, or null if not available.
++	 * @return the PDiff similarity score, or null
++	 */
++	public VTScore getPdiffSimilarityScore();
++
+ 	/**
+ 	 * Returns the address in the source program for a match.
+ 	 * @return the address in the source program
+diff --git a/Ghidra/Features/VersionTracking/src/main/java/ghidra/feature/vt/api/main/VTMatchInfo.java b/Ghidra/Features/VersionTracking/src/main/java/ghidra/feature/vt/api/main/VTMatchInfo.java
+index 0f5b56dc74..3a2a142897 100644
+--- a/Ghidra/Features/VersionTracking/src/main/java/ghidra/feature/vt/api/main/VTMatchInfo.java
++++ b/Ghidra/Features/VersionTracking/src/main/java/ghidra/feature/vt/api/main/VTMatchInfo.java
+@@ -30,6 +30,12 @@ public class VTMatchInfo {
+ 	protected final VTMatchSet matchSet;
+ 	private VTScore confidenceScore;
+ 
++	// PDiff similarity score: a combined metric (95% basic-block mnemonic hash similarity +
++	// 5% stack frame size similarity) computed once at match creation time and persisted in the
++	// DB. This avoids expensive on-the-fly recomputation in the table column and filter.
++	// Null for DATA matches or matches created before this feature was added.
++	private VTScore pdiffSimilarityScore;
++
+ 	public VTMatchInfo(VTMatchSet vtMatchSet) {
+ 		this.matchSet = vtMatchSet;
+ 	}
+@@ -70,6 +76,14 @@ public class VTMatchInfo {
+ 		return confidenceScore;
+ 	}
+ 
++	public VTScore getPdiffSimilarityScore() {
++		return pdiffSimilarityScore;
++	}
++
++	public void setPdiffSimilarityScore(VTScore score) {
++		this.pdiffSimilarityScore = score;
++	}
++
+ 	public void setSourceAddress(Address sourceAddress) {
+ 		this.sourceAddress = sourceAddress;
+ 	}
+diff --git a/Ghidra/Features/VersionTracking/src/main/java/ghidra/feature/vt/gui/provider/impliedmatches/MatchMapper.java b/Ghidra/Features/VersionTracking/src/main/java/ghidra/feature/vt/gui/provider/impliedmatches/MatchMapper.java
+index 4a6bd5f48e..e67a4d118a 100644
+--- a/Ghidra/Features/VersionTracking/src/main/java/ghidra/feature/vt/gui/provider/impliedmatches/MatchMapper.java
++++ b/Ghidra/Features/VersionTracking/src/main/java/ghidra/feature/vt/gui/provider/impliedmatches/MatchMapper.java
+@@ -63,6 +63,19 @@ class MatchMapper implements VTMatch {
+ 		return rowObject.getSimilarityScore();
+ 	}
+ 
++	/**
++	 * Delegates to the underlying match's stored PDiff score. Returns null for
++	 * implied matches that don't yet have a concrete match in the DB.
++	 */
++	@Override
++	public VTScore getPdiffSimilarityScore() {
++		VTMatch existingMatch = rowObject.getMatch();
++		if (existingMatch != null) {
++			return existingMatch.getPdiffSimilarityScore();
++		}
++		return null;
++	}
++
+ 	@Override
+ 	public Address getSourceAddress() {
+ 		return rowObject.getSourceAddress();
+diff --git a/Ghidra/Features/VersionTracking/src/main/java/ghidra/feature/vt/gui/provider/matchtable/BestPDiffMatchFilter.java b/Ghidra/Features/VersionTracking/src/main/java/ghidra/feature/vt/gui/provider/matchtable/BestPDiffMatchFilter.java
+new file mode 100644
+index 0000000000..017498194e
+--- /dev/null
++++ b/Ghidra/Features/VersionTracking/src/main/java/ghidra/feature/vt/gui/provider/matchtable/BestPDiffMatchFilter.java
+@@ -0,0 +1,188 @@
++/* ###
++ * IP: GHIDRA
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package ghidra.feature.vt.gui.provider.matchtable;
++
++import java.util.*;
++
++import javax.swing.*;
++import javax.swing.border.BevelBorder;
++
++import docking.widgets.checkbox.GCheckBox;
++import ghidra.feature.vt.api.main.*;
++import ghidra.feature.vt.gui.filters.Filter;
++import ghidra.framework.options.SaveState;
++
++/**
++ * Filter that deduplicates matches across correlators. When enabled, keeps only
++ * the single best match per (source address, destination address) pair.
++ * "Best" means highest confidence score; ties broken by lowest match-set ID.
++ *
++ * <p>Exact name matches and combined reference matches are excluded from
++ * deduplication and always pass the filter.</p>
++ */
++public class BestPDiffMatchFilter extends Filter<VTMatch> {
++
++	private static final String STATE_KEY = "BestPDiffMatchFilter.enabled";
++
++	/** Correlators whose matches are always hidden when this filter is enabled. */
++	private static final Set<String> HIDDEN_CORRELATORS = Set.of(
++		"Combined Function and Data Reference Match");
++
++	private GCheckBox checkBox;
++	private JComponent component;
++
++	/**
++	 * Lazy cache: "srcAddr|dstAddr" → winning match info.
++	 * We store the match-set ID and confidence (not the VTMatch object) because
++	 * the table model may hold different object instances than the session returns.
++	 */
++	private Map<String, BestMatchInfo> bestMatchCache;
++
++	public BestPDiffMatchFilter() {
++		checkBox = new GCheckBox("Best (PDiff)", false);
++		checkBox.setToolTipText(
++			"Best PDiff Match — show only the best match per function pair (deduplicate across correlators)");
++		checkBox.addItemListener(e -> {
++			invalidateCache();
++			fireStatusChanged(getFilterStatus());
++		});
++
++		JPanel panel = new JPanel();
++		panel.setBorder(BorderFactory.createBevelBorder(BevelBorder.LOWERED));
++		panel.add(checkBox);
++		component = panel;
++	}
++
++	private void invalidateCache() {
++		bestMatchCache = null;
++	}
++
++	private static String getCorrelatorName(VTMatchSet matchSet) {
++		return matchSet.getProgramCorrelatorInfo().getName();
++	}
++
++	private void buildCache(VTMatch anyMatch) {
++		bestMatchCache = new HashMap<>();
++
++		VTSession session = anyMatch.getMatchSet().getSession();
++		List<VTMatchSet> matchSets = session.getMatchSets();
++
++		for (VTMatchSet matchSet : matchSets) {
++			// Hidden correlators don't participate in deduplication
++			if (HIDDEN_CORRELATORS.contains(getCorrelatorName(matchSet))) {
++				continue;
++			}
++
++			int setId = matchSet.getID();
++			for (VTMatch match : matchSet.getMatches()) {
++				VTAssociation assoc = match.getAssociation();
++				String key = assoc.getSourceAddress() + "|" + assoc.getDestinationAddress();
++
++				BestMatchInfo current = bestMatchCache.get(key);
++				double conf = match.getConfidenceScore().getScore();
++
++				if (current == null || conf > current.confidence ||
++						(conf == current.confidence && setId < current.matchSetId)) {
++					bestMatchCache.put(key, new BestMatchInfo(setId, conf));
++				}
++			}
++		}
++	}
++
++	@Override
++	public boolean passesFilter(VTMatch t) {
++		if (!checkBox.isSelected()) {
++			return true;
++		}
++
++		String name = getCorrelatorName(t.getMatchSet());
++
++		// Hidden correlators are always filtered out
++		if (HIDDEN_CORRELATORS.contains(name)) {
++			return false;
++		}
++
++		if (bestMatchCache == null) {
++			buildCache(t);
++		}
++
++		VTAssociation assoc = t.getAssociation();
++		String key = assoc.getSourceAddress() + "|" + assoc.getDestinationAddress();
++		BestMatchInfo best = bestMatchCache.get(key);
++		if (best == null) {
++			return true;
++		}
++
++		// Pass if this match is from the winning match set with the winning confidence
++		int matchSetId = t.getMatchSet().getID();
++		double conf = t.getConfidenceScore().getScore();
++		return matchSetId == best.matchSetId && conf == best.confidence;
++	}
++
++	@Override
++	public JComponent getComponent() {
++		return component;
++	}
++
++	@Override
++	public FilterEditingStatus getFilterStatus() {
++		if (checkBox.isSelected()) {
++			return FilterEditingStatus.APPLIED;
++		}
++		return FilterEditingStatus.NONE;
++	}
++
++	@Override
++	public FilterShortcutState getFilterShortcutState() {
++		if (!checkBox.isSelected()) {
++			return FilterShortcutState.ALWAYS_PASSES;
++		}
++		return FilterShortcutState.REQUIRES_CHECK;
++	}
++
++	@Override
++	public void writeConfigState(SaveState saveState) {
++		saveState.putBoolean(STATE_KEY, checkBox.isSelected());
++	}
++
++	@Override
++	public void readConfigState(SaveState saveState) {
++		checkBox.setSelected(saveState.getBoolean(STATE_KEY, false));
++	}
++
++	@Override
++	public boolean isSubFilterOf(Filter<VTMatch> otherFilter) {
++		if (!(otherFilter instanceof BestPDiffMatchFilter other)) {
++			return false;
++		}
++		return checkBox.isSelected() || !other.checkBox.isSelected();
++	}
++
++	@Override
++	protected Filter<VTMatch> createEmptyCopy() {
++		return new BestPDiffMatchFilter();
++	}
++
++	private static class BestMatchInfo {
++		final int matchSetId;
++		final double confidence;
++
++		BestMatchInfo(int matchSetId, double confidence) {
++			this.matchSetId = matchSetId;
++			this.confidence = confidence;
++		}
++	}
++}
+diff --git a/Ghidra/Features/VersionTracking/src/main/java/ghidra/feature/vt/gui/provider/matchtable/SimilarityFilter.java b/Ghidra/Features/VersionTracking/src/main/java/ghidra/feature/vt/gui/provider/matchtable/SimilarityFilter.java
+new file mode 100644
+index 0000000000..37cc221b6d
+--- /dev/null
++++ b/Ghidra/Features/VersionTracking/src/main/java/ghidra/feature/vt/gui/provider/matchtable/SimilarityFilter.java
+@@ -0,0 +1,61 @@
++/* ###
++ * IP: GHIDRA
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package ghidra.feature.vt.gui.provider.matchtable;
++
++import ghidra.feature.vt.api.main.*;
++import ghidra.feature.vt.gui.filters.Filter;
++
++/**
++ * Filters matches by their stored PDiff similarity score (range [0.0, 1.0]).
++ * Reads the precomputed score from the DB — no on-the-fly hash computation.
++ *
++ * <p>Bypass rules (always pass):
++ * <ul>
++ *   <li>Non-FUNCTION matches (DATA, etc.) — PDiff is only meaningful for functions</li>
++ *   <li>Matches with null PDiff score — not yet computed (e.g. schema migration in progress)</li>
++ * </ul>
++ */
++class SimilarityFilter extends AbstractDoubleRangeFilter<VTMatch> {
++
++	SimilarityFilter() {
++		super("Similarity", 0.0D, 1.0D);
++	}
++
++	@Override
++	public boolean passesFilter(VTMatch t) {
++		VTAssociation assoc = t.getAssociation();
++		if (assoc.getType() != VTAssociationType.FUNCTION) {
++			return true; // non-function matches always pass
++		}
++		if (t.getPdiffSimilarityScore() == null) {
++			return true; // score not yet computed, don't filter out
++		}
++		return super.passesFilter(t);
++	}
++
++	@Override
++	protected Double getFilterableValue(VTMatch t) {
++		// Only called when passesFilter delegates to super, so score is non-null here.
++		// Defensive 0.0 fallback just in case.
++		VTScore score = t.getPdiffSimilarityScore();
++		return score != null ? score.getScore() : 0.0;
++	}
++
++	@Override
++	protected Filter<VTMatch> createEmptyCopy() {
++		return new SimilarityFilter();
++	}
++}
+diff --git a/Ghidra/Features/VersionTracking/src/main/java/ghidra/feature/vt/gui/provider/matchtable/VTMatchTableModel.java b/Ghidra/Features/VersionTracking/src/main/java/ghidra/feature/vt/gui/provider/matchtable/VTMatchTableModel.java
+index 6f337e2e65..a53a2ac2fe 100644
+--- a/Ghidra/Features/VersionTracking/src/main/java/ghidra/feature/vt/gui/provider/matchtable/VTMatchTableModel.java
++++ b/Ghidra/Features/VersionTracking/src/main/java/ghidra/feature/vt/gui/provider/matchtable/VTMatchTableModel.java
+@@ -45,6 +45,7 @@ public class VTMatchTableModel extends AbstractVTMatchTableModel {
+ 		descriptor.addVisibleColumn(new MatchTypeTableColumn());
+ 		descriptor.addVisibleColumn(new ScoreTableColumn());
+ 		descriptor.addVisibleColumn(new ConfidenceScoreTableColumn());
++		descriptor.addVisibleColumn(new BulkBBSimilarityTableColumn());
+ 		descriptor.addVisibleColumn(new ImpliedMatchCountColumn());
+ 		descriptor.addVisibleColumn(new RelatedMatchCountColumn());
+ 		descriptor.addVisibleColumn(new MultipleSourceLabelsTableColumn());
+diff --git a/Ghidra/Features/VersionTracking/src/main/java/ghidra/feature/vt/gui/provider/matchtable/VTMatchTableProvider.java b/Ghidra/Features/VersionTracking/src/main/java/ghidra/feature/vt/gui/provider/matchtable/VTMatchTableProvider.java
+index a2e2a95ab7..56d2fd7557 100644
+--- a/Ghidra/Features/VersionTracking/src/main/java/ghidra/feature/vt/gui/provider/matchtable/VTMatchTableProvider.java
++++ b/Ghidra/Features/VersionTracking/src/main/java/ghidra/feature/vt/gui/provider/matchtable/VTMatchTableProvider.java
+@@ -395,6 +395,12 @@ public class VTMatchTableProvider extends ComponentProviderAdapter
+ 		JComponent confidenceFilterPanel = createConfidenceFilterPanel();
+ 		innerPanel.add(confidenceFilterPanel);
+ 
++		JComponent similarityFilterPanel = createSimilarityFilterPanel();
++		innerPanel.add(similarityFilterPanel);
++
++		JComponent bestPDiffFilterPanel = createBestPDiffMatchFilterPanel();
++		innerPanel.add(bestPDiffFilterPanel);
++
+ 		JComponent lengthFilterPanel = createLengthFilterPanel();
+ 		innerPanel.add(lengthFilterPanel);
+ 
+@@ -460,6 +466,18 @@ public class VTMatchTableProvider extends ComponentProviderAdapter
+ 		return confidenceFilter.getComponent();
+ 	}
+ 
++	private JComponent createSimilarityFilterPanel() {
++		SimilarityFilter similarityFilter = new SimilarityFilter();
++		addFilter(similarityFilter);
++		return similarityFilter.getComponent();
++	}
++
++	private JComponent createBestPDiffMatchFilterPanel() {
++		BestPDiffMatchFilter bestPDiffFilter = new BestPDiffMatchFilter();
++		addFilter(bestPDiffFilter);
++		return bestPDiffFilter.getComponent();
++	}
++
+ 	private void refilter() {
+ 		if (filteringFrozen) {
+ 			return;
+diff --git a/Ghidra/Features/VersionTracking/src/main/java/ghidra/feature/vt/gui/util/AbstractVTMatchTableModel.java b/Ghidra/Features/VersionTracking/src/main/java/ghidra/feature/vt/gui/util/AbstractVTMatchTableModel.java
+index 5df8ed033d..68bc0e2fc3 100644
+--- a/Ghidra/Features/VersionTracking/src/main/java/ghidra/feature/vt/gui/util/AbstractVTMatchTableModel.java
++++ b/Ghidra/Features/VersionTracking/src/main/java/ghidra/feature/vt/gui/util/AbstractVTMatchTableModel.java
+@@ -508,6 +508,70 @@ public abstract class AbstractVTMatchTableModel extends AddressBasedTableModel<V
+ 		}
+ 	}
+ 
++	// Bulk Basic Block Similarity — reads the precomputed PDiff score from the DB.
++	// Previously this column computed hashes on-the-fly for every render; now it just
++	// reads the stored value, making table scrolling and sorting instant.
++	public static class BulkBBSimilarityTableColumn
++			extends AbstractProgramBasedDynamicTableColumn<VTMatch, VTScore> {
++
++		@Override
++		public String getColumnName() {
++			return "Similarity";
++		}
++
++		@Override
++		public String getColumnDescription() {
++			return "Similarity - basic block mnemonic similarity between matched functions";
++		}
++
++		/** Returns the precomputed PDiff score, or null (renders as "N/A") for DATA matches. */
++		@Override
++		public VTScore getValue(VTMatch rowObject, Settings settings, Program program,
++				ServiceProvider serviceProvider) throws IllegalArgumentException {
++			return rowObject.getPdiffSimilarityScore();
++		}
++
++		@Override
++		public int getColumnPreferredWidth() {
++			return 55;
++		}
++
++		private GColumnRenderer<VTScore> renderer = new AbstractGColumnRenderer<>() {
++			@Override
++			public Component getTableCellRendererComponent(GTableCellRenderingData data) {
++
++				JLabel label = (JLabel) super.getTableCellRendererComponent(data);
++
++				Object value = data.getValue();
++
++				VTScore score = (VTScore) value;
++				if (score == null) {
++					label.setText("N/A");
++				}
++				else {
++					label.setText(score.getFormattedScore());
++				}
++
++				label.setOpaque(true);
++
++				return label;
++			}
++
++			@Override
++			public String getFilterString(VTScore t, Settings settings) {
++				if (t == null) {
++					return "N/A";
++				}
++				return t.getFormattedScore();
++			}
++		};
++
++		@Override
++		public GColumnRenderer<VTScore> getColumnRenderer() {
++			return renderer;
++		}
++	}
++
+ 	// Multiple Source Labels Indicator
+ 	public static class MultipleSourceLabelsTableColumn
+ 			extends AbstractProgramBasedDynamicTableColumn<VTMatch, Symbol[]> {
+-- 
+2.45.1
+
