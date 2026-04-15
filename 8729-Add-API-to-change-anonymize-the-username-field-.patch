@@ -7,22 +7,22 @@ Subject: [PATCH] 8729: Add API to change/anonymize the username field of
 8728 - Add API to change the username field of comment
  history and label history
 ---
- .../program/DBTraceProgramViewListing.java    | 12 +++++
- .../DBTraceProgramViewSymbolTable.java        | 12 +++++
- .../ghidra/program/database/ListingDB.java    | 11 ++++
- .../program/database/code/CodeManager.java    | 50 +++++++++++++++++++
- .../database/code/CommentHistoryAdapter.java  | 16 ++++++
- .../code/CommentHistoryAdapterNoTable.java    | 10 ++++
- .../code/CommentHistoryAdapterV0.java         | 22 ++++++++
- .../database/symbol/LabelHistoryAdapter.java  | 17 +++++++
- .../symbol/LabelHistoryAdapterNoTable.java    | 16 ++++++
- .../symbol/LabelHistoryAdapterV0.java         | 25 ++++++++++
- .../database/symbol/SymbolManager.java        | 46 +++++++++++++++++
- .../ghidra/program/model/listing/Listing.java | 22 ++++++++
- .../program/model/listing/StubListing.java    | 10 ++++
- .../program/model/symbol/SymbolTable.java     | 20 ++++++++
- .../program/model/symbol/StubSymbolTable.java | 10 ++++
- 15 files changed, 299 insertions(+)
+ .../program/DBTraceProgramViewListing.java    | 12 ++++++
+ .../DBTraceProgramViewSymbolTable.java        | 12 ++++++
+ .../ghidra/program/database/ListingDB.java    | 11 +++++
+ .../program/database/code/CodeManager.java    | 43 +++++++++++++++++++
+ .../database/code/CommentHistoryAdapter.java  | 16 +++++++
+ .../code/CommentHistoryAdapterNoTable.java    | 10 +++++
+ .../code/CommentHistoryAdapterV0.java         | 22 ++++++++++
+ .../database/symbol/LabelHistoryAdapter.java  | 17 ++++++++
+ .../symbol/LabelHistoryAdapterNoTable.java    | 16 +++++++
+ .../symbol/LabelHistoryAdapterV0.java         | 25 +++++++++++
+ .../database/symbol/SymbolManager.java        | 38 ++++++++++++++++
+ .../ghidra/program/model/listing/Listing.java | 22 ++++++++++
+ .../program/model/listing/StubListing.java    | 10 +++++
+ .../program/model/symbol/SymbolTable.java     | 20 +++++++++
+ .../program/model/symbol/StubSymbolTable.java | 10 +++++
+ 15 files changed, 284 insertions(+)
 
 diff --git a/Ghidra/Debug/Framework-TraceModeling/src/main/java/ghidra/trace/database/program/DBTraceProgramViewListing.java b/Ghidra/Debug/Framework-TraceModeling/src/main/java/ghidra/trace/database/program/DBTraceProgramViewListing.java
 index deb4e548cf..9d8251d2f9 100644
@@ -96,10 +96,10 @@ index 483d2832e5..c6339b2ee9 100644
  	public CodeUnitIterator getCommentCodeUnitIterator(CommentType commentType,
  			AddressSetView addrSet) {
 diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/code/CodeManager.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/code/CodeManager.java
-index 1ac2dff24d..0ce02b6a25 100644
+index bd5673e49a..1b71bb3e61 100644
 --- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/code/CodeManager.java
 +++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/code/CodeManager.java
-@@ -3409,6 +3409,56 @@ public class CodeManager implements ErrorHandler, ManagerDB {
+@@ -3076,6 +3076,49 @@ public class CodeManager implements ErrorHandler, ManagerDB {
  		return new CommentHistory[0];
  	}
  
@@ -111,16 +111,12 @@ index 1ac2dff24d..0ce02b6a25 100644
 +	 * @throws IOException if there was a problem accessing the database
 +	 */
 +	public int anonymizeCommentHistory(String anonymousName) throws IOException {
-+		lock.acquire();
-+		try {
++		try (Closeable c = lock.write()) {
 +			if (historyAdapter == null) {
 +				return 0;
 +			}
 +			historyAdapter.anonymizeAllRecords(anonymousName);
 +			return historyAdapter.getRecordCount();
-+		}
-+		finally {
-+			lock.release();
 +		}
 +	}
 +
@@ -133,8 +129,7 @@ index 1ac2dff24d..0ce02b6a25 100644
 +	 * @throws IOException if there was a problem accessing the database
 +	 */
 +	public int anonymizeCommentHistory(String anonymousName, Address addr) throws IOException {
-+		lock.acquire();
-+		try {
++		try (Closeable c = lock.write()) {
 +			if (historyAdapter == null) {
 +				return 0;
 +			}
@@ -148,9 +143,7 @@ index 1ac2dff24d..0ce02b6a25 100644
 +			}
 +			return count;
 +		}
-+		finally {
-+			lock.release();
-+		}
++
 +	}
 +
  	// note: you must have the lock when calling this method
@@ -317,17 +310,16 @@ index 1b712c9da8..9937f893d1 100644
 +	}
  }
 diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/symbol/SymbolManager.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/symbol/SymbolManager.java
-index 6275670096..7ce09304e6 100644
+index 446c1440bf..a1b9f47f7d 100644
 --- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/symbol/SymbolManager.java
 +++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/symbol/SymbolManager.java
-@@ -1506,6 +1506,52 @@ public class SymbolManager implements SymbolTable, ManagerDB {
+@@ -1399,6 +1399,44 @@ public class SymbolManager implements SymbolTable, ManagerDB {
  		return new LabelHistory[0];
  	}
  
 +	@Override
 +	public int anonymizeLabelHistory(String anonymousName) throws IOException {
-+		lock.acquire();
-+		try {
++		try (Closeable c = lock.write()) {
 +			if (historyAdapter == null) {
 +				return 0;
 +			}
@@ -338,15 +330,11 @@ index 6275670096..7ce09304e6 100644
 +			program.dbError(e);
 +			throw e;
 +		}
-+		finally {
-+			lock.release();
-+		}
 +	}
 +
 +	@Override
 +	public int anonymizeLabelHistory(String anonymousName, Address addr) throws IOException {
-+		lock.acquire();
-+		try {
++		try (Closeable c = lock.write()) {
 +			if (historyAdapter == null) {
 +				return 0;
 +			}
@@ -364,9 +352,6 @@ index 6275670096..7ce09304e6 100644
 +		catch (IOException e) {
 +			program.dbError(e);
 +			throw e;
-+		}
-+		finally {
-+			lock.release();
 +		}
 +	}
 +
