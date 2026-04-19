@@ -1,0 +1,58 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: PoroCYon <p@pcy.be>
+Date: Sat, 18 Apr 2026 02:27:54 +0200
+Subject: [PATCH] 9126: xtensa: decompile LITBASE-relative L32R instructions
+ correctly
+
+---
+ .../data/languages/xtensaInstructions.sinc       | 16 ++++++++++++++--
+ .../Xtensa/data/languages/xtensaMain.sinc        |  6 +++---
+ 2 files changed, 17 insertions(+), 5 deletions(-)
+
+diff --git a/Ghidra/Processors/Xtensa/data/languages/xtensaInstructions.sinc b/Ghidra/Processors/Xtensa/data/languages/xtensaInstructions.sinc
+index f06e61937a..23b0381515 100644
+--- a/Ghidra/Processors/Xtensa/data/languages/xtensaInstructions.sinc
++++ b/Ghidra/Processors/Xtensa/data/languages/xtensaInstructions.sinc
+@@ -637,8 +637,20 @@ macro extract_bit(bit, result) {
+ }
+ 
+ # L32R - Load 32-bit PC-relative (RI6), pg. 382.
+-:l32r at, srel_oex_sh2 is srel_oex_sh2 & at & op0 = 0b0001 {
+-    at = srel_oex_sh2;
++:l32r at, srel_oex_sh2_imm is srel_oex_sh2_imm & at & op0 = 0b0001 {
++	tmp_pc = (((inst_start + 3) & ~3) + srel_oex_sh2_imm);
++	tmp_lb = ((LITBASE & ~1) + srel_oex_sh2_imm);
++
++	if ((LITBASE & 1) == 1) goto <use_litbase>;
++
++	at = *:4 tmp_pc;
++	goto <end>;
++
++	<use_litbase>
++
++	at = *:4 tmp_lb;
++
++	<end>
+ }
+ 
+ # LDCT - Load Data Cache Tag (RRR), pg. 384.
+diff --git a/Ghidra/Processors/Xtensa/data/languages/xtensaMain.sinc b/Ghidra/Processors/Xtensa/data/languages/xtensaMain.sinc
+index 6aee9c3ae7..ed3118845c 100644
+--- a/Ghidra/Processors/Xtensa/data/languages/xtensaMain.sinc
++++ b/Ghidra/Processors/Xtensa/data/languages/xtensaMain.sinc
+@@ -198,9 +198,9 @@ call_srel_sh2: rel is call_o18 [
+     rel = (inst_start & ~3) + ( call_o18 << 2 ) + 4;
+ ] { export *:4 rel; }
+ 
+-srel_oex_sh2: rel is ri16_i16 [
+-    rel = ((inst_start + 3) & ~3) + ((ri16_i16 | 0xffff0000) << 2);
+-] { export *:4 rel; }
++srel_oex_sh2_imm: rel is ri16_i16 [
++    rel = ((ri16_i16 | 0xffff0000) << 2);
++] { export *[const]:4 rel; }
+ 
+ # Immediates split across the instruction.
+ u5_8_11_20: tmp is op2_0 & op_s  [ tmp = (op2_0 << 4) | op_s; ] { export *[const]:4 tmp; }
+-- 
+2.45.1
+

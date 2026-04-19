@@ -4,16 +4,32 @@ Date: Mon, 16 Feb 2026 16:27:24 +0100
 Subject: [PATCH] 8971: Loader for DOS COM files
 
 ---
- .../ghidra/app/util/opinion/ComLoader.java    | 200 ++++++++++++++++++
- 1 file changed, 200 insertions(+)
+ .../ghidra/app/util/opinion/BinaryLoader.java |   2 +-
+ .../ghidra/app/util/opinion/ComLoader.java    | 205 ++++++++++++++++++
+ .../java/ghidra/app/util/opinion/Loader.java  |  11 +
+ .../app/util/opinion/LoaderService.java       |  44 +++-
+ 4 files changed, 249 insertions(+), 13 deletions(-)
  create mode 100644 Ghidra/Features/Base/src/main/java/ghidra/app/util/opinion/ComLoader.java
 
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/opinion/BinaryLoader.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/opinion/BinaryLoader.java
+index d4e786c392..67c85464b1 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/opinion/BinaryLoader.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/opinion/BinaryLoader.java
+@@ -47,7 +47,7 @@ public class BinaryLoader extends AbstractProgramLoader {
+ 
+ 	@Override
+ 	public int getTierPriority() {
+-		return 100;
++		return 9999;
+ 	}
+ 
+ 	@Override
 diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/opinion/ComLoader.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/opinion/ComLoader.java
 new file mode 100644
-index 0000000000..a2905ba3f7
+index 0000000000..77381d5669
 --- /dev/null
 +++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/opinion/ComLoader.java
-@@ -0,0 +1,200 @@
+@@ -0,0 +1,205 @@
 +/* ###
 + * IP: GHIDRA
 + *
@@ -65,7 +81,12 @@ index 0000000000..a2905ba3f7
 +
 +  @Override
 +  public int getTierPriority() {
-+    return 1000; // make sure it is fallback
++    return 1000;
++  }
++
++  @Override
++  public boolean isFallback() {
++    return true; // make sure it is fallback
 +  }
 +
 +  @Override
@@ -214,6 +235,95 @@ index 0000000000..a2905ba3f7
 +    }
 +  }
 +}
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/opinion/Loader.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/opinion/Loader.java
+index ce3b9a2f79..da3642885d 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/opinion/Loader.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/opinion/Loader.java
+@@ -215,6 +215,17 @@ public interface Loader extends ExtensionPoint, Comparable<Loader> {
+ 	 */
+ 	public int getTierPriority();
+ 
++	/**
++	 * Fallback loaders will be loaded only if any other doesn't match
++	 * <p>
++	 * The default behavior of this method is to return false.
++	 *
++	 * @return True if this {@link Loader} is for fallback; otherwise false.
++	 */
++	public default boolean isFallback() {
++		return false;
++	}
++
+ 	/**
+ 	 * The preferred file name to use when loading.
+ 	 * <p>
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/opinion/LoaderService.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/opinion/LoaderService.java
+index e5a05f449b..ffee842522 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/opinion/LoaderService.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/opinion/LoaderService.java
+@@ -31,6 +31,27 @@ public class LoaderService {
+ 
+ 	public static Predicate<Loader> ACCEPT_ALL = loader -> true;
+ 
++	/**
++	 * Attempts to find and register supported {@link LoadSpec}s for the given {@link Loader}.
++	 * @param loader The {@link Loader} to query.
++	 * @param provider The {@link ByteProvider} to load from.
++	 * @param loaderMap The {@link LoaderMap} to populate with discovered {@link LoadSpec}s.
++	 */
++	private static void tryLoadSpecs(Loader loader, ByteProvider provider, LoaderMap loaderMap) {
++		try {
++			Collection<LoadSpec> loadSpecs = loader.findSupportedLoadSpecs(provider);
++			if (loadSpecs != null && !loadSpecs.isEmpty()) { // shouldn't be null, but protect against rogue loaders
++				loaderMap.put(loader, loadSpecs);
++			}
++		}
++		catch (IOException e) {
++			// file not applicable for loader
++		}
++		catch (RuntimeException e) {
++			Msg.error(LoaderService.class, "Unexpected Loader exception from " + loader.getName(), e);
++		}
++	}
++
+ 	/**
+ 	 * Gets all supported {@link LoadSpec}s for loading the given {@link ByteProvider}.
+ 	 * 
+@@ -41,23 +62,22 @@ public class LoaderService {
+ 	public static LoaderMap getSupportedLoadSpecs(ByteProvider provider,
+ 			Predicate<Loader> loaderFilter) {
+ 		LoaderMap loaderMap = new LoaderMap();
++		List<Loader> fallback = new ArrayList<>();
+ 		for (Loader loader : getAllLoaders()) {
+ 			if (loaderFilter.test(loader)) {
+-				try {
+-					Collection<LoadSpec> loadSpecs = loader.findSupportedLoadSpecs(provider);
+-					if (loadSpecs != null && !loadSpecs.isEmpty()) { // shouldn't be null, but protect against rogue loaders
+-						loaderMap.put(loader, loadSpecs);
+-					}
+-				}
+-				catch (IOException e) {
+-					// file not applicable for loader
+-				}
+-				catch (RuntimeException e) {
+-					Msg.error(LoaderService.class,
+-						"Unexpected Loader exception from " + loader.getName(), e);
++				if (!loader.isFallback()) {
++					tryLoadSpecs(loader, provider, loaderMap);
++				} else {
++					fallback.add(loader);
+ 				}
+ 			}
+ 		}
++
++		if (loaderMap.size() < 2) { // BinaryLoader is always there
++			for (Loader loader : fallback) {
++				tryLoadSpecs(loader, provider, loaderMap);
++			}
++		}
+ 		return loaderMap;
+ 	}
+ 
 -- 
 2.45.1
 
