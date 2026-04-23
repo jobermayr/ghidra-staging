@@ -87,6 +87,12 @@ Applied GPP-4356 to methhod ParamListStandard::assignMapLtoR(...).
 Followed GP-6370: Upgrade to JDOM2
 
 Allow 'C32 enum ...' & my BASED change
+
+Fix 'this' param removal to work with other 'this' types switching the comparison from '.equals' to '.startsWith'.
+
+Move 'BasedSpec()' after all <> types.
+
+Removed reference to 'DBObjectCache' to match 'GP-6679: Changing Ghidra to use read/write locks'.
 ---
  Ghidra/Features/Base/certification.manifest   |    1 +
  .../Base/data/FunctionNames.properties        | 2308 +++++++++++++++++
@@ -4425,7 +4431,7 @@ index 0000000000..16ac2c52bc
 +	}
 +}
 diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/function/editor/FunctionEditorModel.java b/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/function/editor/FunctionEditorModel.java
-index e8ed536e55..6428cb6c6b 100644
+index 6f8045b6b9..7fa0b279e6 100644
 --- a/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/function/editor/FunctionEditorModel.java
 +++ b/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/function/editor/FunctionEditorModel.java
 @@ -252,7 +252,7 @@ public class FunctionEditorModel {
@@ -4437,7 +4443,7 @@ index e8ed536e55..6428cb6c6b 100644
  	 * {@link VariableUtilities#checkVariableConflict(List, Variable, VariableStorage, VariableConflictHandler)}
  	 * @param conflicts parameters whose storage conflicts
  	 * @return return false to indicate conflicts have not been resolved and additional checks
-@@ -1038,8 +1038,8 @@ public class FunctionEditorModel {
+@@ -1030,8 +1030,8 @@ public class FunctionEditorModel {
  	}
  
  	/**
@@ -5059,7 +5065,7 @@ index a06295188b..a42e0495bf 100644
  				addr = addr.addWrap(thunkBodySize);
  			}
 diff --git a/Ghidra/Features/Base/src/main/javacc/ghidra/app/util/cparser/C/C.jj b/Ghidra/Features/Base/src/main/javacc/ghidra/app/util/cparser/C/C.jj
-index f36690d7c2..3dd2dceb45 100644
+index f36690d7c2..11f1c9ab84 100644
 --- a/Ghidra/Features/Base/src/main/javacc/ghidra/app/util/cparser/C/C.jj
 +++ b/Ghidra/Features/Base/src/main/javacc/ghidra/app/util/cparser/C/C.jj
 @@ -48,13 +48,16 @@
@@ -5265,14 +5271,14 @@ index f36690d7c2..3dd2dceb45 100644
        <NORETURN> { dec.addQualifier(NORETURN); } |
        <W64> |
        <PTR64> |
-@@ -1856,6 +1882,7 @@ Declaration TypeQualifier(Declaration dec) : {}
-       <RESTRICT> |
-       <EXTENSION> |
+@@ -1858,6 +1884,7 @@ Declaration TypeQualifier(Declaration dec) : {}
        <STATIC> |
-+      ( BasedSpec() ) |
        <PACKED> { dec.addQualifier(PACKED); } |
        <UNALIGNED> |
++      ( BasedSpec() ) |
        ( DeclSpec(dec) )
+     )
+     {
 @@ -1918,6 +1945,25 @@ void SubIdent(Declaration dec) : {
      }
  }
@@ -6407,27 +6413,20 @@ index f41b7ce19c..9d91af8aa2 100644
  					displayName = dt.getDisplayName() + " *";
  				}
 diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/function/FunctionVariables.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/function/FunctionVariables.java
-index ce49273583..fa9f0b153f 100644
+index ce49273583..30eb41385d 100644
 --- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/function/FunctionVariables.java
 +++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/function/FunctionVariables.java
-@@ -445,7 +445,7 @@ class FunctionVariables {
- 
- 			if (updateType == FunctionUpdateType.DYNAMIC_STORAGE_ALL_PARAMS &&
- 				!thisParamRemoved &&
--				CompilerSpec.CALLING_CONVENTION_thiscall.equals(callingConvention) &&
-+				callingConvention.startsWith(CompilerSpec.CALLING_CONVENTION_thiscall) &&
- 				newParams.size() != 0) {
- 				// Attempt to remove inferred unnamed 'this' parameter
- 				// WARNING! This is a bit of a hack - not sure how to account for what may be auto-params
-@@ -558,7 +558,7 @@ class FunctionVariables {
+@@ -558,8 +558,8 @@ class FunctionVariables {
  	 */
  	private static boolean removeExplicitThisParameter(List<? extends Variable> params,
  			String callingConventionName) {
 -		if (CompilerSpec.CALLING_CONVENTION_thiscall.equals(callingConventionName)) {
+-			int thisIndex = findExplicitThisParameter(params);
 +		if (callingConventionName.startsWith(CompilerSpec.CALLING_CONVENTION_thiscall)) {
- 			int thisIndex = findExplicitThisParameter(params);
++		int thisIndex = findExplicitThisParameter(params);
  			if (thisIndex >= 0) {
  				params.remove(thisIndex); // remove explicit 'this' parameter
+ 				return true;
 @@ -574,7 +574,7 @@ class FunctionVariables {
  	 * @return true if 'this' parameter removed
  	 */
