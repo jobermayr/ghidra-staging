@@ -1,0 +1,74 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Simon Brakhane <simon@brakhane.net>
+Date: Fri, 27 Mar 2026 08:24:08 +0100
+Subject: [PATCH] 9154: Skip callfixup targets with fall-through in
+ non-returning function detection
+
+GP-0: Skip callfixup targets with fall-through in
+ non-returning function detection
+
+FindNoReturnFunctionsAnalyzer uses heuristic evidence (data after call,
+function boundary after call, INT3 after call, etc.) to detect non-returning
+functions, but does not consult the target's callfixup. A fall-through
+callfixup is an explicit, authoritative statement that the function returns,
+and should win over heuristic evidence.
+
+The fix adds a check in detectNoReturn() that skips targets with a callfixup
+whose isFallThru() returns true, preventing the heuristic from overriding the
+explicit callfixup semantics.
+---
+ .../FindNoReturnFunctionsAnalyzer.java        | 31 +++++++++++++++++++
+ 1 file changed, 31 insertions(+)
+
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/analysis/FindNoReturnFunctionsAnalyzer.java b/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/analysis/FindNoReturnFunctionsAnalyzer.java
+index b2af9b487a..684294dd1d 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/analysis/FindNoReturnFunctionsAnalyzer.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/analysis/FindNoReturnFunctionsAnalyzer.java
+@@ -373,6 +373,13 @@ public class FindNoReturnFunctionsAnalyzer extends AbstractAnalyzer {
+ 			}
+ 			for (Address target : flows) {
+ 
++				// Skip targets that have a callfixup with fall-through semantics.
++				// A fall-through callfixup explicitly models the function's return
++				// behavior, so heuristic evidence should not override it.
++				if (hasCallFixupWithFallThrough(cp, target)) {
++					continue;
++				}
++
+ 				int count = 1;
+ 				ReferenceIterator refsTo = cp.getReferenceManager().getReferencesTo(target);
+ 				for (Reference reference : refsTo) {
+@@ -421,6 +428,30 @@ public class FindNoReturnFunctionsAnalyzer extends AbstractAnalyzer {
+ 		return hadSuspiciousFunctions;
+ 	}
+ 
++	/**
++	 * Check if the function at the given address has a callfixup that falls through.
++	 * A fall-through callfixup explicitly models the function's return behavior
++	 * (e.g., Watcom's __CHK/__STK stack-check functions), so heuristic noreturn
++	 * detection should not override it.
++	 *
++	 * @param cp current program
++	 * @param target address of the potential noreturn function
++	 * @return true if the function has a callfixup with fall-through semantics
++	 */
++	private boolean hasCallFixupWithFallThrough(Program cp, Address target) {
++		Function func = cp.getFunctionManager().getFunctionAt(target);
++		if (func == null) {
++			return false;
++		}
++		String callFixup = func.getCallFixup();
++		if (callFixup == null || callFixup.isEmpty()) {
++			return false;
++		}
++		PcodeInjectLibrary lib = cp.getCompilerSpec().getPcodeInjectLibrary();
++		InjectPayload payload = lib.getPayload(InjectPayload.CALLFIXUP_TYPE, callFixup);
++		return payload != null && payload.isFallThru();
++	}
++
+ 	private boolean targetOnlyCallsNoReturn(Program cp, Address target, AddressSet noReturnSet)
+ 			throws CancelledException {
+ 
+-- 
+2.45.1
+
