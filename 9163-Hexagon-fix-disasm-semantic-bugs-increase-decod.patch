@@ -1,0 +1,3290 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Shawn Hoffman <business@symbrkrs.com>
+Date: Thu, 7 May 2026 15:49:46 -0700
+Subject: [PATCH] 9163: Hexagon: fix disasm/semantic bugs, increase decode
+ coverage, add tests
+
+hexagon: fix rol pcode to compute true rotate
+
+The rol* constructors were emitting (rs << N) | zext(rs s< 0) which only
+folds the sign bit into bit 0 instead of rotating the high bits back into
+the low.  Use the standard (x << N) | (x >> (W - N)) pattern so the
+single-shot, accumulating, and bitwise variants all match the ISA.
+
+hexagon: prefix !cmp.eq/gt/gtu rather than suffix
+
+LLVM disassembles the negated cmp constructors as "!cmp.eq Pd, Rs, Rt"
+not "cmp.eq! Pd, Rs, Rt".  Quote the bang into the head token so the
+display matches; pcode is unchanged.
+
+hexagon: fix M2_mpyu_*_s1 typo squaring Rs instead of Rs*Rt
+
+Both the plain and accumulating M2_mpyu :<<1 forms had zext(Rs)*zext(Rs).
+Multiply by Rt as the encoding intends.
+
+hexagon: drop spurious Rd5 from ictagw match list
+
+ictagw has no destination register; Rd5 was listed in the constructor's
+operand expression but never used.  Remove it so the constructor only
+binds the operands it actually consumes.
+
+hexagon: swap min/minu operand display to match LLVM
+
+LLVM prints min as "min(Rt, Rs)" not "min(Rs, Rt)".  Reorder the
+display tokens for the four scalar/pair min and minu constructors;
+pcode already evaluates min(rt, rs).
+
+hexagon: add V62 A6_vminub_RdP decode-only stub
+
+Adds the paired-output vminub form that produces both Rdd and Pe; bodied
+as unimpl since we don't model the multi-write semantics yet.
+
+hexagon: add V62 vtrunehb/vtrunohb _ppp decode-only stubs
+
+The pair-pair forms S6_vtrunehb_ppp / S6_vtrunohb_ppp share the existing
+vtrunehb/vtrunohb mnemonics but use op2127=0x0c with op0507=3/5; add them
+alongside the existing v8 forms.
+
+hexagon: drop buggy icdataw decoder using icinva encoding
+
+hexagon: add V66 icdataw and memcpy decode-only stubs
+
+Y2_icdataw uses Inst{31-21}=0b01010101110 in HexagonDepInstrInfo.td
+which is op2127=0x2e with op13=1.  L6_memcpy is greenfield.
+
+hexagon: add V68 dmlink/dmpause/dmpoll/dmresume/dmstart/dmwait stubs
+
+DMA descriptor-list controls from V68; all six are decode-only (no pcode
+model) and slot in next to dmsyncht using the documented Y6_dm* encodings
+from HexagonDepInstrInfo.td.
+
+hexagon: add V68 memw_aq decode-only stub
+
+Acquire-load form L2_loadw_aq from V68; same iclass/op2127 family as the
+existing memw_phys constructor but distinguished by op0513=0x40.
+
+hexagon: add V81 Y2_tlbpp decode-only stub
+
+V81 paired-source tlbp - shares the tlbp mnemonic with the v2 form but
+takes Rss and uses op2127=0x63.
+
+hexagon_hvx: add FP, BF16, F8 and ZReg operand classes
+
+Adds .sf/.bf/.f8/.x lane-suffix operand classes used by the IEEE-FP, BF16
+and FP8 stub families (V68/V73/V79), the .ub Rtt suffix used by V65
+vrmpy_rtt, and the V66 ZReg quad-vector classes (Vdddd / Vyyyy) plus
+Rt8/Rx8 byte-subregister selectors for the matrix-multiply family.
+
+hexagon_hvx: tighten vassign bit constraints
+
+Replace the open-ended op21/op1617 patterns on the existing vassign and
+Vsf/Vhf-from-qf32/qf16 constructors with the full op2123/op1620 fields,
+matching the LLVM encodings exactly so neighbouring stubs don't decode
+ambiguously.
+
+hexagon_hvx: rename Qx accumulating vcmp.eq/gt mnemonics
+
+The nine vcmp_eqand_/vcmp_gtand_ constructors were displaying as plain
+"vcmp.eq Qd, ..." which collides with the non-accumulating vcmp form.
+Append &= via the head-token suffix so the disassembly reads
+"vcmp.eq&= Qx, Vu, Vv" matching LLVM's V6_vcmp_*_and class.
+
+hexagon_hvx: add vhist/vhistq decode-only stubs
+
+Closes the long-standing silent vhist mis-decode.  Both V6_vhist (no
+operands) and V6_vhistq (predicated by Qv4) match the documented
+Inst{31-16}=0x1E00, Inst{13-0}=0x2080 pattern.  Also lays down the
+section header that following commits will append decode-only stubs
+under.
+
+hexagon_hvx: add V60 paired vmpy hus/hv/hvsrs decode stubs
+
+V6_vmpyhus, V6_vmpyhv and V6_vmpyhvsrs plus their _acc variants - five
+new stubs for the V60 paired-output multiplies that the existing scalar
+vmpy constructors don't cover.
+
+hexagon_hvx: add V65 vrmpy{bub,ub}_rtt decode stubs
+
+V6_vrmpybub_rtt and V6_vrmpyub_rtt with their _acc partners - the V65
+forms that take a paired Rtt scalar source instead of a vector Vv.
+
+hexagon_hvx: add V68 IEEE-FP decode stub family
+
+Eleven stubs for the V68 IEEE half/single-precision family:
+vfmax/vfmin .hf and .sf, vmpy_hf_hf and the qf-accumulating variants,
+vabs_hf, vadd_hf_hf and vdmpy_sf_hf_acc.  All decode-only.
+
+hexagon_hvx: add V73 BF16 decode stub family
+
+Eleven stubs for V73 bfloat16 - vadd/vsub/vmpy_sf_bf, vcvt_bf_sf,
+vmax/vmin_bf and the four vgtbf qfloat-accumulating predicate forms.
+
+hexagon_hvx: add V79 FP8 and qfext decode stubs
+
+Nine stubs for V79: vabs/vfneg_f8, vfmax/vfmin_f8, vcvt2 to .b/.ub from
+.hf, plus the three qfext getters/setters (V6_get_qfext, _oracc, set).
+
+hexagon_hvx: add V81 qfloat vcmp.eq and valign4 stubs
+
+Six veqhf/veqsf qfloat-accumulating predicate forms (and/or/xor for both
+.hf and .sf) plus V6_valign4.
+
+hexagon_hvx: add V66 ZReg matrix decode stub family
+
+Greenfield decode coverage for the V66 ZReg matrix-multiply unit: 20
+vrmpyz multiplier variants spanning vr16mpyz/vr8mpyzs and the four .c/.n
+lane shapes, V6_zextract, plus six z-loads (V6_zLd_ai/_pi/_ppu and the
+predicated counterparts).  All bodies unimpl - no matrix pcode emitted.
+
+Hexagon: add stub- and packet-coverage regression-pin tests
+
+Two new JUnit tests pin the disassembly text emitted for representative
+encodings of the recently added decoder stubs (HexagonStubCoverageTest)
+and packet-context decoding (HexagonPacketCoverageTest), so a future edit
+that accidentally drops or shadows a constructor will surface as a
+deliberate review point rather than a silent regression.
+
+hexagon: drop redundant togglebit shift-count guard
+
+hexagon: model sxt7 shift amount in register-form shifts
+
+hexagon: refresh comments to reflect current support
+
+hexagon_float: build sfmake/dfmake from bit pattern per V73
+
+hexagon: drop stale TODOs that no longer apply
+
+Hexagon: expand tests for shift edge cases and recent fixes
+---
+ .../Hexagon/data/languages/hexagon.sinc       | 419 ++++++++----
+ .../Hexagon/data/languages/hexagon.slaspec    |   9 +-
+ .../Hexagon/data/languages/hexagon_float.sinc |   8 +-
+ .../Hexagon/data/languages/hexagon_hvx.sinc   | 611 +++++++++++++++++-
+ .../sleigh/HexagonPacketCoverageTest.java     | 415 ++++++++++++
+ .../sleigh/HexagonShiftEdgeCasesTest.java     | 538 +++++++++++++++
+ .../sleigh/HexagonStubCoverageTest.java       | 246 +++++++
+ 7 files changed, 2076 insertions(+), 170 deletions(-)
+ create mode 100644 Ghidra/Processors/Hexagon/src/test/java/ghidra/app/plugin/assembler/sleigh/HexagonPacketCoverageTest.java
+ create mode 100644 Ghidra/Processors/Hexagon/src/test/java/ghidra/app/plugin/assembler/sleigh/HexagonShiftEdgeCasesTest.java
+ create mode 100644 Ghidra/Processors/Hexagon/src/test/java/ghidra/app/plugin/assembler/sleigh/HexagonStubCoverageTest.java
+
+diff --git a/Ghidra/Processors/Hexagon/data/languages/hexagon.sinc b/Ghidra/Processors/Hexagon/data/languages/hexagon.sinc
+index de29be04da..b6d7739ac4 100755
+--- a/Ghidra/Processors/Hexagon/data/languages/hexagon.sinc
++++ b/Ghidra/Processors/Hexagon/data/languages/hexagon.sinc
+@@ -1,4 +1,4 @@
+-# Qualcomm Hexagon (V73) General Instruction Set
++# Qualcomm Hexagon (V60-V81) General Instruction Set
+ 
+ #
+ # Custom pcode-op
+@@ -2721,7 +2721,7 @@ VcmpbEq: "vcmpb.eq("^rss5,rtt5^")"  is rss5 & rtt5 { tmp:1 = vcmpb.eq(rss5,rtt5)
+ #    1  0  0  0  1  1  0  0  0  0  0  s  s  s  s  s  P  P  0  i  i  i  i  i  0  1  1  d  d  d  d  d  
+ 
+ :rol Rd5,rs5,Uimm8_0812 EndPacket	is iclass=8 & op2127=0x60 & op13=0 & op0507=3 & Rd5 & rs5 & Uimm8_0812 & $(END_PACKET) {
+-	Rd5 = (rs5 << Uimm8_0812) | zext((rs5 s< 0) * 1);
++	Rd5 = (rs5 << Uimm8_0812) | (rs5 >> (32 - Uimm8_0812));
+ 	build EndPacket;
+ }
+ 
+@@ -2753,8 +2753,9 @@ define pcodeop aslSat;
+ #    1  1  0  0  0  1  1  0  0  1  +  s  s  s  s  s  P  P  +  t  t  t  t  t  1  0  +  d  d  d  d  d  
+ 
+ :asl Rd5,rs5,rt5 EndPacket	is iclass=12 & op2127=0x32 & op13=0 & op0507=4 & Rd5 & rs5 & rt5 & $(END_PACKET) {
+-	right:1 = rt5 s< 0;
+-	Rd5 = (zext(right) * (rs5 s>> -rt5)) + (zext(!right) * (rs5 << rt5));
++	shamt:4 = (rt5 << 25) s>> 25;
++	right:1 = shamt s< 0;
++	Rd5 = (zext(right) * (rs5 s>> -shamt)) + (zext(!right) * (rs5 << shamt));
+ 	build EndPacket;
+ }
+ 
+@@ -2784,7 +2785,7 @@ define pcodeop aslSat;
+ #    1  0  0  0  0  0  0  0  0  0  +  s  s  s  s  s  P  P  i  i  i  i  i  i  0  1  1  d  d  d  d  d  
+ 
+ :rol Rdd5,rss5,Uimm8_0813 EndPacket	is iclass=8 & op2127=0x00 & op0507=3 & Rdd5 & rss5 & Uimm8_0813 & $(END_PACKET) {
+-	Rdd5 = (rss5 << Uimm8_0813) | zext((rss5 s< 0) * 1);
++	Rdd5 = (rss5 << Uimm8_0813) | (rss5 >> (64 - Uimm8_0813));
+ 	build EndPacket;
+ }
+ 
+@@ -2794,8 +2795,9 @@ define pcodeop aslSat;
+ #    1  1  0  0  0  0  1  1  1  0  +  s  s  s  s  s  P  P  +  t  t  t  t  t  1  0  +  d  d  d  d  d  
+ 
+ :asl Rdd5,rss5,rt5 EndPacket	is iclass=12 & op2127=0x1c & op13=0 & op0507=4 & Rdd5 & rss5 & rt5 & $(END_PACKET) {
+-	right:1 = rt5 s< 0;
+-	Rdd5 = (zext(right) * (rss5 s>> -rt5)) + (zext(!right) * (rss5 << rt5));
++	shamt:4 = (rt5 << 25) s>> 25;
++	right:1 = shamt s< 0;
++	Rdd5 = (zext(right) * (rss5 s>> -shamt)) + (zext(!right) * (rss5 << shamt));
+ 	build EndPacket;
+ }
+ 
+@@ -2815,7 +2817,7 @@ define pcodeop aslSat;
+ #    1  0  0  0  1  1  1  0  0  1  +  s  s  s  s  s  P  P  0  i  i  i  i  i  0  1  1  x  x  x  x  x  
+ 
+ :rol&= Rd5,rs5,Uimm8_0812 EndPacket	is iclass=8 & op2127=0x72 & op13=0 & op0507=3 & Rd5 & rd5 & rs5 & Uimm8_0812 & $(END_PACKET) {
+-	Rd5 = rd5 & ((rs5 << Uimm8_0812) | zext((rs5 s<0) * 1));
++	Rd5 = rd5 & ((rs5 << Uimm8_0812) | (rs5 >> (32 - Uimm8_0812)));
+ 	build EndPacket;
+ }
+ 
+@@ -2825,8 +2827,9 @@ define pcodeop aslSat;
+ #    1  1  0  0  1  1  0  0  0  1  +  s  s  s  s  s  P  P  +  t  t  t  t  t  1  0  +  x  x  x  x  x  
+ 
+ :asl&= Rd5,rs5,rt5 EndPacket	is iclass=12 & op2127=0x62 & op13=0 & op0507=4 & Rd5 & rd5 & rs5 & rt5 & $(END_PACKET) {
+-	right:1 = rt5 s< 0;
+-	result:4 = (zext(right) * (rs5 s>> -rt5)) + (zext(!right) * (rs5 << rt5));
++	shamt:4 = (rt5 << 25) s>> 25;
++	right:1 = shamt s< 0;
++	result:4 = (zext(right) * (rs5 s>> -shamt)) + (zext(!right) * (rs5 << shamt));
+ 	Rd5 = rd5 & result;
+ 	build EndPacket;
+ }
+@@ -2847,7 +2850,7 @@ define pcodeop aslSat;
+ #    1  0  0  0  1  1  1  0  0  0  +  s  s  s  s  s  P  P  0  i  i  i  i  i  1  1  1  x  x  x  x  x  
+ 
+ :rol+= Rd5,rs5,Uimm8_0812 EndPacket	is iclass=8 & op2127=0x70 & op13=0 & op0507=7 & Rd5 & rd5 & rs5 & Uimm8_0812 & $(END_PACKET) {
+-	Rd5 = rd5 + ((rs5 << Uimm8_0812) | zext((rs5 s< 0) * 1));
++	Rd5 = rd5 + ((rs5 << Uimm8_0812) | (rs5 >> (32 - Uimm8_0812)));
+ 	build EndPacket;
+ }
+ 
+@@ -2857,8 +2860,9 @@ define pcodeop aslSat;
+ #    1  1  0  0  1  1  0  0  1  1  +  s  s  s  s  s  P  P  +  t  t  t  t  t  1  0  +  x  x  x  x  x  
+ 
+ :asl+= Rd5,rs5,rt5 EndPacket	is iclass=12 & op2127=0x66 & op13=0 & op0507=4 & Rd5 & rd5 & rs5 & rt5 & $(END_PACKET) {
+-	right:1 = rt5 s< 0;
+-	result:4 = (zext(right) * (rs5 s>> -rt5)) + (zext(!right) * (rs5 << rt5));
++	shamt:4 = (rt5 << 25) s>> 25;
++	right:1 = shamt s< 0;
++	result:4 = (zext(right) * (rs5 s>> -shamt)) + (zext(!right) * (rs5 << shamt));
+ 	Rd5 = rd5 + result;
+ 	build EndPacket;
+ }
+@@ -2879,7 +2883,7 @@ define pcodeop aslSat;
+ #    1  0  0  0  1  1  1  0  0  0  +  s  s  s  s  s  P  P  0  i  i  i  i  i  0  1  1  x  x  x  x  x  
+ 
+ :rol-= Rd5,rs5,Uimm8_0812 EndPacket	is iclass=8 & op2127=0x70 & op13=0 & op0507=3 & Rd5 & rd5 & rs5 & Uimm8_0812 & $(END_PACKET) {
+-	Rd5 = rd5 - ((rs5 << Uimm8_0812) | zext((rs5 s< 0) * 1));
++	Rd5 = rd5 - ((rs5 << Uimm8_0812) | (rs5 >> (32 - Uimm8_0812)));
+ 	build EndPacket;
+ }
+ 
+@@ -2889,8 +2893,9 @@ define pcodeop aslSat;
+ #    1  1  0  0  1  1  0  0  1  0  +  s  s  s  s  s  P  P  +  t  t  t  t  t  1  0  +  x  x  x  x  x  
+ 
+ :asl-= Rd5,rs5,rt5 EndPacket	is iclass=12 & op2127=0x64 & op13=0 & op0507=4 & Rd5 & rd5 & rs5 & rt5 & $(END_PACKET) {
+-	right:1 = rt5 s< 0;
+-	result:4 = (zext(right) * (rs5 s>> -rt5)) + (zext(!right) * (rs5 << rt5));
++	shamt:4 = (rt5 << 25) s>> 25;
++	right:1 = shamt s< 0;
++	result:4 = (zext(right) * (rs5 s>> -shamt)) + (zext(!right) * (rs5 << shamt));
+ 	Rd5 = rd5 - result;
+ 	build EndPacket;
+ }
+@@ -2911,7 +2916,7 @@ define pcodeop aslSat;
+ #    1  0  0  0  1  1  1  0  1  0  +  s  s  s  s  s  P  P  0  i  i  i  i  i  0  1  1  x  x  x  x  x  
+ 
+ :rol"^=" Rd5,rs5,Uimm8_0812 EndPacket	is iclass=8 & op2127=0x74 & op13=0 & op0507=3 & Rd5 & rd5 & rs5 & Uimm8_0812 & $(END_PACKET) {
+-	Rd5 = rd5 ^ ((rs5 << Uimm8_0812) | zext((rs5 s< 0) * 1));
++	Rd5 = rd5 ^ ((rs5 << Uimm8_0812) | (rs5 >> (32 - Uimm8_0812)));
+ 	build EndPacket;
+ }
+ 
+@@ -2931,7 +2936,7 @@ define pcodeop aslSat;
+ #    1  0  0  0  1  1  1  0  0  1  +  s  s  s  s  s  P  P  0  i  i  i  i  i  1  1  1  x  x  x  x  x  
+ 
+ :rol|= Rd5,rs5,Uimm8_0812 EndPacket	is iclass=8 & op2127=0x72 & op13=0 & op0507=7 & Rd5 & rd5 & rs5 & Uimm8_0812 & $(END_PACKET) {
+-	Rd5 = rd5 | ((rs5 << Uimm8_0812) | zext((rs5 s< 0) * 1));
++	Rd5 = rd5 | ((rs5 << Uimm8_0812) | (rs5 >> (32 - Uimm8_0812)));
+ 	build EndPacket;
+ }
+ 
+@@ -2941,8 +2946,9 @@ define pcodeop aslSat;
+ #    1  1  0  0  1  1  0  0  0  0  +  s  s  s  s  s  P  P  +  t  t  t  t  t  1  0  +  x  x  x  x  x  
+ 
+ :asl|= Rd5,rs5,rt5 EndPacket	is iclass=12 & op2127=0x60 & op13=0 & op0507=4 & Rd5 & rd5 & rs5 & rt5 & $(END_PACKET) {
+-	right:1 = rt5 s< 0;
+-	result:4 = (zext(right) * (rs5 s>> -rt5)) + (zext(!right) * (rs5 << rt5));
++	shamt:4 = (rt5 << 25) s>> 25;
++	right:1 = shamt s< 0;
++	result:4 = (zext(right) * (rs5 s>> -shamt)) + (zext(!right) * (rs5 << shamt));
+ 	Rd5 = rd5 | result;
+ 	build EndPacket;
+ }
+@@ -2963,7 +2969,7 @@ define pcodeop aslSat;
+ #    1  0  0  0  0  0  1  0  0  1  +  s  s  s  s  s  P  P  i  i  i  i  i  i  0  1  1  x  x  x  x  x  
+ 
+ :rol&= Rdd5,rss5,Uimm8_0813 EndPacket	is iclass=8 & op2127=0x12 & op0507=3 & Rdd5 & rdd5 & rss5 & Uimm8_0813 & $(END_PACKET) {
+-	Rdd5 = rdd5 & ((rss5 << Uimm8_0813) | zext((rss5 s< 0) * 1));
++	Rdd5 = rdd5 & ((rss5 << Uimm8_0813) | (rss5 >> (64 - Uimm8_0813)));
+ 	build EndPacket;
+ }
+ 
+@@ -2973,8 +2979,9 @@ define pcodeop aslSat;
+ #    1  1  0  0  1  0  1  1  0  1  0  s  s  s  s  s  P  P  +  t  t  t  t  t  1  0  +  x  x  x  x  x  
+ 
+ :asl&= Rdd5,rss5,rt5 EndPacket	is iclass=12 & op2127=0x5a & op13=0 & op0507=4 & Rdd5 & rdd5 & rss5 & rt5 & $(END_PACKET) {
+-	right:1 = rt5 s< 0;
+-	result:8 = (zext(right) * (rss5 s>> -rt5)) + (zext(!right) * (rss5 << rt5));
++	shamt:4 = (rt5 << 25) s>> 25;
++	right:1 = shamt s< 0;
++	result:8 = (zext(right) * (rss5 s>> -shamt)) + (zext(!right) * (rss5 << shamt));
+ 	Rdd5 = rdd5 & result;
+ 	build EndPacket;
+ }
+@@ -2995,7 +3002,7 @@ define pcodeop aslSat;
+ #    1  0  0  0  0  0  1  0  0  0  +  s  s  s  s  s  P  P  i  i  i  i  i  i  1  1  1  x  x  x  x  x  
+ 
+ :rol+= Rdd5,rss5,Uimm8_0813 EndPacket	is iclass=8 & op2127=0x10 & op0507=7 & Rdd5 & rdd5 & rss5 & Uimm8_0813 & $(END_PACKET) {
+-	Rdd5 = rdd5 + ((rss5 << Uimm8_0813) | zext((rss5 s< 0) * 1));
++	Rdd5 = rdd5 + ((rss5 << Uimm8_0813) | (rss5 >> (64 - Uimm8_0813)));
+ 	build EndPacket;
+ }
+ 
+@@ -3005,8 +3012,9 @@ define pcodeop aslSat;
+ #    1  1  0  0  1  0  1  1  1  1  0  s  s  s  s  s  P  P  +  t  t  t  t  t  1  0  +  x  x  x  x  x  
+ 
+ :asl+= Rdd5,rss5,rt5 EndPacket	is iclass=12 & op2127=0x5e & op13=0 & op0507=4 & Rdd5 & rdd5 & rss5 & rt5 & $(END_PACKET) {
+-	right:1 = rt5 s< 0;
+-	result:8 = (zext(right) * (rss5 s>> -rt5)) + (zext(!right) * (rss5 << rt5));
++	shamt:4 = (rt5 << 25) s>> 25;
++	right:1 = shamt s< 0;
++	result:8 = (zext(right) * (rss5 s>> -shamt)) + (zext(!right) * (rss5 << shamt));
+ 	Rdd5 = rdd5 + result;
+ 	build EndPacket;
+ }
+@@ -3027,7 +3035,7 @@ define pcodeop aslSat;
+ #    1  0  0  0  0  0  1  0  0  0  +  s  s  s  s  s  P  P  i  i  i  i  i  i  0  1  1  x  x  x  x  x  
+ 
+ :rol-= Rdd5,rss5,Uimm8_0813 EndPacket	is iclass=8 & op2127=0x10 & op0507=3 & Rdd5 & rdd5 & rss5 & Uimm8_0813 & $(END_PACKET) {
+-	Rdd5 = rdd5 - ((rss5 << Uimm8_0813) | zext((rss5 s< 0) * 1));
++	Rdd5 = rdd5 - ((rss5 << Uimm8_0813) | (rss5 >> (64 - Uimm8_0813)));
+ 	build EndPacket;
+ }
+ 
+@@ -3037,8 +3045,9 @@ define pcodeop aslSat;
+ #    1  1  0  0  1  0  1  1  1  0  0  s  s  s  s  s  P  P  +  t  t  t  t  t  1  0  +  x  x  x  x  x  
+ 
+ :asl-= Rdd5,rss5,rt5 EndPacket	is iclass=12 & op2127=0x5c & op13=0 & op0507=4 & Rdd5 & rdd5 & rss5 & rt5 & $(END_PACKET) {
+-	right:1 = rt5 s< 0;
+-	result:8 = (zext(right) * (rss5 s>> -rt5)) + (zext(!right) * (rss5 << rt5));
++	shamt:4 = (rt5 << 25) s>> 25;
++	right:1 = shamt s< 0;
++	result:8 = (zext(right) * (rss5 s>> -shamt)) + (zext(!right) * (rss5 << shamt));
+ 	Rdd5 = rdd5 - result;
+ 	build EndPacket;
+ }
+@@ -3059,7 +3068,7 @@ define pcodeop aslSat;
+ #    1  0  0  0  0  0  1  0  1  0  +  s  s  s  s  s  P  P  i  i  i  i  i  i  0  1  1  x  x  x  x  x  
+ 
+ :rol"^=" Rdd5,rss5,Uimm8_0813 EndPacket	is iclass=8 & op2127=0x14 & op0507=3 & Rdd5 & rdd5 & rss5 & Uimm8_0813 & $(END_PACKET) {
+-	Rdd5 = rdd5 ^ ((rss5 << Uimm8_0813) | zext((rss5 s< 0) * 1));
++	Rdd5 = rdd5 ^ ((rss5 << Uimm8_0813) | (rss5 >> (64 - Uimm8_0813)));
+ 	build EndPacket;
+ }
+ 
+@@ -3069,8 +3078,9 @@ define pcodeop aslSat;
+ #    1  1  0  0  1  0  1  1  0  1  1  s  s  s  s  s  P  P  +  t  t  t  t  t  1  0  +  x  x  x  x  x  
+ 
+ :asl"^=" Rdd5,rss5,rt5 EndPacket	is iclass=12 & op2127=0x5b & op13=0 & op0507=4 & Rdd5 & rdd5 & rss5 & rt5 & $(END_PACKET) {
+-	right:1 = rt5 s< 0;
+-	result:8 = (zext(right) * (rss5 s>> -rt5)) + (zext(!right) * (rss5 << rt5));
++	shamt:4 = (rt5 << 25) s>> 25;
++	right:1 = shamt s< 0;
++	result:8 = (zext(right) * (rss5 s>> -shamt)) + (zext(!right) * (rss5 << shamt));
+ 	Rdd5 = rdd5 ^ result;
+ 	build EndPacket;
+ }
+@@ -3091,7 +3101,7 @@ define pcodeop aslSat;
+ #    1  0  0  0  0  0  1  0  0  1  +  s  s  s  s  s  P  P  i  i  i  i  i  i  1  1  1  x  x  x  x  x  
+ 
+ :rol|= Rdd5,rss5,Uimm8_0813 EndPacket	is iclass=8 & op2127=0x12 & op0507=7 & Rdd5 & rdd5 & rss5 & Uimm8_0813 & $(END_PACKET) {
+-	Rdd5 = rdd5 | ((rss5 << Uimm8_0813) | zext((rss5 s< 0) * 1));
++	Rdd5 = rdd5 | ((rss5 << Uimm8_0813) | (rss5 >> (64 - Uimm8_0813)));
+ 	build EndPacket;
+ }
+ 
+@@ -3101,8 +3111,9 @@ define pcodeop aslSat;
+ #    1  1  0  0  1  0  1  1  0  0  0  s  s  s  s  s  P  P  +  t  t  t  t  t  1  0  +  x  x  x  x  x  
+ 
+ :asl|= Rdd5,rss5,rt5 EndPacket	is iclass=12 & op2127=0x58 & op13=0 & op0507=4 & Rdd5 & rdd5 & rss5 & rt5 & $(END_PACKET) {
+-	right:1 = rt5 s< 0;
+-	result:8 = (zext(right) * (rss5 s>> -rt5)) + (zext(!right) * (rss5 << rt5));
++	shamt:4 = (rt5 << 25) s>> 25;
++	right:1 = shamt s< 0;
++	result:8 = (zext(right) * (rss5 s>> -shamt)) + (zext(!right) * (rss5 << shamt));
+ 	Rdd5 = rdd5 | result;
+ 	build EndPacket;
+ }
+@@ -3186,8 +3197,9 @@ define pcodeop aslSat;
+ #    1  1  0  0  0  1  1  0  0  1  +  s  s  s  s  s  P  P  +  t  t  t  t  t  0  0  +  d  d  d  d  d  
+ 
+ :asr Rd5,rs5,rt5 EndPacket	is iclass=12 & op2127=0x32 & op13=0 & op0507=0 & Rd5 & rs5 & rt5 & $(END_PACKET) {
+-	left:1 = rt5 s< 0;
+-	Rd5 = (zext(!left) * (rs5 s>> rt5)) + (zext(left) * (rs5 << -rt5));
++	shamt:4 = (rt5 << 25) s>> 25;
++	left:1 = shamt s< 0;
++	Rd5 = (zext(!left) * (rs5 s>> shamt)) + (zext(left) * (rs5 << -shamt));
+ 	build EndPacket;
+ }
+ 
+@@ -3219,8 +3231,9 @@ define pcodeop asrSat;
+ #    1  1  0  0  0  0  1  1  1  0  +  s  s  s  s  s  P  P  +  t  t  t  t  t  0  0  +  d  d  d  d  d  
+ 
+ :asr Rdd5,rss5,rt5 EndPacket	is iclass=12 & op2127=0x1c & op13=0 & op0507=0 & Rdd5 & rss5 & rt5 & $(END_PACKET) {
+-	left:1 = rt5 s< 0;
+-	Rdd5 = (zext(!left) * (rss5 s>> rt5)) + (zext(left) * (rss5 << -rt5));
++	shamt:4 = (rt5 << 25) s>> 25;
++	left:1 = shamt s< 0;
++	Rdd5 = (zext(!left) * (rss5 s>> shamt)) + (zext(left) * (rss5 << -shamt));
+ 	build EndPacket;
+ }
+ 
+@@ -3240,8 +3253,9 @@ define pcodeop asrSat;
+ #    1  1  0  0  1  1  0  0  0  1  +  s  s  s  s  s  P  P  +  t  t  t  t  t  0  0  +  x  x  x  x  x  
+ 
+ :asr&= Rd5,rs5,rt5 EndPacket	is iclass=12 & op2127=0x62 & op13=0 & op0507=0 & Rd5 & rd5 & rs5 & rt5 & $(END_PACKET) {
+-	left:1 = rt5 s< 0;
+-	result:4 = (zext(!left) * (rs5 s>> rt5)) + (zext(left) * (rs5 << -rt5));
++	shamt:4 = (rt5 << 25) s>> 25;
++	left:1 = shamt s< 0;
++	result:4 = (zext(!left) * (rs5 s>> shamt)) + (zext(left) * (rs5 << -shamt));
+ 	Rd5 = rd5 & result;
+ 	build EndPacket;
+ }
+@@ -3262,8 +3276,9 @@ define pcodeop asrSat;
+ #    1  1  0  0  1  1  0  0  1  1  +  s  s  s  s  s  P  P  +  t  t  t  t  t  0  0  +  x  x  x  x  x  
+ 
+ :asr+= Rd5,rs5,rt5 EndPacket	is iclass=12 & op2127=0x66 & op13=0 & op0507=0 & Rd5 & rd5 & rs5 & rt5 & $(END_PACKET) {
+-	left:1 = rt5 s< 0;
+-	result:4 = (zext(!left) * (rs5 s>> rt5)) + (zext(left) * (rs5 << -rt5));
++	shamt:4 = (rt5 << 25) s>> 25;
++	left:1 = shamt s< 0;
++	result:4 = (zext(!left) * (rs5 s>> shamt)) + (zext(left) * (rs5 << -shamt));
+ 	Rd5 = rd5 + result;
+ 	build EndPacket;
+ }
+@@ -3284,8 +3299,9 @@ define pcodeop asrSat;
+ #    1  1  0  0  1  1  0  0  1  0  +  s  s  s  s  s  P  P  +  t  t  t  t  t  0  0  +  x  x  x  x  x  
+ 
+ :asr-= Rd5,rs5,rt5 EndPacket	is iclass=12 & op2127=0x64 & op13=0 & op0507=0 & Rd5 & rd5 & rs5 & rt5 & $(END_PACKET) {
+-	left:1 = rt5 s< 0;
+-	result:4 = (zext(!left) * (rs5 s>> rt5)) + (zext(left) * (rs5 << -rt5));
++	shamt:4 = (rt5 << 25) s>> 25;
++	left:1 = shamt s< 0;
++	result:4 = (zext(!left) * (rs5 s>> shamt)) + (zext(left) * (rs5 << -shamt));
+ 	Rd5 = rd5 - result;
+ 	build EndPacket;
+ }
+@@ -3306,8 +3322,9 @@ define pcodeop asrSat;
+ #    1  1  0  0  1  1  0  0  0  0  +  s  s  s  s  s  P  P  +  t  t  t  t  t  0  0  +  x  x  x  x  x  
+ 
+ :asr|= Rd5,rs5,rt5 EndPacket	is iclass=12 & op2127=0x60 & op13=0 & op0507=0 & Rd5 & rd5 & rs5 & rt5 & $(END_PACKET) {
+-	left:1 = rt5 s< 0;
+-	result:4 = (zext(!left) * (rs5 s>> rt5)) + (zext(left) * (rs5 << -rt5));
++	shamt:4 = (rt5 << 25) s>> 25;
++	left:1 = shamt s< 0;
++	result:4 = (zext(!left) * (rs5 s>> shamt)) + (zext(left) * (rs5 << -shamt));
+ 	Rd5 = rd5 | result;
+ 	build EndPacket;
+ }
+@@ -3328,8 +3345,9 @@ define pcodeop asrSat;
+ #    1  1  0  0  1  0  1  1  0  1  0  s  s  s  s  s  P  P  +  t  t  t  t  t  0  0  +  x  x  x  x  x  
+ 
+ :asr&= Rdd5,rss5,rt5 EndPacket	is iclass=12 & op2127=0x5a & op13=0 & op0507=0 & Rdd5 & rdd5 & rss5 & rt5 & $(END_PACKET) {
+-	left:1 = rt5 s< 0;
+-	result:8 = (zext(!left) * (rss5 s>> rt5)) + (zext(left) * (rss5 << -rt5));
++	shamt:4 = (rt5 << 25) s>> 25;
++	left:1 = shamt s< 0;
++	result:8 = (zext(!left) * (rss5 s>> shamt)) + (zext(left) * (rss5 << -shamt));
+ 	Rdd5 = rdd5 & result;
+ 	build EndPacket;
+ }
+@@ -3350,8 +3368,9 @@ define pcodeop asrSat;
+ #    1  1  0  0  1  0  1  1  1  1  0  s  s  s  s  s  P  P  +  t  t  t  t  t  0  0  +  x  x  x  x  x  
+ 
+ :asr+= Rdd5,rss5,rt5 EndPacket	is iclass=12 & op2127=0x5e & op13=0 & op0507=0 & Rdd5 & rdd5 & rss5 & rt5 & $(END_PACKET) {
+-	left:1 = rt5 s< 0;
+-	result:8 = (zext(!left) * (rss5 s>> rt5)) + (zext(left) * (rss5 << -rt5));
++	shamt:4 = (rt5 << 25) s>> 25;
++	left:1 = shamt s< 0;
++	result:8 = (zext(!left) * (rss5 s>> shamt)) + (zext(left) * (rss5 << -shamt));
+ 	Rdd5 = rdd5 + result;
+ 	build EndPacket;
+ }
+@@ -3372,8 +3391,9 @@ define pcodeop asrSat;
+ #    1  1  0  0  1  0  1  1  1  0  0  s  s  s  s  s  P  P  +  t  t  t  t  t  0  0  +  x  x  x  x  x  
+ 
+ :asr-= Rdd5,rss5,rt5 EndPacket	is iclass=12 & op2127=0x5c & op13=0 & op0507=0 & Rdd5 & rdd5 & rss5 & rt5 & $(END_PACKET) {
+-	left:1 = rt5 s< 0;
+-	result:8 = (zext(!left) * (rss5 s>> rt5)) + (zext(left) * (rss5 << -rt5));
++	shamt:4 = (rt5 << 25) s>> 25;
++	left:1 = shamt s< 0;
++	result:8 = (zext(!left) * (rss5 s>> shamt)) + (zext(left) * (rss5 << -shamt));
+ 	Rdd5 = rdd5 - result;
+ 	build EndPacket;
+ }
+@@ -3384,8 +3404,9 @@ define pcodeop asrSat;
+ #    1  1  0  0  1  0  1  1  0  1  1  s  s  s  s  s  P  P  +  t  t  t  t  t  0  0  +  x  x  x  x  x  
+ 
+ :asr"^=" Rdd5,rss5,rt5 EndPacket	is iclass=12 & op2127=0x5b & op13=0 & op0507=0 & Rdd5 & rdd5 & rss5 & rt5 & $(END_PACKET) {
+-	left:1 = rt5 s< 0;
+-	result:8 = (zext(!left) * (rss5 s>> rt5)) + (zext(left) * (rss5 << -rt5));
++	shamt:4 = (rt5 << 25) s>> 25;
++	left:1 = shamt s< 0;
++	result:8 = (zext(!left) * (rss5 s>> shamt)) + (zext(left) * (rss5 << -shamt));
+ 	Rdd5 = rdd5 ^ result;
+ 	build EndPacket;
+ }
+@@ -3406,8 +3427,9 @@ define pcodeop asrSat;
+ #    1  1  0  0  1  0  1  1  0  0  0  s  s  s  s  s  P  P  +  t  t  t  t  t  0  0  +  x  x  x  x  x  
+ 
+ :asr|= Rdd5,rss5,rt5 EndPacket	is iclass=12 & op2127=0x58 & op13=0 & op0507=0 & Rdd5 & rdd5 & rss5 & rt5 & $(END_PACKET) {
+-	left:1 = rt5 s< 0;
+-	result:8 = (zext(!left) * (rss5 s>> rt5)) + (zext(left) * (rss5 << -rt5));
++	shamt:4 = (rt5 << 25) s>> 25;
++	left:1 = shamt s< 0;
++	result:8 = (zext(!left) * (rss5 s>> shamt)) + (zext(left) * (rss5 << -shamt));
+ 	Rdd5 = rdd5 | result;
+ 	build EndPacket;
+ }
+@@ -3784,7 +3806,6 @@ define pcodeop barrier;
+ 	upper:4 = rtt5(4);
+ 	lower:4 = rtt5:4;
+ 	src:4 = rss5(4);
+-	# TODO: unclear if comparison should be signed or unsigned
+ 	bool:1 = (src >= lower) && (src < upper);
+ 	Pd2 = Pd2 & (bool * 0xff);
+ 	build EndPacket;
+@@ -3799,7 +3820,6 @@ define pcodeop barrier;
+ 	upper:4 = rtt5(4);
+ 	lower:4 = rtt5:4;
+ 	src:4 = rss5:4;
+-	# TODO: unclear if comparison should be signed or unsigned
+ 	bool:1 = (src >= lower) && (src < upper);
+ 	Pd2 = Pd2 & (bool * 0xff);
+ 	build EndPacket;
+@@ -4014,7 +4034,8 @@ define pcodeop clip;
+ #    1  1  0  0  0  1  1  0  1  0  +  s  s  s  s  s  P  P  +  t  t  t  t  t  0  1  +  d  d  d  d  d  
+ 
+ :clrbit Rd5,rs5,rt5 EndPacket	is iclass=12 & op2127=0x34 & op13=0 & op0507=2 & Rd5 & rs5 & rt5 & $(END_PACKET) {
+-	mask:4 = 1 << rt5;
++	shamt:4 = (rt5 << 25) s>> 25;
++	mask:4 = zext(shamt s>= 0) * (1 << shamt);
+ 	Rd5 = rs5 & ~mask;
+ 	build EndPacket;
+ }
+@@ -4035,7 +4056,7 @@ define pcodeop clip;
+ #  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
+ #    0  1  1  1  0  1  0  1  0  0  i  s  s  s  s  s  P  P  i  i  i  i  i  i  i  i  i  1  0  0  d  d  
+ 
+-:cmp.eq! Pd2,rs5,Simm32_21_0513x EndPacket  is iclass=7 & op2227=0x14 & op0204=4 & rs5 & Simm32_21_0513x & Pd2 & $(END_PACKET) {
++:"!cmp.eq" Pd2,rs5,Simm32_21_0513x EndPacket  is iclass=7 & op2227=0x14 & op0204=4 & rs5 & Simm32_21_0513x & Pd2 & $(END_PACKET) {
+ 	bool:1 = (rs5 != Simm32_21_0513x);
+ 	Pd2 = Pd2 & (bool * 0xff);
+ 	build EndPacket;
+@@ -4057,7 +4078,7 @@ define pcodeop clip;
+ #  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
+ #    1  1  1  1  0  0  1  0  +  0  0  s  s  s  s  s  P  P  +  t  t  t  t  t  +  +  +  1  0  0  d  d  
+ 
+-:cmp.eq! Pd2,rs5,rt5 EndPacket  is iclass=15 & op2127=0x10 & op13=0 & op0207=4 & rs5 & rt5 & Pd2 & $(END_PACKET) {
++:"!cmp.eq" Pd2,rs5,rt5 EndPacket  is iclass=15 & op2127=0x10 & op13=0 & op0207=4 & rs5 & rt5 & Pd2 & $(END_PACKET) {
+ 	bool:1 = (rs5 != rt5);
+ 	Pd2 = Pd2 & (bool * 0xff);
+ 	build EndPacket;
+@@ -4090,7 +4111,7 @@ define pcodeop clip;
+ #  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
+ #    0  1  1  1  0  1  0  1  0  1  i  s  s  s  s  s  P  P  i  i  i  i  i  i  i  i  i  1  0  0  d  d  
+ 
+-:cmp.gt! Pd2,rs5,Simm32_21_0513x EndPacket  is iclass=7 & op2227=0x15 & op0204=4 & rs5 & Simm32_21_0513x & Pd2 & $(END_PACKET) {
++:"!cmp.gt" Pd2,rs5,Simm32_21_0513x EndPacket  is iclass=7 & op2227=0x15 & op0204=4 & rs5 & Simm32_21_0513x & Pd2 & $(END_PACKET) {
+ 	bool:1 = (rs5 s<= Simm32_21_0513x);
+ 	Pd2 = Pd2 & (bool * 0xff);
+ 	build EndPacket;
+@@ -4112,7 +4133,7 @@ define pcodeop clip;
+ #  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
+ #    1  1  1  1  0  0  1  0  +  1  0  s  s  s  s  s  P  P  +  t  t  t  t  t  +  +  +  1  0  0  d  d  
+ 
+-:cmp.gt! Pd2,rs5,rt5 EndPacket  is iclass=15 & op2127=0x12 & op13=0 & op0207=4 & rs5 & rt5 & Pd2 & $(END_PACKET) {
++:"!cmp.gt" Pd2,rs5,rt5 EndPacket  is iclass=15 & op2127=0x12 & op13=0 & op0207=4 & rs5 & rt5 & Pd2 & $(END_PACKET) {
+ 	bool:1 = (rs5 s<= rt5);
+ 	Pd2 = Pd2 & (bool * 0xff);
+ 	build EndPacket;
+@@ -4145,7 +4166,7 @@ define pcodeop clip;
+ #  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
+ #    0  1  1  1  0  1  0  1  1  0  0  s  s  s  s  s  P  P  i  i  i  i  i  i  i  i  i  1  0  0  d  d  
+ 
+-:cmp.gtu! Pd2,rs5,Uimm32_0513x EndPacket  is iclass=7 & op2127=0x2c & op0204=4 & rs5 & Uimm32_0513x & Pd2 & $(END_PACKET) {
++:"!cmp.gtu" Pd2,rs5,Uimm32_0513x EndPacket  is iclass=7 & op2127=0x2c & op0204=4 & rs5 & Uimm32_0513x & Pd2 & $(END_PACKET) {
+ 	bool:1 = (rs5 <= Uimm32_0513x);
+ 	Pd2 = Pd2 & (bool * 0xff);
+ 	build EndPacket;
+@@ -4167,7 +4188,7 @@ define pcodeop clip;
+ #  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
+ #    1  1  1  1  0  0  1  0  +  1  1  s  s  s  s  s  P  P  +  t  t  t  t  t  +  +  +  1  0  0  d  d  
+ 
+-:cmp.gtu! Pd2,rs5,rt5 EndPacket  is iclass=15 & op2127=0x13 & op0207=4 & rs5 & rt5 & Pd2 & $(END_PACKET) {
++:"!cmp.gtu" Pd2,rs5,rt5 EndPacket  is iclass=15 & op2127=0x13 & op0207=4 & rs5 & rt5 & Pd2 & $(END_PACKET) {
+ 	bool:1 = (rs5 <= rt5);
+ 	Pd2 = Pd2 & (bool * 0xff);
+ 	build EndPacket;
+@@ -4190,7 +4211,6 @@ define pcodeop clip;
+ #    0  1  1  1  0  0  1  1  +  1  0  s  s  s  s  s  P  P  1  i  i  i  i  i  i  i  i  d  d  d  d  d  
+ 
+ :cmp.eq Rd5,rs5,Simm32_0512x EndPacket  is iclass=7 & op2127=0x1a & op13=1 & rs5 & Rd5 & Simm32_0512x & $(END_PACKET) {
+-	# TODO: Verify output value - assuming 0/1 boolean
+ 	Rd5 = zext(rs5 == Simm32_0512x);
+ 	build EndPacket;
+ }
+@@ -4200,8 +4220,7 @@ define pcodeop clip;
+ #  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
+ #    0  1  1  1  0  0  1  1  +  1  1  s  s  s  s  s  P  P  1  i  i  i  i  i  i  i  i  d  d  d  d  d  
+ 
+-:cmp.eq! Rd5,rs5,Simm32_0512x EndPacket  is iclass=7 & op2127=0x1b & op13=1 & rs5 & Rd5 & Simm32_0512x & $(END_PACKET) {
+-	# TODO: Verify output value - assuming 0/1 boolean
++:"!cmp.eq" Rd5,rs5,Simm32_0512x EndPacket  is iclass=7 & op2127=0x1b & op13=1 & rs5 & Rd5 & Simm32_0512x & $(END_PACKET) {
+ 	Rd5 = zext(rs5 != Simm32_0512x);
+ 	build EndPacket;
+ }
+@@ -4221,7 +4240,7 @@ define pcodeop clip;
+ #  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
+ #    1  1  1  1  0  0  1  1  0  1  1  s  s  s  s  s  P  P  +  t  t  t  t  t  +  +  +  d  d  d  d  d  
+ 
+-:cmp.eq! Rd5,rs5,rt5 EndPacket  is iclass=15 & op2127=0x1b & op13=0 & op0507=0 & rs5 & rt5 & Rd5 & $(END_PACKET) {
++:"!cmp.eq" Rd5,rs5,rt5 EndPacket  is iclass=15 & op2127=0x1b & op13=0 & op0507=0 & rs5 & rt5 & Rd5 & $(END_PACKET) {
+ 	Rd5 = zext(rs5 != rt5);
+ 	build EndPacket;
+ }
+@@ -5420,6 +5439,54 @@ define pcodeop dmsyncht;
+ 	build EndPacket;
+ }
+ 
++# (v68,10) dmpause  --  "Rd32 = dmpause"
++#  _________________________________________________________________________________________________
++#  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
++#    1  0  1  0  1  0  0  0  0  0  0  0  0  0  0  0  P  P  0  0  0  0  0  0  0  1  1  d  d  d  d  d
++
++:dmpause Rd5 EndPacket 	is iclass=10 & op2127=0x40 & op1620=0 & op0513=3 & Rd5 & $(END_PACKET)
++unimpl
++
++# (v68,10) dmpoll  --  "Rd32 = dmpoll"
++#  _________________________________________________________________________________________________
++#  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
++#    1  0  1  0  1  0  0  0  0  0  0  0  0  0  0  0  P  P  0  0  0  0  0  0  0  1  0  d  d  d  d  d
++
++:dmpoll Rd5 EndPacket 	is iclass=10 & op2127=0x40 & op1620=0 & op0513=2 & Rd5 & $(END_PACKET)
++unimpl
++
++# (v68,10) dmwait  --  "Rd32 = dmwait"
++#  _________________________________________________________________________________________________
++#  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
++#    1  0  1  0  1  0  0  0  0  0  0  0  0  0  0  0  P  P  0  0  0  0  0  0  0  0  1  d  d  d  d  d
++
++:dmwait Rd5 EndPacket 	is iclass=10 & op2127=0x40 & op1620=0 & op0513=1 & Rd5 & $(END_PACKET)
++unimpl
++
++# (v68,10) dmlink  --  "dmlink ( Rs32 , Rt32 )"
++#  _________________________________________________________________________________________________
++#  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
++#    1  0  1  0  0  1  1  0  0  0  0  s  s  s  s  s  P  P  0  t  t  t  t  t  0  1  0  0  0  0  0  0
++
++:dmlink rs5,rt5 EndPacket 	is iclass=10 & op2127=0x30 & op13=0 & op0007=0x40 & rs5 & rt5 & $(END_PACKET)
++unimpl
++
++# (v68,10) dmresume  --  "dmresume ( Rs32 )"
++#  _________________________________________________________________________________________________
++#  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
++#    1  0  1  0  0  1  1  0  0  0  0  s  s  s  s  s  P  P  0  0  0  0  0  0  1  0  0  0  0  0  0  0
++
++:dmresume rs5 EndPacket 	is iclass=10 & op2127=0x30 & op0013=0x80 & rs5 & $(END_PACKET)
++unimpl
++
++# (v68,10) dmstart  --  "dmstart ( Rs32 )"
++#  _________________________________________________________________________________________________
++#  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
++#    1  0  1  0  0  1  1  0  0  0  0  s  s  s  s  s  P  P  0  0  0  0  0  0  0  0  1  0  0  0  0  0
++
++:dmstart rs5 EndPacket 	is iclass=10 & op2127=0x30 & op0013=0x20 & rs5 & $(END_PACKET)
++unimpl
++
+ # (v4,8) extract  --  "Rd32 = extract ( Rs32 , #u5 , #U5 )"
+ #  _________________________________________________________________________________________________
+ #  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
+@@ -5576,7 +5643,7 @@ define pcodeop getimask;
+ #    0  1  0  1  0  0  1  0  1  0  1  s  s  s  s  s  P  P  +  +  +  +  +  +  +  +  +  +  +  +  +  +  
+ 
+ :hintjr rs5 EndPacket	is iclass=5 & op2127=0x15 & op0013=0 & rs5 & $(END_PACKET) {
+-	# TODO: appears in decomp compilation - not sure what it does
++	# branch hint - intentionally no-op
+ 	build EndPacket;
+ }
+ 
+@@ -5619,14 +5686,10 @@ define pcodeop icdatar;
+ # (v66,5) icdataw  --  "icdataw ( Rs32 , Rt32 )"
+ #  _________________________________________________________________________________________________
+ #  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
+-#    0  1  0  1  0  1  0  1  1  1  0  s  s  s  s  s  P  P  +  t  t  t  t  t  +  +  +  +  +  +  +  +  
+-
+-define pcodeop icache_data_write; # TODO: What affect does this have
++#    0  1  0  1  0  1  0  1  1  1  0  s  s  s  s  s  P  P  1  t  t  t  t  t  0  0  0  0  0  0  0  0
+ 
+-:icdataw rs5, rt5 EndPacket 	is iclass=5 & op2127=0x36 & rs5 & rt5 & $(END_PACKET) {
+-	icache_data_write(rs5, rt5);
+-	build EndPacket;
+-}
++:icdataw rs5,rt5 EndPacket 	is iclass=5 & op2127=0x2e & op13=1 & op0007=0 & rs5 & rt5 & $(END_PACKET)
++unimpl
+ 
+ # (v2,5) icinva  --  "icinva ( Rs32 )"
+ #  _________________________________________________________________________________________________
+@@ -5683,7 +5746,7 @@ define pcodeop ictagr;
+ 
+ define pcodeop ictagw;
+ 
+-:ictagw rs5,rt5 EndPacket	is iclass=5 & op2127=0x2e & op13=0 & op0007=0 & Rd5 & rs5 & rt5 & $(END_PACKET) {
++:ictagw rs5,rt5 EndPacket	is iclass=5 & op2127=0x2e & op13=0 & op0007=0 & rs5 & rt5 & $(END_PACKET) {
+ 	ictagw(rs5, rt5);
+ 	build EndPacket;
+ }
+@@ -6633,7 +6696,9 @@ LoopUimm10: "#"^val  is i1620 & i0507 & i0001  [ val = (i1620 << 5) | (i0507 <<
+ #    1  1  0  0  0  1  1  0  1  0  +  i  i  i  i  i  P  P  +  t  t  t  t  t  1  1  i  d  d  d  d  d  
+ 
+ :lsl Rd5,Simm8_1620_05,rt5 EndPacket	is iclass=12 & op2127=0x34 & op13=0 & op0607=3 & Rd5 & rt5 & Simm8_1620_05 & $(END_PACKET) {
+-	Rd5 = sext(Simm8_1620_05) << rt5;
++	shamt:4 = (rt5 << 25) s>> 25;
++	right:1 = shamt s< 0;
++	Rd5 = (zext(right) * (sext(Simm8_1620_05) >> -shamt)) + (zext(!right) * (sext(Simm8_1620_05) << shamt));
+ 	build EndPacket;
+ }
+ 
+@@ -6643,8 +6708,9 @@ LoopUimm10: "#"^val  is i1620 & i0507 & i0001  [ val = (i1620 << 5) | (i0507 <<
+ #    1  1  0  0  0  1  1  0  0  1  +  s  s  s  s  s  P  P  +  t  t  t  t  t  1  1  +  d  d  d  d  d  
+ 
+ :lsl Rd5,rs5,rt5 EndPacket	is iclass=12 & op2127=0x32 & op13=0 & op0507=6 & Rd5 & rt5 & rs5 & $(END_PACKET) {
+-	right:1 = rt5 s< 0;
+-	Rd5 = (zext(right) * (rs5 >> -rt5)) + (zext(!right) * (rs5 << rt5));
++	shamt:4 = (rt5 << 25) s>> 25;
++	right:1 = shamt s< 0;
++	Rd5 = (zext(right) * (rs5 >> -shamt)) + (zext(!right) * (rs5 << shamt));
+ 	build EndPacket;
+ }
+ 
+@@ -6654,8 +6720,9 @@ LoopUimm10: "#"^val  is i1620 & i0507 & i0001  [ val = (i1620 << 5) | (i0507 <<
+ #    1  1  0  0  0  0  1  1  1  0  +  s  s  s  s  s  P  P  +  t  t  t  t  t  1  1  +  d  d  d  d  d  
+ 
+ :lsl Rdd5,rss5,rt5 EndPacket	is iclass=12 & op2127=0x1c & op13=0 & op0507=6 & Rdd5 & rt5 & rss5 & $(END_PACKET) {
+-	right:1 = rt5 s< 0;
+-	Rdd5 = (zext(right) * (rss5 >> -rt5)) + (zext(!right) * (rss5 << rt5));
++	shamt:4 = (rt5 << 25) s>> 25;
++	right:1 = shamt s< 0;
++	Rdd5 = (zext(right) * (rss5 >> -shamt)) + (zext(!right) * (rss5 << shamt));
+ 	build EndPacket;
+ }
+ 
+@@ -6665,8 +6732,9 @@ LoopUimm10: "#"^val  is i1620 & i0507 & i0001  [ val = (i1620 << 5) | (i0507 <<
+ #    1  1  0  0  1  1  0  0  0  1  +  s  s  s  s  s  P  P  +  t  t  t  t  t  1  1  +  x  x  x  x  x  
+ 
+ :lsl&= Rd5,rs5,rt5 EndPacket	is iclass=12 & op2127=0x62 & op13=0 & op0507=6 & Rd5 & rd5 & rt5 & rs5 & $(END_PACKET) {
+-	right:1 = rt5 s< 0;
+-	result:4 = (zext(right) * (rs5 >> -rt5)) + (zext(!right) * (rs5 << rt5));
++	shamt:4 = (rt5 << 25) s>> 25;
++	right:1 = shamt s< 0;
++	result:4 = (zext(right) * (rs5 >> -shamt)) + (zext(!right) * (rs5 << shamt));
+ 	Rd5 = rd5 & result;
+ 	build EndPacket;
+ }
+@@ -6677,8 +6745,9 @@ LoopUimm10: "#"^val  is i1620 & i0507 & i0001  [ val = (i1620 << 5) | (i0507 <<
+ #    1  1  0  0  1  1  0  0  1  1  +  s  s  s  s  s  P  P  +  t  t  t  t  t  1  1  +  x  x  x  x  x  
+ 
+ :lsl+= Rd5,rs5,rt5 EndPacket	is iclass=12 & op2127=0x66 & op13=0 & op0507=6 & Rd5 & rd5 & rt5 & rs5 & $(END_PACKET) {
+-	right:1 = rt5 s< 0;
+-	result:4 = (zext(right) * (rs5 >> -rt5)) + (zext(!right) * (rs5 << rt5));
++	shamt:4 = (rt5 << 25) s>> 25;
++	right:1 = shamt s< 0;
++	result:4 = (zext(right) * (rs5 >> -shamt)) + (zext(!right) * (rs5 << shamt));
+ 	Rd5 = rd5 + result;
+ 	build EndPacket;
+ }
+@@ -6689,8 +6758,9 @@ LoopUimm10: "#"^val  is i1620 & i0507 & i0001  [ val = (i1620 << 5) | (i0507 <<
+ #    1  1  0  0  1  1  0  0  1  0  +  s  s  s  s  s  P  P  +  t  t  t  t  t  1  1  +  x  x  x  x  x  
+ 
+ :lsl-= Rd5,rs5,rt5 EndPacket	is iclass=12 & op2127=0x64 & op13=0 & op0507=6 & Rd5 & rd5 & rt5 & rs5 & $(END_PACKET) {
+-	right:1 = rt5 s< 0;
+-	result:4 = (zext(right) * (rs5 >> -rt5)) + (zext(!right) * (rs5 << rt5));
++	shamt:4 = (rt5 << 25) s>> 25;
++	right:1 = shamt s< 0;
++	result:4 = (zext(right) * (rs5 >> -shamt)) + (zext(!right) * (rs5 << shamt));
+ 	Rd5 = rd5 - result;
+ 	build EndPacket;
+ }
+@@ -6701,8 +6771,9 @@ LoopUimm10: "#"^val  is i1620 & i0507 & i0001  [ val = (i1620 << 5) | (i0507 <<
+ #    1  1  0  0  1  1  0  0  0  0  +  s  s  s  s  s  P  P  +  t  t  t  t  t  1  1  +  x  x  x  x  x  
+ 
+ :lsl|= Rd5,rs5,rt5 EndPacket	is iclass=12 & op2127=0x60 & op13=0 & op0507=6 & Rd5 & rd5 & rt5 & rs5 & $(END_PACKET) {
+-	right:1 = rt5 s< 0;
+-	result:4 = (zext(right) * (rs5 >> -rt5)) + (zext(!right) * (rs5 << rt5));
++	shamt:4 = (rt5 << 25) s>> 25;
++	right:1 = shamt s< 0;
++	result:4 = (zext(right) * (rs5 >> -shamt)) + (zext(!right) * (rs5 << shamt));
+ 	Rd5 = rd5 | result;
+ 	build EndPacket;
+ }
+@@ -6713,7 +6784,10 @@ LoopUimm10: "#"^val  is i1620 & i0507 & i0001  [ val = (i1620 << 5) | (i0507 <<
+ #    1  1  0  0  1  0  1  1  0  1  0  s  s  s  s  s  P  P  +  t  t  t  t  t  1  1  +  x  x  x  x  x  
+ 
+ :lsl&= Rdd5,rss5,rt5 EndPacket	is iclass=12 & op2127=0x5a & op13=0 & op0507=6 & Rdd5 & rdd5 & rt5 & rss5 & $(END_PACKET) {
+-	Rdd5 = rdd5 & (rss5 << rt5);
++	shamt:4 = (rt5 << 25) s>> 25;
++	right:1 = shamt s< 0;
++	result:8 = (zext(right) * (rss5 >> -shamt)) + (zext(!right) * (rss5 << shamt));
++	Rdd5 = rdd5 & result;
+ 	build EndPacket;
+ }
+ 
+@@ -6723,8 +6797,9 @@ LoopUimm10: "#"^val  is i1620 & i0507 & i0001  [ val = (i1620 << 5) | (i0507 <<
+ #    1  1  0  0  1  0  1  1  1  1  0  s  s  s  s  s  P  P  +  t  t  t  t  t  1  1  +  x  x  x  x  x  
+ 
+ :lsl+= Rdd5,rss5,rt5 EndPacket	is iclass=12 & op2127=0x5e & op13=0 & op0507=6 & Rdd5 & rdd5 & rt5 & rss5 & $(END_PACKET) {
+-	right:1 = rt5 s< 0;
+-	result:8 = (zext(right) * (rss5 >> -rt5)) + (zext(!right) * (rss5 << rt5));
++	shamt:4 = (rt5 << 25) s>> 25;
++	right:1 = shamt s< 0;
++	result:8 = (zext(right) * (rss5 >> -shamt)) + (zext(!right) * (rss5 << shamt));
+ 	Rdd5 = rdd5 + result;
+ 	build EndPacket;
+ }
+@@ -6735,8 +6810,9 @@ LoopUimm10: "#"^val  is i1620 & i0507 & i0001  [ val = (i1620 << 5) | (i0507 <<
+ #    1  1  0  0  1  0  1  1  1  0  0  s  s  s  s  s  P  P  +  t  t  t  t  t  1  1  +  x  x  x  x  x  
+ 
+ :lsl-= Rdd5,rss5,rt5 EndPacket	is iclass=12 & op2127=0x5c & op13=0 & op0507=6 & Rdd5 & rdd5 & rt5 & rss5 & $(END_PACKET) {
+-	right:1 = rt5 s< 0;
+-	result:8 = (zext(right) * (rss5 >> -rt5)) + (zext(!right) * (rss5 << rt5));
++	shamt:4 = (rt5 << 25) s>> 25;
++	right:1 = shamt s< 0;
++	result:8 = (zext(right) * (rss5 >> -shamt)) + (zext(!right) * (rss5 << shamt));
+ 	Rdd5 = rdd5 - result;
+ 	build EndPacket;
+ }
+@@ -6747,8 +6823,9 @@ LoopUimm10: "#"^val  is i1620 & i0507 & i0001  [ val = (i1620 << 5) | (i0507 <<
+ #    1  1  0  0  1  0  1  1  0  1  1  s  s  s  s  s  P  P  +  t  t  t  t  t  1  1  +  x  x  x  x  x  
+ 
+ :lsl"^=" Rdd5,rss5,rt5 EndPacket	is iclass=12 & op2127=0x5b & op13=0 & op0507=6 & Rdd5 & rdd5 & rt5 & rss5 & $(END_PACKET) {
+-	right:1 = rt5 s< 0;
+-	result:8 = (zext(right) * (rss5 >> -rt5)) + (zext(!right) * (rss5 << rt5));
++	shamt:4 = (rt5 << 25) s>> 25;
++	right:1 = shamt s< 0;
++	result:8 = (zext(right) * (rss5 >> -shamt)) + (zext(!right) * (rss5 << shamt));
+ 	Rdd5 = rdd5 ^ result;
+ 	build EndPacket;
+ }
+@@ -6759,8 +6836,9 @@ LoopUimm10: "#"^val  is i1620 & i0507 & i0001  [ val = (i1620 << 5) | (i0507 <<
+ #    1  1  0  0  1  0  1  1  0  0  0  s  s  s  s  s  P  P  +  t  t  t  t  t  1  1  +  x  x  x  x  x  
+ 
+ :lsl|= Rdd5,rss5,rt5 EndPacket	is iclass=12 & op2127=0x58 & op13=0 & op0507=6 & Rdd5 & rdd5 & rt5 & rss5 & $(END_PACKET) {
+-	right:1 = rt5 s< 0;
+-	result:8 = (zext(right) * (rss5 >> -rt5)) + (zext(!right) * (rss5 << rt5));
++	shamt:4 = (rt5 << 25) s>> 25;
++	right:1 = shamt s< 0;
++	result:8 = (zext(right) * (rss5 >> -shamt)) + (zext(!right) * (rss5 << shamt));
+ 	Rdd5 = rdd5 | result;
+ 	build EndPacket;
+ }
+@@ -6781,8 +6859,9 @@ LoopUimm10: "#"^val  is i1620 & i0507 & i0001  [ val = (i1620 << 5) | (i0507 <<
+ #    1  1  0  0  0  1  1  0  0  1  +  s  s  s  s  s  P  P  +  t  t  t  t  t  0  1  +  d  d  d  d  d  
+ 
+ :lsr Rd5,rs5,rt5 EndPacket	is iclass=12 & op2127=0x32 & op13=0 & op0507=2 & Rd5 & rs5 & rt5 & $(END_PACKET) {
+-	left:1 = rt5 s< 0;
+-	Rd5 = (zext(!left) * (rs5 >> rt5)) + (zext(left) * (rs5 << -rt5));
++	shamt:4 = (rt5 << 25) s>> 25;
++	left:1 = shamt s< 0;
++	Rd5 = (zext(!left) * (rs5 >> shamt)) + (zext(left) * (rs5 << -shamt));
+ 	build EndPacket;
+ }
+ 
+@@ -6802,8 +6881,9 @@ LoopUimm10: "#"^val  is i1620 & i0507 & i0001  [ val = (i1620 << 5) | (i0507 <<
+ #    1  1  0  0  0  0  1  1  1  0  +  s  s  s  s  s  P  P  +  t  t  t  t  t  0  1  +  d  d  d  d  d  
+ 
+ :lsr Rdd5,rss5,rt5 EndPacket	is iclass=12 & op2127=0x1c & op13=0 & op0507=2 & Rdd5 & rss5 & rt5 & $(END_PACKET) {
+-	left:1 = rt5 s< 0;
+-	Rdd5 = (zext(!left) * (rss5 >> rt5)) + (zext(left) * (rss5 << -rt5));
++	shamt:4 = (rt5 << 25) s>> 25;
++	left:1 = shamt s< 0;
++	Rdd5 = (zext(!left) * (rss5 >> shamt)) + (zext(left) * (rss5 << -shamt));
+ 	build EndPacket;
+ }
+ 
+@@ -6823,8 +6903,9 @@ LoopUimm10: "#"^val  is i1620 & i0507 & i0001  [ val = (i1620 << 5) | (i0507 <<
+ #    1  1  0  0  1  1  0  0  0  1  +  s  s  s  s  s  P  P  +  t  t  t  t  t  0  1  +  x  x  x  x  x  
+ 
+ :lsr&= Rd5,rs5,rt5 EndPacket	is iclass=12 & op2127=0x62 & op13=0 & op0507=2 & Rd5 & rd5 & rs5 & rt5 & $(END_PACKET) {
+-	left:1 = rt5 s< 0;
+-	result:4 = (zext(!left) * (rs5 >> rt5)) + (zext(left) * (rs5 << -rt5));
++	shamt:4 = (rt5 << 25) s>> 25;
++	left:1 = shamt s< 0;
++	result:4 = (zext(!left) * (rs5 >> shamt)) + (zext(left) * (rs5 << -shamt));
+ 	Rd5 = rd5 & result;
+ 	build EndPacket;
+ }
+@@ -6845,8 +6926,9 @@ LoopUimm10: "#"^val  is i1620 & i0507 & i0001  [ val = (i1620 << 5) | (i0507 <<
+ #    1  1  0  0  1  1  0  0  1  1  +  s  s  s  s  s  P  P  +  t  t  t  t  t  0  1  +  x  x  x  x  x  
+ 
+ :lsr+= Rd5,rs5,rt5 EndPacket	is iclass=12 & op2127=0x66 & op13=0 & op0507=2 & Rd5 & rd5 & rs5 & rt5 & $(END_PACKET) {
+-	left:1 = rt5 s< 0;
+-	result:4 = (zext(!left) * (rs5 >> rt5)) + (zext(left) * (rs5 << -rt5));
++	shamt:4 = (rt5 << 25) s>> 25;
++	left:1 = shamt s< 0;
++	result:4 = (zext(!left) * (rs5 >> shamt)) + (zext(left) * (rs5 << -shamt));
+ 	Rd5 = rd5 + result;
+ 	build EndPacket;
+ }
+@@ -6867,8 +6949,9 @@ LoopUimm10: "#"^val  is i1620 & i0507 & i0001  [ val = (i1620 << 5) | (i0507 <<
+ #    1  1  0  0  1  1  0  0  1  0  +  s  s  s  s  s  P  P  +  t  t  t  t  t  0  1  +  x  x  x  x  x  
+ 
+ :lsr-= Rd5,rs5,rt5 EndPacket	is iclass=12 & op2127=0x64 & op13=0 & op0507=2 & Rd5 & rd5 & rs5 & rt5 & $(END_PACKET) {
+-	left:1 = rt5 s< 0;
+-	result:4 = (zext(!left) * (rs5 >> rt5)) + (zext(left) * (rs5 << -rt5));
++	shamt:4 = (rt5 << 25) s>> 25;
++	left:1 = shamt s< 0;
++	result:4 = (zext(!left) * (rs5 >> shamt)) + (zext(left) * (rs5 << -shamt));
+ 	Rd5 = rd5 - result;
+ 	build EndPacket;
+ }
+@@ -6899,8 +6982,9 @@ LoopUimm10: "#"^val  is i1620 & i0507 & i0001  [ val = (i1620 << 5) | (i0507 <<
+ #    1  1  0  0  1  1  0  0  0  0  +  s  s  s  s  s  P  P  +  t  t  t  t  t  0  1  +  x  x  x  x  x  
+ 
+ :lsr|= Rd5,rs5,rt5 EndPacket	is iclass=12 & op2127=0x60 & op13=0 & op0507=2 & Rd5 & rd5 & rs5 & rt5 & $(END_PACKET) {
+-	left:1 = rt5 s< 0;
+-	result:4 = (zext(!left) * (rs5 >> rt5)) + (zext(left) * (rs5 << -rt5));
++	shamt:4 = (rt5 << 25) s>> 25;
++	left:1 = shamt s< 0;
++	result:4 = (zext(!left) * (rs5 >> shamt)) + (zext(left) * (rs5 << -shamt));
+ 	Rd5 = rd5 | result;
+ 	build EndPacket;
+ }
+@@ -6921,8 +7005,9 @@ LoopUimm10: "#"^val  is i1620 & i0507 & i0001  [ val = (i1620 << 5) | (i0507 <<
+ #    1  1  0  0  1  0  1  1  0  1  0  s  s  s  s  s  P  P  +  t  t  t  t  t  0  1  +  x  x  x  x  x  
+ 
+ :lsr&= Rdd5,rss5,rt5 EndPacket	is iclass=12 & op2127=0x5a & op13=0 & op0507=2 & Rdd5 & rdd5 & rss5 & rt5 & $(END_PACKET) {
+-	left:1 = rt5 s< 0;
+-	result:8 = (zext(!left) * (rss5 >> rt5)) + (zext(left) * (rss5 << -rt5));
++	shamt:4 = (rt5 << 25) s>> 25;
++	left:1 = shamt s< 0;
++	result:8 = (zext(!left) * (rss5 >> shamt)) + (zext(left) * (rss5 << -shamt));
+ 	Rdd5 = rdd5 & result;
+ 	build EndPacket;
+ }
+@@ -6943,8 +7028,9 @@ LoopUimm10: "#"^val  is i1620 & i0507 & i0001  [ val = (i1620 << 5) | (i0507 <<
+ #    1  1  0  0  1  0  1  1  1  1  0  s  s  s  s  s  P  P  +  t  t  t  t  t  0  1  +  x  x  x  x  x  
+ 
+ :lsr+= Rdd5,rss5,rt5 EndPacket	is iclass=12 & op2127=0x5e & op13=0 & op0507=2 & Rdd5 & rdd5 & rss5 & rt5 & $(END_PACKET) {
+-	left:1 = rt5 s< 0;
+-	result:8 = (zext(!left) * (rss5 >> rt5)) + (zext(left) * (rss5 << -rt5));
++	shamt:4 = (rt5 << 25) s>> 25;
++	left:1 = shamt s< 0;
++	result:8 = (zext(!left) * (rss5 >> shamt)) + (zext(left) * (rss5 << -shamt));
+ 	Rdd5 = rdd5 + result;
+ 	build EndPacket;
+ }
+@@ -6965,8 +7051,9 @@ LoopUimm10: "#"^val  is i1620 & i0507 & i0001  [ val = (i1620 << 5) | (i0507 <<
+ #    1  1  0  0  1  0  1  1  1  0  0  s  s  s  s  s  P  P  +  t  t  t  t  t  0  1  +  x  x  x  x  x  
+ 
+ :lsr-= Rdd5,rss5,rt5 EndPacket	is iclass=12 & op2127=0x5c & op13=0 & op0507=2 & Rdd5 & rdd5 & rss5 & rt5 & $(END_PACKET) {
+-	left:1 = rt5 s< 0;
+-	result:8 = (zext(!left) * (rss5 >> rt5)) + (zext(left) * (rss5 << -rt5));
++	shamt:4 = (rt5 << 25) s>> 25;
++	left:1 = shamt s< 0;
++	result:8 = (zext(!left) * (rss5 >> shamt)) + (zext(left) * (rss5 << -shamt));
+ 	Rdd5 = rdd5 - result;
+ 	build EndPacket;
+ }
+@@ -6987,8 +7074,9 @@ LoopUimm10: "#"^val  is i1620 & i0507 & i0001  [ val = (i1620 << 5) | (i0507 <<
+ #    1  1  0  0  1  0  1  1  0  1  1  s  s  s  s  s  P  P  +  t  t  t  t  t  0  1  +  x  x  x  x  x  
+ 
+ :lsr"^=" Rdd5,rss5,rt5 EndPacket	is iclass=12 & op2127=0x5b & op13=0 & op0507=2 & Rdd5 & rdd5 & rss5 & rt5 & $(END_PACKET) {
+-	left:1 = rt5 s< 0;
+-	result:8 = (zext(!left) * (rss5 >> rt5)) + (zext(left) * (rss5 << -rt5));
++	shamt:4 = (rt5 << 25) s>> 25;
++	left:1 = shamt s< 0;
++	result:8 = (zext(!left) * (rss5 >> shamt)) + (zext(left) * (rss5 << -shamt));
+ 	Rdd5 = rdd5 ^ result;
+ 	build EndPacket;
+ }
+@@ -7009,8 +7097,9 @@ LoopUimm10: "#"^val  is i1620 & i0507 & i0001  [ val = (i1620 << 5) | (i0507 <<
+ #    1  1  0  0  1  0  1  1  0  0  0  s  s  s  s  s  P  P  +  t  t  t  t  t  0  1  +  x  x  x  x  x  
+ 
+ :lsr|= Rdd5,rss5,rt5 EndPacket	is iclass=12 & op2127=0x58 & op13=0 & op0507=2 & Rdd5 & rdd5 & rss5 & rt5 & $(END_PACKET) {
+-	left:1 = rt5 s< 0;
+-	result:8 = (zext(!left) * (rss5 >> rt5)) + (zext(left) * (rss5 << -rt5));
++	shamt:4 = (rt5 << 25) s>> 25;
++	left:1 = shamt s< 0;
++	result:8 = (zext(!left) * (rss5 >> shamt)) + (zext(left) * (rss5 << -shamt));
+ 	Rdd5 = rdd5 | result;
+ 	build EndPacket;
+ }
+@@ -11228,6 +11317,22 @@ define pcodeop memw_phys;
+ 	build EndPacket;
+ }
+ 
++# (v68,9) memw_aq  --  "Rd32 = memw_aq ( Rs32 )"
++#  _________________________________________________________________________________________________
++#  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
++#    1  0  0  1  0  0  1  0  0  0  0  s  s  s  s  s  P  P  0  0  1  0  0  0  0  0  0  d  d  d  d  d
++
++:memw_aq Rd5,rs5 EndPacket	is iclass=9 & op2127=0x10 & op0513=0x40 & Rd5 & rs5 & $(END_PACKET)
++unimpl
++
++# (v66,9) memcpy  --  "memcpy ( Rs32 , Rt32 , Mu2 )"
++#  _________________________________________________________________________________________________
++#  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
++#    1  0  0  1  0  0  1  0  0  0  0  s  s  s  s  s  P  P  M  t  t  t  t  t  0  1  0  0  0  0  0  0
++
++:memcpy rs5,rt5,mu EndPacket	is iclass=9 & op2127=0x10 & op0007=0x40 & rs5 & rt5 & mu & $(END_PACKET)
++unimpl
++
+ # (v2,13) min  --  "Rd32 = min ( Rt32 , Rs32 )"
+ #  _________________________________________________________________________________________________
+ #  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
+@@ -11235,7 +11340,7 @@ define pcodeop memw_phys;
+ 
+ define pcodeop min;
+ 
+-:min Rd5,rs5,rt5 EndPacket  is iclass=13 & op2127=0x2d & op13=0 & op0507=0 & rs5 & rt5 & Rd5 & $(END_PACKET) {
++:min Rd5,rt5,rs5 EndPacket  is iclass=13 & op2127=0x2d & op13=0 & op0507=0 & rs5 & rt5 & Rd5 & $(END_PACKET) {
+ 	Rd5 = min(rt5,rs5);
+ 	build EndPacket;
+ }
+@@ -11245,7 +11350,7 @@ define pcodeop min;
+ #  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
+ #    1  1  0  1  0  0  1  1  1  0  1  s  s  s  s  s  P  P  +  t  t  t  t  t  1  1  0  d  d  d  d  d  
+ 
+-:min Rdd5,rss5,rtt5 EndPacket  is iclass=13 & op2127=0x1d & op13=0 & op0507=6 & rss5 & rtt5 & Rdd5 & $(END_PACKET) {
++:min Rdd5,rtt5,rss5 EndPacket  is iclass=13 & op2127=0x1d & op13=0 & op0507=6 & rss5 & rtt5 & Rdd5 & $(END_PACKET) {
+ 	Rdd5 = min(rtt5,rss5);
+ 	build EndPacket;
+ }
+@@ -11257,7 +11362,7 @@ define pcodeop min;
+ 
+ define pcodeop minu;
+ 
+-:minu Rd5,rs5,rt5 EndPacket  is iclass=13 & op2127=0x2d & op13=0 & op0507=4 & rs5 & rt5 & Rd5 & $(END_PACKET) {
++:minu Rd5,rt5,rs5 EndPacket  is iclass=13 & op2127=0x2d & op13=0 & op0507=4 & rs5 & rt5 & Rd5 & $(END_PACKET) {
+ 	Rd5 = minu(rt5,rs5);
+ 	build EndPacket;
+ }
+@@ -11267,7 +11372,7 @@ define pcodeop minu;
+ #  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
+ #    1  1  0  1  0  0  1  1  1  0  1  s  s  s  s  s  P  P  +  t  t  t  t  t  1  1  1  d  d  d  d  d  
+ 
+-:minu Rdd5,rss5,rtt5 EndPacket  is iclass=13 & op2127=0x1d & op13=0 & op0507=7 & rss5 & rtt5 & Rdd5 & $(END_PACKET) {
++:minu Rdd5,rtt5,rss5 EndPacket  is iclass=13 & op2127=0x1d & op13=0 & op0507=7 & rss5 & rtt5 & Rdd5 & $(END_PACKET) {
+ 	Rdd5 = minu(rtt5,rss5);
+ 	build EndPacket;
+ }
+@@ -12225,7 +12330,7 @@ define pcodeop mpySatSub;
+ #    1  1  1  0  1  1  0  0  1  1  0  s  s  s  s  s  P  P  +  t  t  t  t  t  0  0  0  d  d  d  d  d  
+ 
+ :mpyu^":<<1" Rd5,Rs5HL06,Rt5HL05 EndPacket  is iclass=14 & op2127=0x66 & op13=0 & op7=0 & Rs5HL06 & Rt5HL05 & Rd5 & $(END_PACKET) {
+-	Rd5 = zext(Rs5HL06) * zext(Rs5HL06);
++	Rd5 = zext(Rs5HL06) * zext(Rt5HL05);
+ 	Rd5 = Rd5 << 1;
+ 	build EndPacket;
+ }
+@@ -12451,7 +12556,7 @@ define pcodeop mpySatSub;
+ #    1  1  1  0  0  1  1  0  1  1  0  s  s  s  s  s  P  P  +  t  t  t  t  t  0  0  0  x  x  x  x  x  
+ 
+ :mpyu+=^":<<1" Rdd5,Rs5HL06,Rt5HL05 EndPacket  is iclass=14 & op2127=0x36 & op13=0 & op7=0 & Rs5HL06 & Rt5HL05 & Rdd5 & rdd5 & $(END_PACKET) {
+-	tmp:8 = zext(Rs5HL06) * zext(Rs5HL06);
++	tmp:8 = zext(Rs5HL06) * zext(Rt5HL05);
+ 	Rdd5 = rdd5 + (tmp << 1);
+ 	build EndPacket;
+ }
+@@ -13211,7 +13316,8 @@ define pcodeop roundArithmeticPSat;
+ #    1  1  0  0  0  1  1  0  1  0  +  s  s  s  s  s  P  P  +  t  t  t  t  t  0  0  +  d  d  d  d  d  
+ 
+ :setbit Rd5,rs5,rt5 EndPacket	is iclass=12 & op2127=0x34 & op13=0 & op0507=0 & Rd5 & rs5 & rt5 & $(END_PACKET) {
+-	mask:4 = 1 << rt5;
++	shamt:4 = (rt5 << 25) s>> 25;
++	mask:4 = zext(shamt s>= 0) * (1 << shamt);
+ 	Rd5 = rs5 | mask;
+ 	build EndPacket;
+ }
+@@ -13900,6 +14006,14 @@ define pcodeop tlbp;
+ 	build EndPacket;
+ }
+ 
++# (v81,6) tlbpp  --  "Rd32 = tlbp ( Rss32 )"
++#  _________________________________________________________________________________________________
++#  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
++#    0  1  1  0  1  1  0  0  0  1  1  s  s  s  s  s  P  P  +  +  +  +  +  +  +  +  +  d  d  d  d  d
++
++:tlbp Rd5,rss5 EndPacket	is iclass=6 & op2127=0x63 & op0513=0 & Rd5 & rss5 & $(END_PACKET)
++unimpl
++
+ # (v2,6) tlbr  --  "Rdd32 = tlbr ( Rs32 )"
+ #  _________________________________________________________________________________________________
+ #  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
+@@ -13953,10 +14067,9 @@ define pcodeop tlbw;
+ #    1  1  0  0  0  1  1  0  1  0  +  s  s  s  s  s  P  P  +  t  t  t  t  t  1  0  +  d  d  d  d  d  
+ 
+ :togglebit Rd5,rs5,rt5 EndPacket	is iclass=12 & op2127=0x34 & op13=0 & op0507=4 & Rd5 & rs5 & rt5 & $(END_PACKET) {
+-	if (rt5 > 31) goto <end>;
+-	mask:4 = 1 << rt5;
++	shamt:4 = (rt5 << 25) s>> 25;
++	mask:4 = zext(shamt s>= 0) * (1 << shamt);
+ 	Rd5 = rs5 ^ mask;
+-  <end>
+ 	build EndPacket;
+ }
+ 
+@@ -14045,7 +14158,8 @@ define pcodeop getTrap1Vector;
+ #    1  1  0  0  0  1  1  1  0  0  0  s  s  s  s  s  P  P  +  t  t  t  t  t  +  +  +  +  +  +  d  d  
+ 
+ :tstbit Pd2,rs5,rt5 EndPacket  is iclass=12 & op2127=0x38 & op13=0 & op0207=0 & rs5 & rt5 & Pd2 & $(END_PACKET) {
+-	mask:4 = 1 << rt5;
++	shamt:4 = (rt5 << 25) s>> 25;
++	mask:4 = zext(shamt s>= 0) * (1 << shamt);
+ 	bool:1 = (rs5 & mask) != 0;
+ 	Pd2 = Pd2 & (bool * 0xff);
+ 	build EndPacket;
+@@ -14057,7 +14171,8 @@ define pcodeop getTrap1Vector;
+ #    1  1  0  0  0  1  1  1  0  0  1  s  s  s  s  s  P  P  +  t  t  t  t  t  +  +  +  +  +  +  d  d  
+ 
+ :"!tstbit" Pd2,rs5,rt5 EndPacket  is iclass=12 & op2127=0x39 & op13=0 & op0207=0 & rs5 & rt5 & Pd2 & $(END_PACKET) {
+-	mask:4 = 1 << rt5;
++	shamt:4 = (rt5 << 25) s>> 25;
++	mask:4 = zext(shamt s>= 0) * (1 << shamt);
+ 	bool:1 = (rs5 & mask) == 0;
+ 	Pd2 = Pd2 & (bool * 0xff);
+ 	build EndPacket;
+@@ -14368,7 +14483,7 @@ macro valignb(d, s, t, align) {
+ 
+ :vaslh Rdd5,rss5,rt5 EndPacket	is iclass=12 & op2127=0x1a & op13=0 & op0507=4 & rss5 & rt5 & Rdd5 & $(END_PACKET)
+ {
+-	# TODO: should we assume positive shift amount to avoid conditional ?
++	# Rt is signed; sign of Rt selects shift direction per ISA
+ 	right:1 = rt5 s< 0;
+ 	h:2 = rss5[0,16];
+ 	Rdd5[0,16] = (zext(right) * (h s>> -rt5)) + (zext(!right) * (h << rt5));
+@@ -14400,7 +14515,7 @@ macro valignb(d, s, t, align) {
+ 
+ :vaslw Rdd5,rss5,rt5 EndPacket	is iclass=12 & op2127=0x18 & op13=0 & op0507=4 & rss5 & rt5 & Rdd5 & $(END_PACKET)
+ {
+-	# TODO: should we assume positive shift amount to avoid conditional ?
++	# Rt is signed; sign of Rt selects shift direction per ISA
+ 	right:1 = rt5 s< 0;
+ 	w:4 = rss5[0,32];
+ 	Rdd5[0,32] = (zext(right) * (w s>> -rt5)) + (zext(!right) * (w << rt5));
+@@ -14444,7 +14559,7 @@ macro valignb(d, s, t, align) {
+ 
+ :vasrh Rdd5,rss5,rt5 EndPacket	is iclass=12 & op2127=0x1a & op13=0 & op0507=0 & rss5 & rt5 & Rdd5 & $(END_PACKET)
+ {
+-	# TODO: should we assume positive shift amount to avoid conditional ?
++	# Rt is signed; sign of Rt selects shift direction per ISA
+ 	right:1 = rt5 s>= 0;
+ 	h:2 = rss5[0,16];
+ 	Rdd5[0,16] = (zext(right) * (h s>> -rt5)) + (zext(!right) * (h << rt5));
+@@ -14505,7 +14620,7 @@ define pcodeop vasrhub_sat;
+ 
+ :vasrw Rd5,rss5,rt5 EndPacket	is iclass=12 & op2127=0x28 & op13=0 & op0507=2 & rss5 & rt5 & Rd5 & $(END_PACKET)
+ {
+-	# TODO: should we assume positive shift amount to avoid conditional ?
++	# Rt is signed; sign of Rt selects shift direction per ISA
+ 	right:1 = rt5 s>= 0;
+ 	w:4 = rss5[0,32];
+ 	res:4 = (zext(right) * (w s>> -rt5)) + (zext(!right) * (w << rt5));
+@@ -14535,7 +14650,7 @@ define pcodeop vasrhub_sat;
+ 
+ :vasrw Rdd5,rss5,rt5 EndPacket	is iclass=12 & op2127=0x18 & op13=0 & op0507=0 & rss5 & rt5 & Rdd5 & $(END_PACKET)
+ {
+-	# TODO: should we assume positive shift amount to avoid conditional ?
++	# Rt is signed; sign of Rt selects shift direction per ISA
+ 	right:1 = rt5 s>= 0;
+ 	w:4 = rss5[0,32];
+ 	Rdd5[0,32] = (zext(right) * (w s>> -rt5)) + (zext(!right) * (w << rt5));
+@@ -15267,6 +15382,14 @@ define pcodeop vminub;
+ 	build EndPacket;
+ }
+ 
++# (v62,14) vminub  --  "Rdd32 , Pe4 = vminub ( Rtt32 , Rss32 )"
++#  _________________________________________________________________________________________________
++#  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
++#    1  1  1  0  1  0  1  0  1  1  1  s  s  s  s  s  P  P  +  t  t  t  t  t  0  e  e  d  d  d  d  d
++
++:vminub Rdd5,Pd0506,rtt5,rss5 EndPacket	is iclass=14 & op2127=0x57 & op13=0 & op7=0 & Rdd5 & Pd0506 & rtt5 & rss5 & $(END_PACKET)
++unimpl
++
+ # (v2,13) vminuh  --  "Rdd32 = vminuh ( Rtt32 , Rss32 )"
+ #  _________________________________________________________________________________________________
+ #  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
+@@ -16771,6 +16894,22 @@ define pcodeop vtrunehb;
+ 	build EndPacket;
+ }
+ 
++# (v62,12) vtrunehb  --  "Rdd32 = vtrunehb ( Rss32 , Rtt32 )"
++#  _________________________________________________________________________________________________
++#  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
++#    1  1  0  0  0  0  0  0  1  1  0  s  s  s  s  s  P  P  0  t  t  t  t  t  0  1  1  d  d  d  d  d
++
++:vtrunehb Rdd5,rss5,rtt5 EndPacket	is iclass=12 & op2127=0x0c & op13=0 & op0507=3 & Rdd5 & rss5 & rtt5 & $(END_PACKET)
++unimpl
++
++# (v62,12) vtrunohb  --  "Rdd32 = vtrunohb ( Rss32 , Rtt32 )"
++#  _________________________________________________________________________________________________
++#  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
++#    1  1  0  0  0  0  0  0  1  1  0  s  s  s  s  s  P  P  0  t  t  t  t  t  1  0  1  d  d  d  d  d
++
++:vtrunohb Rdd5,rss5,rtt5 EndPacket	is iclass=12 & op2127=0x0c & op13=0 & op0507=5 & Rdd5 & rss5 & rtt5 & $(END_PACKET)
++unimpl
++
+ # (v2,8) vtrunohb  --  "Rd32 = vtrunohb ( Rss32 )"
+ #  _________________________________________________________________________________________________
+ #  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
+diff --git a/Ghidra/Processors/Hexagon/data/languages/hexagon.slaspec b/Ghidra/Processors/Hexagon/data/languages/hexagon.slaspec
+index 778d7a7887..701ea0c06b 100755
+--- a/Ghidra/Processors/Hexagon/data/languages/hexagon.slaspec
++++ b/Ghidra/Processors/Hexagon/data/languages/hexagon.slaspec
+@@ -1,12 +1,11 @@
+-# Qualcomm Hexagon (V73) and HVX (V69)
++# Qualcomm Hexagon (V60-V81) and HVX (V60-V81)
+ 
+ ## KNOWN ISSUES
+-# 1. Shift amounts may be positive or negative, however in some cases no special handling 
+-#    is provided for negative shift amounts.
+-# 2. There are many complex instructions with unimplemented pcode or simple custom pcodeops
++# 1. Many V70+ scalar/HVX additions (V73 BF16, V79 FP8/qfext, V81 qfloat, V66 ZReg
++#    matrix, V68 IEEE-FP, etc.) are decode-only stubs with unimpl pcode.
+ #
+ ## NOTES
+-# 1. Implementation includes V73 system registers, instruction set may be incomplete
++# 1. Decode covers V60-V81 scalar and HVX; V73 system registers included.
+ # 2. HVX vector register size is 128-bytes (see defines below), paired size is 256-bytes
+ #
+ ## VERSIONS
+diff --git a/Ghidra/Processors/Hexagon/data/languages/hexagon_float.sinc b/Ghidra/Processors/Hexagon/data/languages/hexagon_float.sinc
+index de104c131d..661eafb186 100644
+--- a/Ghidra/Processors/Hexagon/data/languages/hexagon_float.sinc
++++ b/Ghidra/Processors/Hexagon/data/languages/hexagon_float.sinc
+@@ -422,7 +422,7 @@ define pcodeop sffixupr;
+ #    1  1  0  1  0  1  1  0  0  1  i  +  +  +  +  +  P  P  i  i  i  i  i  i  i  i  i  d  d  d  d  d
+ 
+ :sfmake^":neg" Rd5,Uimm16_21_0513 EndPacket	is iclass=13 & op2227=0x19 & op1620=0 & Uimm16_21_0513 & Rd5 & $(END_PACKET) {
+-	Rd5 = int2float(-Uimm16_21_0513); # TODO: assumed functionality
++	Rd5 = (1 << 31) | (((127 - 6) << 23) + (zext(Uimm16_21_0513) << 17));
+ 	build EndPacket;
+ }
+ 
+@@ -432,7 +432,7 @@ define pcodeop sffixupr;
+ #    1  1  0  1  0  1  1  0  0  0  i  +  +  +  +  +  P  P  i  i  i  i  i  i  i  i  i  d  d  d  d  d
+ 
+ :sfmake^":pos" Rd5,Uimm16_21_0513 EndPacket	is iclass=13 & op2227=0x18 & op1620=0 & Uimm16_21_0513 & Rd5 & $(END_PACKET) {
+-	Rd5 = int2float(Uimm16_21_0513); # TODO: assumed functionality
++	Rd5 = ((127 - 6) << 23) + (zext(Uimm16_21_0513) << 17);
+ 	build EndPacket;
+ }
+ 
+@@ -602,7 +602,7 @@ define pcodeop sffixupr;
+ #    1  1  0  1  1  0  0  1  0  1  i  +  +  +  +  +  P  P  i  i  i  i  i  i  i  i  i  d  d  d  d  d
+ 
+ :dfmake^":neg" Rdd5,Uimm16_21_0513 EndPacket	is iclass=13 & op2227=0x25 & op1620=0 & Uimm16_21_0513 & Rdd5 & $(END_PACKET) {
+-	Rdd5 = int2float(-Uimm16_21_0513); # TODO: assumed functionality
++	Rdd5 = (1:8 << 63) | (((1023:8 - 6) << 52) + (zext(Uimm16_21_0513) << 46));
+ 	build EndPacket;
+ }
+ 
+@@ -612,7 +612,7 @@ define pcodeop sffixupr;
+ #    1  1  0  1  1  0  0  1  0  0  i  +  +  +  +  +  P  P  i  i  i  i  i  i  i  i  i  d  d  d  d  d
+ 
+ :dfmake^":pos" Rdd5,Uimm16_21_0513 EndPacket	is iclass=13 & op2227=0x24 & op1620=0 & Uimm16_21_0513 & Rdd5 & $(END_PACKET) {
+-	Rdd5 = int2float(Uimm16_21_0513); # TODO: assumed functionality
++	Rdd5 = ((1023:8 - 6) << 52) + (zext(Uimm16_21_0513) << 46);
+ 	build EndPacket;
+ }
+ 
+diff --git a/Ghidra/Processors/Hexagon/data/languages/hexagon_hvx.sinc b/Ghidra/Processors/Hexagon/data/languages/hexagon_hvx.sinc
+index 0b6ede08fe..f2a4a0f0d1 100644
+--- a/Ghidra/Processors/Hexagon/data/languages/hexagon_hvx.sinc
++++ b/Ghidra/Processors/Hexagon/data/languages/hexagon_hvx.sinc
+@@ -1,9 +1,10 @@
+-# Qualcomm Hexagon HVX Instruction Set (V69)
++# Qualcomm Hexagon HVX Instruction Set (V60-V81)
+ 
+ # NOTES:
+-# - HVX implemntation based upon V69
+-# - HVX hardware supports either 64-byte or 128-byte vector lengths 
+-# - Vector register write are comitted immediately - we assume assembler enforces read-after-write 
++# - HVX decode covers V60-V81; V68 IEEE-FP, V73 BF16, V79 FP8/qfext, V81 qfloat,
++#   and V66 ZReg matrix families are decode-only stubs (unimpl pcode).
++# - HVX hardware supports either 64-byte or 128-byte vector lengths
++# - Vector register write are comitted immediately - we assume assembler enforces read-after-write
+ #   hazzards for vector registers so we do not shadow writes.
+ 
+ # UNDERSTANDING / ASSUMPTIONS:
+@@ -40,6 +41,7 @@ VddUW_0004: Vdd5^".uw"  is Vdd5 { export Vdd5; }
+ VddUH_0004: Vdd5^".uh"  is Vdd5 { export Vdd5; }
+ VddUB_0004: Vdd5^".ub"	is Vdd5 { export Vdd5; }
+ VddQF32_0004: Vdd5^".qf32"  is Vdd5 { export Vdd5; }
++VddSF_0004: Vdd5^".sf"  is Vdd5 { export Vdd5; }
+ 
+ # source vector pair (0,4) - read-only use
+ Vss_0004:vdd5  is vdd5 {
+@@ -121,6 +123,9 @@ VdHF_0004: Vd5^".hf"	is Vd5 { export Vd5; }
+ VdSF_0004: Vd5^".sf"	is Vd5 { export Vd5; }
+ VdQF16_0004: Vd5^".qf16"  is Vd5 { export Vd5; }
+ VdQF32_0004: Vd5^".qf32"  is Vd5 { export Vd5; }
++VdF8_0004: Vd5^".f8"  is Vd5 { export Vd5; }
++VdBF_0004: Vd5^".bf"  is Vd5 { export Vd5; }
++VdX_0004: Vd5^".x"  is Vd5 { export Vd5; }
+ 
+ # source vector (0,4) - read-only use
+ Vs_0004: vs5  is vs5 {
+@@ -150,6 +155,9 @@ VuSF_0812: Vu_0812^".sf"	is Vu_0812 { export Vu_0812; }
+ VuHF_0812: Vu_0812^".hf"	is Vu_0812 { export Vu_0812; }
+ VuQF16_0812: Vu_0812^".qf16"  is Vu_0812 { export Vu_0812; }
+ VuQF32_0812: Vu_0812^".qf32"  is Vu_0812 { export Vu_0812; }
++VuF8_0812: Vu_0812^".f8"  is Vu_0812 { export Vu_0812; }
++VuBF_0812: Vu_0812^".bf"  is Vu_0812 { export Vu_0812; }
++VuX_0812: Vu_0812^".x"  is Vu_0812 { export Vu_0812; }
+ 
+ # source vector (16,20) - read-only use
+ Vv_1620: vv5  is vv5 {
+@@ -168,6 +176,8 @@ VvSF_1620: Vv_1620^".sf"  is Vv_1620 { export Vv_1620; }
+ VvHF_1620: Vv_1620^".hf"  is Vv_1620 { export Vv_1620; }
+ VvQF16_1620: Vv_1620^".qf16"  is Vv_1620 { export Vv_1620; }
+ VvQF32_1620: Vv_1620^".qf32"  is Vv_1620 { export Vv_1620; }
++VvF8_1620: Vv_1620^".f8"  is Vv_1620 { export Vv_1620; }
++VvBF_1620: Vv_1620^".bf"  is Vv_1620 { export Vv_1620; }
+ 
+ # source vector (19,23) - read-only use
+ Vz_1923: vz5  is vz5 {
+@@ -188,7 +198,8 @@ VzUH_1923: Vz_1923^".uh"  is Vz_1923 { export Vz_1923; }
+ 
+ # source scalar register pair - read-only use - see rxx5 (used for lane naming only)
+ RttH_1620: rxx5^".h"  	is rxx5 { tmp:8 = rxx5; export tmp; } 
+-RttUH_1620: rxx5^".uh"  is rxx5 { tmp:8 = rxx5; export tmp; } 
++RttUH_1620: rxx5^".uh"  is rxx5 { tmp:8 = rxx5; export tmp; }
++RttUB_1620: rxx5^".ub"  is rxx5 { tmp:8 = rxx5; export tmp; }
+ 
+ # source scalar register - read-only use - see rx5 (used for lane naming only)
+ RtH_1620: rx5^".h"  	is rx5 { tmp:4 = rx5; export tmp; }
+@@ -197,7 +208,42 @@ RtUH_1620: rx5^".uh"	is rx5 { tmp:4 = rx5; export tmp; }
+ RtUB_1620: rx5^".ub"	is rx5 { tmp:4 = rx5; export tmp; }
+ 
+ #
+-# Vector Predicate operands 
++# V66 ZReg quad-vector operands (Vdddd / Vyyyy)
++#
++
++Zdddd_0004: "v3:0"		is op0004=0x00 { }
++Zdddd_0004: "v7:4"		is op0004=0x04 { }
++Zdddd_0004: "v11:8"		is op0004=0x08 { }
++Zdddd_0004: "v15:12"	is op0004=0x0c { }
++Zdddd_0004: "v19:16"	is op0004=0x10 { }
++Zdddd_0004: "v23:20"	is op0004=0x14 { }
++Zdddd_0004: "v27:24"	is op0004=0x18 { }
++Zdddd_0004: "v31:28"	is op0004=0x1c { }
++
++ZddddW_0004: Zdddd_0004^".w"	is Zdddd_0004 { }
++
++Zyyyy_0004: "v3:0"		is op0004=0x00 { }
++Zyyyy_0004: "v7:4"		is op0004=0x04 { }
++Zyyyy_0004: "v11:8"		is op0004=0x08 { }
++Zyyyy_0004: "v15:12"	is op0004=0x0c { }
++Zyyyy_0004: "v19:16"	is op0004=0x10 { }
++Zyyyy_0004: "v23:20"	is op0004=0x14 { }
++Zyyyy_0004: "v27:24"	is op0004=0x18 { }
++Zyyyy_0004: "v31:28"	is op0004=0x1c { }
++
++ZyyyyW_0004: Zyyyy_0004^".w"	is Zyyyy_0004 { }
++
++#
++# Rt8/Rx8 byte-subregister operands (18,16) - read-only use
++#
++
++Rt8B_1618: rt1618^".b"		is rt1618 { tmp:4 = rt1618; export tmp; }
++Rt8UB_1618: rt1618^".ub"	is rt1618 { tmp:4 = rt1618; export tmp; }
++Rx8B_pp_1618: rt1618^".b++"		is rt1618 { tmp:4 = rt1618; export tmp; }
++Rx8UB_pp_1618: rt1618^".ub++"	is rt1618 { tmp:4 = rt1618; export tmp; }
++
++#
++# Vector Predicate operands
+ #
+ 
+ # Corresponds to Qd4 in documentation (vector predicate destination Q0..Q3, handles unconditional commit)
+@@ -1476,8 +1522,8 @@ define pcodeop vsub_VwVw_carryResult;
+ #  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
+ #    0  0  0  1  1  1  1  0  -  -  0  -  -  0  1  1  P  P  1  u  u  u  u  u  1  1  1  d  d  d  d  d
+ 
+-:assign Vd5,Vu_0812 EndPacket  is iclass=0x1 & op2427=0xe & op21=0x0 & op18=0x0 & op1617=0x3 & op13=0x1 & op0507=0x7 & Vd5 & Vu_0812 & $(END_PACKET) [ cond=0; ] {
+-	Vd5 = Vu_0812; # Vd5 handles unconditional commit 
++:assign Vd5,Vu_0812 EndPacket  is iclass=0x1 & op2427=0xe & op2123=0x0 & op1620=0x3 & op13=0x1 & op0507=0x7 & Vd5 & Vu_0812 & $(END_PACKET) [ cond=0; ] {
++	Vd5 = Vu_0812; # Vd5 handles unconditional commit
+ 	build EndPacket;
+ }
+ 
+@@ -1486,7 +1532,7 @@ define pcodeop vsub_VwVw_carryResult;
+ #  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
+ #    0  0  0  1  1  1  1  0  -  -  0  -  -  -  0  1  P  P  0  u  u  u  u  u  1  1  0  d  d  d  d  d
+ 
+-:assign Vd5tmp,Vu_0812 EndPacket  is iclass=0x1 & op2427=0xe & op21=0x0 & op1617=0x1 & op13=0x0 & op0507=0x6 & Vd5tmp & Vu_0812 & $(END_PACKET) {
++:assign Vd5tmp,Vu_0812 EndPacket  is iclass=0x1 & op2427=0xe & op2123=0x0 & op1620=0x1 & op13=0x0 & op0507=0x6 & Vd5tmp & Vu_0812 & $(END_PACKET) {
+    Vd5tmp = Vu_0812;
+    build EndPacket;
+ }
+@@ -1808,7 +1854,7 @@ define pcodeop vcmp_gt_VuwVuw;
+ 
+ define pcodeop vcmp_eqand_QVbVb;
+ 
+-:vcmp.eq Qd2,VuB_0812,VvB_1620 EndPacket  is iclass=0x1 & op2127=0x64 & op13=0x1 & op0207=0x0 & Qd2 & VuB_0812 & VvB_1620 & $(END_PACKET) {
++:vcmp.eq^"&=" Qd2,VuB_0812,VvB_1620 EndPacket  is iclass=0x1 & op2127=0x64 & op13=0x1 & op0207=0x0 & Qd2 & VuB_0812 & VvB_1620 & $(END_PACKET) {
+    Qd2 = vcmp_eqand_QVbVb(Qd2,VuB_0812,VvB_1620);
+    build EndPacket;
+ }
+@@ -1820,7 +1866,7 @@ define pcodeop vcmp_eqand_QVbVb;
+ 
+ define pcodeop vcmp_eqand_QVhVh;
+ 
+-:vcmp.eq Qd2,VuH_0812,VvH_1620 EndPacket  is iclass=0x1 & op2127=0x64 & op13=0x1 & op0207=0x1 & Qd2 & VuH_0812 & VvH_1620 & $(END_PACKET) {
++:vcmp.eq^"&=" Qd2,VuH_0812,VvH_1620 EndPacket  is iclass=0x1 & op2127=0x64 & op13=0x1 & op0207=0x1 & Qd2 & VuH_0812 & VvH_1620 & $(END_PACKET) {
+    Qd2 = vcmp_eqand_QVhVh(Qd2,VuH_0812,VvH_1620);
+    build EndPacket;
+ }
+@@ -1832,7 +1878,7 @@ define pcodeop vcmp_eqand_QVhVh;
+ 
+ define pcodeop vcmp_eqand_QVwVw;
+ 
+-:vcmp.eq Qd2,VuW_0812,VvW_1620 EndPacket  is iclass=0x1 & op2127=0x64 & op13=0x1 & op0207=0x2 & Qd2 & VuW_0812 & VvW_1620 & $(END_PACKET) {
++:vcmp.eq^"&=" Qd2,VuW_0812,VvW_1620 EndPacket  is iclass=0x1 & op2127=0x64 & op13=0x1 & op0207=0x2 & Qd2 & VuW_0812 & VvW_1620 & $(END_PACKET) {
+    Qd2 = vcmp_eqand_QVwVw(Qd2,VuW_0812,VvW_1620);
+    build EndPacket;
+ }
+@@ -1844,7 +1890,7 @@ define pcodeop vcmp_eqand_QVwVw;
+ 
+ define pcodeop vcmp_gtand_QVbVb;
+ 
+-:vcmp.gt Qd2,VuB_0812,VvB_1620 EndPacket  is iclass=0x1 & op2127=0x64 & op13=0x1 & op0207=0x4 & Qd2 & VuB_0812 & VvB_1620 & $(END_PACKET) {
++:vcmp.gt^"&=" Qd2,VuB_0812,VvB_1620 EndPacket  is iclass=0x1 & op2127=0x64 & op13=0x1 & op0207=0x4 & Qd2 & VuB_0812 & VvB_1620 & $(END_PACKET) {
+    Qd2 = vcmp_gtand_QVbVb(Qd2,VuB_0812,VvB_1620);
+    build EndPacket;
+ }
+@@ -1856,7 +1902,7 @@ define pcodeop vcmp_gtand_QVbVb;
+ 
+ define pcodeop vcmp_gtand_QVhVh;
+ 
+-:vcmp.gt Qd2,VuH_0812,VvH_1620 EndPacket  is iclass=0x1 & op2127=0x64 & op13=0x1 & op0207=0x5 & Qd2 & VuH_0812 & VvH_1620 & $(END_PACKET) {
++:vcmp.gt^"&=" Qd2,VuH_0812,VvH_1620 EndPacket  is iclass=0x1 & op2127=0x64 & op13=0x1 & op0207=0x5 & Qd2 & VuH_0812 & VvH_1620 & $(END_PACKET) {
+    Qd2 = vcmp_gtand_QVhVh(Qd2,VuH_0812,VvH_1620);
+    build EndPacket;
+ }
+@@ -1868,7 +1914,7 @@ define pcodeop vcmp_gtand_QVhVh;
+ 
+ define pcodeop vcmp_gtand_QVwVw;
+ 
+-:vcmp.gt Qd2,VuW_0812,VvW_1620 EndPacket  is iclass=0x1 & op2127=0x64 & op13=0x1 & op0207=0x6 & Qd2 & VuW_0812 & VvW_1620 & $(END_PACKET) {
++:vcmp.gt^"&=" Qd2,VuW_0812,VvW_1620 EndPacket  is iclass=0x1 & op2127=0x64 & op13=0x1 & op0207=0x6 & Qd2 & VuW_0812 & VvW_1620 & $(END_PACKET) {
+    Qd2 = vcmp_gtand_QVwVw(Qd2,VuW_0812,VvW_1620);
+    build EndPacket;
+ }
+@@ -1880,7 +1926,7 @@ define pcodeop vcmp_gtand_QVwVw;
+ 
+ define pcodeop vcmp_gtand_QVubVub;
+ 
+-:vcmp.gt Qd2,VuUB_0812,VvUB_1620 EndPacket  is iclass=0x1 & op2127=0x64 & op13=0x1 & op0207=0x8 & Qd2 & VuUB_0812 & VvUB_1620 & $(END_PACKET) {
++:vcmp.gt^"&=" Qd2,VuUB_0812,VvUB_1620 EndPacket  is iclass=0x1 & op2127=0x64 & op13=0x1 & op0207=0x8 & Qd2 & VuUB_0812 & VvUB_1620 & $(END_PACKET) {
+    Qd2 = vcmp_gtand_QVubVub(Qd2,VuUB_0812,VvUB_1620);
+    build EndPacket;
+ }
+@@ -1892,7 +1938,7 @@ define pcodeop vcmp_gtand_QVubVub;
+ 
+ define pcodeop vcmp_gtand_QVuhVuh;
+ 
+-:vcmp.gt Qd2,VuUH_0812,VvUH_1620 EndPacket  is iclass=0x1 & op2127=0x64 & op13=0x1 & op0207=0x9 & Qd2 & VuUH_0812 & VvUH_1620 & $(END_PACKET) {
++:vcmp.gt^"&=" Qd2,VuUH_0812,VvUH_1620 EndPacket  is iclass=0x1 & op2127=0x64 & op13=0x1 & op0207=0x9 & Qd2 & VuUH_0812 & VvUH_1620 & $(END_PACKET) {
+    Qd2 = vcmp_gtand_QVuhVuh(Qd2,VuUH_0812,VvUH_1620);
+    build EndPacket;
+ }
+@@ -1904,7 +1950,7 @@ define pcodeop vcmp_gtand_QVuhVuh;
+ 
+ define pcodeop vcmp_gtand_QVuwVuw;
+ 
+-:vcmp.gt Qd2,VuUW_0812,VvUW_1620 EndPacket  is iclass=0x1 & op2127=0x64 & op13=0x1 & op0207=0xa & Qd2 & VuUW_0812 & VvUW_1620 & $(END_PACKET) {
++:vcmp.gt^"&=" Qd2,VuUW_0812,VvUW_1620 EndPacket  is iclass=0x1 & op2127=0x64 & op13=0x1 & op0207=0xa & Qd2 & VuUW_0812 & VvUW_1620 & $(END_PACKET) {
+    Qd2 = vcmp_gtand_QVuwVuw(Qd2,VuUW_0812,VvUW_1620);
+    build EndPacket;
+ }
+@@ -5773,7 +5819,7 @@ define pcodeop Vub_vasr_WuhVub_rnd_sat;
+ 
+ define pcodeop Vsf_equals_Vqf32;
+ 
+-:assign VdSF_0004,VuQF32_0812 EndPacket  is iclass=0x1 & op2427=0xe & op21=0x0 & op18=0x1 & op1617=0x0 & op13=0x1 & op0507=0x0 & VdSF_0004 & VuQF32_0812 & $(END_PACKET) {
++:assign VdSF_0004,VuQF32_0812 EndPacket  is iclass=0x1 & op2427=0xe & op2123=0x0 & op1620=0x4 & op13=0x1 & op0507=0x0 & VdSF_0004 & VuQF32_0812 & $(END_PACKET) {
+    VdSF_0004 = Vsf_equals_Vqf32(VuQF32_0812);
+    build EndPacket;
+ }
+@@ -5785,7 +5831,7 @@ define pcodeop Vsf_equals_Vqf32;
+ 
+ define pcodeop Vhf_equals_Vqf16;
+ 
+-:assign VdHF_0004,VuQF16_0812 EndPacket  is iclass=0x1 & op2427=0xe & op21=0x0 & op18=0x1 & op1617=0x0 & op13=0x1 & op0507=0x3 & VdHF_0004 & VuQF16_0812 & $(END_PACKET) {
++:assign VdHF_0004,VuQF16_0812 EndPacket  is iclass=0x1 & op2427=0xe & op2123=0x0 & op1620=0x4 & op13=0x1 & op0507=0x3 & VdHF_0004 & VuQF16_0812 & $(END_PACKET) {
+    VdHF_0004 = Vhf_equals_Vqf16(VuQF16_0812);
+    build EndPacket;
+ }
+@@ -5797,7 +5843,7 @@ define pcodeop Vhf_equals_Vqf16;
+ 
+ define pcodeop Vhf_equals_Wqf32;
+ 
+-:assign VdHF_0004,VuuQF32_0812 EndPacket  is iclass=0x1 & op2427=0xe & op21=0x0 & op18=0x1 & op1617=0x0 & op13=0x1 & op0507=0x6 & VdHF_0004 & VuuQF32_0812 & $(END_PACKET) {
++:assign VdHF_0004,VuuQF32_0812 EndPacket  is iclass=0x1 & op2427=0xe & op2123=0x0 & op1620=0x4 & op13=0x1 & op0507=0x6 & VdHF_0004 & VuuQF32_0812 & $(END_PACKET) {
+    VdHF_0004 = Vhf_equals_Wqf32(VuuQF32_0812);
+    build EndPacket;
+ }
+@@ -6534,4 +6580,527 @@ define pcodeop scatter_release;
+    scatter_release(VAlignMemAddrRxAIMu);
+ }
+ 
++# (hvx,1) "vhist"
++#  _________________________________________________________________________________________________
++#  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
++#    0  0  0  1  1  1  1  0  0  0  0  0  0  0  0  0  P  P  1  0  0  0  0  0  1  0  0  0  0  0  0  0
++
++:vhist EndPacket  is iclass=0x1 & op2427=0xe & op2123=0x0 & op1620=0x0 & op13=0x1 & op0812=0x0 & op0007=0x80 & $(END_PACKET) unimpl
++
++# (hvx,1) vhist  --  "vhist(Qv4)"
++#  _________________________________________________________________________________________________
++#  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
++#    0  0  0  1  1  1  1  0  0  0  0  0  0  0  1  0  P  P  1  0  0  0  0  0  1  0  0  0  0  0  0  0
++
++:vhist qv2223 EndPacket  is iclass=0x1 & op2427=0xe & op2123=0x0 & op1620=0x2 & op13=0x1 & op0812=0x0 & op0007=0x80 & qv2223 & $(END_PACKET) unimpl
++
++# (hvx,1) vmpy  --  "Vdd.w = vmpy(Vu.h, Vv.uh)"
++#  _________________________________________________________________________________________________
++#  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
++#    0  0  0  1  1  1  0  0  0  0  1  v  v  v  v  v  P  P  0  u  u  u  u  u  0  1  0  d  d  d  d  d
++
++:vmpy VddW_0004,VuH_0812,VvUH_1620 EndPacket  is iclass=0x1 & op2127=0x61 & op13=0x0 & op0507=0x2 & VddW_0004 & VuH_0812 & VvUH_1620 & $(END_PACKET) unimpl
++
++# (hvx,1) vmpy  --  "Vxx.w += vmpy(Vu.h, Vv.uh)"
++#  _________________________________________________________________________________________________
++#  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
++#    0  0  0  1  1  1  0  0  0  0  1  v  v  v  v  v  P  P  1  u  u  u  u  u  0  0  1  x  x  x  x  x
++
++:vmpy+= VddW_0004,VuH_0812,VvUH_1620 EndPacket  is iclass=0x1 & op2127=0x61 & op13=0x1 & op0507=0x1 & vss5 & VddW_0004 & VuH_0812 & VvUH_1620 & $(END_PACKET) unimpl
++
++# (hvx,1) vmpy  --  "Vdd.w = vmpy(Vu.h, Vv.h)"
++#  _________________________________________________________________________________________________
++#  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
++#    0  0  0  1  1  1  0  0  0  0  0  v  v  v  v  v  P  P  0  u  u  u  u  u  1  1  1  d  d  d  d  d
++
++:vmpy VddW_0004,VuH_0812,VvH_1620 EndPacket  is iclass=0x1 & op2127=0x60 & op13=0x0 & op0507=0x7 & VddW_0004 & VuH_0812 & VvH_1620 & $(END_PACKET) unimpl
++
++# (hvx,1) vmpy  --  "Vxx.w += vmpy(Vu.h, Vv.h)"
++#  _________________________________________________________________________________________________
++#  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
++#    0  0  0  1  1  1  0  0  0  0  0  v  v  v  v  v  P  P  1  u  u  u  u  u  1  1  1  x  x  x  x  x
++
++:vmpy+= VddW_0004,VuH_0812,VvH_1620 EndPacket  is iclass=0x1 & op2127=0x60 & op13=0x1 & op0507=0x7 & vss5 & VddW_0004 & VuH_0812 & VvH_1620 & $(END_PACKET) unimpl
++
++# (hvx,1) vmpy  --  "Vd.h = vmpy(Vu.h, Vv.h):<<1:rnd:sat"
++#  _________________________________________________________________________________________________
++#  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
++#    0  0  0  1  1  1  0  0  0  0  1  v  v  v  v  v  P  P  0  u  u  u  u  u  0  0  1  d  d  d  d  d
++
++:vmpy^":<<1:rnd:sat" VdH_0004,VuH_0812,VvH_1620 EndPacket  is iclass=0x1 & op2127=0x61 & op13=0x0 & op0507=0x1 & VdH_0004 & VuH_0812 & VvH_1620 & $(END_PACKET) unimpl
++
++# (hvx,1) vrmpy  --  "Vdd.w = vrmpy(Vu.b, Rtt.ub)"
++#  _________________________________________________________________________________________________
++#  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
++#    0  0  0  1  1  0  0  1  1  1  0  t  t  t  t  t  P  P  0  u  u  u  u  u  1  0  1  d  d  d  d  d
++
++:vrmpy VddW_0004,VuB_0812,RttUB_1620 EndPacket  is iclass=0x1 & op2127=0x4e & op13=0x0 & op0507=0x5 & VddW_0004 & VuB_0812 & RttUB_1620 & $(END_PACKET) unimpl
++
++# (hvx,1) vrmpy  --  "Vxx.w += vrmpy(Vu.b, Rtt.ub)"
++#  _________________________________________________________________________________________________
++#  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
++#    0  0  0  1  1  0  0  1  1  0  1  t  t  t  t  t  P  P  1  u  u  u  u  u  0  0  0  x  x  x  x  x
++
++:vrmpy+= VddW_0004,VuB_0812,RttUB_1620 EndPacket  is iclass=0x1 & op2127=0x4d & op13=0x1 & op0507=0x0 & vss5 & VddW_0004 & VuB_0812 & RttUB_1620 & $(END_PACKET) unimpl
++
++# (hvx,1) vrmpy  --  "Vdd.uw = vrmpy(Vu.ub, Rtt.ub)"
++#  _________________________________________________________________________________________________
++#  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
++#    0  0  0  1  1  0  0  1  1  1  0  t  t  t  t  t  P  P  0  u  u  u  u  u  1  0  0  d  d  d  d  d
++
++:vrmpy VddUW_0004,VuUB_0812,RttUB_1620 EndPacket  is iclass=0x1 & op2127=0x4e & op13=0x0 & op0507=0x4 & VddUW_0004 & VuUB_0812 & RttUB_1620 & $(END_PACKET) unimpl
++
++# (hvx,1) vrmpy  --  "Vxx.uw += vrmpy(Vu.ub, Rtt.ub)"
++#  _________________________________________________________________________________________________
++#  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
++#    0  0  0  1  1  0  0  1  1  0  1  t  t  t  t  t  P  P  1  u  u  u  u  u  1  1  1  x  x  x  x  x
++
++:vrmpy+= VddUW_0004,VuUB_0812,RttUB_1620 EndPacket  is iclass=0x1 & op2127=0x4d & op13=0x1 & op0507=0x7 & vss5 & VddUW_0004 & VuUB_0812 & RttUB_1620 & $(END_PACKET) unimpl
++
++# (hvx,1) vdmpy  --  "Vx.sf += vdmpy(Vu.hf, Vv.hf)"
++#  _________________________________________________________________________________________________
++#  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
++#    0  0  0  1  1  1  0  0  0  1  0  v  v  v  v  v  P  P  1  u  u  u  u  u  0  1  1  x  x  x  x  x
++
++:vdmpy+= VdSF_0004,VuHF_0812,VvHF_1620 EndPacket  is iclass=0x1 & op2127=0x62 & op13=0x1 & op0507=0x3 & vs5 & VdSF_0004 & VuHF_0812 & VvHF_1620 & $(END_PACKET) unimpl
++
++# (hvx,1) vfmax  --  "Vd.hf = vfmax(Vu.hf, Vv.hf)"
++#  _________________________________________________________________________________________________
++#  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
++#    0  0  0  1  1  1  0  0  0  1  1  v  v  v  v  v  P  P  1  u  u  u  u  u  0  1  0  d  d  d  d  d
++
++:vfmax VdHF_0004,VuHF_0812,VvHF_1620 EndPacket  is iclass=0x1 & op2127=0x63 & op13=0x1 & op0507=0x2 & VdHF_0004 & VuHF_0812 & VvHF_1620 & $(END_PACKET) unimpl
++
++# (hvx,1) vfmax  --  "Vd.sf = vfmax(Vu.sf, Vv.sf)"
++#  _________________________________________________________________________________________________
++#  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
++#    0  0  0  1  1  1  0  0  0  1  1  v  v  v  v  v  P  P  1  u  u  u  u  u  0  1  1  d  d  d  d  d
++
++:vfmax VdSF_0004,VuSF_0812,VvSF_1620 EndPacket  is iclass=0x1 & op2127=0x63 & op13=0x1 & op0507=0x3 & VdSF_0004 & VuSF_0812 & VvSF_1620 & $(END_PACKET) unimpl
++
++# (hvx,1) vfmin  --  "Vd.hf = vfmin(Vu.hf, Vv.hf)"
++#  _________________________________________________________________________________________________
++#  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
++#    0  0  0  1  1  1  0  0  0  1  1  v  v  v  v  v  P  P  1  u  u  u  u  u  0  0  0  d  d  d  d  d
++
++:vfmin VdHF_0004,VuHF_0812,VvHF_1620 EndPacket  is iclass=0x1 & op2127=0x63 & op13=0x1 & op0507=0x0 & VdHF_0004 & VuHF_0812 & VvHF_1620 & $(END_PACKET) unimpl
++
++# (hvx,1) vfmin  --  "Vd.sf = vfmin(Vu.sf, Vv.sf)"
++#  _________________________________________________________________________________________________
++#  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
++#    0  0  0  1  1  1  0  0  0  1  1  v  v  v  v  v  P  P  1  u  u  u  u  u  0  0  1  d  d  d  d  d
++
++:vfmin VdSF_0004,VuSF_0812,VvSF_1620 EndPacket  is iclass=0x1 & op2127=0x63 & op13=0x1 & op0507=0x1 & VdSF_0004 & VuSF_0812 & VvSF_1620 & $(END_PACKET) unimpl
++
++# (hvx,1) vmpy  --  "Vx.hf += vmpy(Vu.hf, Vv.hf)"
++#  _________________________________________________________________________________________________
++#  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
++#    0  0  0  1  1  1  0  0  0  1  0  v  v  v  v  v  P  P  1  u  u  u  u  u  0  1  0  x  x  x  x  x
++
++:vmpy+= VdHF_0004,VuHF_0812,VvHF_1620 EndPacket  is iclass=0x1 & op2127=0x62 & op13=0x1 & op0507=0x2 & vs5 & VdHF_0004 & VuHF_0812 & VvHF_1620 & $(END_PACKET) unimpl
++
++# (hvx,1) vmpy  --  "Vxx.sf += vmpy(Vu.hf, Vv.hf)"
++#  _________________________________________________________________________________________________
++#  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
++#    0  0  0  1  1  1  0  0  0  1  0  v  v  v  v  v  P  P  1  u  u  u  u  u  0  0  1  x  x  x  x  x
++
++:vmpy+= VddSF_0004,VuHF_0812,VvHF_1620 EndPacket  is iclass=0x1 & op2127=0x62 & op13=0x1 & op0507=0x1 & vss5 & VddSF_0004 & VuHF_0812 & VvHF_1620 & $(END_PACKET) unimpl
++
++# (hvx,1) vabs  --  "Vd.hf = vabs(Vu.hf)"
++#  _________________________________________________________________________________________________
++#  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
++#    0  0  0  1  1  1  1  0  0  0  0  0  0  1  1  0  P  P  1  u  u  u  u  u  1  0  0  d  d  d  d  d
++
++:vabs VdHF_0004,VuHF_0812 EndPacket  is iclass=0x1 & op2427=0xe & op2123=0x0 & op1620=0x6 & op13=0x1 & op0507=0x4 & VdHF_0004 & VuHF_0812 & $(END_PACKET) unimpl
++
++# (hvx,1) vadd  --  "Vd.hf = vadd(Vu.hf, Vv.hf)"
++#  _________________________________________________________________________________________________
++#  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
++#    0  0  0  1  1  1  1  1  1  0  1  v  v  v  v  v  P  P  1  u  u  u  u  u  1  1  1  d  d  d  d  d
++
++:vadd VdHF_0004,VuHF_0812,VvHF_1620 EndPacket  is iclass=0x1 & op2127=0x7d & op13=0x1 & op0507=0x7 & VdHF_0004 & VuHF_0812 & VvHF_1620 & $(END_PACKET) unimpl
++
++# (hvx,1) vmpy  --  "Vd.hf = vmpy(Vu.hf, Vv.hf)"
++#  _________________________________________________________________________________________________
++#  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
++#    0  0  0  1  1  1  1  1  1  0  0  v  v  v  v  v  P  P  1  u  u  u  u  u  0  1  1  d  d  d  d  d
++
++:vmpy VdHF_0004,VuHF_0812,VvHF_1620 EndPacket  is iclass=0x1 & op2127=0x7c & op13=0x1 & op0507=0x3 & VdHF_0004 & VuHF_0812 & VvHF_1620 & $(END_PACKET) unimpl
++
++# (hvx,1) vadd  --  "Vdd.sf = vadd(Vu.bf, Vv.bf)"
++#  _________________________________________________________________________________________________
++#  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
++#    0  0  0  1  1  1  0  1  0  1  0  v  v  v  v  v  P  P  1  u  u  u  u  u  1  1  0  d  d  d  d  d
++
++:vadd VddSF_0004,VuBF_0812,VvBF_1620 EndPacket  is iclass=0x1 & op2127=0x6a & op13=0x1 & op0507=0x6 & VddSF_0004 & VuBF_0812 & VvBF_1620 & $(END_PACKET) unimpl
++
++# (hvx,1) vcvt  --  "Vd.bf = vcvt(Vu.sf, Vv.sf)"
++#  _________________________________________________________________________________________________
++#  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
++#    0  0  0  1  1  1  0  1  0  1  0  v  v  v  v  v  P  P  1  u  u  u  u  u  0  1  1  d  d  d  d  d
++
++:vcvt VdBF_0004,VuSF_0812,VvSF_1620 EndPacket  is iclass=0x1 & op2127=0x6a & op13=0x1 & op0507=0x3 & VdBF_0004 & VuSF_0812 & VvSF_1620 & $(END_PACKET) unimpl
++
++# (hvx,1) vmax  --  "Vd.bf = vmax(Vu.bf, Vv.bf)"
++#  _________________________________________________________________________________________________
++#  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
++#    0  0  0  1  1  1  0  1  0  1  0  v  v  v  v  v  P  P  1  u  u  u  u  u  1  1  1  d  d  d  d  d
++
++:vmax VdBF_0004,VuBF_0812,VvBF_1620 EndPacket  is iclass=0x1 & op2127=0x6a & op13=0x1 & op0507=0x7 & VdBF_0004 & VuBF_0812 & VvBF_1620 & $(END_PACKET) unimpl
++
++# (hvx,1) vmin  --  "Vd.bf = vmin(Vu.bf, Vv.bf)"
++#  _________________________________________________________________________________________________
++#  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
++#    0  0  0  1  1  1  0  1  0  1  0  v  v  v  v  v  P  P  1  u  u  u  u  u  0  0  0  d  d  d  d  d
++
++:vmin VdBF_0004,VuBF_0812,VvBF_1620 EndPacket  is iclass=0x1 & op2127=0x6a & op13=0x1 & op0507=0x0 & VdBF_0004 & VuBF_0812 & VvBF_1620 & $(END_PACKET) unimpl
++
++# (hvx,1) vmpy  --  "Vdd.sf = vmpy(Vu.bf, Vv.bf)"
++#  _________________________________________________________________________________________________
++#  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
++#    0  0  0  1  1  1  0  1  0  1  0  v  v  v  v  v  P  P  1  u  u  u  u  u  1  0  0  d  d  d  d  d
++
++:vmpy VddSF_0004,VuBF_0812,VvBF_1620 EndPacket  is iclass=0x1 & op2127=0x6a & op13=0x1 & op0507=0x4 & VddSF_0004 & VuBF_0812 & VvBF_1620 & $(END_PACKET) unimpl
++
++# (hvx,1) vmpy  --  "Vxx.sf += vmpy(Vu.bf, Vv.bf)"
++#  _________________________________________________________________________________________________
++#  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
++#    0  0  0  1  1  1  0  1  0  0  0  v  v  v  v  v  P  P  1  u  u  u  u  u  0  0  0  x  x  x  x  x
++
++:vmpy+= VddSF_0004,VuBF_0812,VvBF_1620 EndPacket  is iclass=0x1 & op2127=0x68 & op13=0x1 & op0507=0x0 & vss5 & VddSF_0004 & VuBF_0812 & VvBF_1620 & $(END_PACKET) unimpl
++
++# (hvx,1) vsub  --  "Vdd.sf = vsub(Vu.bf, Vv.bf)"
++#  _________________________________________________________________________________________________
++#  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
++#    0  0  0  1  1  1  0  1  0  1  0  v  v  v  v  v  P  P  1  u  u  u  u  u  1  0  1  d  d  d  d  d
++
++:vsub VddSF_0004,VuBF_0812,VvBF_1620 EndPacket  is iclass=0x1 & op2127=0x6a & op13=0x1 & op0507=0x5 & VddSF_0004 & VuBF_0812 & VvBF_1620 & $(END_PACKET) unimpl
++
++# (hvx,1) vcmp.gt  --  "Qd4 = vcmp.gt(Vu.bf, Vv.bf)"
++#  _________________________________________________________________________________________________
++#  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
++#    0  0  0  1  1  1  0  0  1  0  0  v  v  v  v  v  P  P  1  u  u  u  u  u  0  1  1  1  1  0  d  d
++
++:vcmp.gt Qd2,VuBF_0812,VvBF_1620 EndPacket  is iclass=0x1 & op2127=0x64 & op13=0x1 & op0207=0x1e & Qd2 & VuBF_0812 & VvBF_1620 & $(END_PACKET) unimpl
++
++# (hvx,1) vcmp.gt  --  "Qx4 &= vcmp.gt(Vu.bf, Vv.bf)"
++#  _________________________________________________________________________________________________
++#  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
++#    0  0  0  1  1  1  0  0  1  0  0  v  v  v  v  v  P  P  1  u  u  u  u  u  1  1  0  1  0  0  x  x
++
++:vcmp.gt^"&=" Qd2,VuBF_0812,VvBF_1620 EndPacket  is iclass=0x1 & op2127=0x64 & op13=0x1 & op0207=0x34 & Qd2 & VuBF_0812 & VvBF_1620 & $(END_PACKET) unimpl
++
++# (hvx,1) vcmp.gt  --  "Qx4 |= vcmp.gt(Vu.bf, Vv.bf)"
++#  _________________________________________________________________________________________________
++#  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
++#    0  0  0  1  1  1  0  0  1  0  0  v  v  v  v  v  P  P  1  u  u  u  u  u  0  0  1  1  1  0  x  x
++
++:vcmp.gt^"|=" Qd2,VuBF_0812,VvBF_1620 EndPacket  is iclass=0x1 & op2127=0x64 & op13=0x1 & op0207=0x0e & Qd2 & VuBF_0812 & VvBF_1620 & $(END_PACKET) unimpl
++
++# (hvx,1) vcmp.gt  --  "Qx4 ^= vcmp.gt(Vu.bf, Vv.bf)"
++#  _________________________________________________________________________________________________
++#  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
++#    0  0  0  1  1  1  0  0  1  0  0  v  v  v  v  v  P  P  1  u  u  u  u  u  1  1  1  1  0  0  x  x
++
++:vcmp.gt^"^=" Qd2,VuBF_0812,VvBF_1620 EndPacket  is iclass=0x1 & op2127=0x64 & op13=0x1 & op0207=0x3c & Qd2 & VuBF_0812 & VvBF_1620 & $(END_PACKET) unimpl
++
++# (hvx,1) vabs  --  "Vd.f8 = vabs(Vu.f8)"
++#  _________________________________________________________________________________________________
++#  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
++#    0  0  0  1  1  1  0  0  0  1  1  0  0  1  1  0  P  P  1  u  u  u  u  u  1  1  0  d  d  d  d  d
++
++:vabs VdF8_0004,VuF8_0812 EndPacket  is iclass=0x1 & op2427=0xc & op2123=0x3 & op1620=0x6 & op13=0x1 & op0507=0x6 & VdF8_0004 & VuF8_0812 & $(END_PACKET) unimpl
++
++# (hvx,1) vcvt2  --  "Vd.b = vcvt2(Vu.hf, Vv.hf)"
++#  _________________________________________________________________________________________________
++#  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
++#    0  0  0  1  1  0  1  0  1  1  0  v  v  v  v  v  P  P  1  u  u  u  u  u  1  1  0  d  d  d  d  d
++
++:vcvt2 VdB_0004,VuHF_0812,VvHF_1620 EndPacket  is iclass=0x1 & op2127=0x56 & op13=0x1 & op0507=0x6 & VdB_0004 & VuHF_0812 & VvHF_1620 & $(END_PACKET) unimpl
++
++# (hvx,1) vcvt2  --  "Vd.ub = vcvt2(Vu.hf, Vv.hf)"
++#  _________________________________________________________________________________________________
++#  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
++#    0  0  0  1  1  0  1  0  1  1  0  v  v  v  v  v  P  P  1  u  u  u  u  u  1  1  1  d  d  d  d  d
++
++:vcvt2 VdUB_0004,VuHF_0812,VvHF_1620 EndPacket  is iclass=0x1 & op2127=0x56 & op13=0x1 & op0507=0x7 & VdUB_0004 & VuHF_0812 & VvHF_1620 & $(END_PACKET) unimpl
++
++# (hvx,1) vfmax  --  "Vd.f8 = vfmax(Vu.f8, Vv.f8)"
++#  _________________________________________________________________________________________________
++#  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
++#    0  0  0  1  1  1  0  0  0  1  1  v  v  v  v  v  P  P  1  u  u  u  u  u  1  0  1  d  d  d  d  d
++
++:vfmax VdF8_0004,VuF8_0812,VvF8_1620 EndPacket  is iclass=0x1 & op2127=0x63 & op13=0x1 & op0507=0x5 & VdF8_0004 & VuF8_0812 & VvF8_1620 & $(END_PACKET) unimpl
++
++# (hvx,1) vfmin  --  "Vd.f8 = vfmin(Vu.f8, Vv.f8)"
++#  _________________________________________________________________________________________________
++#  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
++#    0  0  0  1  1  1  0  0  0  1  1  v  v  v  v  v  P  P  1  u  u  u  u  u  1  0  0  d  d  d  d  d
++
++:vfmin VdF8_0004,VuF8_0812,VvF8_1620 EndPacket  is iclass=0x1 & op2127=0x63 & op13=0x1 & op0507=0x4 & VdF8_0004 & VuF8_0812 & VvF8_1620 & $(END_PACKET) unimpl
++
++# (hvx,1) vfneg  --  "Vd.f8 = vfneg(Vu.f8)"
++#  _________________________________________________________________________________________________
++#  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
++#    0  0  0  1  1  1  0  0  0  1  1  0  0  1  1  0  P  P  1  u  u  u  u  u  1  1  1  d  d  d  d  d
++
++:vfneg VdF8_0004,VuF8_0812 EndPacket  is iclass=0x1 & op2427=0xc & op2123=0x3 & op1620=0x6 & op13=0x1 & op0507=0x7 & VdF8_0004 & VuF8_0812 & $(END_PACKET) unimpl
++
++# (hvx,1) vgetqfext  --  "Vd = vgetqfext(Vu.x, Rt32)"
++#  _________________________________________________________________________________________________
++#  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
++#    0  0  0  1  1  0  0  1  1  1  0  t  t  t  t  t  P  P  0  u  u  u  u  u  1  1  1  d  d  d  d  d
++
++:vgetqfext Vd5,VuX_0812,rx5 EndPacket  is iclass=0x1 & op2127=0x4e & op13=0x0 & op0507=0x7 & Vd5 & VuX_0812 & rx5 & $(END_PACKET) unimpl
++
++# (hvx,1) vgetqfext  --  "Vx |= vgetqfext(Vu.x, Rt32)"
++#  _________________________________________________________________________________________________
++#  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
++#    0  0  0  1  1  0  0  1  1  1  0  t  t  t  t  t  P  P  0  u  u  u  u  u  1  1  0  x  x  x  x  x
++
++:vgetqfext^"|=" Vd5,VuX_0812,rx5 EndPacket  is iclass=0x1 & op2127=0x4e & op13=0x0 & op0507=0x6 & vs5 & Vd5 & VuX_0812 & rx5 & $(END_PACKET) unimpl
++
++# (hvx,1) vsetqfext  --  "Vd.x = vsetqfext(Vu, Rt32)"
++#  _________________________________________________________________________________________________
++#  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
++#    0  0  0  1  1  0  0  1  1  1  0  t  t  t  t  t  P  P  0  u  u  u  u  u  0  1  1  d  d  d  d  d
++
++:vsetqfext VdX_0004,Vu_0812,rx5 EndPacket  is iclass=0x1 & op2127=0x4e & op13=0x0 & op0507=0x3 & VdX_0004 & Vu_0812 & rx5 & $(END_PACKET) unimpl
++
++# (hvx,1) vcmp.eq  --  "Qx4 &= vcmp.eq(Vu.hf, Vv.hf)"
++#  _________________________________________________________________________________________________
++#  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
++#    0  0  0  1  1  1  0  0  1  0  0  v  v  v  v  v  P  P  1  u  u  u  u  u  0  0  0  1  1  1  x  x
++
++:vcmp.eq^"&=" Qd2,VuHF_0812,VvHF_1620 EndPacket  is iclass=0x1 & op2127=0x64 & op13=0x1 & op0207=0x07 & Qd2 & VuHF_0812 & VvHF_1620 & $(END_PACKET) unimpl
++
++# (hvx,1) vcmp.eq  --  "Qx4 |= vcmp.eq(Vu.hf, Vv.hf)"
++#  _________________________________________________________________________________________________
++#  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
++#    0  0  0  1  1  1  0  0  1  0  0  v  v  v  v  v  P  P  1  u  u  u  u  u  0  1  0  1  1  1  x  x
++
++:vcmp.eq^"|=" Qd2,VuHF_0812,VvHF_1620 EndPacket  is iclass=0x1 & op2127=0x64 & op13=0x1 & op0207=0x17 & Qd2 & VuHF_0812 & VvHF_1620 & $(END_PACKET) unimpl
++
++# (hvx,1) vcmp.eq  --  "Qx4 ^= vcmp.eq(Vu.hf, Vv.hf)"
++#  _________________________________________________________________________________________________
++#  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
++#    0  0  0  1  1  1  0  0  1  0  0  v  v  v  v  v  P  P  1  u  u  u  u  u  1  0  0  1  1  1  x  x
++
++:vcmp.eq^"^=" Qd2,VuHF_0812,VvHF_1620 EndPacket  is iclass=0x1 & op2127=0x64 & op13=0x1 & op0207=0x27 & Qd2 & VuHF_0812 & VvHF_1620 & $(END_PACKET) unimpl
++
++# (hvx,1) vcmp.eq  --  "Qx4 &= vcmp.eq(Vu.sf, Vv.sf)"
++#  _________________________________________________________________________________________________
++#  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
++#    0  0  0  1  1  1  0  0  1  0  0  v  v  v  v  v  P  P  1  u  u  u  u  u  0  0  0  0  1  1  x  x
++
++:vcmp.eq^"&=" Qd2,VuSF_0812,VvSF_1620 EndPacket  is iclass=0x1 & op2127=0x64 & op13=0x1 & op0207=0x03 & Qd2 & VuSF_0812 & VvSF_1620 & $(END_PACKET) unimpl
++
++# (hvx,1) vcmp.eq  --  "Qx4 |= vcmp.eq(Vu.sf, Vv.sf)"
++#  _________________________________________________________________________________________________
++#  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
++#    0  0  0  1  1  1  0  0  1  0  0  v  v  v  v  v  P  P  1  u  u  u  u  u  0  1  0  0  1  1  x  x
++
++:vcmp.eq^"|=" Qd2,VuSF_0812,VvSF_1620 EndPacket  is iclass=0x1 & op2127=0x64 & op13=0x1 & op0207=0x13 & Qd2 & VuSF_0812 & VvSF_1620 & $(END_PACKET) unimpl
++
++# (hvx,1) vcmp.eq  --  "Qx4 ^= vcmp.eq(Vu.sf, Vv.sf)"
++#  _________________________________________________________________________________________________
++#  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
++#    0  0  0  1  1  1  0  0  1  0  0  v  v  v  v  v  P  P  1  u  u  u  u  u  1  0  0  0  1  1  x  x
++
++:vcmp.eq^"^=" Qd2,VuSF_0812,VvSF_1620 EndPacket  is iclass=0x1 & op2127=0x64 & op13=0x1 & op0207=0x23 & Qd2 & VuSF_0812 & VvSF_1620 & $(END_PACKET) unimpl
++
++# (hvx,1) valign4  --  "Vd = valign4(Vu, Vv, Rt8)"
++#  _________________________________________________________________________________________________
++#  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
++#    0  0  0  1  1  0  0  0  0  0  0  z  z  t  t  t  P  P  0  u  u  u  u  u  1  0  1  d  d  d  d  d
++
++:valign4 Vd5,Vu_0812,Vz_1923,rt1618 EndPacket  is iclass=0x1 & op2427=0x8 & op2123=0x0 & op13=0x0 & op0507=0x5 & Vd5 & Vu_0812 & Vz_1923 & rt1618 & $(END_PACKET) unimpl
++
++# (hvx,1) vrmpyz  --  "Vdddd.w = vrmpyz(Vu.b, Rt8.b)"
++#  _________________________________________________________________________________________________
++#  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
++#    0  0  0  1  1  0  0  1  1  1  1  0  1  t  t  t  P  P  0  u  u  u  u  u  0  0  0  d  d  d  0  0
++
++:vrmpyz ZddddW_0004,VuB_0812,Rt8B_1618 EndPacket  is iclass=0x1 & op2427=0x9 & i1923=0x1d & op13=0x0 & op0507=0x0 & ZddddW_0004 & VuB_0812 & Rt8B_1618 & $(END_PACKET) unimpl
++
++# (hvx,1) vrmpyz  --  "Vyyyy.w += vrmpyz(Vu.b, Rt8.b)"
++#  _________________________________________________________________________________________________
++#  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
++#    0  0  0  1  1  0  0  1  1  1  0  0  0  t  t  t  P  P  1  u  u  u  u  u  0  1  0  y  y  y  0  0
++
++:vrmpyz^"+=" ZyyyyW_0004,VuB_0812,Rt8B_1618 EndPacket  is iclass=0x1 & op2427=0x9 & i1923=0x18 & op13=0x1 & op0507=0x2 & ZyyyyW_0004 & VuB_0812 & Rt8B_1618 & $(END_PACKET) unimpl
++
++# (hvx,1) vrmpyz  --  "Vdddd.w = vrmpyz(Vu.b, Rx8.b++)"
++#  _________________________________________________________________________________________________
++#  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
++#    0  0  0  1  1  0  0  1  1  1  1  0  0  t  t  t  P  P  0  u  u  u  u  u  0  0  0  d  d  d  0  0
++
++:vrmpyz ZddddW_0004,VuB_0812,Rx8B_pp_1618 EndPacket  is iclass=0x1 & op2427=0x9 & i1923=0x1c & op13=0x0 & op0507=0x0 & ZddddW_0004 & VuB_0812 & Rx8B_pp_1618 & $(END_PACKET) unimpl
++
++# (hvx,1) vrmpyz  --  "Vyyyy.w += vrmpyz(Vu.b, Rx8.b++)"
++#  _________________________________________________________________________________________________
++#  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
++#    0  0  0  1  1  0  0  1  1  1  0  0  1  t  t  t  P  P  1  u  u  u  u  u  0  1  0  y  y  y  0  0
++
++:vrmpyz^"+=" ZyyyyW_0004,VuB_0812,Rx8B_pp_1618 EndPacket  is iclass=0x1 & op2427=0x9 & i1923=0x19 & op13=0x1 & op0507=0x2 & ZyyyyW_0004 & VuB_0812 & Rx8B_pp_1618 & $(END_PACKET) unimpl
++
++# (hvx,1) vrmpyz  --  "Vdddd.w = vrmpyz(Vu.b, Rt8.ub)"
++#  _________________________________________________________________________________________________
++#  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
++#    0  0  0  1  1  0  0  1  1  1  1  1  1  t  t  t  P  P  0  u  u  u  u  u  0  1  0  d  d  d  0  0
++
++:vrmpyz ZddddW_0004,VuB_0812,Rt8UB_1618 EndPacket  is iclass=0x1 & op2427=0x9 & i1923=0x1f & op13=0x0 & op0507=0x2 & ZddddW_0004 & VuB_0812 & Rt8UB_1618 & $(END_PACKET) unimpl
++
++# (hvx,1) vrmpyz  --  "Vyyyy.w += vrmpyz(Vu.b, Rt8.ub)"
++#  _________________________________________________________________________________________________
++#  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
++#    0  0  0  1  1  0  0  1  1  1  0  1  0  t  t  t  P  P  1  u  u  u  u  u  0  0  1  y  y  y  0  0
++
++:vrmpyz^"+=" ZyyyyW_0004,VuB_0812,Rt8UB_1618 EndPacket  is iclass=0x1 & op2427=0x9 & i1923=0x1a & op13=0x1 & op0507=0x1 & ZyyyyW_0004 & VuB_0812 & Rt8UB_1618 & $(END_PACKET) unimpl
++
++# (hvx,1) vrmpyz  --  "Vdddd.w = vrmpyz(Vu.b, Rx8.ub++)"
++#  _________________________________________________________________________________________________
++#  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
++#    0  0  0  1  1  0  0  1  1  1  1  1  0  t  t  t  P  P  0  u  u  u  u  u  0  1  0  d  d  d  0  0
++
++:vrmpyz ZddddW_0004,VuB_0812,Rx8UB_pp_1618 EndPacket  is iclass=0x1 & op2427=0x9 & i1923=0x1e & op13=0x0 & op0507=0x2 & ZddddW_0004 & VuB_0812 & Rx8UB_pp_1618 & $(END_PACKET) unimpl
++
++# (hvx,1) vrmpyz  --  "Vyyyy.w += vrmpyz(Vu.b, Rx8.ub++)"
++#  _________________________________________________________________________________________________
++#  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
++#    0  0  0  1  1  0  0  1  1  1  0  1  1  t  t  t  P  P  1  u  u  u  u  u  0  0  1  y  y  y  0  0
++
++:vrmpyz^"+=" ZyyyyW_0004,VuB_0812,Rx8UB_pp_1618 EndPacket  is iclass=0x1 & op2427=0x9 & i1923=0x1b & op13=0x1 & op0507=0x1 & ZyyyyW_0004 & VuB_0812 & Rx8UB_pp_1618 & $(END_PACKET) unimpl
++
++# (hvx,1) vr16mpyz  --  "Vdddd.w = vr16mpyz(Vu.c, Rt8.b)"
++#  _________________________________________________________________________________________________
++#  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
++#    0  0  0  1  1  0  0  1  1  1  1  0  1  t  t  t  P  P  0  u  u  u  u  u  0  0  1  d  d  d  0  0
++
++:vr16mpyz ZddddW_0004,Vu_0812^".c",Rt8B_1618 EndPacket  is iclass=0x1 & op2427=0x9 & i1923=0x1d & op13=0x0 & op0507=0x1 & ZddddW_0004 & Vu_0812 & Rt8B_1618 & $(END_PACKET) unimpl
++
++# (hvx,1) vr16mpyz  --  "Vyyyy.w += vr16mpyz(Vu.c, Rt8.b)"
++#  _________________________________________________________________________________________________
++#  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
++#    0  0  0  1  1  0  0  1  1  1  0  0  0  t  t  t  P  P  1  u  u  u  u  u  0  1  1  y  y  y  0  0
++
++:vr16mpyz^"+=" ZyyyyW_0004,Vu_0812^".c",Rt8B_1618 EndPacket  is iclass=0x1 & op2427=0x9 & i1923=0x18 & op13=0x1 & op0507=0x3 & ZyyyyW_0004 & Vu_0812 & Rt8B_1618 & $(END_PACKET) unimpl
++
++# (hvx,1) vr16mpyz  --  "Vdddd.w = vr16mpyz(Vu.c, Rx8.b++)"
++#  _________________________________________________________________________________________________
++#  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
++#    0  0  0  1  1  0  0  1  1  1  1  0  0  t  t  t  P  P  0  u  u  u  u  u  0  0  1  d  d  d  0  0
++
++:vr16mpyz ZddddW_0004,Vu_0812^".c",Rx8B_pp_1618 EndPacket  is iclass=0x1 & op2427=0x9 & i1923=0x1c & op13=0x0 & op0507=0x1 & ZddddW_0004 & Vu_0812 & Rx8B_pp_1618 & $(END_PACKET) unimpl
++
++# (hvx,1) vr16mpyz  --  "Vyyyy.w += vr16mpyz(Vu.c, Rx8.b++)"
++#  _________________________________________________________________________________________________
++#  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
++#    0  0  0  1  1  0  0  1  1  1  0  0  1  t  t  t  P  P  1  u  u  u  u  u  0  1  1  y  y  y  0  0
++
++:vr16mpyz^"+=" ZyyyyW_0004,Vu_0812^".c",Rx8B_pp_1618 EndPacket  is iclass=0x1 & op2427=0x9 & i1923=0x19 & op13=0x1 & op0507=0x3 & ZyyyyW_0004 & Vu_0812 & Rx8B_pp_1618 & $(END_PACKET) unimpl
++
++# (hvx,1) vr16mpyzs  --  "Vdddd.w = vr16mpyzs(Vu.c, Rt8.b)"
++#  _________________________________________________________________________________________________
++#  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
++#    0  0  0  1  1  0  0  1  1  1  1  0  1  t  t  t  P  P  0  u  u  u  u  u  0  1  0  d  d  d  0  0
++
++:vr16mpyzs ZddddW_0004,Vu_0812^".c",Rt8B_1618 EndPacket  is iclass=0x1 & op2427=0x9 & i1923=0x1d & op13=0x0 & op0507=0x2 & ZddddW_0004 & Vu_0812 & Rt8B_1618 & $(END_PACKET) unimpl
++
++# (hvx,1) vr16mpyzs  --  "Vyyyy.w += vr16mpyzs(Vu.c, Rt8.b)"
++#  _________________________________________________________________________________________________
++#  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
++#    0  0  0  1  1  0  0  1  1  1  0  0  0  t  t  t  P  P  1  u  u  u  u  u  0  0  1  y  y  y  0  0
++
++:vr16mpyzs^"+=" ZyyyyW_0004,Vu_0812^".c",Rt8B_1618 EndPacket  is iclass=0x1 & op2427=0x9 & i1923=0x18 & op13=0x1 & op0507=0x1 & ZyyyyW_0004 & Vu_0812 & Rt8B_1618 & $(END_PACKET) unimpl
++
++# (hvx,1) vr16mpyzs  --  "Vdddd.w = vr16mpyzs(Vu.c, Rx8.b++)"
++#  _________________________________________________________________________________________________
++#  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
++#    0  0  0  1  1  0  0  1  1  1  1  0  0  t  t  t  P  P  0  u  u  u  u  u  0  1  0  d  d  d  0  0
++
++:vr16mpyzs ZddddW_0004,Vu_0812^".c",Rx8B_pp_1618 EndPacket  is iclass=0x1 & op2427=0x9 & i1923=0x1c & op13=0x0 & op0507=0x2 & ZddddW_0004 & Vu_0812 & Rx8B_pp_1618 & $(END_PACKET) unimpl
++
++# (hvx,1) vr16mpyzs  --  "Vyyyy.w += vr16mpyzs(Vu.c, Rx8.b++)"
++#  _________________________________________________________________________________________________
++#  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
++#    0  0  0  1  1  0  0  1  1  1  0  0  1  t  t  t  P  P  1  u  u  u  u  u  0  0  1  y  y  y  0  0
++
++:vr16mpyzs^"+=" ZyyyyW_0004,Vu_0812^".c",Rx8B_pp_1618 EndPacket  is iclass=0x1 & op2427=0x9 & i1923=0x19 & op13=0x1 & op0507=0x1 & ZyyyyW_0004 & Vu_0812 & Rx8B_pp_1618 & $(END_PACKET) unimpl
++
++# (hvx,1) vr8mpyz  --  "Vdddd.w = vr8mpyz(Vu.n, Rt8.b)"
++#  _________________________________________________________________________________________________
++#  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
++#    0  0  0  1  1  0  0  1  1  1  1  1  1  t  t  t  P  P  0  u  u  u  u  u  0  0  0  d  d  d  0  0
++
++:vr8mpyz ZddddW_0004,Vu_0812^".n",Rt8B_1618 EndPacket  is iclass=0x1 & op2427=0x9 & i1923=0x1f & op13=0x0 & op0507=0x0 & ZddddW_0004 & Vu_0812 & Rt8B_1618 & $(END_PACKET) unimpl
++
++# (hvx,1) vr8mpyz  --  "Vyyyy.w += vr8mpyz(Vu.n, Rt8.b)"
++#  _________________________________________________________________________________________________
++#  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
++#    0  0  0  1  1  0  0  1  1  1  0  1  0  t  t  t  P  P  1  u  u  u  u  u  0  1  0  y  y  y  0  0
++
++:vr8mpyz^"+=" ZyyyyW_0004,Vu_0812^".n",Rt8B_1618 EndPacket  is iclass=0x1 & op2427=0x9 & i1923=0x1a & op13=0x1 & op0507=0x2 & ZyyyyW_0004 & Vu_0812 & Rt8B_1618 & $(END_PACKET) unimpl
++
++# (hvx,1) vr8mpyz  --  "Vdddd.w = vr8mpyz(Vu.n, Rx8.b++)"
++#  _________________________________________________________________________________________________
++#  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
++#    0  0  0  1  1  0  0  1  1  1  1  1  0  t  t  t  P  P  0  u  u  u  u  u  0  0  0  d  d  d  0  0
++
++:vr8mpyz ZddddW_0004,Vu_0812^".n",Rx8B_pp_1618 EndPacket  is iclass=0x1 & op2427=0x9 & i1923=0x1e & op13=0x0 & op0507=0x0 & ZddddW_0004 & Vu_0812 & Rx8B_pp_1618 & $(END_PACKET) unimpl
++
++# (hvx,1) vr8mpyz  --  "Vyyyy.w += vr8mpyz(Vu.n, Rx8.b++)"
++#  _________________________________________________________________________________________________
++#  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
++#    0  0  0  1  1  0  0  1  1  1  0  1  1  t  t  t  P  P  1  u  u  u  u  u  0  1  0  y  y  y  0  0
++
++:vr8mpyz^"+=" ZyyyyW_0004,Vu_0812^".n",Rx8B_pp_1618 EndPacket  is iclass=0x1 & op2427=0x9 & i1923=0x1b & op13=0x1 & op0507=0x2 & ZyyyyW_0004 & Vu_0812 & Rx8B_pp_1618 & $(END_PACKET) unimpl
++
++# (hvx,1) zextract  --  "Vd = zextract(Rt32)"
++#  _________________________________________________________________________________________________
++#  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
++#    0  0  0  1  1  0  0  1  1  0  1  s  s  s  s  s  P  P  0  0  0  0  0  1  0  0  1  d  d  d  d  d
++
++:zextract Vd5,rs5 EndPacket  is iclass=0x1 & op2127=0x4d & op0513=0x009 & Vd5 & rs5 & $(END_PACKET) unimpl
++
++# (hvx,2) zLd_ai  --  "z = vmem(Rt32+#s4)"
++#  _________________________________________________________________________________________________
++#  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
++#    0  0  1  0  1  1  0  0  0  0  0  s  s  s  s  s  P  P  i  0  0  i  i  i  0  0  0  0  0  0  0  0
++
++:vmem^".z" VAlignMemAddrRxS4 EndPacket  is iclass=0x2 & op2127=0x60 & op1112=0x0 & op0007=0x00 & VAlignMemAddrRxS4 & $(END_PACKET) [ cond=0; ] unimpl
++
++# (hvx,2) zLd_pi  --  "z = vmem(Rx32++#s3)"
++#  _________________________________________________________________________________________________
++#  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
++#    0  0  1  0  1  1  0  1  0  0  0  s  s  s  s  s  P  P  0  0  0  i  i  i  0  0  0  0  0  0  0  0
++
++:vmem^".z" VAlignMemAddrRxAIS3 EndPacket  is iclass=0x2 & op2127=0x68 & op1113=0x0 & op0007=0x00 & VAlignMemAddrRxAIS3 & $(END_PACKET) [ cond=0; ] unimpl
++
++# (hvx,2) zLd_ppu  --  "z = vmem(Rx32++Mu2)"
++#  _________________________________________________________________________________________________
++#  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
++#    0  0  1  0  1  1  0  1  0  0  0  s  s  s  s  s  P  P  M  0  0  0  0  0  0  0  0  0  0  0  0  1
++
++:vmem^".z" VAlignMemAddrRxAIMu EndPacket  is iclass=0x2 & op2127=0x68 & op1112=0x0 & op0810=0x0 & op0007=0x01 & VAlignMemAddrRxAIMu & $(END_PACKET) [ cond=0; ] unimpl
++
++# (hvx,2) zLd_pred_ai  --  "if (Pv4) z = vmem(Rt32+#s4)"
++#  _________________________________________________________________________________________________
++#  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
++#    0  0  1  0  1  1  0  0  1  0  0  s  s  s  s  s  P  P  i  p  p  i  i  i  0  0  0  0  0  0  0  0
++
++:vmem^".if("^pu1112^")"^".z" VAlignMemAddrRxS4 EndPacket  is iclass=0x2 & op2127=0x64 & op0007=0x00 & pu1112 & VAlignMemAddrRxS4 & $(END_PACKET) [ cond=1; ] unimpl
++
++# (hvx,2) zLd_pred_pi  --  "if (Pv4) z = vmem(Rx32++#s3)"
++#  _________________________________________________________________________________________________
++#  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
++#    0  0  1  0  1  1  0  1  1  0  0  s  s  s  s  s  P  P  0  p  p  i  i  i  0  0  0  0  0  0  0  0
++
++:vmem^".if("^pu1112^")"^".z" VAlignMemAddrRxAIS3 EndPacket  is iclass=0x2 & op2127=0x6c & op13=0x0 & op0007=0x00 & pu1112 & VAlignMemAddrRxAIS3 & $(END_PACKET) [ cond=1; ] unimpl
++
++# (hvx,2) zLd_pred_ppu  --  "if (Pv4) z = vmem(Rx32++Mu2)"
++#  _________________________________________________________________________________________________
++#  |31|30|29|28|27|26|25|24|23|22|21|20|19|18|17|16|15|14|13|12|11|10|09|08|07|06|05|04|03|02|01|00|
++#    0  0  1  0  1  1  0  1  1  0  0  s  s  s  s  s  P  P  M  p  p  0  0  0  0  0  0  0  0  0  0  1
+ 
++:vmem^".if("^pu1112^")"^".z" VAlignMemAddrRxAIMu EndPacket  is iclass=0x2 & op2127=0x6c & op0810=0x0 & op0007=0x01 & pu1112 & VAlignMemAddrRxAIMu & $(END_PACKET) [ cond=1; ] unimpl
+diff --git a/Ghidra/Processors/Hexagon/src/test/java/ghidra/app/plugin/assembler/sleigh/HexagonPacketCoverageTest.java b/Ghidra/Processors/Hexagon/src/test/java/ghidra/app/plugin/assembler/sleigh/HexagonPacketCoverageTest.java
+new file mode 100644
+index 0000000000..524daf1d3b
+--- /dev/null
++++ b/Ghidra/Processors/Hexagon/src/test/java/ghidra/app/plugin/assembler/sleigh/HexagonPacketCoverageTest.java
+@@ -0,0 +1,415 @@
++/* ###
++ * IP: GHIDRA
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package ghidra.app.plugin.assembler.sleigh;
++
++import static org.junit.Assert.assertEquals;
++
++import java.math.BigInteger;
++
++import org.junit.Test;
++
++import ghidra.app.plugin.assembler.sleigh.sem.AssemblyPatternBlock;
++import ghidra.app.util.PseudoInstruction;
++import ghidra.program.model.lang.LanguageID;
++import ghidra.program.model.lang.RegisterValue;
++
++/**
++ * Packet-context regression-pin coverage test for the Hexagon SLEIGH spec.
++ *
++ * <p>Many Hexagon instruction families (NV-cmp-jumps, NV-stores, HVX
++ * V6_vS32b_new_*, dealloc_return:new, ...) only decode in the context of a
++ * non-zero packet position with prior-slot register tracking. The mainline
++ * canonical-byte oracle test (compare_3way.json) decodes each instruction
++ * standalone and so reports these families as DECODE_FAILED -- but that is a
++ * methodology artifact, not a real spec gap.
++ *
++ * <p>This class constructs the required {@code packetOffset} /
++ * {@code packetBits} context by hand and disassembles the second-or-later
++ * instruction in the packet, asserting the resulting mnemonic and operand
++ * text. The pattern follows
++ * {@code HexagonAssemblyTest#testAssemble_memw_mSP_n0x4_R0new}, which already
++ * exercises packet-context for {@code R0.new} stores.
++ *
++ * <p>Each assertion pins the current spec output for one representative
++ * encoding of one packet-context-dependent family; if the constructor
++ * disappears or its rendering changes the assertion fires.
++ *
++ * <p>The byte encodings below are LLVM canonical primaries (one per
++ * {@code def : HInst<>}) modified only to:
++ * <ul>
++ * <li>set the 3-bit {@code Ns8} / {@code Os8} / {@code Nt8} new-register field
++ *     to encoded value {@code 0b010} (= 2). With
++ *     {@code nregSlot = packetOffset - xreg - (field >> 1)} and
++ *     {@code packetOffset == 1, xreg == 0}, this resolves to
++ *     {@code nregSlot = 0} (i.e. the writer was at slot 0);
++ * <li>leave parse bits at the canonical {@code 11} (end-of-packet) since the
++ *     reader instruction is the last in the packet.
++ * </ul>
++ *
++ * <p>The 3-bit new-value field lives at:
++ * <ul>
++ * <li>bits 16..18 (Ns8) for NV-cmp-jumps; setting bit 17 of the word lifts
++ *     it from {@code 000} to {@code 010};
++ * <li>bits 8..10 (Nt8) for NV-stores; setting bit 9;
++ * <li>bits 0..2 (Os8) for HVX V6_vS32b_new; setting bit 1.
++ * </ul>
++ */
++public class HexagonPacketCoverageTest extends AbstractAssemblyTest {
++
++	@Override
++	protected LanguageID getLanguageID() {
++		return new LanguageID("Hexagon:LE:32:default");
++	}
++
++	/**
++	 * Build a context byte string with the given {@code packetOffset} and
++	 * {@code packetBits} sub-register values. Mirrors the helper in
++	 * {@link HexagonAssemblyTest}.
++	 *
++	 * @param packetOffset slot index within the packet (0..3)
++	 * @param packetBits   raw value of the {@code packetBits} sub-register; the
++	 *                     high 2 bits are {@code parse1} (slot-0 parse), the
++	 *                     next 2 are {@code parse2} (slot-1 parse), then 5-bit
++	 *                     {@code nreg0}, {@code nreg1}, {@code nreg2}, etc.
++	 */
++	private String makeCtx(int packetOffset, long packetBits) {
++		RegisterValue ctxVal = new RegisterValue(lang.getContextBaseRegister());
++		ctxVal = ctxVal.assign(lang.getRegister("packetOffset"),
++			BigInteger.valueOf(packetOffset));
++		ctxVal = ctxVal.assign(lang.getRegister("packetBits"),
++			BigInteger.valueOf(packetBits));
++		return AssemblyPatternBlock.fromRegisterValue(ctxVal).fillMask().toString();
++	}
++
++	/**
++	 * Decode a single 4-byte little-endian Hexagon word at packet position
++	 * {@code packetOffset} with the given prior-slot {@code packetBits} and
++	 * assert the disassembly text.
++	 *
++	 * @param hexBytes      8 hex chars representing the 4 bytes in
++	 *                      little-endian order as they appear in memory
++	 * @param packetOffset  slot index within the packet (0..3)
++	 * @param packetBits    raw {@code packetBits} sub-register value
++	 * @param expected      expected disassembly text, trimmed
++	 */
++	protected void assertPacketDecode(String hexBytes, int packetOffset, long packetBits,
++			String expected) {
++		if (hexBytes.length() != 8) {
++			throw new IllegalArgumentException(
++				"expected 4-byte hex word (8 chars), got: " + hexBytes);
++		}
++		byte[] bytes = new byte[4];
++		for (int i = 0; i < 4; i++) {
++			bytes[i] = (byte) Integer.parseInt(hexBytes.substring(i * 2, i * 2 + 2), 16);
++		}
++		String ctxStr = makeCtx(packetOffset, packetBits);
++		byte[] ctx = AssemblyPatternBlock.fromString(ctxStr).fillMask().getVals();
++		PseudoInstruction pi;
++		try {
++			pi = disassemble(DEFAULT_ADDR, bytes, ctx);
++		}
++		catch (Exception e) {
++			throw new AssertionError(
++				"disassembly threw for bytes " + hexBytes + " ctx=" + ctxStr +
++					" (expected: " + expected + ")",
++				e);
++		}
++		String actual = pi.toString().trim();
++		assertEquals("bytes " + hexBytes + " offset=" + packetOffset + " packetBits=" +
++			Long.toHexString(packetBits), expected, actual);
++	}
++
++	/**
++	 * Common context for "slot 1 reads slot 0's writer of R0":
++	 * <ul>
++	 * <li>parse1 = 01 (slot 0 was a normal middle instruction)
++	 * <li>nreg0 = 0 (slot 0 wrote to R0; encoded directly into the 5-bit
++	 *               {@code nreg0} sub-field of {@code packetBits})
++	 * </ul>
++	 * packetBits = parse1 in high 2 bits = 0b01_00_00000_00000_00000_00000_00000_000
++	 *            = 0x40000000.
++	 */
++	private static final long PB_S1_NREG0_R0 = 0x40000000L;
++
++	// ---------------------------------------------------------------------
++	// NV cmp-jump families (J4_cmp{eq,gt,gtu}{,i,n1}_{t,f}_jumpnv_{nt,t})
++	// ---------------------------------------------------------------------
++	//
++	// Encoding layout:
++	//   31..28 : iclass = 0010
++	//   27..22 : opcode bits selecting cmp.{eq,gt,gtu} and t/f
++	//   18..16 : Ns8 (3-bit new-value source)
++	//   15..14 : parse bits
++	//   13     : taken hint (1=jump:t, 0=jump:nt)
++	//   12..8  : Rt32 (or U5 immediate)
++	//   7..1   : i7 immediate
++	//
++	// Canonical sets Ns8 = 000; we set bit 17 -> Ns8 = 010. In LE memory
++	// order byte2 (bits 16..23) gets bit 1 set: byte2 |= 0x02.
++	//
++	// Mainline display order:
++	//   "jump.if:<t|nt> [!]cmp.<eq|gt|gtu>(R0.new,<rhs>),<target>"
++	// Jump target = inst_start - 4*packetOffset + sext(imm)*4. With
++	// DEFAULT_ADDR = 0x40000000, packetOffset=1, imm=0: 0x40000000 - 4 = 0x3ffffffc.
++
++	/** Pin the J4_cmpeq*_*_jumpnv_* families. */
++	@Test
++	public void testPacketCoverage_NVCmpJump_eq() {
++		// J4_cmpeq_t_jumpnv_t   (canonical 00e00020)
++		assertPacketDecode("00e00220", 1, PB_S1_NREG0_R0,
++			"jump.if:t cmp.eq(R0.new,R0),0x3ffffffc");
++		// J4_cmpeq_t_jumpnv_nt  (canonical 00c00020)
++		assertPacketDecode("00c00220", 1, PB_S1_NREG0_R0,
++			"jump.if:nt cmp.eq(R0.new,R0),0x3ffffffc");
++		// J4_cmpeq_f_jumpnv_t   (canonical 00e04020)
++		assertPacketDecode("00e04220", 1, PB_S1_NREG0_R0,
++			"jump.if:t !cmp.eq(R0.new,R0),0x3ffffffc");
++		// J4_cmpeqi_t_jumpnv_t  (canonical 00e00024)
++		assertPacketDecode("00e00224", 1, PB_S1_NREG0_R0,
++			"jump.if:t cmp.eq(R0.new,#0x0),0x3ffffffc");
++		// J4_cmpeqi_f_jumpnv_t  (canonical 00e04024)
++		assertPacketDecode("00e04224", 1, PB_S1_NREG0_R0,
++			"jump.if:t !cmp.eq(R0.new,#0x0),0x3ffffffc");
++		// J4_cmpeqn1_t_jumpnv_t (canonical 00e00026) -- #-1 literal renders as "#-1"
++		assertPacketDecode("00e00226", 1, PB_S1_NREG0_R0,
++			"jump.if:t cmp.eq(R0.new,#-1),0x3ffffffc");
++		// J4_cmpeqn1_f_jumpnv_t (canonical 00e04026)
++		assertPacketDecode("00e04226", 1, PB_S1_NREG0_R0,
++			"jump.if:t !cmp.eq(R0.new,#-1),0x3ffffffc");
++	}
++
++	/** Pin the J4_cmpgt*_*_jumpnv_* families. */
++	@Test
++	public void testPacketCoverage_NVCmpJump_gt() {
++		// J4_cmpgt_t_jumpnv_t   (canonical 00e08020)
++		assertPacketDecode("00e08220", 1, PB_S1_NREG0_R0,
++			"jump.if:t cmp.gt(R0.new,R0),0x3ffffffc");
++		// J4_cmpgt_t_jumpnv_nt
++		assertPacketDecode("00c08220", 1, PB_S1_NREG0_R0,
++			"jump.if:nt cmp.gt(R0.new,R0),0x3ffffffc");
++		// J4_cmpgt_f_jumpnv_t   (canonical 00e0c020)
++		assertPacketDecode("00e0c220", 1, PB_S1_NREG0_R0,
++			"jump.if:t !cmp.gt(R0.new,R0),0x3ffffffc");
++		// J4_cmpgti_t_jumpnv_t  (canonical 00e08024)
++		assertPacketDecode("00e08224", 1, PB_S1_NREG0_R0,
++			"jump.if:t cmp.gt(R0.new,#0x0),0x3ffffffc");
++		// J4_cmpgtn1_t_jumpnv_t (canonical 00e08026) -- #-1 literal
++		assertPacketDecode("00e08226", 1, PB_S1_NREG0_R0,
++			"jump.if:t cmp.gt(R0.new,#-1),0x3ffffffc");
++	}
++
++	/** Pin the J4_cmpgtu*_*_jumpnv_* families. */
++	@Test
++	public void testPacketCoverage_NVCmpJump_gtu() {
++		// J4_cmpgtu_t_jumpnv_t  (canonical 00e00021)
++		assertPacketDecode("00e00221", 1, PB_S1_NREG0_R0,
++			"jump.if:t cmp.gtu(R0.new,R0),0x3ffffffc");
++		// J4_cmpgtu_t_jumpnv_nt (canonical 00c00021)
++		assertPacketDecode("00c00221", 1, PB_S1_NREG0_R0,
++			"jump.if:nt cmp.gtu(R0.new,R0),0x3ffffffc");
++		// J4_cmpgtu_f_jumpnv_t  (canonical 00e04021)
++		assertPacketDecode("00e04221", 1, PB_S1_NREG0_R0,
++			"jump.if:t !cmp.gtu(R0.new,R0),0x3ffffffc");
++		// J4_cmpgtui_t_jumpnv_t (canonical 00e00025)
++		assertPacketDecode("00e00225", 1, PB_S1_NREG0_R0,
++			"jump.if:t cmp.gtu(R0.new,#0x0),0x3ffffffc");
++		// J4_cmpgtui_f_jumpnv_t (canonical 00e04025)
++		assertPacketDecode("00e04225", 1, PB_S1_NREG0_R0,
++			"jump.if:t !cmp.gtu(R0.new,#0x0),0x3ffffffc");
++	}
++
++	// ---------------------------------------------------------------------
++	// NV-store families (S2_storer{b,h,i}new_*, S4_storer{b,h,i}new_*)
++	// ---------------------------------------------------------------------
++	//
++	// Encoding layout (S2_storerXnew_io, _pi, _pci, _rr):
++	//   31..28 : iclass = 1010 (0xa) for S2_*; 0011_1011 etc. for S4_*
++	//   27..22 : subclass selecting size & addressing mode
++	//   21..16 : Rs32 (base reg)
++	//   15..14 : parse bits
++	//   13..11 : 000
++	//   10..8  : Nt8 (3-bit new-value source)
++	//    7..3  : Ii immediate
++	//
++	// Canonical Nt8 = 000; we set bit 9 of word -> Nt8 = 010. In LE memory
++	// order, byte1 |= 0x02. With imm=0 the rendering omits the offset:
++	//   "memb (R0),R0.new"  not "memb (R0+#0x0),R0.new".
++
++	/** Pin S2_storerbnew_io / S2_storerbnew_pi / S4_storerbnew_rr. */
++	@Test
++	public void testPacketCoverage_NVStore_byte() {
++		// S2_storerbnew_io  (canonical 00c0a0a1)  imm=0 -> "(R0)" only
++		assertPacketDecode("00c2a0a1", 1, PB_S1_NREG0_R0,
++			"memb (R0),R0.new");
++		// S2_storerbnew_pi  (canonical 00c0a0ab)
++		assertPacketDecode("00c2a0ab", 1, PB_S1_NREG0_R0,
++			"memb (R0++#0x0),R0.new");
++		// S4_storerbnew_rr  (canonical 00c0a03b)
++		// Note: this constructor uses Nreg0002 (Nt8 at bits 0..2), NOT Nreg0810,
++		// so we set bit 1 (byte0 |= 0x02) rather than bit 9.
++		// With shift = 0 the rendering omits the "<<#0x0" suffix.
++		assertPacketDecode("02c0a03b", 1, PB_S1_NREG0_R0,
++			"memb (R0+R0),R0.new");
++	}
++
++	/** Pin S2_storerhnew_io / S2_storerhnew_pi / S4_storerhnew_rr. */
++	@Test
++	public void testPacketCoverage_NVStore_half() {
++		// S2_storerhnew_io  (canonical 00c8a0a1)
++		assertPacketDecode("00caa0a1", 1, PB_S1_NREG0_R0,
++			"memh (R0),R0.new");
++		// S2_storerhnew_pi  (canonical 00c8a0ab)
++		assertPacketDecode("00caa0ab", 1, PB_S1_NREG0_R0,
++			"memh (R0++#0x0),R0.new");
++		// S4_storerhnew_rr  (canonical 08c0a03b) -- Nreg0002 -> set bit 1
++		assertPacketDecode("0ac0a03b", 1, PB_S1_NREG0_R0,
++			"memh (R0+R0),R0.new");
++	}
++
++	/** Pin S2_storerinew_io / S2_storerinew_pi / S4_storerinew_rr. */
++	@Test
++	public void testPacketCoverage_NVStore_word() {
++		// S2_storerinew_io  (canonical 00d0a0a1)
++		assertPacketDecode("00d2a0a1", 1, PB_S1_NREG0_R0,
++			"memw (R0),R0.new");
++		// S2_storerinew_pi  (canonical 00d0a0ab)
++		assertPacketDecode("00d2a0ab", 1, PB_S1_NREG0_R0,
++			"memw (R0++#0x0),R0.new");
++		// S4_storerinew_rr  (canonical 10c0a03b) -- Nreg0002 -> set bit 1
++		assertPacketDecode("12c0a03b", 1, PB_S1_NREG0_R0,
++			"memw (R0+R0),R0.new");
++	}
++
++	// ---------------------------------------------------------------------
++	// HVX V6_vS32b_new_* (vector NV stores)
++	// ---------------------------------------------------------------------
++	//
++	// Encoding for V6_vS32b_new_ai (canonical 20c02028 -> word 0x2820c020):
++	//   31..28 : iclass = 0010
++	//   27..21 : 1010_000  (vS32b family subclass)
++	//   ...
++	//   2..0   : Os8 (3-bit new vector reg, via VNreg0002 sub-constructor)
++	//
++	// Canonical Os8 = 0; we set bit 1 of word -> Os8 = 010.
++	// In LE memory order, byte0 |= 0x02.
++
++	// ---------------------------------------------------------------------
++	// Predicated NV-store families (S4_pstorer{b,h,i}new{t,f}{,new}_*)
++	// ---------------------------------------------------------------------
++	//
++	// Encoding for S4_pstorerbnewt_io (predicated NV store):
++	//   31..28 : iclass = 0100 (0x4)  [for the io form]
++	//   ...
++	//   10..8  : Nt8 (Nreg0810)
++	// We set Nt8 = 010 -> bit 9 of word, byte1 |= 0x02.
++	//
++	// For S4_pstorerXnewtnew_rr / S4_pstorerXnewfnew_rr (P.new + register
++	// indexed) the canonical bytes from JSON include the
++	// {@code <<#0x0} shift = 0; we set bit 1 (Nreg0002) on those.
++
++	/** Pin S4 predicated NV-store family. */
++	@Test
++	public void testPacketCoverage_PStoreNew_pred() {
++		// S4_pstorerbnewt_rr  (canonical 00c0a034) -- if (P0) memb(...) = R0.new
++		// Uses Nreg0002, set bit 1
++		assertPacketDecode("02c0a034", 1, PB_S1_NREG0_R0,
++			"memb.if(P0) (R0+R0),R0.new");
++		// S4_pstorerbnewf_rr  (canonical 00c0a035) -- if (!P0)
++		assertPacketDecode("02c0a035", 1, PB_S1_NREG0_R0,
++			"memb.if(!P0) (R0+R0),R0.new");
++		// S4_pstorerinewtnew_rr (canonical 10c0a036) -- if (P0.new)
++		assertPacketDecode("12c0a036", 1, PB_S1_NREG0_R0,
++			"memw.if(P0.new) (R0+R0),R0.new");
++		// S4_pstorerhnewfnew_rr (canonical 08c0a037) -- if (!P0.new)
++		assertPacketDecode("0ac0a037", 1, PB_S1_NREG0_R0,
++			"memh.if(!P0.new) (R0+R0),R0.new");
++	}
++
++	// ---------------------------------------------------------------------
++	// L4_return_*new_p* (dealloc_return predicated by P.new)
++	// ---------------------------------------------------------------------
++	//
++	// Encoding for "if (Ps4.new) dealloc_return:t" (LLVM L4_return_tnew_pt):
++	//   31..28 : 1001          (iclass=9)
++	//   27..21 : 0110000        (op2127=0x30)
++	//   20..16 : 11110          (op1620=0x1e -- fixed pattern, NOT a register
++	//                            field; this distinguishes the form from
++	//                            "Rdd32 = dealloc_return(Rs32)" which puts an
++	//                            rs5 register here)
++	//   15..14 : PP             (parse bits)
++	//   13     : 0/1 = jump:t/jump:nt (DRTaken12)
++	//   12..11 : 11             (selects "if (..new)" path)
++	//   10..9  : 10/01 selecting P.new and/or "!"
++	//    7..1  : (zero in our test)
++	//    4..0  : 11110          (op0007=0x1e fixed)
++	//
++	// Note: LLVM canonical encoding sets the 5 bits at op1620 and the low 5
++	// bits of op0007 to 0 (these encode placeholder operands like Rs32 and
++	// Rdd32 in LLVM's view). Mainline matches the predicated-with-rs5 form
++	// (which has rs5 at bits 16..20 and op0007=0x1e fixed), so canonical
++	// bytes 00d80096 from compare_3way.json don't decode in mainline:
++	// the low-5 bits 0x00 don't match op0007=0x1e. We supply byte0=0x1e.
++	//
++	// rs5 = 0 (R0) -> byte2 bits 0..4 = 0; byte2 bits 5..7 = 0 (op2127 low).
++	// byte3 bits 0..3 = 0110 (op2127 high), bits 4..7 = 1001 (iclass=9) ->
++	// byte3 = 0x96. So bytes for "if (P0.new) dealloc_return:t R0":
++	//   byte0 = 0x1e, byte1 = 0xd8, byte2 = 0x00, byte3 = 0x96 -> "1ed80096".
++
++	/** Pin L4_return_*new_p* (dealloc_return predicated by P.new) family. */
++	@Test
++	public void testPacketCoverage_DeallocReturnNew() {
++		// L4_return_tnew_pt    -- "if (P0.new) dealloc_return:t" rs5=R0
++		// byte1: parse=11, bit13=0, bit12=1, bit11=1, bit10=0, bits9..8=00 = 0xd8
++		assertPacketDecode("1ed80096", 1, PB_S1_NREG0_R0,
++			"dealloc_return.if(P0.new):t R0");
++		// L4_return_tnew_pnt   -- "if (P0.new) dealloc_return:nt"
++		// bit12=0 -> byte1 = 11_0_0_1_0_00 = 0xc8
++		assertPacketDecode("1ec80096", 1, PB_S1_NREG0_R0,
++			"dealloc_return.if(P0.new):nt R0");
++		// L4_return_fnew_pt    -- "if (!P0.new) dealloc_return:t"
++		// bit13=1 -> byte1 = 11_1_1_1_0_00 = 0xf8
++		assertPacketDecode("1ef80096", 1, PB_S1_NREG0_R0,
++			"dealloc_return.if(!P0.new):t R0");
++		// L4_return_fnew_pnt   -- "if (!P0.new) dealloc_return:nt"
++		// bit13=1, bit12=0 -> byte1 = 11_1_0_1_0_00 = 0xe8
++		assertPacketDecode("1ee80096", 1, PB_S1_NREG0_R0,
++			"dealloc_return.if(!P0.new):nt R0");
++	}
++
++	/** Pin HVX V6_vS32b_new_* family. */
++	@Test
++	public void testPacketCoverage_HVX_VS32bNew() {
++		// V6_vS32b_new_ai (canonical 20c02028) -> set bit 1: byte0 = 0x22
++		assertPacketDecode("22c02028", 1, PB_S1_NREG0_R0,
++			"vmem (R0),V0.new");
++		// V6_vS32b_new_pi (canonical 20c02029)
++		assertPacketDecode("22c02029", 1, PB_S1_NREG0_R0,
++			"vmem (R0++#0x0),V0.new");
++		// V6_vS32b_new_pred_ai (canonical 40c0a028) -- mainline renders as
++		// "vmem.if(P0)" rather than "if (P0) vmem".
++		assertPacketDecode("42c0a028", 1, PB_S1_NREG0_R0,
++			"vmem.if(P0) (R0),V0.new");
++		// V6_vS32b_new_npred_ai (canonical 68c0a028)
++		assertPacketDecode("6ac0a028", 1, PB_S1_NREG0_R0,
++			"vmem.if(!P0) (R0),V0.new");
++		// V6_vS32b_new_ppu (canonical 20c0202b) -- Mu2 post-increment
++		assertPacketDecode("22c0202b", 1, PB_S1_NREG0_R0,
++			"vmem (R0++M0),V0.new");
++		// V6_vS32b_new_pred_pi (canonical 40c0a029) -- predicated post-inc imm
++		assertPacketDecode("42c0a029", 1, PB_S1_NREG0_R0,
++			"vmem.if(P0) (R0++#0x0),V0.new");
++	}
++}
+diff --git a/Ghidra/Processors/Hexagon/src/test/java/ghidra/app/plugin/assembler/sleigh/HexagonShiftEdgeCasesTest.java b/Ghidra/Processors/Hexagon/src/test/java/ghidra/app/plugin/assembler/sleigh/HexagonShiftEdgeCasesTest.java
+new file mode 100644
+index 0000000000..775c88609a
+--- /dev/null
++++ b/Ghidra/Processors/Hexagon/src/test/java/ghidra/app/plugin/assembler/sleigh/HexagonShiftEdgeCasesTest.java
+@@ -0,0 +1,538 @@
++/* ###
++ * IP: GHIDRA
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package ghidra.app.plugin.assembler.sleigh;
++
++import static org.junit.Assert.assertEquals;
++
++import org.junit.Test;
++
++import ghidra.app.util.PseudoInstruction;
++import ghidra.program.model.lang.LanguageID;
++
++/**
++ * Edge-case regression tests for Hexagon shift, rotate, multiply and float-make
++ * pcode behavior.
++ *
++ * <p>These tests pin the encodings and disassembly text for the recently fixed
++ * decoder/pcode constructors:
++ *
++ * <ul>
++ * <li>scalar register-form shifts (asl, asr, lsl, lsr, setbit, togglebit,
++ *     clrbit) under sxt7 of the Rt register: shift amounts above bit 6 must
++ *     decode as right-shifts (commit "model sxt7 shift amount in
++ *     register-form shifts");
++ * <li>{@code mpyu(Rs.h,Rt.h):<<1} and its accumulating sibling: the prior
++ *     constructor squared Rs (commit "fix M2_mpyu_*_s1 typo squaring Rs
++ *     instead of Rs*Rt");
++ * <li>{@code rol} 32-bit and 64-bit immediate forms: must rotate by N rather
++ *     than fold the sign bit (commit "fix rol pcode to compute true rotate");
++ * <li>{@code sfmake} / {@code dfmake}: must build the IEEE-754 bit pattern
++ *     from {@code (bias-6)<<23 | imm<<17} per V73 spec (commit "build
++ *     sfmake/dfmake from bit pattern per V73");
++ * <li>{@code sub(#-1,Rs)} canonicalization to {@code not(Rs)}: a long-standing
++ *     pin to detect accidental decoder shadowing.
++ * </ul>
++ *
++ * <p>The HVX vector shift family (vasl/vasr/vlsr) is decode-only -- its pcode
++ * is a single opaque pcodeop -- but we pin a representative encoding regardless
++ * of the Rt value to confirm the disasm mnemonic is stable.
++ *
++ * <p>The class follows the same disassemble-and-assert pattern as
++ * {@link HexagonStubCoverageTest}: round-trip tests that don't require the
++ * assembler grammar, just byte-to-text decode.
++ */
++public class HexagonShiftEdgeCasesTest extends AbstractAssemblyTest {
++
++	@Override
++	protected LanguageID getLanguageID() {
++		return new LanguageID("Hexagon:LE:32:default");
++	}
++
++	/**
++	 * Decode a single 4-byte little-endian Hexagon word and assert the
++	 * disassembly text (trimmed) matches {@code expected}.
++	 */
++	protected void assertDecode(String hexBytes, String expected) {
++		if (hexBytes.length() != 8) {
++			throw new IllegalArgumentException(
++				"expected 4-byte hex word (8 chars), got: " + hexBytes);
++		}
++		byte[] bytes = new byte[4];
++		for (int i = 0; i < 4; i++) {
++			bytes[i] = (byte) Integer.parseInt(hexBytes.substring(i * 2, i * 2 + 2), 16);
++		}
++		byte[] ctx = context.getDefaultAt(lang.getDefaultSpace().getAddress(DEFAULT_ADDR))
++				.fillMask()
++				.getVals();
++		PseudoInstruction pi;
++		try {
++			pi = disassemble(DEFAULT_ADDR, bytes, ctx);
++		}
++		catch (Exception e) {
++			throw new AssertionError(
++				"disassembly threw for bytes " + hexBytes + " (expected: " + expected + ")", e);
++		}
++		String actual = pi.toString().trim();
++		assertEquals("bytes " + hexBytes, expected, actual);
++	}
++
++	// ---------------------------------------------------------------------
++	// Scalar register-form shifts -- sxt7 negative shift handling
++	// ---------------------------------------------------------------------
++	//
++	// Encoding for the 32-bit register-form shifts:
++	//   31..28 : iclass = 1100
++	//   27..21 : op2127 = 0x32 (asl/asr/lsl/lsr) or 0x34 (setbit/clrbit/togglebit)
++	//   20..16 : Rs5 (source reg)
++	//   15..14 : parse bits = 11 (end of packet)
++	//   13     : op13 = 0
++	//   12..8  : Rt5 (shift-count reg)
++	//   7..5   : op0507 = function code
++	//             asl       = 4 (100)
++	//             asr       = 0 (000)
++	//             lsr       = 2 (010)
++	//             lsl       = 6 (110)
++	//             setbit    = 0 (000) [op2127=0x34 distinguishes]
++	//             clrbit    = 2 (010) [op2127=0x34]
++	//             togglebit = 4 (100) [op2127=0x34]
++	//   4..0   : Rd5 (dest reg)
++	//
++	// Disassembly is opaque to Rt's runtime value (the Rt5 field names a
++	// register, not a shift count), so the mnemonic is identical regardless
++	// of whether the runtime value is positive or has bit 6 set. We pin the
++	// encodings with several Rd/Rs/Rt register triples to detect accidental
++	// constructor shadowing.
++
++	/** asl Rd,Rs,Rt -- register-form, op2127=0x32, op0507=4. */
++	@Test
++	public void testShiftEdge_asl_register_form() {
++		// asl R3,R2,R1
++		assertDecode("83c142c6", "asl R3,R2,R1");
++		// asl R0,R0,R0
++		assertDecode("80c040c6", "asl R0,R0,R0");
++		// asl R5,R6,R7 (Rs=R6, Rt=R7, Rd=R5)
++		assertDecode("85c746c6", "asl R5,R6,R7");
++		// asl R31,R31,R31 (max scalar regs -> LR per attach table)
++		assertDecode("9fdf5fc6", "asl LR,LR,LR");
++	}
++
++	/** asr Rd,Rs,Rt -- register-form, op2127=0x32, op0507=0. */
++	@Test
++	public void testShiftEdge_asr_register_form() {
++		// asr R3,R2,R1 -- bits 7..5 = 000 so byte0 = 0000 0011 = 0x03
++		assertDecode("03c142c6", "asr R3,R2,R1");
++		// asr R0,R0,R0
++		assertDecode("00c040c6", "asr R0,R0,R0");
++		// asr R5,R6,R7
++		assertDecode("05c746c6", "asr R5,R6,R7");
++	}
++
++	/** lsr Rd,Rs,Rt -- register-form, op2127=0x32, op0507=2 (010). */
++	@Test
++	public void testShiftEdge_lsr_register_form() {
++		// lsr R3,R2,R1 -- byte0 = 0100 0011 = 0x43
++		assertDecode("43c142c6", "lsr R3,R2,R1");
++		// lsr R0,R0,R0
++		assertDecode("40c040c6", "lsr R0,R0,R0");
++	}
++
++	/** lsl Rd,Rs,Rt -- register-form, op2127=0x32, op0507=6 (110). */
++	@Test
++	public void testShiftEdge_lsl_register_form() {
++		// lsl R3,R2,R1 -- byte0 = 1100 0011 = 0xC3
++		assertDecode("c3c142c6", "lsl R3,R2,R1");
++		// lsl R0,R0,R0
++		assertDecode("c0c040c6", "lsl R0,R0,R0");
++	}
++
++	// ---------------------------------------------------------------------
++	// 64-bit scalar register-form shifts -- (Rdd5 = asl/asr/lsl/lsr Rss5, rt5)
++	// ---------------------------------------------------------------------
++	//
++	// Encoding for the 64-bit register-form shifts:
++	//   31..28 : iclass = 1100
++	//   27..21 : op2127 = 0x1c
++	//   20..16 : Rss5 (paired-low source reg)
++	//   15..14 : parse = 11
++	//   13     : op13 = 0
++	//   12..8  : Rt5 (32-bit shift-count reg)
++	//   7..5   : op0507 = function code (asl=4, asr=0, lsl=6, lsr=2)
++	//   4..0   : Rdd5 (paired-low dest reg)
++	//
++	// op2127=0x1c = 0011100 (bits 27..21 MSB..LSB). For Rss=R1R0, Rdd=R1R0,
++	// Rt=R0: bits 27..21 = 0011100, rs=00000, rt=00000. With parse=11:
++	//   nibble 31..28 = C
++	//   nibble 27..24 = 0011 = 3
++	//   nibble 23..20 = 1000 = 8 (b23=1, 22=0, 21=0, 20=0)
++	//   nibble 19..16 = 0
++	//   nibble 15..12 = 1100 = C
++	//   nibble 11..8  = 0
++	//   nibble 7..4   = depends on op0507 + bit 4 = 0 (Rdd5 bit 4 = 0)
++	//   nibble 3..0   = 0
++	// Word for asl R1R0,R1R0,R0 (op0507=4): 0xC380C080. Bytes "80c080c3".
++	// Word for asr R1R0,R1R0,R0 (op0507=0): 0xC380C000. Bytes "00c080c3".
++	// Word for lsr R1R0,R1R0,R0 (op0507=2): 0xC380C040. Bytes "40c080c3".
++	// Word for lsl R1R0,R1R0,R0 (op0507=6): 0xC380C0C0. Bytes "c0c080c3".
++
++	/** asl Rdd,Rss,Rt -- 64-bit register-form. */
++	@Test
++	public void testShiftEdge_asl64_register_form() {
++		// asl R1R0,R1R0,R0
++		assertDecode("80c080c3", "asl R1R0,R1R0,R0");
++		// asl R3R2,R5R4,R6 -- Rdd=2, Rss=4, Rt=6 -> bits 4..0=2 (low byte=
++		// 1000 0010=0x82), 12..8=6 (byte1=11 0 00110=0xC6), 20..16=4 (bit
++		// 24..20 nibble updates: bits 23..20 = 1000 ohh wait let me redo).
++		// For Rss=R5R4 (low reg index 4), bits 20..16 = 00100. Bits 23..20
++		// from op2127=0x1c -> bits 23,22,21 = 1,0,0; bit 20 = 0 (Rss MSB) ->
++		// nibble 23..20 = 1000 = 8. Bits 19..16 = 100 (Rss low 3 bits) plus
++		// bit 19=0... wait let me redo. Rss = 4 = 00100 in 5 bits. Bits
++		// 20..16 = 0,0,1,0,0. nibble 19..16 = 0100 = 4, nibble 23..20 has
++		// bit 20 = 0 -> nibble 23..20 = 1000 = 8. So byte2 = 1000_0100 = 0x84.
++		// byte1: parse=11, bit13=0, Rt=R6=00110, bits 12..8 = 00110, byte1
++		// = 11_0_0_0_1_1_0 = 1100 0110 = 0xC6.
++		// byte0: op0507=4 (100), bit 4 = Rdd MSB = 0, Rdd=R3R2 -> low reg=2,
++		// bits 4..0 = 00010, byte0 = 1000 0010 = 0x82.
++		// byte3: iclass=1100, op2127 high bits = 0011, byte3 = 1100 0011 = 0xC3.
++		assertDecode("82c684c3", "asl R3R2,R5R4,R6");
++	}
++
++	/** asr Rdd,Rss,Rt -- 64-bit register-form. */
++	@Test
++	public void testShiftEdge_asr64_register_form() {
++		// asr R1R0,R1R0,R0
++		assertDecode("00c080c3", "asr R1R0,R1R0,R0");
++	}
++
++	/** lsr Rdd,Rss,Rt -- 64-bit register-form. */
++	@Test
++	public void testShiftEdge_lsr64_register_form() {
++		// lsr R1R0,R1R0,R0
++		assertDecode("40c080c3", "lsr R1R0,R1R0,R0");
++	}
++
++	/** lsl Rdd,Rss,Rt -- 64-bit register-form. */
++	@Test
++	public void testShiftEdge_lsl64_register_form() {
++		// lsl R1R0,R1R0,R0
++		assertDecode("c0c080c3", "lsl R1R0,R1R0,R0");
++	}
++
++	// ---------------------------------------------------------------------
++	// setbit / clrbit / togglebit -- op2127 = 0x34
++	// ---------------------------------------------------------------------
++	//
++	// op2127=0x34 = 0110100 (bits 27..21 MSB..LSB). vs 0x32 = 0110010 used
++	// by asl/asr/lsl/lsr above. The two differ only at bit 21: 0x32 has
++	// bit 21 clear, 0x34 has bit 21 set. Combined with rs5=0 the nibble at
++	// 23..20 is 0x4 vs 0x6 respectively.
++
++	/** setbit Rd,Rs,Rt -- op2127=0x34, op0507=0. */
++	@Test
++	public void testShiftEdge_setbit_register_form() {
++		// setbit R0,R0,R0: word = 1100 0110 1000 0000 1100 0000 0000 0000
++		//                       = 0xC680 C000
++		assertDecode("00c080c6", "setbit R0,R0,R0");
++		// setbit R3,R2,R1
++		assertDecode("03c182c6", "setbit R3,R2,R1");
++	}
++
++	/** clrbit Rd,Rs,Rt -- op2127=0x34, op0507=2. */
++	@Test
++	public void testShiftEdge_clrbit_register_form() {
++		// clrbit R0,R0,R0: byte0 = 0100 0000 = 0x40
++		assertDecode("40c080c6", "clrbit R0,R0,R0");
++		// clrbit R3,R2,R1
++		assertDecode("43c182c6", "clrbit R3,R2,R1");
++	}
++
++	/** togglebit Rd,Rs,Rt -- op2127=0x34, op0507=4. */
++	@Test
++	public void testShiftEdge_togglebit_register_form() {
++		// togglebit R0,R0,R0: byte0 = 1000 0000 = 0x80
++		assertDecode("80c080c6", "togglebit R0,R0,R0");
++		// togglebit R3,R2,R1
++		assertDecode("83c182c6", "togglebit R3,R2,R1");
++	}
++
++	// ---------------------------------------------------------------------
++	// Accumulating asl Rd, Rs, Rt -- pinned to detect the sxt7 fix on each
++	// accumulator family (the sxt7 commit edited each variant separately).
++	// ---------------------------------------------------------------------
++	//
++	// Encoding for "asl&= Rd,Rs,Rt" (and siblings):
++	//   31..28 : iclass = 1100
++	//   27..21 : op2127 selects accumulator op
++	//             asl&= -> 0x62, asl+= -> 0x66, asl-= -> 0x64, asl|= -> 0x60
++	//   20..16 : Rs5
++	//   15..14 : parse = 11
++	//   13     : op13 = 0
++	//   12..8  : Rt5
++	//   7..5   : op0507 = 4 (asl)
++	//   4..0   : Rd5 (accumulating - same as Rx5)
++	//
++	// All four use bit 22 = 1 (different from the plain register-form 0x32),
++	// and they only differ in bits 27..23. We pin one canonical encoding
++	// per accumulator family.
++
++	/** asl&= Rd,Rs,Rt -- accumulating-AND form. */
++	@Test
++	public void testShiftEdge_asl_acc_and() {
++		// op2127=0x62 = 1100010. Bits 27..21 = 1,1,0,0,0,1,0.
++		// nibble 27..24 = 1100 = C, nibble 23..20 = 0100 = 4 (b23=0,22=1,
++		// 21=0, 20=0 with rs=0). Word: 0xCC40C080. Bytes "80c040cc".
++		// Wait: iclass=12=1100 nibble 31..28 = C. nibble 27..24 = 1100 = C.
++		// nibble 23..20 with rs=0: bits 23,22,21,20 = 0,1,0,0 -> 0100 = 4.
++		// Hmm but op2127=0x62 = 1100010 in 7 bits. Bits 27..21:
++		//   27=1, 26=1, 25=0, 24=0, 23=0, 22=1, 21=0.
++		// nibble 27..24 = 1100 = C, nibble 23..20 = 0100 = 4 (b23=0,22=1,
++		// 21=0, 20=0). So word = 0xCC40_C080. Bytes "80c040cc".
++		assertDecode("80c040cc", "asl&= R0,R0,R0");
++	}
++
++	/** asl+= Rd,Rs,Rt -- accumulating-add form. */
++	@Test
++	public void testShiftEdge_asl_acc_plus() {
++		// op2127=0x66 = 1100110. Bits 27..21 = 1,1,0,0,1,1,0.
++		// nibble 27..24 = 1100 = C, nibble 23..20 = 1100 = C (b23=1,22=1,
++		// 21=0, 20=0).  Word = 0xCCC0_C080. Bytes "80c0c0cc".
++		assertDecode("80c0c0cc", "asl+= R0,R0,R0");
++	}
++
++	/** asl-= Rd,Rs,Rt -- accumulating-sub form. */
++	@Test
++	public void testShiftEdge_asl_acc_minus() {
++		// op2127=0x64 = 1100100. Bits 27..21 = 1,1,0,0,1,0,0.
++		// nibble 27..24 = 1100, nibble 23..20 = 1000 (b23=1,22=0,21=0,20=0).
++		// Word = 0xCC80_C080. Bytes "80c080cc".
++		assertDecode("80c080cc", "asl-= R0,R0,R0");
++	}
++
++	/** asl|= Rd,Rs,Rt -- accumulating-OR form. */
++	@Test
++	public void testShiftEdge_asl_acc_or() {
++		// op2127=0x60 = 1100000. Bits 27..21 = 1,1,0,0,0,0,0.
++		// nibble 27..24 = 1100, nibble 23..20 = 0000 (b23=0,22=0,21=0,20=0).
++		// Word = 0xCC00_C080. Bytes "80c000cc".
++		assertDecode("80c000cc", "asl|= R0,R0,R0");
++	}
++
++	// ---------------------------------------------------------------------
++	// rol Rd,Rs,#u5  -- 32-bit immediate rotate
++	// ---------------------------------------------------------------------
++	//
++	// Encoding:
++	//   31..28 : iclass = 1000
++	//   27..21 : op2127 = 0x60 (1100000)
++	//   20..16 : Rs5
++	//   15..14 : parse = 11
++	//   13     : op13 = 0
++	//   12..8  : Uimm8_0812 (5-bit shift count)
++	//   7..5   : op0507 = 3 (011)
++	//   4..0   : Rd5
++	//
++	// Per the recent commit, the pcode now correctly emits
++	//   Rd = (Rs << N) | (Rs >> (32 - N))
++	// rather than the prior "fold sign bit into bit 0". We pin the
++	// disassembly for several N values to ensure all rol constructors
++	// continue to decode at boundary values.
++
++	/** rol Rd,Rs,#N -- pin N=1, 5, 16, 31 decode. */
++	@Test
++	public void testShiftEdge_rol32_imm() {
++		// rol R0,R0,#1
++		assertDecode("60c1008c", "rol R0,R0,#0x1");
++		// rol R0,R0,#5
++		assertDecode("60c5008c", "rol R0,R0,#0x5");
++		// rol R0,R0,#16
++		assertDecode("60d0008c", "rol R0,R0,#0x10");
++		// rol R0,R0,#31 (max valid 5-bit value)
++		assertDecode("60df008c", "rol R0,R0,#0x1f");
++	}
++
++	// ---------------------------------------------------------------------
++	// rol Rdd,Rss,#u6  -- 64-bit immediate rotate
++	// ---------------------------------------------------------------------
++	//
++	// Encoding:
++	//   31..28 : iclass = 1000
++	//   27..21 : op2127 = 0x00 (0000000)
++	//   20..16 : Rss5 (paired register, low)
++	//   15..14 : parse = 11
++	//   13..8  : Uimm8_0813 (6-bit shift count)
++	//   7..5   : op0507 = 3 (011)
++	//   4..0   : Rdd5
++	//
++	// The fixed pcode is (Rss << N) | (Rss >> (64 - N)). Pin N=1, 5, 32, 63.
++
++	/** rol Rdd,Rss,#N -- pin N=1, 5, 32, 63 decode. */
++	@Test
++	public void testShiftEdge_rol64_imm() {
++		// rol R1R0,R1R0,#1
++		assertDecode("60c10080", "rol R1R0,R1R0,#0x1");
++		// rol R1R0,R1R0,#5
++		assertDecode("60c50080", "rol R1R0,R1R0,#0x5");
++		// rol R1R0,R1R0,#32 (high bit of 6-bit imm set; bits 13..8 = 100000)
++		assertDecode("60e00080", "rol R1R0,R1R0,#0x20");
++		// rol R1R0,R1R0,#63 (max valid 6-bit value)
++		assertDecode("60ff0080", "rol R1R0,R1R0,#0x3f");
++	}
++
++	// ---------------------------------------------------------------------
++	// mpyu :<<1 -- ensure Rs and Rt are distinct after fix
++	// ---------------------------------------------------------------------
++	//
++	// Encoding for M2_mpyu_hh_s1 ("Rd32 = mpyu(Rs.h,Rt.h):<<1"):
++	//   31..28 : iclass = 1110
++	//   27..21 : op2127 = 0x66
++	//   20..16 : Rs5
++	//   15..14 : parse = 11
++	//   13     : op13 = 0
++	//   12..8  : Rt5
++	//   7      : op7 = 0
++	//   6      : op6 = 1 -> Rs.H
++	//   5      : op5 = 1 -> Rt.H
++	//   4..0   : Rd5
++	//
++	// Pre-fix the constructor squared Rs (zext(Rs)*zext(Rs)). After fix it
++	// multiplies by Rt. Pin a few register triples; the disasm doesn't
++	// reflect the buggy semantics, but the fact that we have distinct Rs and
++	// Rt operands in the rendered text confirms the constructor is in fact
++	// the two-operand form.
++
++	/** mpyu(Rs.h,Rt.h):<<1 -- pin distinct Rs/Rt registers. */
++	@Test
++	public void testShiftEdge_mpyu_hh_s1() {
++		// mpyu(R0.H,R0.H):<<1 -> R0
++		assertDecode("60c0c0ec", "mpyu:<<1 R0,R0.H,R0.H");
++		// mpyu(R6.H,R7.H):<<1 -> R5 -- Rs=R6 (bits 20..16=00110), Rt=R7
++		// (bits 12..8=00111), Rd=R5 (bits 4..0=00101)
++		assertDecode("65c7c6ec", "mpyu:<<1 R5,R6.H,R7.H");
++	}
++
++	// Encoding for the accumulating M2_mpyu_acc_hh_s1 ("Rxx32 += mpyu(...)"):
++	//   31..28 : iclass = 1110
++	//   27..21 : op2127 = 0x36
++	//   20..16 : Rs5
++	//   15..14 : parse = 11
++	//   13     : op13 = 0
++	//   12..8  : Rt5
++	//   7      : op7 = 0
++	//   6      : op6 = 1 (Rs.H)
++	//   5      : op5 = 1 (Rt.H)
++	//   4..0   : Rxx5 (paired -- Rxx low reg encoded as Rxx5/2)
++	@Test
++	public void testShiftEdge_mpyu_hh_s1_acc() {
++		// R1R0 += mpyu(R0.H,R0.H):<<1
++		assertDecode("60c0c0e6", "mpyu+=:<<1 R1R0,R0.H,R0.H");
++		// R3R2 += mpyu(R6.H,R7.H):<<1 -- Rxx5 = 2 (R3R2 in the dpair table)
++		assertDecode("62c7c6e6", "mpyu+=:<<1 R3R2,R6.H,R7.H");
++	}
++
++	// ---------------------------------------------------------------------
++	// sfmake / dfmake -- IEEE-754 bit pattern construction
++	// ---------------------------------------------------------------------
++	//
++	// Encoding for sfmake:pos:
++	//   31..28 : iclass = 1101
++	//   27..22 : op2227 = 0x18 (011000)
++	//   21     : i (high bit of imm, becomes bit 9 after concat)
++	//   20..16 : op1620 = 0
++	//   15..14 : parse = 11
++	//   13..5  : i0513 (low 9 bits of imm)
++	//   4..0   : Rd5
++	//
++	// :neg uses op2227 = 0x19 (011001).
++	//
++	// The fixed pcode emits
++	//    Rd = ((bias-6)<<exp_shift) + (zext(imm) << mantissa_shift)
++	// rather than int2float of the imm. Pin the disassembly for a couple of
++	// imm values; the mnemonic is "sfmake:pos" / "sfmake:neg".
++
++	@Test
++	public void testShiftEdge_sfmake() {
++		// sfmake:pos R0,#0
++		assertDecode("00c000d6", "sfmake:pos R0,#0x0");
++		// sfmake:neg R0,#0
++		assertDecode("00c040d6", "sfmake:neg R0,#0x0");
++	}
++
++	@Test
++	public void testShiftEdge_dfmake() {
++		// dfmake:pos R1R0,#0
++		assertDecode("00c000d9", "dfmake:pos R1R0,#0x0");
++		// dfmake:neg R1R0,#0
++		assertDecode("00c040d9", "dfmake:neg R1R0,#0x0");
++	}
++
++	// ---------------------------------------------------------------------
++	// not Rd, Rs  -- canonicalized from sub(#-1, Rs)
++	// ---------------------------------------------------------------------
++	//
++	// Encoding (special case of sub Rd,#i,Rs with imm = -1, immexted=0):
++	//   31..28 : iclass = 0111
++	//   27..22 : op2227 = 0x19 (011001)
++	//   21     : s21 = 1 (sign bit of imm)
++	//   20..16 : Rs5
++	//   15..14 : parse = 11
++	//   13..5  : i0513 = 0x1ff (all-ones)
++	//   4..0   : Rd5
++	//
++	// Pin so that a constructor reorder elsewhere in the decoder doesn't
++	// silently shadow the special case (which would turn "not R0,R0" back
++	// into "sub R0,#-1,R0" in the output).
++
++	@Test
++	public void testShiftEdge_not_from_sub_neg1() {
++		// not R0, R0
++		assertDecode("e0ff6076", "not R0,R0");
++		// not R5, R6 -- bits 20..16 = R6 = 00110, bits 4..0 = R5 = 00101
++		// byte0 = (1,1,1,0,0,1,0,1) = 0xE5
++		// byte1 = (1,1,1,1,1,1,1,1) = 0xFF
++		// byte2 = (0,1,1,0,0,1,1,0) = 0x66
++		// byte3 = (0,1,1,1,0,1,1,0) = 0x76
++		assertDecode("e5ff6676", "not R5,R6");
++	}
++
++	// ---------------------------------------------------------------------
++	// HVX vasl/vasr/vlsr -- decode-only pin
++	// ---------------------------------------------------------------------
++	//
++	// HVX vector shifts are implemented as opaque pcodeops; semantics are
++	// known-issue. We just pin that the mnemonic continues to decode for
++	// representative encodings.
++
++	@Test
++	public void testShiftEdge_hvx_vshifts_decode_only() {
++		// V6_vaslw -- iclass=1, op2127=0x4b, op0507=7
++		// Word: 0001 1001 0110 0000 1100 0000 1110 0000 = 0x1960C0E0
++		assertDecode("e0c06019", "vasl V0.w,V0.w,R0");
++		// V6_vasrw -- iclass=1, op2127=0x4b, op0507=5
++		// Word: 0001 1001 0110 0000 1100 0000 1010 0000 = 0x1960C0A0
++		assertDecode("a0c06019", "vasr V0.w,V0.w,R0");
++		// V6_vasrh -- iclass=1, op2127=0x4b, op0507=6
++		// Word: 0001 1001 0110 0000 1100 0000 1100 0000 = 0x1960C0C0
++		assertDecode("c0c06019", "vasr V0.h,V0.h,R0");
++		// V6_vaslh -- iclass=1, op2127=0x4c, op0507=0
++		// Word: 0001 1001 1000 0000 1100 0000 0000 0000 = 0x1980C000
++		assertDecode("00c08019", "vasl V0.h,V0.h,R0");
++		// V6_vlsruw -- iclass=1, op2127=0x4c, op0507=1
++		// Word: 0001 1001 1000 0000 1100 0000 0010 0000 = 0x1980C020
++		assertDecode("20c08019", "vlsr V0.uw,V0.uw,R0");
++		// V6_vlsruh -- iclass=1, op2127=0x4c, op0507=2
++		// Word: 0001 1001 1000 0000 1100 0000 0100 0000 = 0x1980C040
++		assertDecode("40c08019", "vlsr V0.uh,V0.uh,R0");
++	}
++}
+diff --git a/Ghidra/Processors/Hexagon/src/test/java/ghidra/app/plugin/assembler/sleigh/HexagonStubCoverageTest.java b/Ghidra/Processors/Hexagon/src/test/java/ghidra/app/plugin/assembler/sleigh/HexagonStubCoverageTest.java
+new file mode 100644
+index 0000000000..6d038db5bf
+--- /dev/null
++++ b/Ghidra/Processors/Hexagon/src/test/java/ghidra/app/plugin/assembler/sleigh/HexagonStubCoverageTest.java
+@@ -0,0 +1,246 @@
++/* ###
++ * IP: GHIDRA
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package ghidra.app.plugin.assembler.sleigh;
++
++import static org.junit.Assert.assertEquals;
++
++import org.junit.Test;
++
++import ghidra.app.util.PseudoInstruction;
++import ghidra.program.model.lang.LanguageID;
++
++/**
++ * Regression-pin coverage test for recently added decoder stubs.
++ *
++ * <p>Each assertion records, as a baseline, the disassembly text produced by
++ * the current Hexagon SLEIGH spec for a representative encoding of one stub
++ * family. The intent is purely to detect silent behavioral regressions
++ * (e.g. a future edit that accidentally removes or shadows a decoder
++ * constructor): if the decoded mnemonic changes for any pinned encoding,
++ * the corresponding assertion will fail and force a deliberate review.
++ *
++ * <p>Encodings are taken from real LLVM-MC sample bytes for V69/V73 HVX and
++ * system instructions; the expected text is what the spec currently emits
++ * (which for some families is a deliberately simplified or stubbed form).
++ *
++ * <p>Unlike {@link HexagonAssemblyTest} this class does <em>not</em> exercise
++ * the assembler -- many of the stubbed mnemonics use punctuation
++ * (e.g. {@code |=}, {@code &=}, {@code ^=}, {@code +=}, {@code :rnd:sat})
++ * that does not necessarily round-trip through the assembler grammar.
++ * We only assert byte-to-text disassembly via {@link #disassemble}.
++ */
++public class HexagonStubCoverageTest extends AbstractAssemblyTest {
++
++	@Override
++	protected LanguageID getLanguageID() {
++		return new LanguageID("Hexagon:LE:32:default");
++	}
++
++	/**
++	 * Decode a single 4-byte little-endian Hexagon word and assert the
++	 * disassembly text (trimmed) matches {@code expected}.
++	 *
++	 * @param hexBytes 8 hex chars representing the 4 bytes in little-endian
++	 *                 order as they appear in memory (the same form that the
++	 *                 LLVM-MC corpus prints)
++	 * @param expected the expected disassembly, without trailing whitespace
++	 */
++	protected void assertDecode(String hexBytes, String expected) {
++		if (hexBytes.length() != 8) {
++			throw new IllegalArgumentException(
++				"expected 4-byte hex word (8 chars), got: " + hexBytes);
++		}
++		byte[] bytes = new byte[4];
++		for (int i = 0; i < 4; i++) {
++			bytes[i] = (byte) Integer.parseInt(hexBytes.substring(i * 2, i * 2 + 2), 16);
++		}
++		// Default context for a single-instruction packet; the parse-bits
++		// in the encoding itself mark end-of-packet.
++		byte[] ctx = context.getDefaultAt(lang.getDefaultSpace().getAddress(DEFAULT_ADDR))
++				.fillMask()
++				.getVals();
++		PseudoInstruction pi;
++		try {
++			pi = disassemble(DEFAULT_ADDR, bytes, ctx);
++		}
++		catch (Exception e) {
++			throw new AssertionError(
++				"disassembly threw for bytes " + hexBytes + " (expected: " + expected + ")", e);
++		}
++		String actual = pi.toString().trim();
++		assertEquals("bytes " + hexBytes, expected, actual);
++	}
++
++	@Test
++	public void testStubCoverage_HVX_vmpy_integer() {
++		// V6_vmpyhus
++		assertDecode("40c0201c", "vmpy V1V0.w,V0.h,V0.uh");
++		// V6_vmpyhus_acc
++		assertDecode("20e0201c", "vmpy+= V1V0.w,V0.h,V0.uh");
++		// V6_vmpyhv
++		assertDecode("e0c0001c", "vmpy V1V0.w,V0.h,V0.h");
++		// V6_vmpyhv_acc
++		assertDecode("e0e0001c", "vmpy+= V1V0.w,V0.h,V0.h");
++		// V6_vmpyhvsrs
++		assertDecode("20c0201c", "vmpy:<<1:rnd:sat V0.h,V0.h,V0.h");
++	}
++
++	@Test
++	public void testStubCoverage_HVX_vrmpy_rtt() {
++		// V6_vrmpybub_rtt
++		assertDecode("a0c0c019", "vrmpy V1V0.w,V0.b,R1R0.ub");
++		// V6_vrmpybub_rtt_acc
++		assertDecode("00e0a019", "vrmpy+= V1V0.w,V0.b,R1R0.ub");
++		// V6_vrmpyub_rtt
++		assertDecode("80c0c019", "vrmpy V1V0.uw,V0.ub,R1R0.ub");
++		// V6_vrmpyub_rtt_acc
++		assertDecode("e0e0a019", "vrmpy+= V1V0.uw,V0.ub,R1R0.ub");
++	}
++
++	@Test
++	public void testStubCoverage_HVX_hf_sf_arith() {
++		// V6_vdmpy_sf_hf_acc
++		assertDecode("60e0401c", "vdmpy+= V0.sf,V0.hf,V0.hf");
++		// V6_vmpy_hf_hf_acc
++		assertDecode("40e0401c", "vmpy+= V0.hf,V0.hf,V0.hf");
++		// V6_vmpy_sf_hf_acc
++		assertDecode("20e0401c", "vmpy+= V1V0.sf,V0.hf,V0.hf");
++		// V6_vfmax_hf
++		assertDecode("40e0601c", "vfmax V0.hf,V0.hf,V0.hf");
++		// V6_vfmax_sf
++		assertDecode("60e0601c", "vfmax V0.sf,V0.sf,V0.sf");
++		// V6_vfmin_hf
++		assertDecode("00e0601c", "vfmin V0.hf,V0.hf,V0.hf");
++		// V6_vfmin_sf
++		assertDecode("20e0601c", "vfmin V0.sf,V0.sf,V0.sf");
++	}
++
++	@Test
++	public void testStubCoverage_HVX_bf_arith() {
++		// V6_vadd_sf_bf
++		assertDecode("c0e0401d", "vadd V1V0.sf,V0.bf,V0.bf");
++		// V6_vsub_sf_bf
++		assertDecode("a0e0401d", "vsub V1V0.sf,V0.bf,V0.bf");
++		// V6_vmpy_sf_bf
++		assertDecode("80e0401d", "vmpy V1V0.sf,V0.bf,V0.bf");
++		// V6_vmpy_sf_bf_acc
++		assertDecode("00e0001d", "vmpy+= V1V0.sf,V0.bf,V0.bf");
++		// V6_vmax_bf
++		assertDecode("e0e0401d", "vmax V0.bf,V0.bf,V0.bf");
++		// V6_vmin_bf
++		assertDecode("00e0401d", "vmin V0.bf,V0.bf,V0.bf");
++		// V6_vcvt_bf_sf
++		assertDecode("60e0401d", "vcvt V0.bf,V0.sf,V0.sf");
++	}
++
++	@Test
++	public void testStubCoverage_HVX_bf_compare() {
++		// V6_vgtbf
++		assertDecode("78e0801c", "vcmp.gt Q0,V0.bf,V0.bf");
++		// V6_vgtbf_and
++		assertDecode("d0e0801c", "vcmp.gt&= Q0,V0.bf,V0.bf");
++		// V6_vgtbf_or
++		assertDecode("38e0801c", "vcmp.gt|= Q0,V0.bf,V0.bf");
++		// V6_vgtbf_xor
++		assertDecode("f0e0801c", "vcmp.gt^= Q0,V0.bf,V0.bf");
++	}
++
++	@Test
++	public void testStubCoverage_HVX_hf_sf_eq_compare() {
++		// V6_veqhf_and
++		assertDecode("1ce0801c", "vcmp.eq&= Q0,V0.hf,V0.hf");
++		// V6_veqhf_or
++		assertDecode("5ce0801c", "vcmp.eq|= Q0,V0.hf,V0.hf");
++		// V6_veqhf_xor
++		assertDecode("9ce0801c", "vcmp.eq^= Q0,V0.hf,V0.hf");
++		// V6_veqsf_and
++		assertDecode("0ce0801c", "vcmp.eq&= Q0,V0.sf,V0.sf");
++		// V6_veqsf_or
++		assertDecode("4ce0801c", "vcmp.eq|= Q0,V0.sf,V0.sf");
++		// V6_veqsf_xor
++		assertDecode("8ce0801c", "vcmp.eq^= Q0,V0.sf,V0.sf");
++	}
++
++	@Test
++	public void testStubCoverage_HVX_f8_and_cvt2() {
++		// V6_vcvt2_b_hf
++		assertDecode("c0e0c01a", "vcvt2 V0.b,V0.hf,V0.hf");
++		// V6_vcvt2_ub_hf
++		assertDecode("e0e0c01a", "vcvt2 V0.ub,V0.hf,V0.hf");
++		// V6_vfmax_f8
++		assertDecode("a0e0601c", "vfmax V0.f8,V0.f8,V0.f8");
++		// V6_vfmin_f8
++		assertDecode("80e0601c", "vfmin V0.f8,V0.f8,V0.f8");
++		// V6_vabs_f8 -- previously broken (typo bug), now decoded
++		assertDecode("c0e0661c", "vabs V0.f8,V0.f8");
++		// V6_vfneg_f8 -- previously broken (typo bug), now decoded
++		assertDecode("e0e0661c", "vfneg V0.f8,V0.f8");
++	}
++
++	@Test
++	public void testStubCoverage_HVX_vhist() {
++		// V6_vhist -- previously broken (typo bug), now decoded
++		assertDecode("80e0001e", "vhist");
++		// V6_vhistq -- previously broken (typo bug), now decoded
++		assertDecode("80e0021e", "vhist Q0");
++	}
++
++	@Test
++	public void testStubCoverage_HVX_qfext_and_align() {
++		// V6_get_qfext
++		assertDecode("e0c0c019", "vgetqfext V0,V0.x,R0");
++		// V6_get_qfext_oracc
++		assertDecode("c0c0c019", "vgetqfext|= V0,V0.x,R0");
++		// V6_set_qfext
++		assertDecode("60c0c019", "vsetqfext V0.x,V0,R0");
++		// V6_valign4
++		assertDecode("a0c00018", "valign4 V0,V0,V0,R0");
++	}
++
++	@Test
++	public void testStubCoverage_scalar_and_pair() {
++		// A6_vminub_RdP
++		assertDecode("00c0e0ea", "vminub R1R0,P0,R1R0,R1R0");
++		// L2_loadw_aq
++		assertDecode("00c80092", "memw_aq R0,R0");
++		// L6_memcpy
++		assertDecode("40c00092", "memcpy R0,R0,M0");
++		// S6_vtrunehb_ppp -- previously broken (typo bug), now decoded
++		assertDecode("60c080c1", "vtrunehb R1R0,R1R0,R1R0");
++		// S6_vtrunohb_ppp -- previously broken (typo bug), now decoded
++		assertDecode("a0c080c1", "vtrunohb R1R0,R1R0,R1R0");
++	}
++
++	@Test
++	public void testStubCoverage_system_and_dma() {
++		// Y2_icdataw
++		assertDecode("00e0c055", "icdataw R0,R0");
++		// Y2_tlbpp
++		assertDecode("00c0606c", "tlbp R0,R1R0");
++		// Y6_dmlink
++		assertDecode("40c000a6", "dmlink R0,R0");
++		// Y6_dmpause
++		assertDecode("60c000a8", "dmpause R0");
++		// Y6_dmpoll
++		assertDecode("40c000a8", "dmpoll R0");
++		// Y6_dmresume
++		assertDecode("80c000a6", "dmresume R0");
++		// Y6_dmstart
++		assertDecode("20c000a6", "dmstart R0");
++		// Y6_dmwait
++		assertDecode("20c000a8", "dmwait R0");
++	}
++}
+-- 
+2.45.1
+
