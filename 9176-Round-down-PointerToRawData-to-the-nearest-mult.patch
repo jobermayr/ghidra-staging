@@ -1,0 +1,70 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: XOR-RAX <XOR-RAX@outlook.com>
+Date: Mon, 11 May 2026 00:01:25 +0200
+Subject: [PATCH] 9176: Round down PointerToRawData to the nearest multiple
+ 0x200
+
+#9170 Round down PointerToRawData to the nearest multiple
+ 0x200
+---
+ .../app/util/bin/format/pe/SectionHeader.java | 20 +++++++++++++------
+ .../ghidra/app/util/opinion/PeLoader.java     |  3 ++-
+ 2 files changed, 16 insertions(+), 7 deletions(-)
+
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/pe/SectionHeader.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/pe/SectionHeader.java
+index 106e862744..a20f4d6307 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/pe/SectionHeader.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/pe/SectionHeader.java
+@@ -423,20 +423,28 @@ public class SectionHeader implements StructConverter, ByteArrayConverter {
+ 	/**
+ 	 * Returns the file offset where the data 
+ 	 * for the section begins. For executables, 
+-	 * this value must be a multiple of the file 
++	 * this value *should* be a multiple of the file
+ 	 * alignment given in the PE header.
+-	 * <p>
+-	 * If a section is uninitialized, this value will be 0.
++	 * Note: While this value *should* be a
++	 * multiple of the file alignment, Windows will
++	 * round down to the nearest multiple of 0x200
++	 * regardless of the file alignment.
++	 * Also note that for values below 0x200 but above 0x0
++	 * Windows will round down to 0 but still load the section
++	 * into memory instead of not loading anything as it would
++	 * if it were 0 from the start.
+ 	 * 
+ 	 * @return the file offset where the data for the section begins
+ 	 */
+ 	public int getPointerToRawData() {
+-		if (pointerToRawData < 0x200) {
+-			return 0;
+-		}
++		return (pointerToRawData / 0x200) * 0x200;
++	}
++
++	public int getRawPointerToRawData() {
+ 		return pointerToRawData;
+ 	}
+ 
++
+ 	/**
+ 	 * Returns the file offset of relocations for this section. 
+ 	 * @return the file offset of relocations for this section
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/opinion/PeLoader.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/opinion/PeLoader.java
+index 15eba37c1e..ae690e82d2 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/opinion/PeLoader.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/opinion/PeLoader.java
+@@ -685,8 +685,9 @@ public class PeLoader extends AbstractPeDebugLoader {
+ 				int rawDataSize = sections[i].getSizeOfRawData();
+ 				int rawDataPtr = sections[i].getPointerToRawData();
+ 				virtualSize = sections[i].getVirtualSize();
++				int unChangedRawDataPtr = sections[i].getRawPointerToRawData();
+ 				MemoryBlock block = null;
+-				if (rawDataSize != 0 && rawDataPtr != 0) {
++				if (rawDataSize != 0 && unChangedRawDataPtr != 0) { // Check PointerToRawData before it was rounded down
+ 					int dataSize =
+ 						((rawDataSize > virtualSize && virtualSize > 0) || rawDataSize < 0)
+ 								? virtualSize
+-- 
+2.45.1
+

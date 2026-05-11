@@ -1,0 +1,92 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: XOR-RAX <XOR-RAX@outlook.com>
+Date: Sun, 10 May 2026 20:14:48 +0200
+Subject: [PATCH] 9175: Round SizeOfRawData up to the nearest multiple of the
+ FileAlignment
+
+ FileAlignment
+---
+ .../ghidra/app/util/bin/format/pe/FileHeader.java     |  2 +-
+ .../ghidra/app/util/bin/format/pe/SectionHeader.java  | 11 +++++++++--
+ .../app/util/bin/format/pe/SeparateDebugHeader.java   |  2 +-
+ 3 files changed, 11 insertions(+), 4 deletions(-)
+
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/pe/FileHeader.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/pe/FileHeader.java
+index cdf72bf93d..3997f38f23 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/pe/FileHeader.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/pe/FileHeader.java
+@@ -374,7 +374,7 @@ public class FileHeader implements StructConverter {
+ 			sectionHeaders = new SectionHeader[numberOfSections];
+ 			for (int i = 0; i < numberOfSections; ++i) {
+ 				SectionHeader section =
+-					SectionHeader.readSectionHeader(reader, tmpIndex, stringTableOffset);
++					SectionHeader.readSectionHeader(reader, tmpIndex, stringTableOffset, optHeader.getFileAlignment());
+ 				sectionHeaders[i] = section;
+ 
+ 				int pointerToRawData = section.getPointerToRawData();
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/pe/SectionHeader.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/pe/SectionHeader.java
+index f009a03343..106e862744 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/pe/SectionHeader.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/pe/SectionHeader.java
+@@ -237,6 +237,8 @@ public class SectionHeader implements StructConverter, ByteArrayConverter {
+ 	private short numberOfLinenumbers;
+ 	private int characteristics;
+ 
++	private int fileAlignment;
++
+ 	private BinaryReader reader;
+ 
+ 	/**
+@@ -249,7 +251,7 @@ public class SectionHeader implements StructConverter, ByteArrayConverter {
+ 	 * @throws IOException if error reading data
+ 	 */
+ 	public static SectionHeader readSectionHeader(BinaryReader reader, long index,
+-			long stringTableOffset) throws IOException {
++			long stringTableOffset, int fileAlignment) throws IOException {
+ 		SectionHeader result = new SectionHeader();
+ 
+ 		result.reader = reader;
+@@ -278,6 +280,7 @@ public class SectionHeader implements StructConverter, ByteArrayConverter {
+ 		result.numberOfRelocations = reader.readNextShort();
+ 		result.numberOfLinenumbers = reader.readNextShort();
+ 		result.characteristics = reader.readNextInt();
++		result.fileAlignment = fileAlignment;
+ 
+ 		return result;
+ 	}
+@@ -320,6 +323,7 @@ public class SectionHeader implements StructConverter, ByteArrayConverter {
+ 				characteristics |= SectionFlags.IMAGE_SCN_CNT_UNINITIALIZED_DATA.getMask();
+ 			}
+ 		}
++		fileAlignment = optHeader.getFileAlignment();
+ 	}
+ 
+ 	/**
+@@ -410,7 +414,10 @@ public class SectionHeader implements StructConverter, ByteArrayConverter {
+ 	 * @return the size (in bytes) of data stored for the section
+ 	 */
+ 	public int getSizeOfRawData() {
+-		return sizeOfRawData;
++		if(this.fileAlignment <= 0) { // In case of unknown fileAlignment return without adjustment
++			return this.sizeOfRawData;
++		}
++		return Math.ceilDiv(sizeOfRawData, this.fileAlignment) * this.fileAlignment;
+ 	}
+ 
+ 	/**
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/pe/SeparateDebugHeader.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/pe/SeparateDebugHeader.java
+index ee0200b5e7..818b0536dc 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/pe/SeparateDebugHeader.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/pe/SeparateDebugHeader.java
+@@ -110,7 +110,7 @@ public class SeparateDebugHeader implements OffsetValidator {
+ 
+ 		sections = new SectionHeader[numberOfSections];
+ 		for (int i = 0; i < numberOfSections; ++i) {
+-			sections[i] = SectionHeader.readSectionHeader(reader, ptr, -1);
++			sections[i] = SectionHeader.readSectionHeader(reader, ptr, -1, -1);
+ 			ptr += SectionHeader.IMAGE_SIZEOF_SECTION_HEADER;
+ 		}
+ 
+-- 
+2.45.1
+
