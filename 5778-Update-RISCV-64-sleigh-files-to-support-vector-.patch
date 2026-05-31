@@ -642,6 +642,10 @@ Date:   Thu Sep 14 13:46:58 2023 -0400
 
 update RISCV-64 sleigh files to current vector, bitmap, and crypto
 extensions
+
+Merge branch 'master' into isa_ext
+
+restore missing uimm5 definition for RISC-V vector processing
 ---
  .../Decompiler/certification.manifest         |    1 +
  .../datatests/riscv_isaext_memcpy.xml         |   30 +
@@ -663,7 +667,7 @@ extensions
  .../RISCV/data/languages/riscv.rv64b.sinc     |   12 +-
  .../RISCV/data/languages/riscv.rv64q.sinc     |   42 +
  .../RISCV/data/languages/riscv.rvv.sinc       | 4388 ++++++++++++++---
- .../RISCV/data/languages/riscv.table.sinc     |   23 +-
+ .../RISCV/data/languages/riscv.table.sinc     |    2 +
  .../RISCV/data/languages/riscv.xthead.sinc    |  712 +++
  .../RISCV/data/languages/riscv.zcb.sinc       |   71 +
  .../RISCV/data/languages/riscv.zfa.sinc       |  933 ++++
@@ -678,7 +682,7 @@ extensions
  .../RISCV/data/languages/riscv.zvkng.sinc     |   55 +
  .../RISCV/data/languages/riscv.zvksg.sinc     |   19 +
  gradle/support/ip.gradle                      |    2 +
- 35 files changed, 6675 insertions(+), 792 deletions(-)
+ 35 files changed, 6674 insertions(+), 772 deletions(-)
  create mode 100644 Ghidra/Features/Decompiler/src/decompile/datatests/riscv_isaext_memcpy.xml
  create mode 100644 Ghidra/Features/Decompiler/src/decompile/unittests/riscv_isaext.cc
  create mode 100644 Ghidra/Processors/RISCV/data/languages/Readme_isa_extensions.md
@@ -699,10 +703,10 @@ extensions
  create mode 100644 Ghidra/Processors/RISCV/data/languages/riscv.zvksg.sinc
 
 diff --git a/Ghidra/Features/Decompiler/certification.manifest b/Ghidra/Features/Decompiler/certification.manifest
-index fef7fa721e..396786be68 100644
+index 15f93fe8c8..f510caffdc 100644
 --- a/Ghidra/Features/Decompiler/certification.manifest
 +++ b/Ghidra/Features/Decompiler/certification.manifest
-@@ -85,6 +85,7 @@ src/decompile/datatests/readvolatile.xml||GHIDRA||||END|
+@@ -86,6 +86,7 @@ src/decompile/datatests/readvolatile.xml||GHIDRA||||END|
  src/decompile/datatests/retspecial.xml||GHIDRA||||END|
  src/decompile/datatests/retstruct.xml||GHIDRA||||END|
  src/decompile/datatests/revisit.xml||GHIDRA||||END|
@@ -7605,71 +7609,18 @@ index bb37a6c42b..6fb5327056 100644
 +:vzext.vf8  vd, vs2         is op2631=0x12 & op2525=1 & vs2 & op1519=0x2 & op1214=0x2 & vd & op0006=0x57 {vd=vzext_vf8(vs2);}
 +:vzext.vf8  vd, vs2, "v0.t" is op2631=0x12 & op2525=0 & vs2 & op1519=0x2 & op1214=0x2 & vd & op0006=0x57 {vd=vzext_vf8(vs2,v0);}
 diff --git a/Ghidra/Processors/RISCV/data/languages/riscv.table.sinc b/Ghidra/Processors/RISCV/data/languages/riscv.table.sinc
-index 2cd1ab08e4..93c84f4b2b 100644
+index 05d1692c7f..73ead8dcd3 100644
 --- a/Ghidra/Processors/RISCV/data/languages/riscv.table.sinc
 +++ b/Ghidra/Processors/RISCV/data/languages/riscv.table.sinc
-@@ -625,12 +625,6 @@ rs1W: zero is r1519 & zero & op1519=0 { export 0:$(WXLEN); }
- rs2W: r2024 is r2024 { local tmp:$(WXLEN) = r2024:$(WXLEN); export tmp; }
- rs2W: zero is r2024 & zero & op2024=0 { export 0:$(WXLEN); }
+@@ -635,6 +635,7 @@ rs1L: zero is r1519 & zero & op1519=0 { export 0:8; }
+ rs2L: r2024 is r2024 { export r2024; }
+ rs2L: zero is r2024 & zero & op2024=0 { export 0:8; }
  
--#TODO  dest may be bad, might need an assign macro
--rdW: r0711 is r0711 { local tmp:$(WXLEN) = r0711:$(WXLEN); export tmp; }
--rdW: zero is r0711 & zero & op0711=0 { export 0:$(WXLEN); }
--
--
--
- #TODO  does this need to be in an if/endif
- @if ADDRSIZE == "64"
- rs1L: r1519 is r1519 { local tmp:8 = r1519:8; export tmp; }
-@@ -756,31 +750,20 @@ aqrl: ".rl"   is op2526=1 { export 1:$(XLEN); }
- aqrl: ".aq"   is op2526=2 { export 2:$(XLEN); }
- aqrl: ".aqrl" is op2526=3 { export 3:$(XLEN); }
++#TODO  dest may be bad, might need an assign macro
+ rdL: r0711 is r0711 { export r0711; }
+ rdL: zero is r0711=0 & zero { local tmp:8 = 0; export tmp; }
  
--
--
- crs1: cr0711 is cr0711 { export cr0711; }
- crs1: zero is cr0711 & zero & cop0711=0 { export 0:$(XLEN); }
- 
--crdNoSp: cd0711NoSp is cd0711NoSp { export cd0711NoSp; }
--crdNoSp: zero is zero & cop0711=0 { export 0:$(XLEN); }
--
- crd: cd0711 is cd0711 { export cd0711; }
- crd: zero is zero & cop0711=0 { export 0:$(XLEN); }
- 
- crs2: cr0206 is cr0206 { export cr0206; }
- crs2: zero is cr0206 & zero & cop0206=0 { export 0:$(XLEN); }
- 
--cfrs1: cfr0711 is cfr0711 { export cfr0711; }
--
- cfrd: cfr0711 is cfr0711 { export cfr0711; }
- 
--cfrs2: cfr0206 is cfr0206 { export cfr0206; }
--
- #ATTN  Not doing tables for the RVC registers since there is no
- #      zero register to worry about
- 
--
--
- cimmI: imm is scop1212 & cop0206 [ imm = (scop1212 << 5) | (cop0206); ] { local tmp:$(XLEN) = imm; export tmp; }
- 
- # used for goto
-@@ -790,13 +773,12 @@ cbimm: reloc is scop1212 & cop1011 & cop0506 & cop0304 & cop0202 [ reloc = inst_
- # used for goto
- cjimm: reloc is scop1212 & cop1111 & cop0910 & cop0808 & cop0707 & cop0606 & cop0305 & cop0202 [ reloc = inst_start + ((scop1212 << 11) | (cop1111 << 4) | (cop0910 << 8) | (cop0808 << 10) | (cop0707 << 6) | (cop0606 << 7) | (cop0305 << 1) | (cop0202 << 5)); ] { export *[ram]:$(XLEN) reloc; }
- 
--
--nzuimm5: is cop0606=1 | cop0505=1 | cop0404=1 | cop0303 = 1 | cop0202=1 {}
- nzuimm6: is cop1212=1 | cop0606=1 | cop0505=1 | cop0404=1 | cop0303 = 1 | cop0202=1 {}
--
- @if ADDRSIZE == "32"
-+nzuimm5: is cop0606=1 | cop0505=1 | cop0404=1 | cop0303 = 1 | cop0202=1 {}
- c6imm: uimm is cop1212=0 & cop0206 & nzuimm5 [ uimm = (cop0206 + 0); ] { local tmp:$(XLEN) = uimm; export tmp; }
- @elif ADDRSIZE == "64"
-+
- c6imm: uimm is cop1212 & cop0206 & nzuimm6 [ uimm = (cop1212 << 5) | (cop0206); ] { local tmp:$(XLEN) = uimm; export tmp; }
- @elif ADDRSIZE == "128"
- c6imm: uimm is cop1212 & cop0206 [ uimm = (cop1212 << 5) | (cop0206); ] { local tmp:$(XLEN) = uimm + (64 * (uimm == 0)); export tmp; }
-@@ -956,6 +938,7 @@ vm: ,v0^".t" is op2525=0 & v0 & vd { vd = vd & v0; }
+@@ -953,6 +954,7 @@ vm: ,v0^".t" is op2525=0 & v0 & vd { vd = vd & v0; }
  vm: "" is op2525=1 { }
  
  simm5: sop1519 is sop1519 { local tmp:$(XLEN) = sop1519; export tmp; }

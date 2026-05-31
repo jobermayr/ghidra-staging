@@ -93,6 +93,10 @@ Fix 'this' param removal to work with other 'this' types switching the compariso
 Move 'BasedSpec()' after all <> types.
 
 Removed reference to 'DBObjectCache' to match 'GP-6679: Changing Ghidra to use read/write locks'.
+
+Update to commit 6e8d599
+
+Add new override method 'refresh(...)'.
 ---
  Ghidra/Features/Base/certification.manifest   |    1 +
  .../Base/data/FunctionNames.properties        | 2308 +++++++++++++++++
@@ -119,7 +123,7 @@ Removed reference to 'DBObjectCache' to match 'GP-6679: Changing Ghidra to use r
  .../Decompiler/src/decompile/cpp/marshal.cc   |    2 +-
  .../src/decompile/cpp/modelrules.cc           |    2 +-
  .../data/languages/compiler_spec.rxg          |    1 +
- .../program/database/data/AddressModelDB.java |  219 ++
+ .../program/database/data/AddressModelDB.java |  225 ++
  .../database/data/AddressModelDBAdapter.java  |  190 ++
  .../data/AddressModelDBAdapterNoTable.java    |   70 +
  .../data/AddressModelDBAdapterV0.java         |  112 +
@@ -144,7 +148,7 @@ Removed reference to 'DBObjectCache' to match 'GP-6679: Changing Ghidra to use r
  .../model/TestDoubleFunctionSignature.java    |    6 +
  .../program/model/data/StubDataType.java      |   10 +
  .../x86/data/languages/x86-16.cspec           |  288 +-
- 50 files changed, 6136 insertions(+), 137 deletions(-)
+ 50 files changed, 6142 insertions(+), 137 deletions(-)
  create mode 100644 Ghidra/Features/Base/data/FunctionNames.properties
  create mode 100644 Ghidra/Features/Base/ghidra_scripts/FixPascalCallingConvention.java
  create mode 100644 Ghidra/Features/Base/ghidra_scripts/FixWin16LibraryFunctionNames.java
@@ -164,7 +168,7 @@ Removed reference to 'DBObjectCache' to match 'GP-6679: Changing Ghidra to use r
  create mode 100644 Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/data/SegmentCodePointerDataType.java
 
 diff --git a/Ghidra/Features/Base/certification.manifest b/Ghidra/Features/Base/certification.manifest
-index a988f97e8f..3313a426b0 100644
+index 7601a316bb..142285dd2f 100644
 --- a/Ghidra/Features/Base/certification.manifest
 +++ b/Ghidra/Features/Base/certification.manifest
 @@ -59,6 +59,7 @@ data/symbols/win16/toolhelp.exports||GHIDRA||||END|
@@ -4431,10 +4435,10 @@ index 0000000000..16ac2c52bc
 +	}
 +}
 diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/function/editor/FunctionEditorModel.java b/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/function/editor/FunctionEditorModel.java
-index 6f8045b6b9..7fa0b279e6 100644
+index f683704386..9f27cb314e 100644
 --- a/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/function/editor/FunctionEditorModel.java
 +++ b/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/function/editor/FunctionEditorModel.java
-@@ -252,7 +252,7 @@ public class FunctionEditorModel {
+@@ -256,7 +256,7 @@ public class FunctionEditorModel {
  	}
  
  	/**
@@ -4443,7 +4447,7 @@ index 6f8045b6b9..7fa0b279e6 100644
  	 * {@link VariableUtilities#checkVariableConflict(List, Variable, VariableStorage, VariableConflictHandler)}
  	 * @param conflicts parameters whose storage conflicts
  	 * @return return false to indicate conflicts have not been resolved and additional checks
-@@ -1030,8 +1030,8 @@ public class FunctionEditorModel {
+@@ -1080,8 +1080,8 @@ public class FunctionEditorModel {
  	}
  
  	/**
@@ -5717,10 +5721,10 @@ index 6d1615b449..cfb5d08657 100644
    ///
    /// Within the conventions of this model, do the two (hi/lo) locations represent
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/marshal.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/marshal.cc
-index f1a43d865a..491cdde147 100644
+index 66b1562328..525d3c96cc 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/marshal.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/marshal.cc
-@@ -1254,7 +1254,7 @@ AttributeId ATTRIB_WORDSIZE = AttributeId("wordsize",26);
+@@ -1258,7 +1258,7 @@ AttributeId ATTRIB_WORDSIZE = AttributeId("wordsize",26);
  AttributeId ATTRIB_STORAGE = AttributeId("storage",149);
  AttributeId ATTRIB_STACKSPILL = AttributeId("stackspill",150);
  
@@ -5730,7 +5734,7 @@ index f1a43d865a..491cdde147 100644
  
  ElementId ELEM_DATA = ElementId("data",1);
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/modelrules.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/modelrules.cc
-index 2335bc012d..d5eb76c21b 100644
+index 3f4bb8ef35..c31c0bb832 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/modelrules.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/modelrules.cc
 @@ -765,7 +765,7 @@ uint4 ConvertToPointer::assignAddress(Datatype *dt,const PrototypePieces &proto,
@@ -5756,10 +5760,10 @@ index 69b1f35320..fbc5feab88 100644
  
 diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/data/AddressModelDB.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/data/AddressModelDB.java
 new file mode 100644
-index 0000000000..fccb1ebcc0
+index 0000000000..ca314f84e5
 --- /dev/null
 +++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/data/AddressModelDB.java
-@@ -0,0 +1,219 @@
+@@ -0,0 +1,225 @@
 +/* ###
 + * IP: GHIDRA
 + *
@@ -5977,6 +5981,12 @@ index 0000000000..fccb1ebcc0
 +	@Override
 +	protected boolean isEquivalent(DataType dataType, DataTypeConflictHandler handler) {
 +		return this.addressModel.equals(dataType.getAddressModel());
++	}
++
++	@Override
++	protected boolean refresh(DBRecord record) {
++		// TODO Auto-generated method stub
++		return false;
 +	}
 +}
 diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/data/AddressModelDBAdapter.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/data/AddressModelDBAdapter.java
@@ -6370,7 +6380,7 @@ index 0000000000..eff6e95ec0
 +
 +}
 diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/data/DataTypeDB.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/data/DataTypeDB.java
-index 165e72caaf..f7b4cf261d 100644
+index 1dc3232fd6..13bd548ea5 100644
 --- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/data/DataTypeDB.java
 +++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/data/DataTypeDB.java
 @@ -47,6 +47,7 @@ abstract class DataTypeDB extends DbObject implements DataType {
@@ -6381,7 +6391,7 @@ index 165e72caaf..f7b4cf261d 100644
  
  	protected DataTypeDB(DataTypeManagerDB dataMgr, DBRecord record) {
  		super(record.getKey());
-@@ -568,6 +569,16 @@ abstract class DataTypeDB extends DbObject implements DataType {
+@@ -566,6 +567,16 @@ abstract class DataTypeDB extends DbObject implements DataType {
  			getName().equals(otherDt.getName()) && isEquivalent(otherDt);
  	}
  
@@ -6399,10 +6409,10 @@ index 165e72caaf..f7b4cf261d 100644
  	public boolean isEncodable() {
  		return false;
 diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/data/PointerDB.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/data/PointerDB.java
-index f41b7ce19c..9d91af8aa2 100644
+index 8ef472ec23..fef1cdba52 100644
 --- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/data/PointerDB.java
 +++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/data/PointerDB.java
-@@ -146,6 +146,9 @@ class PointerDB extends DataTypeDB implements Pointer {
+@@ -149,6 +149,9 @@ class PointerDB extends DataTypeDB implements Pointer {
  						displayName += Integer.toString(getLength() * 8);
  					}
  				}
@@ -6413,10 +6423,10 @@ index f41b7ce19c..9d91af8aa2 100644
  					displayName = dt.getDisplayName() + " *";
  				}
 diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/function/FunctionVariables.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/function/FunctionVariables.java
-index ce49273583..30eb41385d 100644
+index fc0b337217..eebedf7fa6 100644
 --- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/function/FunctionVariables.java
 +++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/function/FunctionVariables.java
-@@ -558,8 +558,8 @@ class FunctionVariables {
+@@ -559,8 +559,8 @@ class FunctionVariables {
  	 */
  	private static boolean removeExplicitThisParameter(List<? extends Variable> params,
  			String callingConventionName) {
@@ -6427,7 +6437,7 @@ index ce49273583..30eb41385d 100644
  			if (thisIndex >= 0) {
  				params.remove(thisIndex); // remove explicit 'this' parameter
  				return true;
-@@ -574,7 +574,7 @@ class FunctionVariables {
+@@ -575,7 +575,7 @@ class FunctionVariables {
  	 * @return true if 'this' parameter removed
  	 */
  	boolean removeExplicitThisParameter(FunctionDB function) {
@@ -6698,10 +6708,10 @@ index 136ac17d7e..6b37121655 100644
  	 * Indicates if the length of this data-type is determined based upon the
  	 * {@link DataOrganization} obtained from the associated {@link DataTypeManager}.
 diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/data/DataTypeWriter.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/data/DataTypeWriter.java
-index 9594fbd99b..829bb57cd0 100644
+index b4e0cca969..f2e23dbefe 100644
 --- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/data/DataTypeWriter.java
 +++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/data/DataTypeWriter.java
-@@ -830,8 +830,12 @@ public class DataTypeWriter {
+@@ -805,8 +805,12 @@ public class DataTypeWriter {
  		}
  		if (functionPointerArrayType instanceof Pointer) {
  			Pointer p = (Pointer) functionPointerArrayType;
@@ -7040,7 +7050,7 @@ index 7d357a0b3f..6e3da5a321 100644
  			if (responseCode == AssignAction.HIDDENRET_SPECIALREG_VOID) {
  				store.type = VoidDataType.dataType;
 diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/PrototypeModel.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/PrototypeModel.java
-index fef08a80ca..995786ff56 100644
+index 52b954d0b8..2e3c390f33 100644
 --- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/PrototypeModel.java
 +++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/PrototypeModel.java
 @@ -57,6 +57,7 @@ public class PrototypeModel {
@@ -7101,7 +7111,7 @@ index fef08a80ca..995786ff56 100644
  	 * @return true if this model uses p-code injections
  	 */
  	public boolean hasInjection() {
-@@ -259,6 +268,22 @@ public class PrototypeModel {
+@@ -260,6 +269,22 @@ public class PrototypeModel {
  		return null;
  	}
  
@@ -7124,8 +7134,8 @@ index fef08a80ca..995786ff56 100644
  	/**
  	 * Get the preferred parameter location for a new parameter which will appended
  	 * to the end of an existing set of params.  If existing parameters use custom
-@@ -321,7 +346,7 @@ public class PrototypeModel {
- 
+@@ -327,7 +352,7 @@ public class PrototypeModel {
+ 			Program program) {
  		if (dataType != null) {
  			dataType = dataType.clone(program.getDataTypeManager());
 -			// Identify next arg index based upon number of storage varnodes 
@@ -7133,7 +7143,7 @@ index fef08a80ca..995786ff56 100644
  			// already assigned to parameters - this may not work well if
  			// customized storage has been used
  		}
-@@ -359,9 +384,36 @@ public class PrototypeModel {
+@@ -365,9 +390,36 @@ public class PrototypeModel {
  	 */
  	public void assignParameterStorage(PrototypePieces proto, DataTypeManager dtManager,
  			ArrayList<ParameterPieces> res, boolean addAutoParams) {
@@ -7170,7 +7180,7 @@ index fef08a80ca..995786ff56 100644
  		if (hasThis && addAutoParams && res.size() > 1) {
  			int thisIndex = 1;
  			if (res.get(1).hiddenReturnPtr && res.size() > 2) {
-@@ -389,21 +441,23 @@ public class PrototypeModel {
+@@ -396,12 +448,12 @@ public class PrototypeModel {
  	 * or zero-length datatypes or any subsequent parameter following such a parameter.
  	 * 
  	 * @param program is the Program
@@ -7183,9 +7193,12 @@ index fef08a80ca..995786ff56 100644
 -	 * locations. 
 +	 * return storage. The returned array may also include additional auto-parameter storage
 +	 * locations.
+ 	 * @deprecated This method does not apply any storage rules specific to varags functions.
+ 	 * Use {@link #getStorageLocations(Program,DataType[],boolean,boolean)} instead.
  	 */
+@@ -437,11 +489,13 @@ public class PrototypeModel {
  	public VariableStorage[] getStorageLocations(Program program, DataType[] dataTypes,
- 			boolean addAutoParams) {
+ 			boolean addAutoParams, boolean isVarArgs) {
  
 +		int pointerSize = getPointerSize(program.getAddressFactory().getDefaultAddressSpace());
 +
@@ -7197,8 +7210,8 @@ index fef08a80ca..995786ff56 100644
 +			injectedThis = new PointerDataType(null, pointerSize, program.getDataTypeManager());
  		}
  		PrototypePieces proto = new PrototypePieces(this, dataTypes, injectedThis);
- 
-@@ -414,6 +468,7 @@ public class PrototypeModel {
+ 		if (isVarArgs) {
+@@ -456,6 +510,7 @@ public class PrototypeModel {
  		for (int i = 0; i < finalres.length; ++i) {
  			finalres[i] = res.get(i).getVariableStorage(program);
  		}
@@ -7206,7 +7219,7 @@ index fef08a80ca..995786ff56 100644
  		return finalres;
  	}
  
-@@ -479,6 +534,9 @@ public class PrototypeModel {
+@@ -521,6 +576,9 @@ public class PrototypeModel {
  		if (isConstruct) {
  			encoder.writeBool(ATTRIB_CONSTRUCTOR, true);
  		}
@@ -7216,7 +7229,7 @@ index fef08a80ca..995786ff56 100644
  		if (inputListType != InputListType.STANDARD) {
  			encoder.writeString(ATTRIB_STRATEGY, "register");
  		}
-@@ -639,17 +697,22 @@ public class PrototypeModel {
+@@ -681,17 +739,22 @@ public class PrototypeModel {
  		stackshift = SpecXmlUtils.decodeInt(protoElement.getAttribute(ATTRIB_STACKSHIFT.name()));
  		hasThis = false;
  		isConstruct = false;
@@ -7240,7 +7253,7 @@ index fef08a80ca..995786ff56 100644
  
  		buildParamList(protoElement.getAttribute(ATTRIB_STRATEGY.name()));
  		while (parser.peek().isStart()) {
-@@ -750,7 +813,7 @@ public class PrototypeModel {
+@@ -792,7 +855,7 @@ public class PrototypeModel {
  	}
  
  	/**
@@ -7249,7 +7262,7 @@ index fef08a80ca..995786ff56 100644
  	 * @param prog is the current Program
  	 * @return a VariableStorage ojbect for each register
  	 */
-@@ -773,6 +836,9 @@ public class PrototypeModel {
+@@ -815,6 +878,9 @@ public class PrototypeModel {
  		if (extrapop != obj.extrapop || stackshift != obj.stackshift) {
  			return false;
  		}

@@ -7,25 +7,25 @@ Decompiler: avoid passing Sleigh IDs to BFD
 
 Decompiler: ignore missing callotherfixup userops
 ---
- Ghidra/Features/Decompiler/src/decompile/cpp/bfd_arch.cc      | 4 ++++
- Ghidra/Features/Decompiler/src/decompile/cpp/loadimage_bfd.cc | 3 ++-
- Ghidra/Features/Decompiler/src/decompile/cpp/userop.cc        | 3 +++
- 3 files changed, 9 insertions(+), 1 deletion(-)
+ .../Features/Decompiler/src/decompile/cpp/bfd_arch.cc |  4 ++++
+ .../Decompiler/src/decompile/cpp/loadimage_bfd.cc     |  3 ++-
+ .../Features/Decompiler/src/decompile/cpp/userop.cc   | 11 +++++++++--
+ 3 files changed, 15 insertions(+), 3 deletions(-)
 
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/bfd_arch.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/bfd_arch.cc
-index e05c2fed12..f61a1c372f 100644
+index 646f803e54..533196cc94 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/bfd_arch.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/bfd_arch.cc
 @@ -72,6 +72,10 @@ void BfdArchitecture::buildLoader(DocumentStorage &store)
    collectSpecFiles(*errorstream);
    if (getTarget().find("binary")==0)
-     ldr = new LoadImageBfd(getFilename(),"binary");
+     ldr.reset(new LoadImageBfd(getFilename(),"binary"));
 +  else if (getTarget().find(':')!=string::npos)
 +    // The target is already a Sleigh language id. Let BFD auto-detect the
 +    // object format from the file header.
-+    ldr = new LoadImageBfd(getFilename(),"");
++    ldr.reset(new LoadImageBfd(getFilename(),""));
    else if (getTarget().find("default")==0)
-     ldr = new LoadImageBfd(getFilename(),"default");
+     ldr.reset(new LoadImageBfd(getFilename(),"default"));
    else
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/loadimage_bfd.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/loadimage_bfd.cc
 index 01a6ae8d49..35e7701553 100644
@@ -42,19 +42,27 @@ index 01a6ae8d49..35e7701553 100644
      string errmsg="Unable to open image file: ";
      errmsg += filename;
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/userop.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/userop.cc
-index 8b6306d1af..0717a424e6 100644
+index 6dddd835f8..d57d12fe1f 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/userop.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/userop.cc
-@@ -589,6 +589,9 @@ void UserOpManage::decodeCallOtherFixup(Decoder &decoder,Architecture *glb)
-     registerOp(op);
-   } catch(LowlevelError &err) {
-     delete op;
+@@ -579,8 +579,15 @@ void UserOpManage::decodeCallOtherFixup(Decoder &decoder,Architecture *glb)
+ 
+ {
+   unique_ptr<UserPcodeOp> op(new InjectedUserOp("",glb,0,0));
+-  op->decode(decoder);
+-  registerOp(op.release());
++  try {
++    op->decode(decoder);
++    registerOp(op.release());
++  } catch(LowlevelError &err) {
 +    const string unknownUseropPrefix = "Unknown userop name in <callotherfixup>: ";
 +    if (err.explain.rfind(unknownUseropPrefix, 0) == 0)
 +      return;
-     throw err;
-   }
++    throw err;
++  }
  }
+ 
+ /// Create a JumpAssistOp description object based on the element
 -- 
 2.45.1
 

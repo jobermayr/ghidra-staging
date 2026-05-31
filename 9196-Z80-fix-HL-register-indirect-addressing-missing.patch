@@ -1,0 +1,72 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: 0xDI <0xDI@users.noreply.github.com>
+Date: Mon, 18 May 2026 22:02:39 +0300
+Subject: [PATCH] 9196: Z80: fix (HL) register indirect addressing missing from
+ operand representation
+
+getDefaultOperandRepresentationList() returned [Register HL] for LD E,(HL)
+instead of [Character '(', Register 'HL', Character ')']. Root cause: the three
+base Z80 LD (HL) instructions used HL directly as a constraint operand with
+(HL) as a literal in the display template, rather than the hlMem8 named
+sub-table. Named sub-tables (ixMem8, iyMem8) already work correctly.
+
+Extend hlMem8 to the base Z80 (previously only Z180) and update the three
+affected instructions to use it, consistent with the ixMem8/iyMem8 pattern.
+
+Resolves #9195
+---
+ Ghidra/Processors/Z80/data/languages/z80.slaspec | 15 ++++++---------
+ 1 file changed, 6 insertions(+), 9 deletions(-)
+
+diff --git a/Ghidra/Processors/Z80/data/languages/z80.slaspec b/Ghidra/Processors/Z80/data/languages/z80.slaspec
+index 2c06a25c24..b93024298a 100644
+--- a/Ghidra/Processors/Z80/data/languages/z80.slaspec
++++ b/Ghidra/Processors/Z80/data/languages/z80.slaspec
+@@ -319,10 +319,8 @@ iyMem8: (IY-val)    is IY & simm8 & sign8=1	[ val = -simm8; ] {
+ }
+ 
+ @else # if Z180_SEGMENTED
+-@if defined(Z180)
+ 
+ hlMem8: (HL)  is HL      { ptr:$(PTRSIZE) = HL; export *:1 ptr; }
+-@endif
+ 
+ ixMem8: (IX+simm8)  is IX & simm8                                 { ptr:$(PTRSIZE) = IX + simm8; export *:1 ptr; }
+ ixMem8: (IX-val)    is IX & simm8 & sign8=1	[ val = -simm8; ]      { ptr:$(PTRSIZE) = IX + simm8; export *:1 ptr; }
+@@ -396,8 +394,8 @@ cc2: "C"   is bits3_3=0x7   { c:1 = $(C_flag); export c; }
+ 	reg3_3 = imm8;
+ }
+ 
+-:LD reg3_3,(HL)     is op6_2=0x1 & reg3_3 & bits0_3=0x6 & HL {
+-	MemRead(reg3_3,HL);
++:LD reg3_3,hlMem8   is op6_2=0x1 & reg3_3 & bits0_3=0x6 & hlMem8 {
++	reg3_3 = hlMem8;
+ }
+ 
+ :LD reg3_3,ixMem8   is op0_8=0xdd; op6_2=0x1 & reg3_3 & bits3_3!=0x6 & bits0_3=0x6; ixMem8  {
+@@ -408,8 +406,8 @@ cc2: "C"   is bits3_3=0x7   { c:1 = $(C_flag); export c; }
+ 	reg3_3 = iyMem8; 
+ }
+ 
+-:LD (HL),reg0_3     is op6_2=0x1 & bits3_3=0x6 & reg0_3 & HL {
+-	MemStore(HL,reg0_3);
++:LD hlMem8,reg0_3   is op6_2=0x1 & bits3_3=0x6 & reg0_3 & hlMem8 {
++	hlMem8 = reg0_3;
+ }
+ 
+ :LD ixMem8,reg0_3   is op0_8=0xdd; op6_2=0x1 & bits3_3=0x6 & reg0_3 & bits0_3!=0x6; ixMem8  {
+@@ -420,9 +418,8 @@ cc2: "C"   is bits3_3=0x7   { c:1 = $(C_flag); export c; }
+ 	iyMem8 = reg0_3;
+ }
+ 
+-:LD (HL),imm8       is op0_8=0x36 & HL; imm8 {
+-	tmp:1 = imm8;
+-	MemStore(HL,tmp);
++:LD hlMem8,imm8     is op0_8=0x36 & hlMem8; imm8 {
++	hlMem8 = imm8;
+ }
+ 
+ :LD ixMem8,imm8     is op0_8=0xdd; op6_2=0x0 & bits3_3=0x6 & bits0_3=0x6; ixMem8; imm8  {
+-- 
+2.45.1
+

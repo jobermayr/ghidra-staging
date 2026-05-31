@@ -8,8 +8,8 @@ Building decomp_dbg and sleigh_dbg can now easily enabled via 'gradle -Pdebug' s
 Fixes: #5296
 ---
  .../Features/Decompiler/buildNatives.gradle   | 537 ++++++++++++------
- .../src/decompile/cpp/ghidra_arch.cc          |  32 ++
- .../src/decompile/cpp/ghidra_process.cc       |  23 +
+ .../src/decompile/cpp/ghidra_arch.cc          |   7 +
+ .../src/decompile/cpp/ghidra_process.cc       |  48 ++
  3 files changed, 413 insertions(+), 179 deletions(-)
 
 diff --git a/Ghidra/Features/Decompiler/buildNatives.gradle b/Ghidra/Features/Decompiler/buildNatives.gradle
@@ -619,7 +619,7 @@ index c76114bb2d..64c12afd59 100644
 +	} // end binaries
  } // end model
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/ghidra_arch.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/ghidra_arch.cc
-index 2a16fe465c..43808df973 100644
+index 9de2daeec2..1af81feaaf 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/ghidra_arch.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/ghidra_arch.cc
 @@ -23,6 +23,13 @@
@@ -636,8 +636,34 @@ index 2a16fe465c..43808df973 100644
  namespace ghidra {
  
  //AttributeId ATTRIB_BADDATA = AttributeId("baddata",145);
-@@ -52,6 +59,31 @@ ElementId ELEM_COMMAND_GETUSEROPNAME = ElementId("command_getuseropname",259);
- void ArchitectureGhidra::segvHandler(int4 sig)
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/ghidra_process.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/ghidra_process.cc
+index 2e15906f03..e6fabd7939 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/ghidra_process.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/ghidra_process.cc
+@@ -26,6 +26,21 @@
+ #include "ifacedecomp.hh"
+ #endif
+ 
++#if defined(GDB_BT) || defined(WAIT_DEBUGGER)
++#include <sys/prctl.h>
++#endif
++
++#ifdef WAIT_DEBUGGER
++#include <thread>
++#include <chrono>
++volatile bool startDebug = false;
++
++void wait_for_debugger() {
++  while (!startDebug)
++    std::this_thread::sleep_for(std::chrono::milliseconds(500));
++}
++#endif
++
+ namespace ghidra {
+ 
+ #ifdef __REMOTE_SOCKET__
+@@ -506,6 +521,31 @@ void GhidraDecompCapability::initialize(void)
+ static void segvHandler(int4 sig)
  
  {
 +#ifdef GDB_BT
@@ -665,36 +691,10 @@ index 2a16fe465c..43808df973 100644
 +    waitpid(child, &status, 0);
 +  }
 +#endif
-   exit(1);	// Just die - prevents OS from popping-up a dialog
+   _Exit(1);	// Don't do any cleanup, just die - prevents OS from popping-up a dialog
  }
  
-diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/ghidra_process.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/ghidra_process.cc
-index c282c25f18..7a7b472d65 100644
---- a/Ghidra/Features/Decompiler/src/decompile/cpp/ghidra_process.cc
-+++ b/Ghidra/Features/Decompiler/src/decompile/cpp/ghidra_process.cc
-@@ -26,6 +26,21 @@
- #include "ifacedecomp.hh"
- #endif
- 
-+#if defined(GDB_BT) || defined(WAIT_DEBUGGER)
-+#include <sys/prctl.h>
-+#endif
-+
-+#ifdef WAIT_DEBUGGER
-+#include <thread>
-+#include <chrono>
-+volatile bool startDebug = false;
-+
-+void wait_for_debugger() {
-+  while (!startDebug)
-+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
-+}
-+#endif
-+
- namespace ghidra {
- 
- #ifdef __REMOTE_SOCKET__
-@@ -508,6 +523,14 @@ int main(int argc,char **argv)
+@@ -516,6 +556,14 @@ int main(int argc,char **argv)
  {
    using namespace ghidra;
  
@@ -706,7 +706,7 @@ index c282c25f18..7a7b472d65 100644
 +  wait_for_debugger();
 +#endif
 +
-   signal(SIGSEGV, &ArchitectureGhidra::segvHandler);  // Exit on SEGV errors
+   signal(SIGSEGV, &segvHandler);  // Exit on SEGV errors
  #ifdef _WINDOWS
    // Force i/o streams to be in binary mode
 -- 

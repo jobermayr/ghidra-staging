@@ -46,13 +46,13 @@ Add more documentation around changes
  .../GenericStructFromFieldUsage.java          |  259 +++
  .../MipsFixTailcallWrappers.java              |  110 ++
  .../MipsInferParamsFromCalls.java             |  142 ++
- .../core/analysis/MipsAddressAnalyzer.java    |  204 ++-
+ .../core/analysis/MipsAddressAnalyzer.java    |  200 ++-
  .../core/analysis/MipsDriverAnalyzer.java     | 1486 +++++++++++++++++
  .../analysis/MipsFunctionPointerAnalyzer.java | 1386 +++++++++++++++
  .../MipsFunctionSignatureAnalyzer.java        | 1148 +++++++++++++
  .../core/analysis/MipsInlineCodeAnalyzer.java |  280 ++++
  .../analysis/MipsSwitchTableAnalyzer.java     |  661 ++++++++
- 17 files changed, 6136 insertions(+), 12 deletions(-)
+ 17 files changed, 6134 insertions(+), 10 deletions(-)
  create mode 100644 Ghidra/Features/DecompilerDependent/src/main/java/ghidra/app/plugin/core/analysis/MipsDecompIndirectCallAnalyzer.java
  create mode 100644 Ghidra/Processors/MIPS/ghidra_scripts/FixFunctionSignatures.java
  create mode 100644 Ghidra/Processors/MIPS/ghidra_scripts/GenericStructFromFieldUsage.java
@@ -1144,10 +1144,10 @@ index 0000000000..9af7f101f4
 +    }
 +}
 diff --git a/Ghidra/Processors/MIPS/src/main/java/ghidra/app/plugin/core/analysis/MipsAddressAnalyzer.java b/Ghidra/Processors/MIPS/src/main/java/ghidra/app/plugin/core/analysis/MipsAddressAnalyzer.java
-index b80f193960..beed434f8d 100644
+index 53d27774ae..7c9d4e1932 100644
 --- a/Ghidra/Processors/MIPS/src/main/java/ghidra/app/plugin/core/analysis/MipsAddressAnalyzer.java
 +++ b/Ghidra/Processors/MIPS/src/main/java/ghidra/app/plugin/core/analysis/MipsAddressAnalyzer.java
-@@ -41,8 +41,11 @@ import ghidra.util.task.TaskMonitor;
+@@ -42,8 +42,11 @@ import ghidra.util.task.TaskMonitor;
  public class MipsAddressAnalyzer extends ConstantPropagationAnalyzer {
  
  	private static final int MAX_UNIQUE_GP_SYMBOLS = 50;
@@ -1161,236 +1161,226 @@ index b80f193960..beed434f8d 100644
  
  	private static final String OPTION_NAME_MARK_DUAL_INSTRUCTION =
  		"Mark dual instruction references";
-@@ -253,6 +256,11 @@ public class MipsAddressAnalyzer extends ConstantPropagationAnalyzer {
+@@ -259,6 +262,11 @@ public class MipsAddressAnalyzer extends ConstantPropagationAnalyzer {
  
- 			private boolean mustStopNow = false; // if something discovered in processing, mustStop flag
+ 				private boolean mustStopNow = false; // if something discovered in processing, mustStop flag
  
-+			// Track hi/lo register pairs for better constant propagation
-+			// This helps with switch table base address calculation
-+			// Pattern: lui $reg, %hi(addr) followed by addiu $reg, $reg, %lo(addr)
-+			private java.util.HashMap<Register, Long> hiRegisterValues = new java.util.HashMap<>();
++				// Track hi/lo register pairs for better constant propagation
++				// This helps with switch table base address calculation
++				// Pattern: lui $reg, %hi(addr) followed by addiu $reg, $reg, %lo(addr)
++				private java.util.HashMap<Register, Long> hiRegisterValues = new java.util.HashMap<>();
 +
- 			@Override
- 			public boolean evaluateContextBefore(VarnodeContext context, Instruction instr) {
- 				return mustStopNow;
-@@ -260,6 +268,9 @@ public class MipsAddressAnalyzer extends ConstantPropagationAnalyzer {
+ 				@Override
+ 				public boolean evaluateContextBefore(VarnodeContext context, Instruction instr) {
+ 					return mustStopNow;
+@@ -266,6 +274,9 @@ public class MipsAddressAnalyzer extends ConstantPropagationAnalyzer {
  
- 			@Override
- 			public boolean evaluateContext(VarnodeContext context, Instruction instr) {
-+				// Enhanced: Track lui/addiu pairs for better table base address resolution
-+				trackHiLoRegisterPairs(context, instr);
+ 				@Override
+ 				public boolean evaluateContext(VarnodeContext context, Instruction instr) {
++					// Enhanced: Track lui/addiu pairs for better table base address resolution
++					trackHiLoRegisterPairs(context, instr);
 +
- 				if (markupDualInstructionOption) {
- 					markupDualInstructions(context, instr);
+ 					if (markupDualInstructionOption) {
+ 						markupDualInstructions(context, instr);
+ 					}
+@@ -357,6 +368,71 @@ public class MipsAddressAnalyzer extends ConstantPropagationAnalyzer {
+ 					return mustStopNow;
  				}
-@@ -345,6 +356,71 @@ public class MipsAddressAnalyzer extends ConstantPropagationAnalyzer {
- 				return mustStopNow;
- 			}
  
-+			/**
-+			 * Track lui/addiu register pairs for better constant propagation.
-+			 * This is critical for switch table base address resolution.
-+			 *
-+			 * Pattern:
-+			 *   lui   $reg, %hi(addr)    # Load upper 16 bits
-+			 *   addiu $reg, $reg, %lo(addr)  # Add lower 16 bits
-+			 *
-+			 * This method tracks the lui values and helps resolve the final address
-+			 * when the addiu is encountered.
-+			 */
-+			private void trackHiLoRegisterPairs(VarnodeContext context, Instruction instr) {
-+				String mnemonic = instr.getMnemonicString();
++				/**
++				* Track lui/addiu register pairs for better constant propagation.
++				* This is critical for switch table base address resolution.
++				*
++				* Pattern:
++				*   lui   $reg, %hi(addr)    # Load upper 16 bits
++				*   addiu $reg, $reg, %lo(addr)  # Add lower 16 bits
++				*
++				* This method tracks the lui values and helps resolve the final address
++				* when the addiu is encountered.
++				*/
++				private void trackHiLoRegisterPairs(VarnodeContext context, Instruction instr) {
++					String mnemonic = instr.getMnemonicString();
 +
-+				// Track lui (load upper immediate) instructions
-+				if (mnemonic.equals("lui") || mnemonic.equals("_lui")) {
-+					Register destReg = instr.getRegister(0);
-+					Scalar immediate = instr.getScalar(1);
++					// Track lui (load upper immediate) instructions
++					if (mnemonic.equals("lui") || mnemonic.equals("_lui")) {
++						Register destReg = instr.getRegister(0);
++						Scalar immediate = instr.getScalar(1);
 +
-+					if (destReg != null && immediate != null) {
-+						// Store the upper 16 bits (shifted left by 16)
-+						long hiValue = immediate.getUnsignedValue() << 16;
-+						hiRegisterValues.put(destReg, hiValue);
++						if (destReg != null && immediate != null) {
++							// Store the upper 16 bits (shifted left by 16)
++							long hiValue = immediate.getUnsignedValue() << 16;
++							hiRegisterValues.put(destReg, hiValue);
++						}
 +					}
-+				}
 +
-+				// Track addiu/ori that complete the hi/lo pair
-+				else if (mnemonic.equals("addiu") || mnemonic.equals("_addiu") ||
-+				         mnemonic.equals("ori") || mnemonic.equals("_ori")) {
-+					Register destReg = instr.getRegister(0);
-+					Register srcReg = instr.getRegister(1);
-+					Scalar immediate = instr.getScalar(2);
++					// Track addiu/ori that complete the hi/lo pair
++					else if (mnemonic.equals("addiu") || mnemonic.equals("_addiu") ||
++							mnemonic.equals("ori") || mnemonic.equals("_ori")) {
++						Register destReg = instr.getRegister(0);
++						Register srcReg = instr.getRegister(1);
++						Scalar immediate = instr.getScalar(2);
 +
-+					if (destReg != null && srcReg != null && immediate != null) {
-+						// Check if this completes a hi/lo pair
-+						Long hiValue = hiRegisterValues.get(srcReg);
-+						if (hiValue != null) {
-+							// Combine hi and lo to get full address
-+							long loValue = immediate.getValue(); // Signed for addiu
-+							long fullAddress = hiValue + loValue;
++						if (destReg != null && srcReg != null && immediate != null) {
++							// Check if this completes a hi/lo pair
++							Long hiValue = hiRegisterValues.get(srcReg);
++							if (hiValue != null) {
++								// Combine hi and lo to get full address
++								long loValue = immediate.getValue(); // Signed for addiu
++								long fullAddress = hiValue + loValue;
 +
-+							// Store the combined value in the context
-+							// This helps the switch table analyzer find table base addresses
-+							try {
-+								Address addr = instr.getMinAddress().getNewAddress(fullAddress);
-+								if (program.getMemory().contains(addr)) {
-+									// The reference will be created by the normal flow
-+									// but we've helped track the value through the registers
++								// Store the combined value in the context
++								// This helps the switch table analyzer find table base addresses
++								try {
++									Address addr = instr.getMinAddress().getNewAddress(fullAddress);
++									if (program.getMemory().contains(addr)) {
++										// The reference will be created by the normal flow
++										// but we've helped track the value through the registers
++									}
++								} catch (AddressOutOfBoundsException e) {
++									// Invalid address, ignore
 +								}
-+							} catch (AddressOutOfBoundsException e) {
-+								// Invalid address, ignore
-+							}
 +
-+							// Clear the hi value since it's been used
-+							hiRegisterValues.remove(srcReg);
++								// Clear the hi value since it's been used
++								hiRegisterValues.remove(srcReg);
 +
-+							// If dest != src, store for potential chaining
-+							if (!destReg.equals(srcReg)) {
-+								hiRegisterValues.put(destReg, fullAddress);
++								// If dest != src, store for potential chaining
++								if (!destReg.equals(srcReg)) {
++									hiRegisterValues.put(destReg, fullAddress);
++								}
 +							}
 +						}
 +					}
 +				}
-+			}
 +
- 			private void markupDualInstructions(VarnodeContext context, Instruction instr) {
- 				String mnemonic = instr.getMnemonicString();
- 				if (targetLoadStore.contains(mnemonic)) {
-@@ -374,12 +450,91 @@ public class MipsAddressAnalyzer extends ConstantPropagationAnalyzer {
+ 				private void markupDualInstructions(VarnodeContext context, Instruction instr) {
+ 					String mnemonic = instr.getMnemonicString();
+ 					if (targetLoadStore.contains(mnemonic)) {
+@@ -387,6 +463,85 @@ public class MipsAddressAnalyzer extends ConstantPropagationAnalyzer {
+ 					}
  				}
- 			}
  
-+			/**
-+			 * Track indirect references through memory loads.
-+			 * This helps with:
-+			 * - Function pointer tables (lw $reg, offset($base))
-+			 * - Multi-level indirection (pointer to pointer)
-+			 * - GOT/PLT references in PIC code
-+			 *
-+			 * Pattern examples:
-+			 *   lw $t0, offset($gp)      # Load from GOT
-+			 *   lw $t1, 0($t0)           # Load through pointer
-+			 *   jalr $t1                 # Indirect call
-+			 */
-+			private void trackIndirectReferences(VarnodeContext context, Instruction instr,
-+					int pcodeop, Address address, RefType refType) {
++				/**
++				* Track indirect references through memory loads.
++				* This helps with:
++				* - Function pointer tables (lw $reg, offset($base))
++				* - Multi-level indirection (pointer to pointer)
++				* - GOT/PLT references in PIC code
++				*
++				* Pattern examples:
++				*   lw $t0, offset($gp)      # Load from GOT
++				*   lw $t1, 0($t0)           # Load through pointer
++				*   jalr $t1                 # Indirect call
++				*/
++				private void trackIndirectReferences(VarnodeContext context, Instruction instr,
++						int pcodeop, Address address, RefType refType) {
 +
-+				String mnemonic = instr.getMnemonicString();
++					String mnemonic = instr.getMnemonicString();
 +
-+				// Track lw (load word) instructions that might load pointers
-+				if (mnemonic.equals("lw") || mnemonic.equals("_lw") ||
-+				    mnemonic.equals("ld") || mnemonic.equals("_ld")) {
++					// Track lw (load word) instructions that might load pointers
++					if (mnemonic.equals("lw") || mnemonic.equals("_lw") ||
++						mnemonic.equals("ld") || mnemonic.equals("_ld")) {
 +
-+					Register destReg = instr.getRegister(0);
-+					Register baseReg = instr.getRegister(1);
++						Register destReg = instr.getRegister(0);
++						Register baseReg = instr.getRegister(1);
 +
-+					if (destReg != null && baseReg != null) {
-+						// Get the base address value
-+						BigInteger baseVal = context.getValue(baseReg, false);
-+						if (baseVal != null) {
-+							long baseAddr = baseVal.longValue();
++						if (destReg != null && baseReg != null) {
++							// Get the base address value
++							BigInteger baseVal = context.getValue(baseReg, false);
++							if (baseVal != null) {
++								long baseAddr = baseVal.longValue();
 +
-+							// Get the offset
-+							Scalar offset = instr.getScalar(1);
-+							long offsetVal = (offset != null) ? offset.getValue() : 0;
++								// Get the offset
++								Scalar offset = instr.getScalar(1);
++								long offsetVal = (offset != null) ? offset.getValue() : 0;
 +
-+							long loadAddr = baseAddr + offsetVal;
++								long loadAddr = baseAddr + offsetVal;
 +
-+							try {
-+								Address memAddr = instr.getMinAddress().getNewAddress(loadAddr);
++								try {
++									Address memAddr = instr.getMinAddress().getNewAddress(loadAddr);
 +
-+								// Check if this is a valid memory location
-+								if (program.getMemory().contains(memAddr)) {
-+									// Try to read the value at this address (potential pointer)
-+									int pointerSize = program.getDefaultPointerSize();
-+									long pointerValue;
++									// Check if this is a valid memory location
++									if (program.getMemory().contains(memAddr)) {
++										// Try to read the value at this address (potential pointer)
++										int pointerSize = program.getDefaultPointerSize();
++										long pointerValue;
 +
-+									if (pointerSize == 4) {
-+										pointerValue = program.getMemory().getInt(memAddr) & 0xFFFFFFFFL;
-+									} else if (pointerSize == 8) {
-+										pointerValue = program.getMemory().getLong(memAddr);
-+									} else {
-+										return;
-+									}
++										if (pointerSize == 4) {
++											pointerValue = program.getMemory().getInt(memAddr) & 0xFFFFFFFFL;
++										} else if (pointerSize == 8) {
++											pointerValue = program.getMemory().getLong(memAddr);
++										} else {
++											return;
++										}
 +
-+									// Check if the loaded value looks like a valid pointer
-+									Address targetAddr = instr.getMinAddress().getNewAddress(pointerValue);
-+									if (program.getMemory().contains(targetAddr)) {
-+										// This looks like a pointer load
-+										// The reference will be created by normal flow,
-+										// but we've validated it's a valid indirection
++										// Check if the loaded value looks like a valid pointer
++										Address targetAddr = instr.getMinAddress().getNewAddress(pointerValue);
++										if (program.getMemory().contains(targetAddr)) {
++											// This looks like a pointer load
++											// The reference will be created by normal flow,
++											// but we've validated it's a valid indirection
 +
-+										// For function pointers, check if target is code
-+										Function func = program.getFunctionManager().getFunctionAt(targetAddr);
-+										Instruction targetInstr = program.getListing().getInstructionAt(targetAddr);
++											// For function pointers, check if target is code
++											Function func = program.getFunctionManager().getFunctionAt(targetAddr);
++											Instruction targetInstr = program.getListing().getInstructionAt(targetAddr);
 +
-+										if (func != null || targetInstr != null) {
-+											// This is likely a function pointer load
-+											// The MipsFunctionPointerAnalyzer will handle creating
-+											// the proper references for indirect calls
++											if (func != null || targetInstr != null) {
++												// This is likely a function pointer load
++												// The MipsFunctionPointerAnalyzer will handle creating
++												// the proper references for indirect calls
++											}
 +										}
 +									}
++								} catch (Exception e) {
++									// Memory read error or invalid address, ignore
 +								}
-+							} catch (Exception e) {
-+								// Memory read error or invalid address, ignore
 +							}
 +						}
 +					}
 +				}
-+			}
 +
- 			@Override
- 			public boolean evaluateReference(VarnodeContext context, Instruction instr, int pcodeop,
- 					Address address, int size, DataType dataType, RefType refType) {
+ 				@Override
+ 				public boolean evaluateReference(VarnodeContext context, Instruction instr,
+ 						int pcodeop,
+@@ -407,6 +562,10 @@ public class MipsAddressAnalyzer extends ConstantPropagationAnalyzer {
+ 						return false;
+ 					}
  
- 				Address addr = address;
--				
++					// Enhanced: Track indirect references through memory loads
++					// This helps with function pointer tables and multi-level indirection
++					trackIndirectReferences(context, instr, pcodeop, address, refType);
 +
- 				if (addr == Address.NO_ADDRESS) {
+ 					if ((refType.isJump() || refType.isCall()) & refType.isComputed()) {
+ 						addr = mipsExtDisassembly(program, instr, context, address, monitor);
+ 						if (addr == null) {
+@@ -465,13 +624,22 @@ public class MipsAddressAnalyzer extends ConstantPropagationAnalyzer {
+ 						return false;
+ 					}
+ 
+-					if (trySwitchTables) {
+-						String mnemonic = instruction.getMnemonicString();
+-						if (mnemonic.equals("jr")) {
+-							fixJumpTable(program, instruction, monitor);
+-						}
++					String mnemonic = instruction.getMnemonicString();
++
++					// Handle switch tables (jr instructions)
++					if (trySwitchTables && mnemonic.equals("jr")) {
++						fixJumpTable(program, instruction, monitor);
+ 					}
+ 
++					// NOTE: Indirect calls (jalr) are now handled by MipsFunctionPointerAnalyzer
++					// which provides more sophisticated function pointer tracking and
++					// call site linking. The analyzer:
++					// - Detects function pointer tables in data sections
++					// - Tracks function pointer propagation through registers
++					// - Creates references at jalr sites when source is known
++					// - Supports callback registration patterns
++					//
++					// Future enhancement: Could add basic jalr tracking here as fallback
  					return false;
  				}
-@@ -393,8 +548,11 @@ public class MipsAddressAnalyzer extends ConstantPropagationAnalyzer {
- 					return false;
- 				}
  
-+				// Enhanced: Track indirect references through memory loads
-+				// This helps with function pointer tables and multi-level indirection
-+				trackIndirectReferences(context, instr, pcodeop, address, refType);
-+
- 				if ((refType.isJump() || refType.isCall()) && refType.isComputed()) {
--					//if (refType.isJump() || refType.isCall()) {
- 					addr = mipsExtDisassembly(program, instr, context, address, monitor);
- 					if (addr == null) {
- 						addr = address;
-@@ -450,13 +608,23 @@ public class MipsAddressAnalyzer extends ConstantPropagationAnalyzer {
- 					return false;
- 				}
- 
--				if (trySwitchTables) {
--					String mnemonic = instruction.getMnemonicString();
--					if (mnemonic.equals("jr")) {
--						fixJumpTable(program, instruction, monitor);
--					}
-+				String mnemonic = instruction.getMnemonicString();
-+
-+				// Handle switch tables (jr instructions)
-+				if (trySwitchTables && mnemonic.equals("jr")) {
-+					fixJumpTable(program, instruction, monitor);
- 				}
- 
-+				// NOTE: Indirect calls (jalr) are now handled by MipsFunctionPointerAnalyzer
-+				// which provides more sophisticated function pointer tracking and
-+				// call site linking. The analyzer:
-+				// - Detects function pointer tables in data sections
-+				// - Tracks function pointer propagation through registers
-+				// - Creates references at jalr sites when source is known
-+				// - Supports callback registration patterns
-+				//
-+				// Future enhancement: Could add basic jalr tracking here as fallback
-+
- 				return false;
- 			}
- 
-@@ -577,9 +745,21 @@ public class MipsAddressAnalyzer extends ConstantPropagationAnalyzer {
+@@ -593,9 +761,21 @@ public class MipsAddressAnalyzer extends ConstantPropagationAnalyzer {
  	}
  
  	/**

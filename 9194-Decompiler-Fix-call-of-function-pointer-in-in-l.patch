@@ -1,0 +1,66 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Daniel Moos <daniel.moos@gmail.com>
+Date: Mon, 18 May 2026 12:04:53 +0200
+Subject: [PATCH] 9194: Decompiler: Fix call of function pointer in in-lined
+ function
+
+In AARCH64 out-lined functions are called with the bl instruction.
+An out-lined function usually ends with a ret instruction to continue
+execution in the original function after the bl instruction.
+However, the out-lined function can also end with a call to a function
+pointer via the br instruction. Then, the called function pointer will
+end with a ret and continue the execution after the bl instruction in
+the orginal function. To correctly handle this, the BRANCHIND pcode op
+emitted for the br instruction has to be replaced with the CALLIND
+pcode op.
+Additionally, to support the in-lining of the same out-lined function
+multiple times, allow the BRANCHIND pcode op as last instruction in
+the EZ model.
+---
+ Ghidra/Features/Decompiler/src/decompile/cpp/flow.cc | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/flow.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/flow.cc
+index 0dc173f53a..8b5d5870ec 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/flow.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/flow.cc
+@@ -1089,6 +1089,8 @@ void FlowInfo::inlineClone(const FlowInfo &inlineflow,const Address &retaddr)
+ /// Individual PcodeOps from the Funcdata being in-lined are cloned into
+ /// the Funcdata for \b this flow but are reassigned a new fixed address,
+ /// and the RETURN op is eliminated.
++/// A BRANCHIND op is replaced with a CALLIND op to handle function calls performed
++/// by the in-lined function.
+ /// \param inlineflow is the given in-line flow to clone
+ /// \param calladdr is the fixed address assigned to the cloned PcodeOps
+ void FlowInfo::inlineEZClone(const FlowInfo &inlineflow,const Address &calladdr)
+@@ -1100,6 +1102,9 @@ void FlowInfo::inlineEZClone(const FlowInfo &inlineflow,const Address &calladdr)
+     if (op->code() == CPUI_RETURN) break;
+     SeqNum myseq(calladdr,op->getSeqNum().getTime());
+     PcodeOp *cloneop = data.cloneOp(op,myseq);
++    if (op->code() == CPUI_BRANCHIND) {
++      data.opSetOpcode(cloneop,CPUI_CALLIND);
++    }
+     if (cloneop->isCallOrBranch())
+       xrefInlinedBranch(cloneop);
+   }
+@@ -1173,6 +1178,7 @@ bool FlowInfo::testHardInlineRestrictions(Funcdata *inlinefd,PcodeOp *op,Address
+ /// block, since we cannot split a basic block in the middle of an address. As
+ /// such, branches to different addresses (i.e. non-pcode relative branches) are
+ /// disallowed, but CALL(IND) and p-code relative (C)BRANCH operations are allowed.
++/// For a leaf function the last op can also be a BRANCHIND.
+ /// \return \b true if this flow can be inlined using the EZ model
+ bool FlowInfo::checkEZModel(void) const
+ 
+@@ -1180,6 +1186,9 @@ bool FlowInfo::checkEZModel(void) const
+   list<PcodeOp *>::const_iterator iter = obank.beginDead();
+   while(iter != obank.endDead()) {
+     PcodeOp *op = *iter;
++    if (std::next(iter) == obank.endDead()) {
++      if (op->code() == CPUI_BRANCHIND) return true;
++    }
+     if (op->isBranch() && !(((op->code() == CPUI_BRANCH) || (op->code() == CPUI_CBRANCH)) && op->getIn(0)->isConstant())) return false;
+     ++iter;
+   }
+-- 
+2.45.1
+
