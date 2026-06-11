@@ -1,0 +1,178 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: kkots <okknots@gmail.com>
+Date: Tue, 9 Jun 2026 22:13:24 +0300
+Subject: [PATCH] 9265: decompiler: fix broken stack variable tracking
+
+fix broken stack variable tracking
+---
+ .../src/decompile/cpp/coreaction.cc           | 11 ++++-
+ .../src/decompile/cpp/funcdata_varnode.cc     | 48 +++++++++++++++++++
+ .../cpp/include/ghidra/coreaction.hh          |  2 +-
+ .../Decompiler/src/decompile/cpp/variable.cc  | 21 ++++++++
+ 4 files changed, 79 insertions(+), 3 deletions(-)
+
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
+index 25ab95ee93..1e70b8cb55 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
+@@ -3086,7 +3086,7 @@ void ActionNameVars::lookForFuncParamNames(Funcdata &data,const vector<Varnode *
+ /// \param vn is the given \e spacebase Varnode
+ /// \param data is the function containing the Varnode
+ /// \param namerec is used to store any recovered Symbol without a name
+-void ActionNameVars::linkSpacebaseSymbol(Varnode *vn,Funcdata &data,vector<Varnode *> &namerec)
++void ActionNameVars::linkSpacebaseSymbol(Varnode *vn,Funcdata &data,vector<Varnode *> &namerec,vector<Varnode *> *failedLinks)
+ 
+ {
+   if (!vn->isConstant() && !vn->isInput()) return;
+@@ -3096,6 +3096,7 @@ void ActionNameVars::linkSpacebaseSymbol(Varnode *vn,Funcdata &data,vector<Varno
+     if (op->code() != CPUI_PTRSUB) continue;
+     Varnode *offVn = op->getIn(1);
+     Symbol *sym = data.linkSymbolReference(offVn);
++    if (!sym && failedLinks) failedLinks->push_back(offVn);
+     if ((sym != (Symbol *)0) && sym->isNameUndefined())
+       namerec.push_back(offVn);
+   }
+@@ -3125,6 +3126,7 @@ void ActionNameVars::linkSymbols(Funcdata &data,vector<Varnode *> &namerec)
+       linkSpacebaseSymbol(curvn, data, namerec);
+   }
+ 
++  std::vector<Varnode *> failedSpacebases;
+   TypeFactory *typeFactory = data.getArch()->types;
+   for(int4 i=0;i<manage->numSpaces();++i) { // Build a list of nameable highs
+     spc = manage->getSpace(i);
+@@ -3137,7 +3139,7 @@ void ActionNameVars::linkSymbols(Funcdata &data,vector<Varnode *> &namerec)
+ 	continue;
+       }
+       if (curvn->isSpacebase())
+-	linkSpacebaseSymbol(curvn, data, namerec);
++	linkSpacebaseSymbol(curvn, data, namerec, &failedSpacebases);
+       Varnode *vn = curvn->getHigh()->getNameRepresentative();
+       if (vn != curvn) continue; // Hit each high only once
+       HighVariable *high = vn->getHigh();
+@@ -3155,6 +3157,11 @@ void ActionNameVars::linkSymbols(Funcdata &data,vector<Varnode *> &namerec)
+       }
+     }
+   }
++
++  for (Varnode *constVn : failedSpacebases) {
++    if (constVn->getSymbolEntry()) continue;
++    linkSpacebaseSymbol(constVn, data, namerec);
++  }
+ }
+ 
+ int4 ActionNameVars::apply(Funcdata &data)
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/funcdata_varnode.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/funcdata_varnode.cc
+index 2b086e1d66..db44321cef 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/funcdata_varnode.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/funcdata_varnode.cc
+@@ -1256,7 +1256,55 @@ Symbol *Funcdata::linkSymbolReference(Varnode *vn)
+     throw LowlevelError("Unable to generate proper address from spacebase");
+   SymbolEntry *entry = scope->queryContainer(addr,1,Address());
+   if (entry == (SymbolEntry *)0)
++  {
++    if (vn->getHigh())
++    {
++      VarnodeLocSet::const_iterator begiter,enditer;
++
++      for (int desperation = 0; desperation < 2; ++desperation)
++      {
++        for (int spacebaseIndex = 0; spacebaseIndex < addr.getSpace()->numSpacebase(); ++spacebaseIndex)
++        {
++          const VarnodeData &spacebasedata(addr.getSpace()->getSpacebase(spacebaseIndex));
++          begiter = beginLoc(spacebasedata.size, addr);
++          enditer = endLoc(spacebasedata.size, addr);
++          bool assigned = false;
++          while(begiter != enditer)
++          {
++            Varnode *otherVn = *begiter;
++            HighVariable *otherHigh = otherVn->getHigh();
++            if (otherHigh && otherHigh->getSymbol())
++            {
++              switch (desperation)
++              {
++                case 0:
++                  entry = otherVn->getSymbolEntry();
++                  if (entry)
++                  {
++                    vn->setSymbolReference(entry, 0);
++                    return entry->getSymbol();
++                  }
++                  break;
++                case 1:
++                  if (!otherVn->getSymbolEntry())
++                  {
++                    entry = otherVn->getHigh()->getSymbolEntry();
++                    if (entry)
++                    {
++                      vn->setSymbolReference(entry, 0);
++                      return entry->getSymbol();
++                    }
++                  }
++                  break;
++              }
++            }
++            ++begiter;
++          }
++        }
++      }
++    }
+     return (Symbol *)0;
++  }
+   int4 off = (int4)(addr.getOffset() - entry->getAddr().getOffset()) + entry->getOffset();
+   vn->setSymbolReference(entry, off);
+   return entry->getSymbol();
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/coreaction.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/coreaction.hh
+index a853cfaed7..e7d59cf8f1 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/coreaction.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/coreaction.hh
+@@ -478,7 +478,7 @@ class ActionNameVars : public Action {
+   static void makeRec(ProtoParameter *param,Varnode *vn,map<HighVariable *,OpRecommend> &recmap);
+   static void lookForBadJumpTables(Funcdata &data);	///< Mark the switch variable for bad jump-tables
+   static void lookForFuncParamNames(Funcdata &data,const vector<Varnode *> &varlist);
+-  static void linkSpacebaseSymbol(Varnode *vn,Funcdata &data,vector<Varnode *> &namerec);
++  static void linkSpacebaseSymbol(Varnode *vn,Funcdata &data,vector<Varnode *> &namerec,vector<Varnode *> *failedLinks = nullptr);
+   static void linkSymbols(Funcdata &data,vector<Varnode *> &namerec);
+ public:
+   ActionNameVars(const string &g) : Action(rule_onceperfunc,"namevars",g) {}	///< Constructor
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/variable.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/variable.cc
+index 928afb663b..66bc67566b 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/variable.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/variable.cc
+@@ -241,6 +241,25 @@ HighVariable::~HighVariable(void)
+     delete piece;
+ }
+ 
++static bool vnPointsToSymbol(Varnode *vn, Symbol *symbol, SymbolEntry *entry) {
++  if (symbol->getType()->getSize() == vn->getSize()
++      && entry->getAddr().getSpace() && entry->getAddr().getSpace()->getType() == IPTR_SPACEBASE
++      && vn->getAddr().getSpace() && vn->getAddr().getSpace()->getType() == IPTR_CONSTANT
++      && entry->getAddr().getOffset() == vn->getOffset()
++  ) {
++    PcodeOp *op = vn->loneDescend();
++    if (!op || op->code() != CPUI_PTRSUB || op->getIn(1) != vn) return false;
++    Varnode *in0 = op->getIn(0);
++    if (!in0->isSpacebase()) return false;
++    TypePointer *ptype = (TypePointer *)in0->getHigh()->getType();
++    if (ptype->getMetatype() != TYPE_PTR) return false;
++    TypeSpacebase *sb = (TypeSpacebase *)ptype->getPtrTo();
++    if (sb->getMetatype() != TYPE_SPACEBASE) return false;
++    return sb->getAddress(vn->getOffset(), in0->getSize(), op->getAddr(), vn->isPtrCheck()) == entry->getAddr();
++  }
++  return false;
++}
++
+ /// The given Varnode \b must be a member and \b must have a non-null SymbolEntry
+ void HighVariable::setSymbol(Varnode *vn) const
+ 
+@@ -262,6 +281,8 @@ void HighVariable::setSymbol(Varnode *vn) const
+     symboloffset = -1;
+   else if (symbol->getCategory() == Symbol::equate)
+     symboloffset = -1;			// For equates, we don't care about size
++  else if (vnPointsToSymbol(vn, symbol, entry))
++    symboloffset = 0;
+   else if (symbol->getType()->getSize() == vn->getSize() &&
+       entry->getAddr() == vn->getAddr() && !entry->isPiece())
+     symboloffset = -1;			// A matching entry
+-- 
+2.45.1
+

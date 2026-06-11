@@ -1,0 +1,780 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: kkots <okknots@gmail.com>
+Date: Wed, 10 Jul 2024 17:55:36 +0300
+Subject: [PATCH] 6709: Improved enum type propagation
+
+improved enum type propagation
+
+improved enum propagation: merge with master
+
+improved enum propagation: handle (char)enum < '\0' and -1 < (char)enum; partially handle when constant had already enum propagated onto it, but that enum is wrong; handle CPUI_SUBPIECE offsets other than 0 and 4; handle stepping onto the CPUI_INT_SEXT rake.
+---
+ .../src/decompile/cpp/coreaction.cc           |  12 +-
+ .../cpp/include/ghidra/ruleaction.hh          |  12 +
+ .../src/decompile/cpp/include/ghidra/type.hh  |   8 +-
+ .../decompile/cpp/include/ghidra/varnode.hh   |   1 +
+ .../Decompiler/src/decompile/cpp/printc.cc    |  24 +-
+ .../src/decompile/cpp/ruleaction.cc           | 375 ++++++++++++++++++
+ .../Decompiler/src/decompile/cpp/type.cc      | 147 ++++---
+ .../Decompiler/src/decompile/cpp/typeop.cc    |   9 +
+ 8 files changed, 525 insertions(+), 63 deletions(-)
+
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
+index 4c7ff1f100..c1d524868c 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
+@@ -2761,9 +2761,12 @@ int4 ActionSetCasts::castInput(PcodeOp *op,int4 slot,Funcdata &data,CastStrategy
+     }
+   }
+   else if (vn->isConstant()) {
+-    vn->updateType(ct);
+-    if (vn->getType() == ct)
+-      return 1;
++    Datatype* currentType = vn->getTypeReadFacing(op);
++    if (currentType == nullptr || !currentType->isEnumType()) {  // this protects enums set by ActionPropagateEnums from getting replaced
++      vn->updateType(ct);
++      if (vn->getType() == ct)
++        return 1;
++    }
+   }
+   else if (ct->getMetatype() == TYPE_PTR && testStructOffset0(ct, vn->getHighTypeReadFacing(op), castStrategy)) {
+     // Insert a PTRSUB(vn,#0) instead of a CAST
+@@ -2787,7 +2790,7 @@ int4 ActionSetCasts::castInput(PcodeOp *op,int4 slot,Funcdata &data,CastStrategy
+   data.opSetOpcode(newop,CPUI_CAST);
+   data.opSetInput(newop,vnin,0);
+   data.opSetInput(op,vnout,slot);
+-  data.opInsertBefore(newop,op); // Cast comes AFTER operation
++  data.opInsertBefore(newop,op); // Cast comes BEFORE operation
+   if (ct->needsResolution()) {
+     data.forceFacingType(ct, -1, newop, -1);
+   }
+@@ -5914,6 +5917,7 @@ void ActionDatabase::universalAction(Architecture *conf)
+   act->addAction( new ActionMapGlobals("fixateglobals") );
+   act->addAction( new ActionDynamicSymbols("dynamic") );
+   act->addAction( new ActionNameVars("merge") );
++  act->addAction( new ActionPropagateEnums("typerecovery") );
+   act->addAction( new ActionSetCasts("casts") );
+   act->addAction( new ActionFinalStructure("blockrecovery") );
+   act->addAction( new ActionPrototypeWarnings("protorecovery") );
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/ruleaction.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/ruleaction.hh
+index 5d1f2e79b2..01bc9afbf9 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/ruleaction.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/ruleaction.hh
+@@ -1641,5 +1641,17 @@ public:
+   virtual int4 applyOp(PcodeOp *op,Funcdata &data);
+ };
+ 
++class ActionPropagateEnums : public Action {
++public:
++  ActionPropagateEnums(const string& g) : Action(0, "propagateenums", g) {}	///< Constructor
++  virtual Action* clone(const ActionGroupList& grouplist) const {
++    if (!grouplist.contains(getGroup())) return (Action*)0;
++    return new ActionPropagateEnums(getGroup());
++  }
++  virtual int4 apply(Funcdata &data);
++  static Datatype *getFinalDisplayedType(Varnode *vn,PcodeOp *op,int4 slot,int4& off); ///< Dig through all structs/enums/unions until a base member pointed to by vn is found
++  static void updateTypeWithOptionalCast(Funcdata &data, Varnode *constant, TypeEnum *newType, PcodeOp *op, int shiftLength);
++};
++
+ } // End namespace ghidra
+ #endif
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/type.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/type.hh
+index 83cb90b501..000c1cdc45 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/type.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/type.hh
+@@ -553,7 +553,7 @@ public:
+   map<uintb,string>::const_iterator beginEnum(void) const { return namemap.begin(); }	///< Beginning of name map
+   map<uintb,string>::const_iterator endEnum(void) const { return namemap.end(); }	///< End of name map
+   virtual bool hasNamedValue(uintb val) const;			///< Does \b this have a (single) name for the given value
+-  virtual void getMatches(uintb val,Representation &rep) const;	///< Recover the named representation
++  virtual void getMatches(uintb val,int4 valSize,int shiftDistance,Representation &representation) const;	///< Recover the named representation
+   virtual int4 compare(const Datatype &op,int4 level) const;
+   virtual int4 compareDependency(const Datatype &op) const;
+   virtual Datatype *clone(void) const { return new TypeEnum(*this); }
+@@ -644,15 +644,15 @@ class TypePartialEnum : public TypeEnum {
+   friend class TypeFactory;
+   Datatype *stripped;		///< The \e undefined data-type to use if a formal data-type is required.
+   TypeEnum *parent;		///< The enumeration data-type \b this is based on
+-  int4 offset;			///< Byte offset with the parent enum where \b this starts
++  int4 offset;			///< Bit offset with the parent enum where \b this starts
+ public:
+   TypePartialEnum(const TypePartialEnum &op);		///< Construct from another TypePartialEnum
+   TypePartialEnum(TypeEnum *par,int4 off,int4 sz,Datatype *strip);	///< Constructor
+-  int4 getOffset(void) const { return offset; }		///< Get the byte offset into the containing data-type
++  int4 getOffset(void) const { return offset; }		///< Get the bit offset into the containing data-type
+   Datatype *getParent(void) const { return parent; }	///< Get the enumeration containing \b this piece
+   virtual void printRaw(ostream &s) const;
+   virtual bool hasNamedValue(uintb val) const;
+-  virtual void getMatches(uintb val,Representation &rep) const;
++  virtual void getMatches(uintb val,int4 valSize,int shiftDistance,Representation &representation) const;
+   virtual int4 compare(const Datatype &op,int4 level) const;
+   virtual int4 compareDependency(const Datatype &op) const;
+   virtual Datatype *clone(void) const { return new TypePartialEnum(*this); }
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/varnode.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/varnode.hh
+index 1b05f216cf..fcb8a21bde 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/varnode.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/varnode.hh
+@@ -301,6 +301,7 @@ public:
+   bool isNameLock(void) const { return ((flags&Varnode::namelock)!=0); } ///< Does \b this have a locked name?
+   void setActiveHeritage(void) { addlflags |= Varnode::activeheritage; } ///< Mark \b this as currently being linked into the SSA tree
+   void clearActiveHeritage(void) { addlflags &= ~Varnode::activeheritage; }	///< Mark \b this as not (actively) being linked into the SSA tree
++  ///< (Only for constants of enum type) specify by how many bits this needs to be shifted right before printing
+   void setMark(void) const { flags |= Varnode::mark; } ///< Mark this Varnode for breadcrumb algorithms
+   void clearMark(void) const { flags &= ~Varnode::mark; } ///< Clear the mark on this Varnode
+   void setDirectWrite(void) { flags |= Varnode::directwrite; } ///< Mark \b this as directly affected by a legal input
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/printc.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/printc.cc
+index 1448832621..ec23229d4c 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/printc.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/printc.cc
+@@ -1739,20 +1739,24 @@ void PrintC::pushCharConstant(uintb val,const Datatype *ct,tagtype tag,const Var
+ void PrintC::pushEnumConstant(uintb val,const TypeEnum *ct,tagtype tag,
+ 			      const Varnode *vn,const PcodeOp *op)
+ {
+-  TypeEnum::Representation rep;
++  TypeEnum::Representation representation;
+ 
+-  ct->getMatches(val,rep);
+-  if (rep.matchname.size() > 0) {
+-    if (rep.shiftAmount != 0)
++  int sizeInBits = (vn ? vn->getSize() : ct->getSize()) * 8;
++
++  ct->getMatches(val,sizeInBits,0,representation);
++  if (representation.matchname.size() > 0) {
++    if (representation.shiftAmount > 0) {
+       pushOp(&shift_right,op);
+-    if (rep.complement)
++    }
++    if (representation.complement)
+       pushOp(&bitwise_not,op);
+-    for(int4 i=rep.matchname.size()-1;i>0;--i)
++    for(int4 i=representation.matchname.size()-1;i>0;--i)
+       pushOp(&enum_cat,op);
+-    for(int4 i=0;i<rep.matchname.size();++i)
+-      pushAtom(Atom(rep.matchname[i],tag,EmitMarkup::const_color,op,vn,val));
+-    if (rep.shiftAmount != 0)
+-      push_integer(rep.shiftAmount,4,false,tag,vn,op,0);
++    for(int4 i=0;i<representation.matchname.size();++i)
++      pushAtom(Atom(representation.matchname[i],tag,EmitMarkup::const_color,op,vn,val));
++    if (representation.shiftAmount) {
++      push_integer(representation.shiftAmount,4,false,tag,vn,op,0);
++    }
+   }
+   else {
+     push_integer(val,ct->getSize(),false,tag,vn,op,ct->getDisplayFormat());
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc
+index 6225b7f407..e6292a7d02 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc
+@@ -11357,4 +11357,379 @@ int4 RuleExpandLoad::applyOp(PcodeOp *op,Funcdata &data)
+   return 1;
+ }
+ 
++int4 ActionPropagateEnums::apply(Funcdata &data)
++
++{
++  if (!data.hasTypeRecoveryStarted()) return 0;
++
++  list<PcodeOp *>::const_iterator iter;
++  PcodeOp *op;
++
++  const BlockGraph &basicblocks( data.getBasicBlocks() );
++  for(int4 j=0;j<basicblocks.getSize();++j) {
++    BlockBasic *bb = (BlockBasic *)basicblocks.getBlock(j);
++    for(iter=bb->beginOp();iter!=bb->endOp();++iter) {
++      op = *iter;
++      OpCode code = op->code();
++
++      Varnode *constant;
++      if (code == CPUI_INT_SLESS) {
++        int4 constantSlot = -1;
++        for (int i = 0; i < 2; ++i) {
++          if (op->getIn(i)->isConstant()) {
++            constantSlot = i;
++            break;
++          }
++        }
++        if (constantSlot == -1) {
++          continue;
++        }
++        constant = op->getIn(constantSlot);
++        Datatype *constantType = constant->getTypeReadFacing(op);
++        if (constantType->isEnumType()
++            || constant->getSize() != 1
++            || !(
++              constantSlot == 0 && constant->getOffset() == 0xff
++              || constantSlot == 1 && constant->getOffset() == 0
++            )) continue;
++
++        Varnode *charVn = op->getIn(1 - constantSlot);
++        if (charVn->getSize() != 1) continue;
++        PcodeOp *subpieceOp = charVn->getDef();
++        if (!subpieceOp || subpieceOp->code() != CPUI_SUBPIECE) continue;
++        int subpieceOffset = subpieceOp->getIn(1)->getOffset();  // in bytes
++        Varnode *enumVn = subpieceOp->getIn(0);
++        Datatype *enumOpType = enumVn->getTypeReadFacing(op);
++        if (!enumOpType->isEnumType()) continue;
++
++        Varnode *newConstForAnd = data.newConstant(1, 0x80);
++        PcodeOp *newAnd = data.newOpBefore(op, CPUI_INT_AND, charVn, newConstForAnd);
++        Varnode *newConstForEq = data.newConstant(1, constantSlot == 0 ? 0 : 0x80);
++        data.opSetOpcode(op, CPUI_INT_EQUAL);
++        Varnode *andOutput = newAnd->getOut();
++        data.opSetInput(op, andOutput, 0);
++        andOutput->setImplied();  // prevent C printer from printing unique0x7800 = enumField & 0x80, unique0x7800 == 0,
++                                  // so that we get a nice short (enumField & 0x80) == 0
++        data.opSetInput(op, newConstForEq, 1);
++        updateTypeWithOptionalCast(data, newConstForAnd, (TypeEnum *)enumOpType, newAnd, subpieceOffset * 8);
++        updateTypeWithOptionalCast(data, newConstForEq,  (TypeEnum *)enumOpType, op,     subpieceOffset * 8);
++        ++count;
++        continue;
++      }
++
++      if (code != CPUI_STORE
++	&& code != CPUI_INT_AND
++	&& code != CPUI_INT_OR
++	&& code != CPUI_INT_EQUAL         // for enums that are downcast to smaller types
++	&& code != CPUI_INT_NOTEQUAL) {   // for enums that are downcast to smaller types
++	continue;
++      }
++
++      constant = op->getIn(1);
++      if (op->code() == CPUI_STORE) {
++	constant = op->getIn(2);
++      }
++      if (constant->getType()->isEnumType()) {
++        PcodeOp *in0Def = op->getIn(0)->getDef();
++        if (!in0Def) continue;
++        if (in0Def->numInput() == 0) continue;
++        Varnode *in0DefIn0 = in0Def->getIn(0);
++        Datatype *in0DefIn0Type = in0DefIn0->getTypeReadFacing(in0Def);
++        if (!in0DefIn0Type->isEnumType()) continue;
++        Datatype *constantType = constant->getType();
++        for (
++          Datatype *partialBase = constantType->getPartialBase();
++          partialBase != (Datatype *)0;
++          partialBase = partialBase->getPartialBase()
++        ) {
++          constantType = partialBase;
++        }
++        for (
++          Datatype *partialBase = in0DefIn0Type->getPartialBase();
++          partialBase != (Datatype *)0;
++          partialBase = partialBase->getPartialBase()
++        ) {
++          in0DefIn0Type = partialBase;
++        }
++        if (in0DefIn0Type == constantType) continue;
++      }
++      if (!constant->isConstant()
++          || constant->isSpacebase()
++          || constant->isTypeLock()) {
++	continue;
++      }
++      PcodeOp* def = op;
++      if (op->code() != CPUI_STORE) {
++	def = op->getIn(0)->getDef();
++	if (!def) {
++	  Varnode* opOut = op->getOut();
++	  if (opOut) {
++	    def = opOut->loneDescend();
++	  }
++	}
++      }
++      if (def && (def->code() == CPUI_INT_NEGATE || def->code() == CPUI_INT_2COMP))
++      {
++        def = def->getIn(0)->getDef();
++      }
++      if (!def) continue;
++
++      struct VarnodeToScan {
++	Varnode* varnode = nullptr;
++	int operationSize = 0;
++	int subpieceOffset = 0;
++	int shiftLength = 0;
++	int slot = 0;
++      };
++
++      vector<VarnodeToScan> varnodes;
++
++      code = def->code();
++      if (code == CPUI_INT_SEXT || code == CPUI_INT_ZEXT) {
++        Varnode *origSizeVn = def->getIn(0);
++        Varnode *extOutput = def->getOut();
++        PcodeOp *andOp = extOutput->loneDescend();
++        if (!andOp || andOp->code() != CPUI_INT_AND) continue;
++        Varnode *andConst = andOp->getIn(1 - andOp->getSlot(extOutput));
++        if (!andConst->isConstant()) continue;
++        int4 andConstVal = andConst->getOffset();
++        if (origSizeVn->getSize() < (int4)(sizeof(uintb))
++            // if what we got is (int)(char)enum & 0x100, presence of 0x100 flag depends on whether the number is signed, so we can just check 0x80.
++            // But if it's (int)(char)enum & 0x101, we have to check both 0x80 (for signedness) and 1, so our enum would have to be 0x81.
++            // Basically, if it's SEXT, we take all bits above the origSizeVn->getSize() and lump them together into 0x80.
++            // I've never seen code that does SEXT and then & against a constant whose value is outside of original size that was pre-SEXT.
++            // So I'm just not going to handle this case. If some people get it, then we'll implement it.
++            // I'm only writing this check so that if such case happens, we won't produce incorrect output and lie to the user.
++            && andConstVal >= (1ULL << (origSizeVn->getSize() * 8))) continue;
++
++        def = origSizeVn->getDef();
++        if (!def) continue;
++        code = def->code();
++      }
++
++      if (code == CPUI_LOAD) {
++	if (def->getOut() == (Varnode *)0) {
++	  continue;
++	}
++	varnodes.emplace_back();
++	VarnodeToScan& newVnToScan = varnodes.back();
++	newVnToScan.varnode = def->getIn(1);
++	newVnToScan.operationSize = def->getOut()->getSize();
++	newVnToScan.slot = 1;
++
++      } else if (code == CPUI_SUBPIECE) {
++        if (def->getOut() == (Varnode *)0) {
++          continue;
++        }
++	varnodes.emplace_back();
++	VarnodeToScan& newVnToScan = varnodes.back();
++	newVnToScan.varnode = def->getIn(0);
++	newVnToScan.slot = 0;
++	newVnToScan.subpieceOffset = def->getIn(1)->getOffset();
++	newVnToScan.operationSize = def->getOut()->getSize();
++
++      } else if (code == CPUI_STORE) {
++	varnodes.emplace_back();
++	VarnodeToScan& newVnToScan = varnodes.back();
++	newVnToScan.varnode = def->getIn(1);
++	newVnToScan.slot = 1;
++	newVnToScan.operationSize = def->getIn(2)->getSize();
++
++      } else if (code == CPUI_INT_AND || code == CPUI_INT_OR) {
++	if (def->getOut() == (Varnode *)0) {
++	  continue;
++	}
++	int operationSize = def->getOut()->getSize();
++	for (int i = 0; i < def->numInput(); ++i) {
++	  varnodes.emplace_back();
++	  VarnodeToScan& newVnToScan = varnodes.back();
++	  newVnToScan.varnode = def->getIn(i);
++	  newVnToScan.slot = i;
++	  newVnToScan.operationSize = operationSize;
++	}
++
++      } else if (code == CPUI_INT_RIGHT) {
++        if (def->getOut() == (Varnode *)0) {
++          continue;
++        }
++        Varnode* constVn = def->getIn(1);
++        Varnode* nonConstVn = def->getIn(0);
++        if (constVn->isConstant() && !nonConstVn->isConstant()) {
++	  varnodes.emplace_back();
++	  VarnodeToScan& newVnToScan = varnodes.back();
++	  newVnToScan.varnode = nonConstVn;
++	  newVnToScan.shiftLength = constVn->getOffset();
++	  newVnToScan.slot = 0;
++	  newVnToScan.operationSize = def->getOut()->getSize();
++	}
++
++      } else if (code == CPUI_MULTIEQUAL
++	  || code == CPUI_CALL
++	  || code == CPUI_CALLIND) {
++	if (def->getOut() == (Varnode *)0) {
++	  continue;
++	}
++	varnodes.emplace_back();
++	VarnodeToScan& newVnToScan = varnodes.back();
++	newVnToScan.varnode = def->getOut();
++	newVnToScan.slot = -1;
++	newVnToScan.operationSize = def->getOut()->getSize();
++
++      }
++
++      for (VarnodeToScan& vn : varnodes) {
++	int shiftLength = vn.shiftLength;
++	Datatype* ct = vn.varnode->getTypeReadFacing(def);
++	bool ctIsPtr = ct->getMetatype() == TYPE_PTR;
++	int subpieceOffset = vn.subpieceOffset;
++	if (ctIsPtr) {
++	  ct = ((TypePointer *)ct)->getPtrTo();
++	}
++	if (!ct->isEnumType()) {
++	  PcodeOp* vnDef = vn.varnode->getDef();
++	  if (vnDef && vnDef->code() == CPUI_CAST) {
++	    Datatype* vnPreCastType = vnDef->getIn(0)->getTypeReadFacing(vnDef);
++	    if (vnPreCastType->isEnumType()) {
++	      ct = vnPreCastType;
++	    }
++	  }
++	}
++	if (!ct->isEnumType()) {
++	  int4 off;
++	  Datatype *newct = getFinalDisplayedType(vn.varnode, def, vn.slot, off);
++	  if (newct && newct->isEnumType()) {
++	    ct = newct;
++	    subpieceOffset = off;
++	  }
++	}
++	shiftLength += subpieceOffset * 8;
++	if (ct->isEnumType() && (vn.operationSize != ct->getSize() || shiftLength > 0) && constant->getType() != ct) {
++	  updateTypeWithOptionalCast(data, constant, (TypeEnum *)ct, op, shiftLength);
++	  ++count;
++	  break;
++	}
++	if (ctIsPtr) {
++	  PcodeOp* inDef = vn.varnode->getDef();
++	  if (inDef && inDef->code() == CPUI_INT_ADD) {
++	    Varnode* rightOperand = inDef->getIn(1);
++	    if (rightOperand->isConstant()) {
++	      subpieceOffset = (int)rightOperand->getOffset();
++	      shiftLength += subpieceOffset * 8;
++	      Varnode* leftOperand = inDef->getIn(0);
++	      Datatype* leftOperandType = leftOperand->getTypeReadFacing(inDef);
++	      if (subpieceOffset >= 0 && leftOperandType->getMetatype() == TYPE_PTR) {
++		Datatype* leftOperandPointedToType = ((TypePointer *)leftOperandType)->getPtrTo();
++		if (leftOperandPointedToType->isEnumType()
++		    && (int)leftOperandPointedToType->getSize() > subpieceOffset) {
++		  updateTypeWithOptionalCast(data, constant, (TypeEnum *)leftOperandPointedToType, op, shiftLength);
++		  ++count;
++		  break;
++		}
++	      }
++	    }
++	  }
++	}
++      }  // varnodes to scan loop
++    }  // block p-code operator loop
++  }  // block loop
++
++  return 0;
++}
++
++/// Dig through all structs/enums/unions until a base member pointed to by vn is found
++/// \param vn the varnode to dig into
++/// \param op the operation from which the \b vn was obtained
++/// \param slot in which \b vn can be found in the \op. -1 if \b vn is in the output slot of \b op
++/// \param off gets set to the offset at which \b vn points relative to the member found. Not set if no member found
++/// \return the data type of the member found or the original (\b vn's) type if no member found
++Datatype *ActionPropagateEnums::getFinalDisplayedType(Varnode *vn,PcodeOp *op,int4 slot,int4& off) {
++  Datatype *baseType = vn->getType();
++  int4 sz = vn->getSize();
++  HighVariable *high = vn->getHigh();
++  Symbol *sym = high->getSymbol();
++  if (sym == (Symbol *)0) {
++    return baseType;
++  }
++  off = high->getSymbolOffset();
++  if (off == -1) {  // perfect symbol match
++    off = 0;
++  }
++  if (off + vn->getSize() > sym->getType()->getSize()) {
++    return baseType;
++  }
++  Datatype *ct = sym->getType();
++  bool succeeded = true;
++  while(ct != (Datatype *)0 && succeeded) {
++    if (off == 0) {
++      if (sz == 0 || (sz == ct->getSize() && (!ct->needsResolution() || ct->getMetatype()==TYPE_PTR)))
++	break;
++    }
++    succeeded = false;
++    if (ct->getMetatype()==TYPE_STRUCT) {
++      if (ct->needsResolution() && ct->getSize() == sz) {
++	Datatype *outtype = ct->findResolve(op, slot);
++	if (outtype == ct)
++	  break;	// Turns out we don't resolve to the field
++      }
++      const TypeField *field;
++      int8 off_int8;
++      field = ct->findTruncation(off,sz,op,slot,off_int8);
++      if (field != (const TypeField *)0) {
++	ct = field->type;
++	off = (int4)off_int8;
++	succeeded = true;
++      }
++    }
++    else if (ct->getMetatype() == TYPE_ARRAY) {
++      int4 el;
++      Datatype *arrayof = ((TypeArray *)ct)->getSubEntry(off,sz,&off,&el);
++      if (arrayof != (Datatype *)0) {
++	ct = arrayof;
++	succeeded = true;
++      }
++    }
++    else if (ct->getMetatype() == TYPE_UNION) {
++      const TypeField *field;
++      int8 off_int8;
++      field = ct->findTruncation(off,sz,op,slot,off_int8);
++      if (field != (const TypeField*)0) {
++	off = (int4)off_int8;
++	ct = field->type;
++	succeeded = true;
++      }
++      else if (ct->getSize() == sz)
++	break;		// Turns out we don't need to resolve the field
++    }
++  }
++  if (!ct) return baseType;
++  return ct;
++}
++
++void ActionPropagateEnums::updateTypeWithOptionalCast(Funcdata &data, Varnode *constant, TypeEnum *newType, PcodeOp *op, int shiftLength) {
++  if (shiftLength >= newType->getSize() * 8) return;
++  int4 oldConstantSize = constant->getSize();
++  Datatype *oldType = constant->getType();
++  int4 newTypeSize = newType->getSize();
++
++  if (shiftLength) {
++    TypeFactory *typeFactory = data.getArch()->types;
++    newType = typeFactory->getTypePartialEnum(newType, shiftLength, oldConstantSize);
++  }
++  constant->updateType(newType);
++
++  if (oldConstantSize == newTypeSize) {
++    return;
++  }
++
++  int4 slot = op->getSlot(constant);
++  PcodeOp *newop = data.newOp(1,op->getAddr());
++  Varnode *vnout = data.newUniqueOut(constant->getSize(),newop);
++  vnout->updateType(oldType);
++  vnout->setImplied();
++  data.opSetOpcode(newop,CPUI_CAST);
++  data.opSetInput(newop,constant,0);
++  data.opSetInput(op,vnout,slot);
++  data.opInsertBefore(newop,op); // Cast comes BEFORE operation
++}
++
+ } // End namespace ghidra
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/type.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/type.cc
+index 0455ccb406..4aad91faf3 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/type.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/type.cc
+@@ -1533,56 +1533,105 @@ bool TypeEnum::hasNamedValue(uintb val) const
+ /// The representation is returned as a list of names that must logically ORed and possibly complemented.
+ /// If no representation is possible, no names will be returned.
+ /// \param val is the value to find the representation for
+-/// \param rep will contain the individual names in the representation and other transforms
+-void TypeEnum::getMatches(uintb val,Representation &rep) const
++/// \param valSize is the size (in bits) of the varnode that was holding \b val or 0 if the size of the enum is implied
++/// \param shiftDistance \b number of bits by which you shifted \b val to the left prior to passing it to this function
++/// \param representation will hold the list of names, the unchanged copy of the \b shiftDistance value, and whether the names are for the complement (~) version of the \b val
++void TypeEnum::getMatches(uintb val,int4 valSize,int shiftDistance,Representation &representation) const
+ 
+ {
+   map<uintb,string>::const_iterator iter;
+-  int4 count;
++  int4 attempt;
++  Representation prevAttempt;  // the successful attempt made for the non-complement (non-~) version of val, for comparing with the attempt for the complement (~) (second) version and choosing the best one
+ 
+-  for(count=0;count<2;++count) {
++  uintb shiftDistanceMask = (1U << shiftDistance) - 1;
++  int sizeToUse = valSize == 0 ? size * 8 : valSize;
++  uintb sizeMask = sizeToUse >= sizeof(uintb) * 8 ? ~0ULL : (1ULL << sizeToUse) - 1;
++
++  representation.shiftAmount = shiftDistance;
++
++  for(attempt=0;attempt<2;++attempt) {
+     bool allmatch = true;
+-    if (val == 0) {	// Zero handled specially
+-      iter = namemap.find(val);
+-      if (iter != namemap.end())
+-	rep.matchname.push_back( (*iter).second );
+-      else
+-	allmatch = false;
+-    }
+-    else {
++    iter = namemap.lower_bound(val);  // iter is either namemap.end(), or iter->first is guaranteed to be >= val
++    if (iter != namemap.end() && iter->first == val) {
++      representation.matchname.push_back(iter->second);  // an exact match
++    } else if (val == 0) {
++      allmatch = false;  // if this is a zero value, we can't represent it, because all other enum elements would be non-zero
++      break;  // not allowing inverted representation for 0 by doing a ~(-1) if this enum has a -1 element
++    } else {
+       uintb bitsleft = val;
+-      uintb target = val;
+-      while(target != 0) {
+-	// Find named value that matches the largest number of most significant bits in bitsleft
+-	iter = namemap.upper_bound(target);
+-	if (iter == namemap.begin()) break;	// All named values are greater than target
+-	--iter;					// Biggest named value less than or equal to target
+-	uintb curval = (*iter).first;
+-	uintb diff = coveringmask(bitsleft ^ curval);
+-	if (diff >= bitsleft) break;		// Could not match most significant bit of bitsleft
+-	if ((curval & diff) == 0) {
+-	  // Found a named value that matches at least most significant bit of bitsleft
+-	  rep.matchname.push_back( (*iter).second );	// Accept the name
+-	  bitsleft ^= curval;				// Remove the bits from bitsleft
+-	  target = bitsleft;				// Continue searching for named value that match the new bitsleft
++      while (iter != namemap.begin()) {  // iterate backwards from end to start (from highest value to lowest)
++	--iter;
++	// iter->first is guaranteed to be < val
++	const uintb& key = iter->first;
++	// if key is 0, 'bitsleft_temp >= key' condition below is guaranteed to be fulfilled and we will break there
++	const uintb& maskedKey = key & bitsleft;
++	const uintb bitsleft_temp = bitsleft - maskedKey;
++	// Why this works (proof):
++	// Since key is guaranteed to be < bitsleft, it can't have a bit that is higher than bitsleft's most significant bit.
++	// 1)
++	//    Assume key contains the most significant bit of bitsleft.
++	//    maskedKey would include that bit.
++	//    bitsleft_temp would not have that bit.
++	//    bitsleft_temp is guaranteed to be < key, which still has the bit.
++	// 2)
++	//    Assume key does not contain the most significant bit of bitsleft.
++	//    maskedKey would not include that bit.
++	//    bitsleft_temp would still have that bit.
++	//    bitsleft_temp is guaranteed to be >= key, which does not have that bit.
++	if (bitsleft_temp >= key) {
++	  // None of the remaining enum elements are going to contain bitsleft's most significant bit, since they're all lower than the key,
++	  // so we can exit now
++	  break;
+ 	}
+-	else {
+-	  // Not all the (one) bits of curval match into bitsleft, but we can restrict a further search.
+-	  // Bits above diff in curval are the maximum we can hope to match with one named value.
+-	  // Zero out bits below this and prepare to search at or below this value
+-	  target = curval & ~diff;
++	// If we are here, that means key contained the most significant bit of bitsleft.
++	if (maskedKey == key) {             // if all bits of the enum value are contained in bitsleft
++	  representation.matchname.push_back(iter->second);
++	  bitsleft = bitsleft_temp;         // remove used bits and continue next search only for the bits that remain
++	  if (bitsleft == 0) {              // no more bits remain, we found all of them in the enum
++	    break;
++	  }
++	  iter = namemap.lower_bound(bitsleft); // this will return a non-end iterator, because
++	  // we removed the highest bit from the bitsleft
++	  // and the current key contained that bit, so at most
++	  // this should return the current key again.
++	  // iter->first is guaranteed to be >= bitsleft.
++	  if (iter->first == bitsleft) {  // the iter->first matches bitsleft exactly
++	    representation.matchname.push_back(iter->second);
++	    bitsleft = 0;
++	    break;
++	  }
++	  // Once we do --iter at the beginning of the next iteration, iter->first will be guaranteed to be < bitsleft
+ 	}
+       }
+-      allmatch = (bitsleft == 0);
++      allmatch = (bitsleft == 0);  // if not all bits were found then we can't make a representation
+     }
+-    if (allmatch) {			// If we have a complete representation
+-      rep.complement = (count==1);	// Set whether we represented original value or complement
++    if (attempt == 1 && !prevAttempt.matchname.empty() && (                         // If we have a previous successful attempt doing a non-~ representation
++        allmatch && prevAttempt.matchname.size() < representation.matchname.size()  // And this attempt is successful but yields more enum elements than the other one
++        || !allmatch)) {                                                            // Or this attempt is just not successful
++      representation = prevAttempt;                                                 // Return the previous attempt
+       return;
+     }
+-    val = val ^ calc_mask(size);	// Switch value we are trying to represent (to complement)
+-    rep.matchname.clear();		// Clear out old attempt
+-  }
+-  // If we reach here, no representation was possible, -matchname- is empty
++    if (allmatch                                                    // If we have a complete representation
++      && attempt == 0 && representation.matchname.size() >= (       // But it seems to include most of the enum's elements (if each was a single bit flag)
++                                  size * 8 - shiftDistance) / 2) {  // Or when the val was <<32 before being passed, because when that happens
++                                                                    // it could include fewer flags than size * 8 / 2, so a double-check (with
++                                                                    // the complement of the val) is necessary
++      prevAttempt = representation;
++      allmatch = false;
++    }
++    if (allmatch)  // We have a complete representation
++      return;
++
++    val ^= sizeMask;           // Switch value we are trying to represent (to complement).
++    val ^= shiftDistanceMask;  // If the val was for example 0xfffffffe and was <<32 before being passed to this function
++                               // it would get padded with 0's and end up looking like 0xfffffffe00000000
++                               // so when getting its complement we would get 0x00000001ffffffff
++                               // and still not find the enum values we're looking for. The ^= shiftDistanceMask fixes that
++
++    representation.matchname.clear();  // Clear out old attempt
++    representation.complement = true;
++  }  // for(attempt=0;attempt<2;++attempt)
++  // If we reach here, no representation was possible, representation.matchname is empty
+ }
+ 
+ int4 TypeEnum::compare(const Datatype &op,int4 level) const
+@@ -2700,16 +2749,24 @@ void TypePartialEnum::printRaw(ostream &s) const
+ bool TypePartialEnum::hasNamedValue(uintb val) const
+ 
+ {
+-  val <<= 8*offset;
++  val <<= offset;
+   return parent->hasNamedValue(val);
+ }
+ 
+-void TypePartialEnum::getMatches(uintb val,Representation &rep) const
++void TypePartialEnum::getMatches(uintb val,int4 valSize,int shiftDistance,Representation &representation) const
+ 
+ {
+-  val <<= 8*offset;
+-  rep.shiftAmount = offset * 8;
+-  parent->getMatches(val,rep);
++  val <<= offset;
++  valSize += offset;
++  if (valSize > (int4)sizeof(uintb) * 8) {
++    valSize = (int4)sizeof(uintb) * 8;
++  }
++  shiftDistance += offset;
++  if (shiftDistance >= valSize) {
++    shiftDistance = valSize - 1;
++    val = 0;
++  }
++  parent->getMatches(val,valSize,shiftDistance,representation);
+ }
+ 
+ int4 TypePartialEnum::compare(const Datatype &op,int4 level) const
+@@ -4445,7 +4502,7 @@ TypeEnum *TypeFactory::getTypeEnum(const string &n)
+ 
+ /// Create a data-type representing storage of part of an \e enumeration.
+ /// \param contain is the parent \e enumeration data-type that we are taking a part of.
+-/// \param off is the offset (in bytes) within the parent that the partial data-type starts at
++/// \param off is the offset (in bits) within the parent that the partial data-type starts at
+ /// \param sz is the number of bytes in the partial data-type
+ /// \return the TypePartialEnum object
+ TypePartialEnum *TypeFactory::getTypePartialEnum(TypeEnum *contain,int4 off,int4 sz)
+@@ -4601,7 +4658,7 @@ Datatype *TypeFactory::getExactPiece(Datatype *ct,int4 offset,int4 size)
+       return getTypePartialUnion(partial->getParentUnion(),lastOff + partial->getOffset(), size);
+     }
+     else if (lastType->isEnumType() && !lastType->hasStripped())
+-      return getTypePartialEnum((TypeEnum *)lastType, lastOff, size);
++      return getTypePartialEnum((TypeEnum *)lastType, lastOff * 8, size);
+   }
+   return (Datatype *)0;
+ }
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/typeop.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/typeop.cc
+index 2b9ee1e5d4..f68a3f9775 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/typeop.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/typeop.cc
+@@ -1448,6 +1448,9 @@ Datatype *TypeOpIntXor::propagateType(Datatype *alttype,PcodeOp *op,Varnode *inv
+       return (Datatype *)0;
+     if (floatSignManipulation(op) == CPUI_MAX)
+       return (Datatype *)0;
++  } else if (invn->isConstant() && !outvn->isConstant()) {
++	return (Datatype *)0;  // propagating enum types set by ActionPropagateEnums may be bad if their size does not
++                           // match the size of the other operand
+   }
+   Datatype *newtype;
+   if (invn->isSpacebase()) {
+@@ -1481,6 +1484,9 @@ Datatype *TypeOpIntAnd::propagateType(Datatype *alttype,PcodeOp *op,Varnode *inv
+       return (Datatype *)0;
+     if (floatSignManipulation(op) == CPUI_MAX)
+       return (Datatype *)0;
++  } else if (invn->isConstant() && !outvn->isConstant()) {
++	return (Datatype *)0;  // propagating enum types set by ActionPropagateEnums may be bad if their size does not
++                           // match the size of the other operand
+   }
+   Datatype *newtype;
+   if (invn->isSpacebase()) {
+@@ -1510,6 +1516,9 @@ Datatype *TypeOpIntOr::propagateType(Datatype *alttype,PcodeOp *op,Varnode *invn
+ 				     int4 inslot,int4 outslot)
+ {
+   if (!alttype->isEnumType()) return (Datatype *)0; // Only propagate enums
++  if (invn->isConstant() && !outvn->isConstant())
++    return (Datatype *)0;  // propagating enum types set by ActionPropagateEnums may be bad if their size does not
++                           // match the size of the other operand
+   Datatype *newtype;
+   if (invn->isSpacebase()) {
+     AddrSpace *spc = tlst->getArch()->getDefaultDataSpace();
+-- 
+2.45.1
+
