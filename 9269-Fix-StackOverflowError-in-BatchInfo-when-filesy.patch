@@ -1,0 +1,114 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Platon <nxt8787@gmail.com>
+Date: Thu, 11 Jun 2026 16:51:03 +0200
+Subject: [PATCH] 9269: Fix StackOverflowError in BatchInfo when filesystem
+ contains cycles
+
+The batch importer descends into filesystems via two recursive paths in
+BatchInfo.doAddFile():
+
+  1. file.isDirectory() -> processFS(file.getFilesystem(), file, ...)
+  2. processAsFS(fsrl) -> shouldTerminateRecurse() -> processFS(fs, ...)
+
+Path 2 is guarded by the maxDepth check in shouldTerminateRecurse(), but
+path 1 (the directory case) has no depth guard at all. When a filesystem
+contains a cycle - an NTFS junction pointing at an ancestor, a symlink
+loop, a self-referencing archive container, or a directory tree with
+back-references - the doAddFile -> processFS -> doAddFile chain recurses
+without bound and the JVM eventually crashes:
+
+  java.lang.StackOverflowError
+      at ghidra.formats.gfilesystem.FileSystemRef.<init>(...)
+      at ghidra.formats.gfilesystem.FileSystemRefManager.create(...)
+      at ghidra.plugins.importer.batch.BatchInfo.doAddFile(BatchInfo.java:226)
+      at ghidra.plugins.importer.batch.BatchInfo.processFS(BatchInfo.java:352)
+      [repeating thousands of times]
+
+This change adds two complementary defences inside doAddFile():
+
+  - A Set<FSRL> visitedFSRLs tracks every FSRL the batch session has
+    already processed. If doAddFile() is called with an FSRL it has
+    already seen, it logs a warning and returns immediately, breaking
+    the cycle. This is the precise fix: it identifies the actual cycle
+    by FSRL equality, regardless of how many levels deep the recursion
+    has gone.
+
+  - A static HARD_MAX_NEST_DEPTH (32) backstops the FSRL set in the
+    unlikely case that an adversarial filesystem produces an unbounded
+    stream of distinct FSRLs that never repeat. Path 2's maxDepth check
+    is bypassed when the user constructs BatchInfo with MAXDEPTH_UNLIMITED
+    (-1) or 0, so the static cap is the only guarantee against stack
+    exhaustion in that mode.
+
+Both guards write a single Msg.warn() so the user sees why a subtree
+was skipped, rather than silently dropping files or crashing.
+
+Backwards compatible: no public API changes, no behaviour change for
+inputs that do not cycle. The Set is allocated once per BatchInfo
+instance and only ever grows for the lifetime of that session.
+
+Reproducer: Batch Import on a directory containing an NTFS junction
+that points back at the directory itself, or any container whose
+internal filesystem references an ancestor.
+---
+ .../plugins/importer/batch/BatchInfo.java     | 37 +++++++++++++++++++
+ 1 file changed, 37 insertions(+)
+
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/plugins/importer/batch/BatchInfo.java b/Ghidra/Features/Base/src/main/java/ghidra/plugins/importer/batch/BatchInfo.java
+index 7850788e53..41be66cf3f 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/plugins/importer/batch/BatchInfo.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/plugins/importer/batch/BatchInfo.java
+@@ -60,6 +60,23 @@ public class BatchInfo {
+ 	private List<UserAddedSourceInfo> userAddedSources =
+ 		Collections.synchronizedList(new ArrayList<>());
+ 
++	/**
++	 * Tracks FSRLs already visited during the current batch session. Used to
++	 * detect filesystem cycles (symlink loops, self-referencing archives,
++	 * directory junctions, etc.) and prevent infinite recursion that would
++	 * otherwise cause {@link StackOverflowError} in the {@code doAddFile} /
++	 * {@code processFS} chain.
++	 */
++	private Set<FSRL> visitedFSRLs = Collections.synchronizedSet(new HashSet<>());
++
++	/**
++	 * Hard upper bound on filesystem nesting depth, enforced regardless of
++	 * {@link #maxDepth}. Belt-and-suspenders for cases where FSRL identity
++	 * comparison fails to detect a cycle (e.g., FSRLs that grow without ever
++	 * repeating).
++	 */
++	private static final int HARD_MAX_NEST_DEPTH = 32;
++
+ 	/**
+ 	 * Maximum depth of containers (ie. filesystems) to recurse into when processing
+ 	 * a file added by the user.
+@@ -220,6 +237,26 @@ public class BatchInfo {
+ 
+ 		// use the fsrl param instead of file.getFSRL() as param may have more info (ie. md5)
+ 
++		// Cycle detection: if this FSRL was already visited in the current batch
++		// session, skip it to break filesystem cycles (symlink loops, self-
++		// referencing archives, NTFS junctions, deep directory trees with
++		// back-references, etc.). Without this, doAddFile -> processFS ->
++		// doAddFile can recurse without bound and crash with StackOverflowError.
++		if (!visitedFSRLs.add(fsrl)) {
++			Msg.warn(this,
++				"BatchInfo: cycle detected, skipping already-visited FSRL: " + fsrl);
++			return false;
++		}
++
++		// Hard depth fallback: even if FSRL identity check misses a cycle (e.g.,
++		// FSRLs that grow without ever repeating), enforce an absolute cap so a
++		// pathological filesystem cannot consume the entire JVM stack.
++		if (fsrl.getNestingDepth() > HARD_MAX_NEST_DEPTH) {
++			Msg.warn(this, "BatchInfo: hard nesting depth limit (" +
++				HARD_MAX_NEST_DEPTH + ") reached, skipping: " + fsrl);
++			return false;
++		}
++
+ 		try (RefdFile refdFile = fsService.getRefdFile(fsrl, taskMonitor)) {
+ 			GFile file = refdFile.file;
+ 			if (file.isDirectory()) {
+-- 
+2.45.1
+
