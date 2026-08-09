@@ -17,10 +17,10 @@ Subject: [PATCH] 8312: Decompiler support for typed pointer offsets
  10 files changed, 206 insertions(+), 37 deletions(-)
 
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
-index c1d524868c..20ea789afa 100644
+index 6ef880f0f1..24f439135d 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
-@@ -5839,6 +5839,7 @@ void ActionDatabase::universalAction(Architecture *conf)
+@@ -6064,6 +6064,7 @@ void ActionDatabase::universalAction(Architecture *conf)
  	actprop2->addRule( new RulePushPtr("typerecovery") );
  	actprop2->addRule( new RuleStructOffset0("typerecovery") );
  	actprop2->addRule( new RulePtrArith("typerecovery") );
@@ -29,7 +29,7 @@ index c1d524868c..20ea789afa 100644
  	actprop2->addRule( new RuleLoadVarnode("stackvars") );
  	actprop2->addRule( new RuleStoreVarnode("stackvars") );
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/printc.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/printc.hh
-index 75fa30cf78..2a216518b8 100644
+index 661936087d..e4a05edb44 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/printc.hh
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/printc.hh
 @@ -146,6 +146,7 @@ public:
@@ -41,10 +41,10 @@ index 75fa30cf78..2a216518b8 100644
    bool option_NULL;		///< Set to \b true if we should emit NULL keyword
    bool option_inplace_ops;	///< Set to \b true if we should use '+=' '&=' etc.
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/ruleaction.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/ruleaction.hh
-index 52802f229f..189976932e 100644
+index 99e7d55e42..f0b205f3ef 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/ruleaction.hh
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/ruleaction.hh
-@@ -1140,6 +1140,16 @@ public:
+@@ -1092,6 +1092,16 @@ public:
    virtual int4 applyOp(PcodeOp *op,Funcdata &data);
    static int4 evaluatePointerExpression(PcodeOp *op,int4 slot);
  };
@@ -62,7 +62,7 @@ index 52802f229f..189976932e 100644
  public:
    RuleStructOffset0(const string &g) : Rule(g, 0, "structoffset0") {}	///< Constructor
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/type.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/type.hh
-index b758e634f3..8a1db872c9 100644
+index 50d051a53a..c8127572de 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/type.hh
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/type.hh
 @@ -78,17 +78,18 @@ extern void print_data(ostream &s,uint1 *buffer,int4 size,const Address &baseadd
@@ -140,25 +140,25 @@ index b758e634f3..8a1db872c9 100644
    SUB_PTRREL = 5,		///< Pointer relative to another data-type, sub-type of TYPE_PTR
    SUB_PTR_STRUCT = 4,		///< Pointer into struct, sub-type of TYPE_PTR
    SUB_ARRAY = 3,		///< Compare as TYPE_ARRAY
-@@ -166,7 +169,7 @@ struct DatatypeCompare;
- /// Used for symbols, function prototypes, type propagation etc.
- class Datatype {
+@@ -175,7 +178,7 @@ public:
+     int4 elSize;	///< Element size responsive to query
+   };
  protected:
 -  static sub_metatype base2sub[18];
 +  static sub_metatype base2sub[19];
    /// Boolean properties of datatypes
    enum {
      coretype = 1,		///< This is a basic type which will never be redefined
-@@ -251,6 +254,8 @@ public:
-   virtual int8 nearestArrayedComponentForward(int8 off,int8 max,int8 *newoff,int8 *elSize) const;
-   virtual int8 nearestArrayedComponentBackward(int8 off,int8 max,int8 *newoff,int8 *elSize) const;
+@@ -259,6 +262,8 @@ public:
+   virtual bool nearestArrayedComponentForward(int8 off,Nearest &res) const;
+   virtual bool nearestArrayedComponentBackward(int8 off,Nearest &res) const;
  
 +  virtual bool isPointerOff(void) const { return false; }
 +
    /// \brief Get number of bytes at the given offset that are padding
    ///
    /// For the given offset into \b this data-type, determine if the byte at that offset is considered
-@@ -760,6 +765,30 @@ public:
+@@ -777,6 +782,30 @@ public:
    static Datatype *getPtrToFromParent(Datatype *base,int4 off,TypeFactory &typegrp);
  };
  
@@ -202,7 +202,7 @@ index 8d6b255d23..653ac1ee46 100644
    virtual void printRaw(ostream &s,const PcodeOp *op);
  };
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/modelrules.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/modelrules.cc
-index adfa63f9fc..b6fd816ed2 100644
+index 31c3b40630..6c40969720 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/modelrules.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/modelrules.cc
 @@ -190,6 +190,7 @@ bool PrimitiveExtractor::extract(Datatype *dt,int4 max,int4 offset)
@@ -214,7 +214,7 @@ index adfa63f9fc..b6fd816ed2 100644
  	return false;
        primitives.emplace_back(dt,offset);
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/printc.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/printc.cc
-index ec23229d4c..7112bd830c 100644
+index 4b31bbc232..6a23c7a67c 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/printc.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/printc.cc
 @@ -105,6 +105,7 @@ const string PrintC::KEYWORD_DEFAULT = "default";
@@ -260,10 +260,10 @@ index ec23229d4c..7112bd830c 100644
    return false;
  }
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc
-index 65a1aa4da7..b3b480e72c 100644
+index e7caf45003..a8d1cff0d4 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc
-@@ -7937,6 +7937,65 @@ int4 RulePtrArith::applyOp(PcodeOp *op,Funcdata &data)
+@@ -6728,6 +6728,65 @@ int4 RulePtrArith::applyOp(PcodeOp *op,Funcdata &data)
    return 0;
  }
  
@@ -330,7 +330,7 @@ index 65a1aa4da7..b3b480e72c 100644
  /// \brief Convert a LOAD or STORE to the first element of a structure to a PTRSUB.
  ///
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/type.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/type.cc
-index 8002078727..df82586229 100644
+index d8cd6229a2..68d54be9b3 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/type.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/type.cc
 @@ -20,9 +20,9 @@ namespace ghidra {
@@ -345,7 +345,7 @@ index 8002078727..df82586229 100644
      SUB_SPACEBASE, SUB_VOID
  };
  
-@@ -272,6 +272,9 @@ void metatype2string(type_metatype metatype,string &res)
+@@ -265,6 +265,9 @@ void metatype2string(type_metatype metatype,string &res)
    case TYPE_PTRREL:
      res = "ptrrel";
      break;
@@ -355,7 +355,7 @@ index 8002078727..df82586229 100644
    case TYPE_ARRAY:
      res = "array";
      break;
-@@ -334,6 +337,8 @@ type_metatype string2metatype(const string &metastring)
+@@ -327,6 +330,8 @@ type_metatype string2metatype(const string &metastring)
        return TYPE_PTR;
      else if (metastring=="ptrrel")
        return TYPE_PTRREL;
@@ -364,7 +364,7 @@ index 8002078727..df82586229 100644
      else if (metastring=="partunion")
        return TYPE_PARTIALUNION;
      else if (metastring=="partstruct")
-@@ -3247,6 +3252,32 @@ Datatype *TypePointerRel::getPtrToFromParent(Datatype *base,int4 off,TypeFactory
+@@ -3302,6 +3307,32 @@ Datatype *TypePointerRel::getPtrToFromParent(Datatype *base,int4 off,TypeFactory
    return base;
  }
  
@@ -397,7 +397,7 @@ index 8002078727..df82586229 100644
  /// Turn on the data-type's function prototype
  /// \param tfact is the factory that owns \b this
  /// \param sig is the list of names and data-types making up the prototype
-@@ -5064,6 +5095,15 @@ Datatype *TypeFactory::decodeTypeNoRef(Decoder &decoder,bool forcecore)
+@@ -5189,6 +5220,15 @@ Datatype *TypeFactory::decodeTypeNoRef(Decoder &decoder,bool forcecore)
        ct = findAdd(tp);
      }
      break;

@@ -1,0 +1,208 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: burhan_250 <burhan_250@live.de>
+Date: Thu, 6 Aug 2026 14:09:31 +0200
+Subject: [PATCH] 9481: #9480 Decompiler: postpone dead-code removal while late
+ heritage ranges are still appearing
+
+---
+ .../Decompiler/certification.manifest         |  1 +
+ .../Decompiler/src/decompile/cpp/heritage.cc  | 28 +++++-
+ .../decompile/datatests/varargsavearea.xml    | 94 +++++++++++++++++++
+ 3 files changed, 119 insertions(+), 4 deletions(-)
+ create mode 100644 Ghidra/Features/Decompiler/src/decompile/datatests/varargsavearea.xml
+
+diff --git a/Ghidra/Features/Decompiler/certification.manifest b/Ghidra/Features/Decompiler/certification.manifest
+index 05852e5af4..a0045dd7cf 100644
+--- a/Ghidra/Features/Decompiler/certification.manifest
++++ b/Ghidra/Features/Decompiler/certification.manifest
+@@ -116,6 +116,7 @@ src/decompile/datatests/switchreturn.xml||GHIDRA||||END|
+ src/decompile/datatests/threedim.xml||GHIDRA||||END|
+ src/decompile/datatests/twodim.xml||GHIDRA||||END|
+ src/decompile/datatests/union_datatype.xml||GHIDRA||||END|
++src/decompile/datatests/varargsavearea.xml||GHIDRA||||END|
+ src/decompile/datatests/varcross.xml||GHIDRA||||END|
+ src/decompile/datatests/wayoffarray.xml||GHIDRA||||END|
+ src/decompile/datatests/wraprange.xml||GHIDRA||||END|
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/heritage.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/heritage.cc
+index 6aea819e43..93c3d40029 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/heritage.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/heritage.cc
+@@ -205,10 +205,11 @@ HeritageInfo::HeritageInfo(AddrSpace *spc)
+ void HeritageInfo::reset(void)
+ 
+ {
+-  // Leave any override intact: deadcodedelay = delay;
+   deadremoved = 0;
+-  if (space != (AddrSpace *)0)
++  if (space != (AddrSpace *)0) {
++    deadcodedelay = space->getDeadcodeDelay();	// Restore any augmented delay (overrides are reapplied when processing restarts)
+     hasCallPlaceholders = (space->getType() == IPTR_SPACEBASE);
++  }
+   warningissued = false;
+   loadGuardSearch = false;
+ }
+@@ -2605,7 +2606,10 @@ void Heritage::bumpDeadcodeDelay(AddrSpace *spc)
+     return;			// there is already a global delay
+   if (fd->getOverride().hasDeadcodeDelay(spc))
+     return;			// A delay has already been installed
+-  fd->getOverride().insertDeadcodeDelay(spc,spc->getDeadcodeDelay()+1);
++  int4 newDelay = getInfo(spc)->deadcodedelay + 1;
++  if (newDelay < pass)
++    newDelay = pass;	// Delay dead code past the pass that discovered the new Varnodes
++  fd->getOverride().insertDeadcodeDelay(spc,newDelay);
+   fd->setRestartPending(true);
+ }
+ 
+@@ -2724,6 +2728,7 @@ void Heritage::heritage(void)
+       }
+     }
+     needwarning = false;
++    bool latediscovery = false;
+     iter = fd->beginLoc(info->space);
+     enditer = fd->endLoc(info->space);
+ 
+@@ -2734,11 +2739,16 @@ void Heritage::heritage(void)
+       if (vn->isWriteMask()) continue;
+       int4 prev = 0;
+       LocationMap::iterator liter = globaldisjoint.add(vn->getAddr(),vn->getSize(),pass,prev);
+-      if (prev == 0)		// All new location being heritaged, or intersecting with something new
++      if (prev == 0) {		// All new location being heritaged, or intersecting with something new
++	if (pass > info->delay)
++	  latediscovery = true;	// New range discovered after the space's first heritage pass
+ 	disjoint.add((*liter).first,(*liter).second.size,MemRange::new_addresses);
++      }
+       else if (prev==2) { // If completely contained in range from previous pass
+ 	if (vn->isHeritageKnown()) continue; // Don't heritage if we don't have to 
+ 	if (vn->hasNoDescend()) continue;
++	if (pass > info->delay)
++	  latediscovery = true;	// New Varnode in an old range, after the space's first heritage pass
+ 	if ((!needwarning)&&(info->deadremoved>0)&&!fd->isJumptableRecoveryOn()) {
+ 	  needwarning = true;
+ 	  bumpDeadcodeDelay(vn->getSpace());
+@@ -2747,6 +2757,8 @@ void Heritage::heritage(void)
+ 	disjoint.add((*liter).first,(*liter).second.size,MemRange::old_addresses);
+       }
+       else {	// Partially contained in old range, but may contain new stuff
++	if (pass > info->delay)
++	  latediscovery = true;	// New range discovered after the space's first heritage pass
+ 	disjoint.add((*liter).first,(*liter).second.size,MemRange::old_addresses | MemRange::new_addresses);
+ 	if ((!needwarning)&&(info->deadremoved>0)&&!fd->isJumptableRecoveryOn()) {
+ 	  // TODO: We should check if this varnode is tiled by previously heritaged ranges
+@@ -2759,6 +2771,14 @@ void Heritage::heritage(void)
+       }
+     }
+ 
++    if (latediscovery && info->delay > 0 && info->deadremoved == 0 && info->deadcodedelay <= pass &&
++	!fd->isJumptableRecoveryOn()) {
++      // Late discoveries are still being made for this space, but dead code removal has not
++      // yet occurred.  Delay dead code removal further, as data-flow that will reach the new
++      // Varnodes (through simplification of indirect pointers) may still be uncovered.
++      info->deadcodedelay = pass + 1;
++    }
++
+     if (needwarning) {
+       if (!info->warningissued) {
+ 	info->warningissued = true;
+diff --git a/Ghidra/Features/Decompiler/src/decompile/datatests/varargsavearea.xml b/Ghidra/Features/Decompiler/src/decompile/datatests/varargsavearea.xml
+new file mode 100644
+index 0000000000..5212b3f786
+--- /dev/null
++++ b/Ghidra/Features/Decompiler/src/decompile/datatests/varargsavearea.xml
+@@ -0,0 +1,94 @@
++<decompilertest>
++<binaryimage arch="x86:LE:64:default:gcc">
++  <!--
++      gcc -O0 x86-64 varargs register save area reproducer (3 variadic shapes).
++
++      sink6        (0x1129):  long sink6(long,long,long,long,long,long)
++      fcntl_like   (0x116e):  int  fcntl_like(int fd, int cmd, ...)
++                              arg = va_arg(ap, unsigned long);
++                              if (cmd == 4) arg |= 0x8000;
++                              return (int)sink6(fd, cmd, arg, 0, 0, 0);
++      ptrace_like  (0x1283):  long ptrace_like(int req, ...)  - three va_args
++      syscall_like (0x141b):  long syscall_like(long n, ...)  - six va_args
++                              (the sixth comes from the caller's stack)
++
++      In each prologue the compiler spills RSI/RDX/RCX/R8/R9 (and, behind a
++      test of AL, XMM0-7) into the register save area; va_arg then reads the
++      slots back through the va_list reg_save_area pointer.  The spill stores
++      are direct stack writes heritaged on the stack space's first heritage
++      pass; the va_arg reads only become direct stack reads several passes
++      later, after the va_list pointer arithmetic constant-folds.  Dead code
++      elimination must not run for the stack space before those reads are
++      linked, otherwise the spill stores are removed and the decompiled body
++      consumes never-written locals.  The va_arg values must surface as
++      variadic parameters (param_3 / param_2..param_4 / param_3..param_7).
++  -->
++<bytechunk space="ram" offset="0x1129" readonly="true">
++554889e548897df8488975f0488955e848894de04c8945d84c894dd0488b55f8
++488b45f04801c2488b45e84801c2488b45e04801c2488b45d84801c2488b45d0
++4801d05dc3554889e54881ece000000089bd2cffffff89b528ffffff48899560
++ffffff48898d68ffffff4c898570ffffff4c898d78ffffff84c074200f294580
++0f294d900f2.45.10f295db00f2965c00f296dd00f2975e00f297df0c78530ff
++ffff10000000c78534ffffff30000000488d451048898538ffffff488d8550ff
++ffff48898540ffffff8b8530ffffff83f82f7723488b8540ffffff8b9530ffff
++ff89d24801d08b9530ffffff83c208899530ffffffeb12488b8538ffffff488d
++500848899538ffffff488b0048898548ffffff83bd28ffffff04750b48818d48
++ffffff00800000488b9548ffffff8b8528ffffff4863f08b852cffffff489841
++b90000000041b800000000b9000000004889c7e8a8feffffc9c3554889e54881
++ecf000000089bd1cffffff4889b558ffffff48899560ffffff48898d68ffffff
++4c898570ffffff4c898d78ffffff84c074200f2945800f294d900f2.45.10f29
++5db00f2965c00f296dd00f2975e00f297df0c78520ffffff08000000c78524ff
++ffff30000000488d451048898528ffffff488d8550ffffff48898530ffffff8b
++8520ffffff83f82f7723488b8530ffffff8b9520ffffff89d24801d08b9520ff
++ffff83c208899520ffffffeb12488b8528ffffff488d500848899528ffffff48
++8b0048898548ffffff8b8520ffffff83f82f7723488b8530ffffff8b9520ffff
++ff89d24801d08b9520ffffff83c208899520ffffffeb12488b8528ffffff488d
++500848899528ffffff488b0048898540ffffff8b8520ffffff83f82f7723488b
++8530ffffff8b9520ffffff89d24801d08b9520ffffff83c208899520ffffffeb
++12488b8528ffffff488d500848899528ffffff488b0048898538ffffff488b8d
++40ffffff8b851cffffff4898488bb538ffffff488b9548ffffff41b900000000
++4989f04889c6bf65000000e810fdffffc9c3554889e54881ec100100004889bd
++f8feffff4889b558ffffff48899560ffffff48898d68ffffff4c898570ffffff
++4c898d78ffffff84c074200f2945800f294d900f2.45.10f295db00f2965c00f
++296dd00f2975e00f297df0c78508ffffff08000000c7850cffffff3000000048
++8d451048898510ffffff488d8550ffffff48898518ffffff8b8508ffffff83f8
++2f7723488b8518ffffff8b9508ffffff89d24801d08b9508ffffff83c2088995
++08ffffffeb12488b8510ffffff488d500848899510ffffff488b0048898548ff
++ffff8b8508ffffff83f82f7723488b8518ffffff8b9508ffffff89d24801d08b
++9508ffffff83c208899508ffffffeb12488b8510ffffff488d500848899510ff
++ffff488b0048898540ffffff8b8508ffffff83f82f7723488b8518ffffff8b95
++08ffffff89d24801d08b9508ffffff83c208899508ffffffeb12488b8510ffff
++ff488d500848899510ffffff488b0048898538ffffff8b8508ffffff83f82f77
++23488b8518ffffff8b9508ffffff89d24801d08b9508ffffff83c208899508ff
++ffffeb12488b8510ffffff488d500848899510ffffff488b0048898530ffffff
++8b8508ffffff83f82f7723488b8518ffffff8b9508ffffff89d24801d08b9508
++ffffff83c208899508ffffffeb12488b8510ffffff488d500848899510ffffff
++488b0048898528ffffff8b8508ffffff83f82f7723488b8518ffffff8b9508ff
++ffff89d24801d08b9508ffffff83c208899508ffffffeb12488b8510ffffff48
++8d500848899510ffffff488b0048898520ffffff488b9548ffffff488b85f8fe
++ffff488d3c024c8b8520ffffff488bb528ffffff488b8d30ffffff488b9538ff
++ffff488b8540ffffff4d89c14989f04889c6e889faffffc9c3
++</bytechunk>
++</binaryimage>
++<script>
++  <com>map fun r0x1129 sink6</com>
++  <com>map fun r0x116e fcntl_like</com>
++  <com>map fun r0x1283 ptrace_like</com>
++  <com>map fun r0x141b syscall_like</com>
++  <com>lo fu fcntl_like</com>
++  <com>decompile</com>
++  <com>print C</com>
++  <com>lo fu ptrace_like</com>
++  <com>decompile</com>
++  <com>print C</com>
++  <com>lo fu syscall_like</com>
++  <com>decompile</com>
++  <com>print C</com>
++  <com>quit</com>
++</script>
++<stringmatch name="Varargs save area #1" min="1" max="1">fcntl_like\(int4 param_1,int4 param_2,uint8 param_3\)</stringmatch>
++<stringmatch name="Varargs save area #2" min="1" max="1">param_3 \| 0x8000</stringmatch>
++<stringmatch name="Varargs save area #3" min="1" max="1">sink6\(0x65,\(int8\)param_1,param_2,param_3,param_4,0\)</stringmatch>
++<stringmatch name="Varargs save area #4" min="1" max="1">sink6\(param_2 \+ param_1,param_3,param_4,param_5,param_6,param_7\)</stringmatch>
++<stringmatch name="Varargs save area #5" min="0" max="0">AFTER dead removal</stringmatch>
++</decompilertest>
+-- 
+2.45.1
+

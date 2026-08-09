@@ -1,0 +1,67 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: axd1x8a <sign@axd1x8a.me>
+Date: Mon, 13 Jul 2026 17:02:34 +0300
+Subject: [PATCH] 9370: Fix merge crash on structure data types
+
+Fix merge crash on structure data types
+
+Fix stale ordinal handling for out-of-range ordinals
+---
+ .../merge/datatypes/DataTypeMergeManager.java | 33 +++++++++++--------
+ 1 file changed, 20 insertions(+), 13 deletions(-)
+
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/merge/datatypes/DataTypeMergeManager.java b/Ghidra/Features/Base/src/main/java/ghidra/app/merge/datatypes/DataTypeMergeManager.java
+index 05d6ca7113..20cddea927 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/merge/datatypes/DataTypeMergeManager.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/merge/datatypes/DataTypeMergeManager.java
+@@ -2580,13 +2580,12 @@ public class DataTypeMergeManager implements MergeResolver {
+ 		int ordinal = info.resultOrdinal;
+ 
+ 		DataTypeComponent dtc;
+-		if (ordinal >= 0 || ordinal < struct.getNumComponents()) {
+-			dtc = struct.getComponent(ordinal);
+-		}
+-		else {
+-			throw new AssertException(
+-				"Expected fixup component at ordinal " + ordinal + " in " + struct.getPathName());
+-		}
++		if (ordinal < 0 || ordinal >= struct.getNumComponents()) {
++            throw new AssertException(
++                "Expected fixup component at ordinal " + ordinal + " in " + struct.getPathName());
++        }
++
++		dtc = struct.getComponent(ordinal);
+ 
+ 		long lastChangeTime = struct.getLastChangeTime(); // Don't let the time change.
+ 		try {
+@@ -2676,13 +2675,21 @@ public class DataTypeMergeManager implements MergeResolver {
+ 
+ 		int ordinal = info.resultOrdinal;
+ 
+-		DataTypeComponent dtc;
+-		if (ordinal >= 0 || ordinal < struct.getNumComponents()) {
+-			dtc = struct.getComponent(ordinal);
++		DataTypeComponent dtc = null;
++		if (info.offset >= 0) {
++			DataTypeComponent atOffset = struct.getComponentAt(info.offset);
++			if (atOffset != null && atOffset.getDataType() == BadDataType.dataType) {
++				dtc = atOffset;
++				ordinal = dtc.getOrdinal();
++			}
+ 		}
+-		else {
+-			throw new AssertException(
+-				"Expected fixup component at ordinal " + ordinal + " in " + struct.getPathName());
++
++		if (dtc == null) {
++			if (ordinal < 0 || ordinal >= struct.getNumComponents()) {
++				throw new AssertException(
++					"Expected fixup component at ordinal " + ordinal + " in " + struct.getPathName());
++			}
++			dtc = struct.getComponent(ordinal);
+ 		}
+ 
+ 		long lastChangeTime = struct.getLastChangeTime(); // Don't let the time change.
+-- 
+2.45.1
+

@@ -1,0 +1,181 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Fran=C3=A7ois=20Guerraz?= <francois@orographic.uk>
+Date: Sun, 5 Jul 2026 12:45:47 +0200
+Subject: [PATCH] 9348: Golang: recover symbols from stripped Go 1.24/1.25
+ (swiss-map) binaries
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Golang: don't let one bad type abort all type markup
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+GolangSymbolAnalyzer.added() runs GoTypeManager.markupGoTypes() before it
+names functions (markupGoFunctions()), with the whole sequence sharing a
+single try/catch. markupGoTypes() iterated every discovered type and called
+markupSession.markup() with no per-type error handling, so a single type
+whose markup throws — e.g. a mis-recovered rtti type in a stripped binary
+whose name offset resolves out of bounds — aborted markup of every remaining
+type AND the later function-naming pass. The analyzer's transaction is then
+rolled back, leaving the program with zero recovered Go symbols (main.main
+and all Go functions unresolved).
+
+Wrap each type's markup in a try/catch that logs and continues, matching the
+existing per-type guard in the type-discovery loop, so one bad type no longer
+sinks the entire Go analysis.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+Golang: reject out-of-bounds rtti name offsets instead of throwing
+
+resolveNameOff() computes a name address as module.getTypesOffset() + off and
+reads a GoName there. A name offset is relative to the module's types base
+and must land within its [types, etypes) region. On stripped Go >= 1.25
+binaries one rtti type's pkgPath name offset reads back as a large garbage
+value (~0x30580201), so the computed address lands far past the end of the
+program image and readStructure() throws EOFException. That exception
+propagated out of the whole Go analysis pass, leaving the program with no
+recovered Go symbols.
+
+Validate the resolved offset against the module's type region and return null
+(no name) when it falls outside, rather than reading an out-of-bounds address.
+The affected type is still recovered, just without the bogus package-path
+qualifier.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+Golang: resolve stripped 1.24/1.25 maps as SwissMapType
+
+GoMapType's structureName candidate list was missing
+internal/abi.SwissMapType. For Go 1.24 and 1.25 the swiss-table map
+struct is named internal/abi.SwissMapType (only in 1.26 was it renamed
+to the canonical internal/abi.MapType, and in <=1.23 the old map is
+internal/abi.MapType). Because swiss maps are the default since 1.24,
+default-built 1.24/1.25 binaries emit SwissMapType rtti, but resolution
+fell through the candidate list to the 88-byte internal/abi.OldMapType.
+The 112-byte swiss struct was then under-read, so getEndOfTypeInfo
+stopped 24 bytes early and findUnindexedClosureStructTypes scanned into
+the middle of the real struct, indexing phantom types whose garbage
+pkgPath name-offset threw EOFException during markup and rolled back the
+whole analyzer -> zero recovered symbols on stripped binaries.
+
+Add internal/abi.SwissMapType to the candidate list (ahead of
+OldMapType) and gate the map fields by layout instead of the previous
+1.25/1.26 boundary: the old bucket/keysize/elemsize/bucketsize fields are
+present only for -1.23, and group is present for 1.24- (swiss).
+
+Verified on stripped linux-amd64 reproducers built with a custom
+http.Transport DialContext (the original crash trigger): stock master
+recovers 3 named funcs and crashes on 1.24 and 1.25; with this change
+1.24/1.25/1.26 recover 5776/5878/6155 named funcs with main.main,
+runtime.main and net/http.(*Client).Get all resolved, and 1.23 is
+byte-for-byte unchanged (5402 named). No apisnapshot regeneration
+required.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+---
+ .../bin/format/golang/rtti/GoRttiMapper.java    | 17 +++++++++++++++++
+ .../bin/format/golang/rtti/GoTypeManager.java   | 12 +++++++++++-
+ .../bin/format/golang/rtti/types/GoMapType.java | 13 +++++++------
+ 3 files changed, 35 insertions(+), 7 deletions(-)
+
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/golang/rtti/GoRttiMapper.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/golang/rtti/GoRttiMapper.java
+index a33ad837a3..7cc6e31c72 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/golang/rtti/GoRttiMapper.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/golang/rtti/GoRttiMapper.java
+@@ -1065,6 +1065,23 @@ public class GoRttiMapper extends DataTypeMapper implements DataTypeMapperContex
+ 				"Unable to find containing module for structure at 0x%x".formatted(ptrInModule));
+ 		}
+ 		long nameStart = module.getTypesOffset() + off;
++		if (nameStart < module.getTypesOffset() || nameStart >= module.getTypesEndOffset()) {
++			// A name offset is relative to the module's types base and must
++			// resolve to an address within the module's type/name area
++			// [types, etypes).  A value outside that range means the referring
++			// structure's name offset is corrupt, or the structure was
++			// misidentified as a Go type (observed on stripped Go >= 1.25
++			// binaries, where one rtti type's pkgPath name offset reads as a
++			// large garbage value).  Return null (no name) rather than reading
++			// an out-of-bounds address, which throws an EOFException that
++			// aborts the entire Go analysis pass and leaves the program with
++			// no recovered Go symbols.
++			Msg.warn(this,
++				"Ignoring out-of-bounds Go name offset 0x%x for structure at 0x%x (module types [0x%x, 0x%x))"
++						.formatted(off, ptrInModule, module.getTypesOffset(),
++							module.getTypesEndOffset()));
++			return null;
++		}
+ 		return getGoName(nameStart);
+ 	}
+ 
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/golang/rtti/GoTypeManager.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/golang/rtti/GoTypeManager.java
+index f3b08b1f81..c34bf835eb 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/golang/rtti/GoTypeManager.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/golang/rtti/GoTypeManager.java
+@@ -165,7 +165,17 @@ public class GoTypeManager {
+ 		// were referenced from the firstModule struct
+ 		for (GoType goType : allTypes()) {
+ 			monitor.checkCancelled();
+-			markupSession.markup(goType, false);
++			try {
++				markupSession.markup(goType, false);
++			}
++			catch (IOException e) {
++				// Don't let one bad type (e.g. a mis-recovered type in a
++				// stripped binary whose name-offset resolves out of bounds)
++				// abort markup of every remaining type and the later function
++				// markup pass.  Log and continue.
++				Msg.warn(this, "Failed to markup Go type at %s"
++						.formatted(goType.getStructureContext().getStructureAddress()), e);
++			}
+ 		}
+ 	}
+ 
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/golang/rtti/types/GoMapType.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/golang/rtti/types/GoMapType.java
+index a8d59c2be0..0e1dcfad47 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/golang/rtti/types/GoMapType.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/golang/rtti/types/GoMapType.java
+@@ -30,7 +30,8 @@ import ghidra.util.Msg;
+  * Maps are passed by address, and in Go sizeof(mapvar) will always be ptrSize
+  */
+ @StructureMapping(
+-	structureName = { "runtime.maptype", "internal/abi.MapType", "internal/abi.OldMapType" }
++	structureName = { "runtime.maptype", "internal/abi.MapType", "internal/abi.SwissMapType",
++		"internal/abi.OldMapType" }
+ )
+ public class GoMapType extends GoType {
+ 
+@@ -42,24 +43,24 @@ public class GoMapType extends GoType {
+ 	@MarkupReference("getElement")
+ 	private long elem;	// ptr to type
+ 
+-	@FieldMapping(presentWhen = "-1.25")
++	@FieldMapping(presentWhen = "-1.23")
+ 	@MarkupReference("getBucket")
+ 	private long bucket;	// ptr to type
+ 
+-	@FieldMapping(presentWhen = "1.26-")
++	@FieldMapping(presentWhen = "1.24-")
+ 	@MarkupReference("getGroup")
+ 	private long group;	// ptr to group type
+ 
+ 	@FieldMapping
+ 	private long hasher;	// pointer to "func(Pointer, pointer) pointer"
+ 
+-	@FieldMapping(presentWhen = "-1.25")
++	@FieldMapping(presentWhen = "-1.23")
+ 	private int keysize;
+ 
+-	@FieldMapping(fieldName = { "elemsize", "ValueSize" }, presentWhen = "-1.25")
++	@FieldMapping(fieldName = { "elemsize", "ValueSize" }, presentWhen = "-1.23")
+ 	private int elemsize;
+ 
+-	@FieldMapping(presentWhen = "-1.25")
++	@FieldMapping(presentWhen = "-1.23")
+ 	private int bucketsize;
+ 
+ 	@FieldMapping
+-- 
+2.45.1
+

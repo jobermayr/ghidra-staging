@@ -646,6 +646,11 @@ extensions
 Merge branch 'master' into isa_ext
 
 restore missing uimm5 definition for RISC-V vector processing
+
+RISC-V Vector destination registers are often input registers too
+
+Vector ternary instructions need to mark destination registers as input
+registers too.
 ---
  .../Decompiler/certification.manifest         |    1 +
  .../datatests/riscv_isaext_memcpy.xml         |   30 +
@@ -660,8 +665,6 @@ restore missing uimm5 definition for RISC-V vector processing
  .../RISCV/data/languages/riscv.priv.sinc      |   44 +-
  .../RISCV/data/languages/riscv.reg.sinc       |    6 +
  .../RISCV/data/languages/riscv.rv32b.sinc     |  178 +-
- .../RISCV/data/languages/riscv.rv32d.sinc     |   10 +-
- .../RISCV/data/languages/riscv.rv32f.sinc     |   19 +-
  .../RISCV/data/languages/riscv.rv32i.sinc     |    6 +
  .../RISCV/data/languages/riscv.rv32p.sinc     |   44 +-
  .../RISCV/data/languages/riscv.rv64b.sinc     |   12 +-
@@ -682,7 +685,7 @@ restore missing uimm5 definition for RISC-V vector processing
  .../RISCV/data/languages/riscv.zvkng.sinc     |   55 +
  .../RISCV/data/languages/riscv.zvksg.sinc     |   19 +
  gradle/support/ip.gradle                      |    2 +
- 35 files changed, 6674 insertions(+), 772 deletions(-)
+ 33 files changed, 6658 insertions(+), 759 deletions(-)
  create mode 100644 Ghidra/Features/Decompiler/src/decompile/datatests/riscv_isaext_memcpy.xml
  create mode 100644 Ghidra/Features/Decompiler/src/decompile/unittests/riscv_isaext.cc
  create mode 100644 Ghidra/Processors/RISCV/data/languages/Readme_isa_extensions.md
@@ -703,17 +706,17 @@ restore missing uimm5 definition for RISC-V vector processing
  create mode 100644 Ghidra/Processors/RISCV/data/languages/riscv.zvksg.sinc
 
 diff --git a/Ghidra/Features/Decompiler/certification.manifest b/Ghidra/Features/Decompiler/certification.manifest
-index df910d79a3..dab77bc459 100644
+index 6efa8584bf..c8127132bc 100644
 --- a/Ghidra/Features/Decompiler/certification.manifest
 +++ b/Ghidra/Features/Decompiler/certification.manifest
-@@ -86,6 +86,7 @@ src/decompile/datatests/readvolatile.xml||GHIDRA||||END|
+@@ -89,6 +89,7 @@ src/decompile/datatests/readvolatile.xml||GHIDRA||||END|
  src/decompile/datatests/retspecial.xml||GHIDRA||||END|
  src/decompile/datatests/retstruct.xml||GHIDRA||||END|
  src/decompile/datatests/revisit.xml||GHIDRA||||END|
 +src/decompile/datatests/riscv_isaext_memcpy.xml||GHIDRA||||END|
  src/decompile/datatests/sbyte.xml||GHIDRA||||END|
  src/decompile/datatests/skipnext2.xml||GHIDRA||||END|
- src/decompile/datatests/stackreturn.xml||GHIDRA||||END|
+ src/decompile/datatests/stackcorner.xml||GHIDRA||||END|
 diff --git a/Ghidra/Features/Decompiler/src/decompile/datatests/riscv_isaext_memcpy.xml b/Ghidra/Features/Decompiler/src/decompile/datatests/riscv_isaext_memcpy.xml
 new file mode 100644
 index 0000000000..79df311c93
@@ -1166,10 +1169,10 @@ index 15a1daa1be..77a90bbe0f 100644
  
  # todos that may be possible, mostly just artifacts from my
 diff --git a/Ghidra/Processors/RISCV/data/languages/riscv.ldefs b/Ghidra/Processors/RISCV/data/languages/riscv.ldefs
-index 346f7d6fa7..4f57de1c81 100644
+index e2b30d398e..351542e23d 100644
 --- a/Ghidra/Processors/RISCV/data/languages/riscv.ldefs
 +++ b/Ghidra/Processors/RISCV/data/languages/riscv.ldefs
-@@ -33,5 +33,30 @@
+@@ -35,5 +35,30 @@
      <external_name tool="qemu" name="qemu-riscv32"/>
      <external_name tool="qemu_system" name="qemu-system-riscv32"/>
    </language>
@@ -1652,78 +1655,6 @@ index 46852a2aea..9deafd0f46 100644
  
 +define pcodeop xperm_n;
 +:xperm.nf rd, rs1, rs2 is op0006=0x33 & rd & op1214=0x2 & rs1 & rs2 & op2531=0x14 {rd=xperm_n(rs1,rs2);}
-diff --git a/Ghidra/Processors/RISCV/data/languages/riscv.rv32d.sinc b/Ghidra/Processors/RISCV/data/languages/riscv.rv32d.sinc
-index e8d298bfbe..f00ddcec38 100644
---- a/Ghidra/Processors/RISCV/data/languages/riscv.rv32d.sinc
-+++ b/Ghidra/Processors/RISCV/data/languages/riscv.rv32d.sinc
-@@ -61,17 +61,19 @@
- 
- 
- # fcvt.w.d d,S,m c2000053 fff0007f SIMPLE (0, 0) 
--:fcvt.w.d rdW,frs1D,FRM is frs1D & FRM & rdW & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct7=0x61 & op2024=0x0
-+:fcvt.w.d rd,frs1D,FRM is frs1D & FRM & rd & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct7=0x61 & op2024=0x0
- {
--	rdW = trunc(frs1D);
-+	local tmp:$(XLEN) = trunc(frs1D);
-+	rd = sext(tmp);
- }
- 
- 
- # fcvt.wu.d d,S,m c2100053 fff0007f SIMPLE (0, 0) 
--:fcvt.wu.d rdW,frs1D,FRM is frs1D & FRM & rdW & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct7=0x61 & op2024=0x1
-+:fcvt.wu.d rd,frs1D,FRM is frs1D & FRM & rd & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct7=0x61 & op2024=0x1
- {
- 	#TODO  unsigned
--	rdW = trunc(frs1D);
-+	local tmp:$(XLEN) = trunc(frs1D);
-+	rd = sext(tmp);
- }
- 
- 
-diff --git a/Ghidra/Processors/RISCV/data/languages/riscv.rv32f.sinc b/Ghidra/Processors/RISCV/data/languages/riscv.rv32f.sinc
-index e830008391..e53a3b8094 100644
---- a/Ghidra/Processors/RISCV/data/languages/riscv.rv32f.sinc
-+++ b/Ghidra/Processors/RISCV/data/languages/riscv.rv32f.sinc
-@@ -45,17 +45,19 @@
- 
- 
- # fcvt.w.s d,S,m c0000053 fff0007f SIMPLE (0, 0) 
--:fcvt.w.s rdW,frs1S,FRM is frs1S & FRM & rdW & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct7=0x60 & op2024=0x0
-+:fcvt.w.s rd,frs1S,FRM is frs1S & FRM & rd & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct7=0x60 & op2024=0x0
- {
--	rdW = trunc(frs1S);
-+	local tmp:$(WXLEN) = trunc(frs1S);
-+	rd = sext(tmp);
- }
- 
- 
- # fcvt.wu.s d,S,m c0100053 fff0007f SIMPLE (0, 0) 
--:fcvt.wu.s rdW,frs1S,FRM is frs1S & FRM & rdW & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct7=0x60 & op2024=0x1
-+:fcvt.wu.s rd,frs1S,FRM is frs1S & FRM & rd & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct7=0x60 & op2024=0x1
- {
--	#TODO  unsigned
--	rdW = trunc(frs1S);
-+	#TODO proper emulation needs a trunc_unsigned
-+	local tmp:$(WXLEN) = trunc(frs1S);
-+	rd = sext(tmp);
- }
- 
- 
-@@ -159,11 +161,10 @@
- }
- 
- # fmv.x.w d,S e0000053 fff0707f SIMPLE (0, 0) 
--:fmv.x.w rdW,frs1S is frs1S & rdW & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct3=0x0 & funct7=0x70 & op2024=0x0
-+:fmv.x.w rd,frs1S is frs1S & rd & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct3=0x0 & funct7=0x70 & op2024=0x0
- {
--	local tmpreg:4 = &frs1S;
--	local tmp:4 = *[register]:4 tmpreg;
--	rdW = tmp;
-+	local tmp:$(WXLEN) = trunc(frs1S);
-+	rd = sext(tmp);
- }
- 
- 
 diff --git a/Ghidra/Processors/RISCV/data/languages/riscv.rv32i.sinc b/Ghidra/Processors/RISCV/data/languages/riscv.rv32i.sinc
 index 0fbdfac2e1..93b91f79d2 100644
 --- a/Ghidra/Processors/RISCV/data/languages/riscv.rv32i.sinc
@@ -1940,7 +1871,7 @@ index 51849d3a64..c78a0b436f 100644
 +        frd = tmpfrs1;
 +}
 diff --git a/Ghidra/Processors/RISCV/data/languages/riscv.rvv.sinc b/Ghidra/Processors/RISCV/data/languages/riscv.rvv.sinc
-index bb37a6c42b..6fb5327056 100644
+index bb37a6c42b..638268bcd3 100644
 --- a/Ghidra/Processors/RISCV/data/languages/riscv.rvv.sinc
 +++ b/Ghidra/Processors/RISCV/data/languages/riscv.rvv.sinc
 @@ -38,1918 +38,5022 @@
@@ -2718,15 +2649,15 @@ index bb37a6c42b..6fb5327056 100644
 -# vfmsac.vf vd, rs1, vs2, vm    # vd[i] = +(f[rs1] * vs2[i]) - vd[i]
 -:vfmsac.vf  vd, rs1, vs2^ vm     is op2631=0x2e & vm & vs2 & rs1 & op1214=0x5 & vd & op0006=0x57  unimpl
 +# vfmsac.vf vd, frs1, vs2, vm    # vd[i] = +(f[rs1] * vs2[i]) - vd[i]
-+:vfmsac.vf  vd, frs1, vs2         is op2631=0x2e & op2525=0x1 & vs2 & frs1 & op1214=0x5 & vd & op0006=0x57 {vd=vfmsac_vf(frs1,vs2);}
-+:vfmsac.vf  vd, frs1, vs2, "v0.t" is op2631=0x2e & op2525=0x0 & vs2 & frs1 & op1214=0x5 & vd & op0006=0x57 {vd=vfmsac_vf(frs1,vs2,v0);}
++:vfmsac.vf  vd, frs1, vs2         is op2631=0x2e & op2525=0x1 & vs2 & frs1 & op1214=0x5 & vd & op0006=0x57 {vd=vfmsac_vf(frs1,vs2,vd);}
++:vfmsac.vf  vd, frs1, vs2, "v0.t" is op2631=0x2e & op2525=0x0 & vs2 & frs1 & op1214=0x5 & vd & op0006=0x57 {vd=vfmsac_vf(frs1,vs2,vd,v0);}
  
 +define pcodeop vfmsac_vv;
  # vfmsac.vv      31..26=0x2e vm vs2 vs1 14..12=0x1 vd 6..0=0x57
  # vfmsac.vv vd, vs1, vs2, vm    # vd[i] = +(vs1[i] * vs2[i]) - vd[i]
 -:vfmsac.vv  vd, vs1, vs2^ vm     is op2631=0x2e & vm & vs2 & vs1 & op1214=0x1 & vd & op0006=0x57  unimpl
-+:vfmsac.vv  vd, vs1, vs2         is op2631=0x2e & op2525=0x1 & vs2 & vs1 & op1214=0x1 & vd & op0006=0x57 {vd=vfmsac_vv(vs1,vs2);}
-+:vfmsac.vv  vd, vs1, vs2, "v0.t" is op2631=0x2e & op2525=0x0 & vs2 & vs1 & op1214=0x1 & vd & op0006=0x57 {vd=vfmsac_vv(vs1,vs2,v0);}
++:vfmsac.vv  vd, vs1, vs2         is op2631=0x2e & op2525=0x1 & vs2 & vs1 & op1214=0x1 & vd & op0006=0x57 {vd=vfmsac_vv(vs1,vs2,vd);}
++:vfmsac.vv  vd, vs1, vs2, "v0.t" is op2631=0x2e & op2525=0x0 & vs2 & vs1 & op1214=0x1 & vd & op0006=0x57 {vd=vfmsac_vv(vs1,vs2,vd,v0);}
  
 -# vfmsub.vf      31..26=0x2a vm vs2 rs1 14..12=0x5 vd 6..0=0x57
 -# vfmsub.vf vd, rs1, vs2, vm    # vd[i] = +(f[rs1] * vd[i]) - vs2[i]
@@ -2734,15 +2665,15 @@ index bb37a6c42b..6fb5327056 100644
 +define pcodeop vfmsub_vf;
 +# vfmsub.vf      31..26=0x2a vm vs2 frs1 14..12=0x5 vd 6..0=0x57
 +# vfmsub.vf vd, frs1, vs2, vm    # vd[i] = +(f[rs1] * vd[i]) - vs2[i]
-+:vfmsub.vf  vd, frs1, vs2         is op2631=0x2a & op2525=0x1 & vs2 & frs1 & op1214=0x5 & vd & op0006=0x57 {vd=vfmsub_vf(frs1,vs2);}
-+:vfmsub.vf  vd, frs1, vs2, "v0.t" is op2631=0x2a & op2525=0x0 & vs2 & frs1 & op1214=0x5 & vd & op0006=0x57 {vd=vfmsub_vf(frs1,vs2,v0);}
++:vfmsub.vf  vd, frs1, vs2         is op2631=0x2a & op2525=0x1 & vs2 & frs1 & op1214=0x5 & vd & op0006=0x57 {vd=vfmsub_vf(frs1,vs2,vd);}
++:vfmsub.vf  vd, frs1, vs2, "v0.t" is op2631=0x2a & op2525=0x0 & vs2 & frs1 & op1214=0x5 & vd & op0006=0x57 {vd=vfmsub_vf(frs1,vs2,vd,v0);}
  
 +define pcodeop vfmsub_vv;
  # vfmsub.vv      31..26=0x2a vm vs2 vs1 14..12=0x1 vd 6..0=0x57
  # vfmsub.vv vd, vs1, vs2, vm    # vd[i] = +(vs1[i] * vd[i]) - vs2[i]
 -:vfmsub.vv  vd, vs1, vs2^ vm     is op2631=0x2a & vm & vs2 & vs1 & op1214=0x1 & vd & op0006=0x57  unimpl
-+:vfmsub.vv  vd, vs1, vs2         is op2631=0x2a & op2525=0x1 & vs2 & vs1 & op1214=0x1 & vd & op0006=0x57 {vd=vfmsub_vv(vs1,vs2);}
-+:vfmsub.vv  vd, vs1, vs2, "v0.t" is op2631=0x2a & op2525=0x0 & vs2 & vs1 & op1214=0x1 & vd & op0006=0x57 {vd=vfmsub_vv(vs1,vs2,v0);}
++:vfmsub.vv  vd, vs1, vs2         is op2631=0x2a & op2525=0x1 & vs2 & vs1 & op1214=0x1 & vd & op0006=0x57 {vd=vfmsub_vv(vs1,vs2,vd);}
++:vfmsub.vv  vd, vs1, vs2, "v0.t" is op2631=0x2a & op2525=0x0 & vs2 & vs1 & op1214=0x1 & vd & op0006=0x57 {vd=vfmsub_vv(vs1,vs2,vd,v0);}
  
 -# vfmul.vf       31..26=0x24 vm vs2 rs1 14..12=0x5 vd 6..0=0x57
 +define pcodeop vfmul_vf;
@@ -3137,15 +3068,15 @@ index bb37a6c42b..6fb5327056 100644
 +define pcodeop vfwmacc_vf;
 +# vfwmacc.vf     31..26=0x3c vm vs2 frs1 14..12=0x5 vd 6..0=0x57
 +# vfwmacc.vf vd, frs1, vs2, vm    # vd[i] = +(f[rs1] * vs2[i]) + vd[i]
-+:vfwmacc.vf  vd, frs1, vs2         is op2631=0x3c & op2525=1 & vs2 & frs1 & op1214=0x5 & vd & op0006=0x57 {vd=vfwmacc_vf(frs1,vs2);}
-+:vfwmacc.vf  vd, frs1, vs2, "v0.t" is op2631=0x3c & op2525=0 & vs2 & frs1 & op1214=0x5 & vd & op0006=0x57 {vd=vfwmacc_vf(frs1,vs2,v0);}
++:vfwmacc.vf  vd, frs1, vs2         is op2631=0x3c & op2525=1 & vs2 & frs1 & op1214=0x5 & vd & op0006=0x57 {vd=vfwmacc_vf(frs1,vs2,vd);}
++:vfwmacc.vf  vd, frs1, vs2, "v0.t" is op2631=0x3c & op2525=0 & vs2 & frs1 & op1214=0x5 & vd & op0006=0x57 {vd=vfwmacc_vf(frs1,vs2,vd,v0);}
  
 +define pcodeop vfwmacc_vv;
  # vfwmacc.vv     31..26=0x3c vm vs2 vs1 14..12=0x1 vd 6..0=0x57
  # vfwmacc.vv vd, vs1, vs2, vm    # vd[i] = +(vs1[i] * vs2[i]) + vd[i]
 -:vfwmacc.vv  vd, vs1, vs2^ vm     is op2631=0x3c & vm & vs2 & vs1 & op1214=0x1 & vd & op0006=0x57  unimpl
-+:vfwmacc.vv  vd, vs1, vs2         is op2631=0x3c & op2525=1 & vs2 & vs1 & op1214=0x1 & vd & op0006=0x57 {vd=vfwmacc_vv(vs1,vs2);}
-+:vfwmacc.vv  vd, vs1, vs2, "v0.t" is op2631=0x3c & op2525=0 & vs2 & vs1 & op1214=0x1 & vd & op0006=0x57 {vd=vfwmacc_vv(vs1,vs2,v0);}
++:vfwmacc.vv  vd, vs1, vs2         is op2631=0x3c & op2525=1 & vs2 & vs1 & op1214=0x1 & vd & op0006=0x57 {vd=vfwmacc_vv(vs1,vs2,vd);}
++:vfwmacc.vv  vd, vs1, vs2, "v0.t" is op2631=0x3c & op2525=0 & vs2 & vs1 & op1214=0x1 & vd & op0006=0x57 {vd=vfwmacc_vv(vs1,vs2,vd,v0);}
  
 -# vfwmsac.vf     31..26=0x3e vm vs2 rs1 14..12=0x5 vd 6..0=0x57
 -# vfwmsac.vf vd, rs1, vs2, vm    # vd[i] = +(f[rs1] * vs2[i]) - vd[i]
@@ -3153,15 +3084,15 @@ index bb37a6c42b..6fb5327056 100644
 +define pcodeop vfwmsac_vf;
 +# vfwmsac.vf     31..26=0x3e vm vs2 frs1 14..12=0x5 vd 6..0=0x57
 +# vfwmsac.vf vd, frs1, vs2, vm    # vd[i] = +(f[rs1] * vs2[i]) - vd[i]
-+:vfwmsac.vf  vd, frs1, vs2         is op2631=0x3e & op2525=1 & vs2 & frs1 & op1214=0x5 & vd & op0006=0x57 {vd=vfwmsac_vf(frs1,vs2);}
-+:vfwmsac.vf  vd, frs1, vs2, "v0.t" is op2631=0x3e & op2525=0 & vs2 & frs1 & op1214=0x5 & vd & op0006=0x57 {vd=vfwmsac_vf(frs1,vs2,v0);}
++:vfwmsac.vf  vd, frs1, vs2         is op2631=0x3e & op2525=1 & vs2 & frs1 & op1214=0x5 & vd & op0006=0x57 {vd=vfwmsac_vf(frs1,vs2,vd);}
++:vfwmsac.vf  vd, frs1, vs2, "v0.t" is op2631=0x3e & op2525=0 & vs2 & frs1 & op1214=0x5 & vd & op0006=0x57 {vd=vfwmsac_vf(frs1,vs2,vd,v0);}
  
 +define pcodeop vfwmsac_vv;
  # vfwmsac.vv     31..26=0x3e vm vs2 vs1 14..12=0x1 vd 6..0=0x57
  # vfwmsac.vv vd, vs1, vs2, vm    # vd[i] = +(vs1[i] * vs2[i]) - vd[i]
 -:vfwmsac.vv  vd, vs1, vs2^ vm     is op2631=0x3e & vm & vs2 & vs1 & op1214=0x1 & vd & op0006=0x57  unimpl
-+:vfwmsac.vv  vd, vs1, vs2         is op2631=0x3e & op2525=1 & vs2 & vs1 & op1214=0x1 & vd & op0006=0x57 {vd=vfwmsac_vv(vs1,vs2);}
-+:vfwmsac.vv  vd, vs1, vs2, "v0.t" is op2631=0x3e & op2525=0 & vs2 & vs1 & op1214=0x1 & vd & op0006=0x57 {vd=vfwmsac_vv(vs1,vs2,v0);}
++:vfwmsac.vv  vd, vs1, vs2         is op2631=0x3e & op2525=1 & vs2 & vs1 & op1214=0x1 & vd & op0006=0x57 {vd=vfwmsac_vv(vs1,vs2,vd);}
++:vfwmsac.vv  vd, vs1, vs2, "v0.t" is op2631=0x3e & op2525=0 & vs2 & vs1 & op1214=0x1 & vd & op0006=0x57 {vd=vfwmsac_vv(vs1,vs2,vd,v0);}
  
 -# vfwmul.vf      31..26=0x38 vm vs2 rs1 14..12=0x5 vd 6..0=0x57
 -# vfwmul.vf    vd, vs2, rs1, vm # vector-scalar
@@ -3185,15 +3116,15 @@ index bb37a6c42b..6fb5327056 100644
 +define pcodeop vfwnmacc_vf;
 +# vfwnmacc.vf    31..26=0x3d vm vs2 frs1 14..12=0x5 vd 6..0=0x57
 +# vfwnmacc.vf vd, frs1, vs2, vm   # vd[i] = -(f[frs1] * vs2[i]) - vd[i]
-+:vfwnmacc.vf  vd, frs1, vs2         is op2631=0x3d & op2525=1 & vs2 & frs1 & op1214=0x5 & vd & op0006=0x57 {vd=vfwnmacc_vf(frs1,vs2);}
-+:vfwnmacc.vf  vd, frs1, vs2, "v0.t" is op2631=0x3d & op2525=0 & vs2 & frs1 & op1214=0x5 & vd & op0006=0x57 {vd=vfwnmacc_vf(frs1,vs2,v0);}
++:vfwnmacc.vf  vd, frs1, vs2         is op2631=0x3d & op2525=1 & vs2 & frs1 & op1214=0x5 & vd & op0006=0x57 {vd=vfwnmacc_vf(frs1,vs2,vd);}
++:vfwnmacc.vf  vd, frs1, vs2, "v0.t" is op2631=0x3d & op2525=0 & vs2 & frs1 & op1214=0x5 & vd & op0006=0x57 {vd=vfwnmacc_vf(frs1,vs2,vd,v0);}
  
 +define pcodeop vfwnmacc_vv;
  # vfwnmacc.vv    31..26=0x3d vm vs2 vs1 14..12=0x1 vd 6..0=0x57
  # vfwnmacc.vv vd, vs1, vs2, vm   # vd[i] = -(vs1[i] * vs2[i]) - vd[i]
 -:vfwnmacc.vv  vd, vs1, vs2^ vm    is op2631=0x3d & vm & vs2 & vs1 & op1214=0x1 & vd & op0006=0x57  unimpl
-+:vfwnmacc.vv  vd, vs1, vs2         is op2631=0x3d & op2525=1 & vs2 & vs1 & op1214=0x1 & vd & op0006=0x57 {vd=vfwnmacc_vv(vs1,vs2);}
-+:vfwnmacc.vv  vd, vs1, vs2, "v0.t" is op2631=0x3d & op2525=0 & vs2 & vs1 & op1214=0x1 & vd & op0006=0x57 {vd=vfwnmacc_vv(vs1,vs2,v0);}
++:vfwnmacc.vv  vd, vs1, vs2         is op2631=0x3d & op2525=1 & vs2 & vs1 & op1214=0x1 & vd & op0006=0x57 {vd=vfwnmacc_vv(vs1,vs2,vd);}
++:vfwnmacc.vv  vd, vs1, vs2, "v0.t" is op2631=0x3d & op2525=0 & vs2 & vs1 & op1214=0x1 & vd & op0006=0x57 {vd=vfwnmacc_vv(vs1,vs2,vd,v0);}
  
 -# vfwnmsac.vf    31..26=0x3f vm vs2 rs1 14..12=0x5 vd 6..0=0x57
 -# vfwnmsac.vf vd, rs1, vs2, vm   # vd[i] = -(f[rs1] * vs2[i]) + vd[i]
@@ -3201,15 +3132,15 @@ index bb37a6c42b..6fb5327056 100644
 +define pcodeop vfwnmsac_vf;
 +# vfwnmsac.vf    31..26=0x3f vm vs2 frs1 14..12=0x5 vd 6..0=0x57
 +# vfwnmsac.vf vd, frs1, vs2, vm   # vd[i] = -(f[rs1] * vs2[i]) + vd[i]
-+:vfwnmsac.vf  vd, frs1, vs2         is op2631=0x3f & op2525=1 & vs2 & frs1 & op1214=0x5 & vd & op0006=0x57 {vd=vfwnmsac_vf(frs1,vs2);}
-+:vfwnmsac.vf  vd, frs1, vs2, "v0.t" is op2631=0x3f & op2525=0 & vs2 & frs1 & op1214=0x5 & vd & op0006=0x57 {vd=vfwnmsac_vf(frs1,vs2,v0);}
++:vfwnmsac.vf  vd, frs1, vs2         is op2631=0x3f & op2525=1 & vs2 & frs1 & op1214=0x5 & vd & op0006=0x57 {vd=vfwnmsac_vf(frs1,vs2,vd);}
++:vfwnmsac.vf  vd, frs1, vs2, "v0.t" is op2631=0x3f & op2525=0 & vs2 & frs1 & op1214=0x5 & vd & op0006=0x57 {vd=vfwnmsac_vf(frs1,vs2,vd,v0);}
  
 +define pcodeop vfwnmsac_vv;
  # vfwnmsac.vv    31..26=0x3f vm vs2 vs1 14..12=0x1 vd 6..0=0x57
  # vfwnmsac.vv vd, vs1, vs2, vm   # vd[i] = -(vs1[i] * vs2[i]) + vd[i]
 -:vfwnmsac.vv  vd, vs1, vs2^ vm    is op2631=0x3f & vm & vs2 & vs1 & op1214=0x1 & vd & op0006=0x57  unimpl
-+:vfwnmsac.vv  vd, vs1, vs2         is op2631=0x3f & op2525=1 & vs2 & vs1 & op1214=0x1 & vd & op0006=0x57 {vd=vfwnmsac_vv(vs1,vs2);}
-+:vfwnmsac.vv  vd, vs1, vs2, "v0.t" is op2631=0x3f & op2525=0 & vs2 & vs1 & op1214=0x1 & vd & op0006=0x57 {vd=vfwnmsac_vv(vs1,vs2,v0);}
++:vfwnmsac.vv  vd, vs1, vs2         is op2631=0x3f & op2525=1 & vs2 & vs1 & op1214=0x1 & vd & op0006=0x57 {vd=vfwnmsac_vv(vs1,vs2,vd);}
++:vfwnmsac.vv  vd, vs1, vs2, "v0.t" is op2631=0x3f & op2525=0 & vs2 & vs1 & op1214=0x1 & vd & op0006=0x57 {vd=vfwnmsac_vv(vs1,vs2,vd,v0);}
  
 +define pcodeop vfwredosum_vs;
  # vfwredosum.vs  31..26=0x33 vm vs2 vs1 14..12=0x1 vd 6..0=0x57
@@ -4494,15 +4425,15 @@ index bb37a6c42b..6fb5327056 100644
  # vmacc.vv       31..26=0x2d vm vs2 vs1 14..12=0x2 vd 6..0=0x57
  # vmacc.vv vd, vs1, vs2, vm    # vd[i] = +(vs1[i] * vs2[i]) + vd[i]
 -:vmacc.vv  vd, vs1, vs2^ vm     is op2631=0x2d & vm & vs2 & vs1 & op1214=0x2 & vd & op0006=0x57  unimpl
-+:vmacc.vv  vd, vs1, vs2         is op2631=0x2d & op2525=1 & vs2 & vs1 & op1214=0x2 & vd & op0006=0x57 {vd=vmacc_vv(vs1,vs2);}
-+:vmacc.vv  vd, vs1, vs2, "v0.t" is op2631=0x2d & op2525=0 & vs2 & vs1 & op1214=0x2 & vd & op0006=0x57 {vd=vmacc_vv(vs1,vs2,v0);}
++:vmacc.vv  vd, vs1, vs2         is op2631=0x2d & op2525=1 & vs2 & vs1 & op1214=0x2 & vd & op0006=0x57 {vd=vmacc_vv(vs1,vs2,vd);}
++:vmacc.vv  vd, vs1, vs2, "v0.t" is op2631=0x2d & op2525=0 & vs2 & vs1 & op1214=0x2 & vd & op0006=0x57 {vd=vmacc_vv(vs1,vs2,vd,v0);}
  
 +define pcodeop vmacc_vx;
  # vmacc.vx       31..26=0x2d vm vs2 rs1 14..12=0x6 vd 6..0=0x57
  # vmacc.vx vd, rs1, vs2, vm    # vd[i] = +(x[rs1] * vs2[i]) + vd[i]
 -:vmacc.vx  vd, rs1, vs2^ vm     is op2631=0x2d & vm & vs2 & rs1 & op1214=0x6 & vd & op0006=0x57  unimpl
-+:vmacc.vx  vd, rs1, vs2         is op2631=0x2d & op2525=1 & vs2 & rs1 & op1214=0x6 & vd & op0006=0x57 {vd=vmacc_vx(rs1,vs2);}
-+:vmacc.vx  vd, rs1, vs2, "v0.t" is op2631=0x2d & op2525=0 & vs2 & rs1 & op1214=0x6 & vd & op0006=0x57 {vd=vmacc_vx(rs1,vs2,v0);}
++:vmacc.vx  vd, rs1, vs2         is op2631=0x2d & op2525=1 & vs2 & rs1 & op1214=0x6 & vd & op0006=0x57 {vd=vmacc_vx(rs1,vs2,vd);}
++:vmacc.vx  vd, rs1, vs2, "v0.t" is op2631=0x2d & op2525=0 & vs2 & rs1 & op1214=0x6 & vd & op0006=0x57 {vd=vmacc_vx(rs1,vs2,vd,v0);}
  
 +define pcodeop vmadc_vim;
  # vmadc.vim      31..26=0x11 vm   vs2 simm5 14..12=0x3 vd 6..0=0x57
@@ -4531,16 +4462,16 @@ index bb37a6c42b..6fb5327056 100644
  # vmadd.vv       31..26=0x29 vm vs2 vs1 14..12=0x2 vd 6..0=0x57
  # vmadd.vv vd, vs1, vs2, vm    # vd[i] = (vs1[i] * vd[i]) + vs2[i]
 -:vmadd.vv  vd, vs1, vs2^ vm     is op2631=0x29 & vm & vs2 & vs1 & op1214=0x2 & vd & op0006=0x57  unimpl
-+:vmadd.vv  vd, vs1, vs2, vm     is op2631=0x29 & vm & vs2 & vs1 & op1214=0x2 & vd & op0006=0x57 {vd=vmadd_vv(vs1,vs2,vm);}
-+:vmadd.vv  vd, vs1, vs2         is op2631=0x29 & op2525=1 & vs2 & vs1 & op1214=0x2 & vd & op0006=0x57 {vd=vmadd_vv(vs1,vs2);}
-+:vmadd.vv  vd, vs1, vs2, "v0.t" is op2631=0x29 & op2525=0 & vs2 & vs1 & op1214=0x2 & vd & op0006=0x57 {vd=vmadd_vv(vs1,vs2,v0);}
++:vmadd.vv  vd, vs1, vs2, vm     is op2631=0x29 & vm & vs2 & vs1 & op1214=0x2 & vd & op0006=0x57 {vd=vmadd_vv(vs1,vd,vs2,vm);}
++:vmadd.vv  vd, vs1, vs2         is op2631=0x29 & op2525=1 & vs2 & vs1 & op1214=0x2 & vd & op0006=0x57 {vd=vmadd_vv(vs1,vd,vs2);}
++:vmadd.vv  vd, vs1, vs2, "v0.t" is op2631=0x29 & op2525=0 & vs2 & vs1 & op1214=0x2 & vd & op0006=0x57 {vd=vmadd_vv(vs1,vd,vs2,v0);}
  
 +define pcodeop vmadd_vx;
  # vmadd.vx       31..26=0x29 vm vs2 rs1 14..12=0x6 vd 6..0=0x57
  # vmadd.vx vd, rs1, vs2, vm    # vd[i] = (x[rs1] * vd[i]) + vs2[i]
 -:vmadd.vx  vd, rs1, vs2^ vm     is op2631=0x29 & vm & vs2 & rs1 & op1214=0x6 & vd & op0006=0x57  unimpl
-+:vmadd.vx  vd, rs1, vs2         is op2631=0x29 & op2525=1 & vs2 & rs1 & op1214=0x6 & vd & op0006=0x57 {vd=vmadd_vx(rs1,vs2);}
-+:vmadd.vx  vd, rs1, vs2, "v0.t" is op2631=0x29 & op2525=0 & vs2 & rs1 & op1214=0x6 & vd & op0006=0x57 {vd=vmadd_vx(rs1,vs2,v0);}
++:vmadd.vx  vd, rs1, vs2         is op2631=0x29 & op2525=1 & vs2 & rs1 & op1214=0x6 & vd & op0006=0x57 {vd=vmadd_vx(rs1,vd,vs2);}
++:vmadd.vx  vd, rs1, vs2, "v0.t" is op2631=0x29 & op2525=0 & vs2 & rs1 & op1214=0x6 & vd & op0006=0x57 {vd=vmadd_vx(rs1,vd,vs2,v0);}
  
 +define pcodeop vmand_mm;
  # vmand.mm       31..26=0x19 vm vs2 vs1 14..12=0x2 vd 6..0=0x57
@@ -5108,29 +5039,29 @@ index bb37a6c42b..6fb5327056 100644
  # vnmsac.vv      31..26=0x2f vm vs2 vs1 14..12=0x2 vd 6..0=0x57
  # vnmsac.vv vd, vs1, vs2, vm    # vd[i] = -(vs1[i] * vs2[i]) + vd[i]
 -:vnmsac.vv  vd, vs1, vs2^ vm     is op2631=0x2f & vm & vs2 & vs1 & op1214=0x2 & vd & op0006=0x57  unimpl
-+:vnmsac.vv  vd, vs1, vs2         is op2631=0x2f & op2525=1 & vs2 & vs1 & op1214=0x2 & vd & op0006=0x57 {vd=vnmsac_vv(vs1,vs2);}
-+:vnmsac.vv  vd, vs1, vs2, "v0.t" is op2631=0x2f & op2525=0 & vs2 & vs1 & op1214=0x2 & vd & op0006=0x57 {vd=vnmsac_vv(vs1,vs2,v0);}
++:vnmsac.vv  vd, vs1, vs2         is op2631=0x2f & op2525=1 & vs2 & vs1 & op1214=0x2 & vd & op0006=0x57 {vd=vnmsac_vv(vs1,vs2,vd);}
++:vnmsac.vv  vd, vs1, vs2, "v0.t" is op2631=0x2f & op2525=0 & vs2 & vs1 & op1214=0x2 & vd & op0006=0x57 {vd=vnmsac_vv(vs1,vs2,vd,v0);}
  
 +define pcodeop vnmsac_vx;
  # vnmsac.vx      31..26=0x2f vm vs2 rs1 14..12=0x6 vd 6..0=0x57
  # vnmsac.vx vd, rs1, vs2, vm    # vd[i] = -(x[rs1] * vs2[i]) + vd[i]
 -:vnmsac.vx  vd, rs1, vs2^ vm     is op2631=0x2f & vm & vs2 & rs1 & op1214=0x6 & vd & op0006=0x57  unimpl
-+:vnmsac.vx  vd, rs1, vs2         is op2631=0x2f & op2525=1 & vs2 & rs1 & op1214=0x6 & vd & op0006=0x57 {vd=vnmsac_vx(rs1,vs2);}
-+:vnmsac.vx  vd, rs1, vs2, "v0.t" is op2631=0x2f & op2525=0 & vs2 & rs1 & op1214=0x6 & vd & op0006=0x57 {vd=vnmsac_vx(rs1,vs2,v0);}
++:vnmsac.vx  vd, rs1, vs2         is op2631=0x2f & op2525=1 & vs2 & rs1 & op1214=0x6 & vd & op0006=0x57 {vd=vnmsac_vx(rs1,vs2,vd);}
++:vnmsac.vx  vd, rs1, vs2, "v0.t" is op2631=0x2f & op2525=0 & vs2 & rs1 & op1214=0x6 & vd & op0006=0x57 {vd=vnmsac_vx(rs1,vs2,vd,v0);}
  
 +define pcodeop vnmsub_vv;
  # vnmsub.vv      31..26=0x2b vm vs2 vs1 14..12=0x2 vd 6..0=0x57
  # vnmsub.vv vd, vs1, vs2, vm    # vd[i] = -(vs1[i] * vd[i]) + vs2[i]
 -:vnmsub.vv  vd, vs1, vs2^ vm     is op2631=0x2b & vm & vs2 & vs1 & op1214=0x2 & vd & op0006=0x57  unimpl
-+:vnmsub.vv  vd, vs1, vs2         is op2631=0x2b & op2525=1 & vs2 & vs1 & op1214=0x2 & vd & op0006=0x57 {vd=vnmsub_vv(vs1,vs2);}
-+:vnmsub.vv  vd, vs1, vs2, "v0.t" is op2631=0x2b & op2525=0 & vs2 & vs1 & op1214=0x2 & vd & op0006=0x57 {vd=vnmsub_vv(vs1,vs2,v0);}
++:vnmsub.vv  vd, vs1, vs2         is op2631=0x2b & op2525=1 & vs2 & vs1 & op1214=0x2 & vd & op0006=0x57 {vd=vnmsub_vv(vs1,vs2,vd);}
++:vnmsub.vv  vd, vs1, vs2, "v0.t" is op2631=0x2b & op2525=0 & vs2 & vs1 & op1214=0x2 & vd & op0006=0x57 {vd=vnmsub_vv(vs1,vs2,vd,v0);}
  
 +define pcodeop vnmsub_vx;
  # vnmsub.vx      31..26=0x2b vm vs2 rs1 14..12=0x6 vd 6..0=0x57
  # vnmsub.vx vd, rs1, vs2, vm    # vd[i] = -(x[rs1] * vd[i]) + vs2[i]
 -:vnmsub.vx  vd, rs1, vs2^ vm     is op2631=0x2b & vm & vs2 & rs1 & op1214=0x6 & vd & op0006=0x57  unimpl
-+:vnmsub.vx  vd, rs1, vs2         is op2631=0x2b & op2525=1 & vs2 & rs1 & op1214=0x6 & vd & op0006=0x57 {vd=vnmsub_vx(rs1,vs2);}
-+:vnmsub.vx  vd, rs1, vs2, "v0.t" is op2631=0x2b & op2525=0 & vs2 & rs1 & op1214=0x6 & vd & op0006=0x57 {vd=vnmsub_vx(rs1,vs2,v0);}
++:vnmsub.vx  vd, rs1, vs2         is op2631=0x2b & op2525=1 & vs2 & rs1 & op1214=0x6 & vd & op0006=0x57 {vd=vnmsub_vx(rs1,vs2,vd);}
++:vnmsub.vx  vd, rs1, vs2, "v0.t" is op2631=0x2b & op2525=0 & vs2 & rs1 & op1214=0x6 & vd & op0006=0x57 {vd=vnmsub_vx(rs1,vs2,vd,v0);}
  
 -#TODO  this is broken
 -# vnsra.wi       31..26=0x2d vm vs2 simm5 14..12=0x3 vd 6..0=0x57
@@ -5231,36 +5162,36 @@ index bb37a6c42b..6fb5327056 100644
  # vqmaccsu.vv    31..26=0x3f vm vs2 vs1 14..12=0x0 vd 6..0=0x57
  # vqmaccsu.vv vd, vs1, vs2, vm # vd[i] = +(signed(vs1[i]) * unsigned(vs2[i])) + vd[i]
 -:vqmaccsu.vv  vd, vs1, vs2^ vm  is op2631=0x3f & vm & vs2 & vs1 & op1214=0x0 & vd & op0006=0x57  unimpl
-+:vqmaccsu.vv  vd, vs1, vs2         is op2631=0x3f & op2525=1 & vs2 & vs1 & op1214=0x0 & vd & op0006=0x57 {vd=vqmaccsu_vv(vs1,vs2);}
-+:vqmaccsu.vv  vd, vs1, vs2, "v0.t" is op2631=0x3f & op2525=0 & vs2 & vs1 & op1214=0x0 & vd & op0006=0x57 {vd=vqmaccsu_vv(vs1,vs2,v0);}
++:vqmaccsu.vv  vd, vs1, vs2         is op2631=0x3f & op2525=1 & vs2 & vs1 & op1214=0x0 & vd & op0006=0x57 {vd=vqmaccsu_vv(vs1,vs2,vd);}
++:vqmaccsu.vv  vd, vs1, vs2, "v0.t" is op2631=0x3f & op2525=0 & vs2 & vs1 & op1214=0x0 & vd & op0006=0x57 {vd=vqmaccsu_vv(vs1,vs2,vd,v0);}
  
 +define pcodeop vqmaccsu_vx;
  # vqmaccsu.vx    31..26=0x3f vm vs2 rs1 14..12=0x4 vd 6..0=0x57
  # vqmaccsu.vx vd, rs1, vs2, vm # vd[i] = +(signed(x[rs1]) * unsigned(vs2[i])) + vd[i]
 -:vqmaccsu.vx  vd, rs1, vs2^ vm  is op2631=0x3f & vm & vs2 & rs1 & op1214=0x4 & vd & op0006=0x57  unimpl
-+:vqmaccsu.vx  vd, rs1, vs2         is op2631=0x3f & op2525=1 & vs2 & rs1 & op1214=0x4 & vd & op0006=0x57 {vd=vqmaccsu_vx(rs1,vs2);}
-+:vqmaccsu.vx  vd, rs1, vs2, "v0.t" is op2631=0x3f & op2525=0 & vs2 & rs1 & op1214=0x4 & vd & op0006=0x57 {vd=vqmaccsu_vx(rs1,vs2,v0);}
++:vqmaccsu.vx  vd, rs1, vs2         is op2631=0x3f & op2525=1 & vs2 & rs1 & op1214=0x4 & vd & op0006=0x57 {vd=vqmaccsu_vx(rs1,vs2,vd);}
++:vqmaccsu.vx  vd, rs1, vs2, "v0.t" is op2631=0x3f & op2525=0 & vs2 & rs1 & op1214=0x4 & vd & op0006=0x57 {vd=vqmaccsu_vx(rs1,vs2,vd,v0);}
  
 +define pcodeop vqmaccu_vv;
  # vqmaccu.vv     31..26=0x3c vm vs2 vs1 14..12=0x0 vd 6..0=0x57
  # vqmaccu.vv vd, vs1, vs2, vm # vd[i] = +(vs1[i] * vs2[i]) + vd[i]
 -:vqmaccu.vv  vd, vs1, vs2^ vm  is op2631=0x3c & vm & vs2 & vs1 & op1214=0x0 & vd & op0006=0x57  unimpl
-+:vqmaccu.vv  vd, vs1, vs2         is op2631=0x3c & op2525=1 & vs2 & vs1 & op1214=0x0 & vd & op0006=0x57 {vd=vqmaccu_vv(vs1,vs2);}
-+:vqmaccu.vv  vd, vs1, vs2, "v0.t" is op2631=0x3c & op2525=0 & vs2 & vs1 & op1214=0x0 & vd & op0006=0x57 {vd=vqmaccu_vv(vs1,vs2,v0);}
++:vqmaccu.vv  vd, vs1, vs2         is op2631=0x3c & op2525=1 & vs2 & vs1 & op1214=0x0 & vd & op0006=0x57 {vd=vqmaccu_vv(vs1,vs2,vd);}
++:vqmaccu.vv  vd, vs1, vs2, "v0.t" is op2631=0x3c & op2525=0 & vs2 & vs1 & op1214=0x0 & vd & op0006=0x57 {vd=vqmaccu_vv(vs1,vs2,vd,v0);}
  
 +define pcodeop vqmaccu_vx;
  # vqmaccu.vx     31..26=0x3c vm vs2 rs1 14..12=0x4 vd 6..0=0x57
  # vqmaccu.vx vd, rs1, vs2, vm # vd[i] = +(x[rs1] * vs2[i]) + vd[i]
 -:vqmaccu.vx  vd, rs1, vs2^ vm  is op2631=0x3c & vm & vs2 & rs1 & op1214=0x4 & vd & op0006=0x57  unimpl
-+:vqmaccu.vx  vd, rs1, vs2         is op2631=0x3c & op2525=1 & vs2 & rs1 & op1214=0x4 & vd & op0006=0x57 {vd=vqmaccu_vx(rs1,vs2);}
-+:vqmaccu.vx  vd, rs1, vs2, "v0.t" is op2631=0x3c & op2525=0 & vs2 & rs1 & op1214=0x4 & vd & op0006=0x57 {vd=vqmaccu_vx(rs1,vs2,v0);}
++:vqmaccu.vx  vd, rs1, vs2         is op2631=0x3c & op2525=1 & vs2 & rs1 & op1214=0x4 & vd & op0006=0x57 {vd=vqmaccu_vx(rs1,vs2,vd);}
++:vqmaccu.vx  vd, rs1, vs2, "v0.t" is op2631=0x3c & op2525=0 & vs2 & rs1 & op1214=0x4 & vd & op0006=0x57 {vd=vqmaccu_vx(rs1,vs2,vd,v0);}
  
 +define pcodeop vqmaccus_vx;
  # vqmaccus.vx    31..26=0x3e vm vs2 rs1 14..12=0x4 vd 6..0=0x57
  # vqmaccus.vx vd, rs1, vs2, vm # vd[i] = +(unsigned(x[rs1]) * signed(vs2[i])) + vd[i]
 -:vqmaccus.vx  vd, rs1, vs2^ vm  is op2631=0x3e & vm & vs2 & rs1 & op1214=0x4 & vd & op0006=0x57  unimpl
-+:vqmaccus.vx  vd, rs1, vs2         is op2631=0x3e & op2525=1 & vs2 & rs1 & op1214=0x4 & vd & op0006=0x57 {vd=vqmaccus_vx(rs1,vs2);}
-+:vqmaccus.vx  vd, rs1, vs2, "v0.t" is op2631=0x3e & op2525=0 & vs2 & rs1 & op1214=0x4 & vd & op0006=0x57 {vd=vqmaccus_vx(rs1,vs2,v0);}
++:vqmaccus.vx  vd, rs1, vs2         is op2631=0x3e & op2525=1 & vs2 & rs1 & op1214=0x4 & vd & op0006=0x57 {vd=vqmaccus_vx(rs1,vs2,vd);}
++:vqmaccus.vx  vd, rs1, vs2, "v0.t" is op2631=0x3e & op2525=0 & vs2 & rs1 & op1214=0x4 & vd & op0006=0x57 {vd=vqmaccus_vx(rs1,vs2,vd,v0);}
  
 +define pcodeop vredand_vs;
  # vredand.vs     31..26=0x01 vm vs2 vs1 14..12=0x2 vd 6..0=0x57
@@ -7405,50 +7336,50 @@ index bb37a6c42b..6fb5327056 100644
  # vwmacc.vv      31..26=0x3d vm vs2 vs1 14..12=0x2 vd 6..0=0x57
  # vwmacc.vv vd, vs1, vs2, vm    # vd[i] = +(vs1[i] * vs2[i]) + vd[i]
 -:vwmacc.vv  vd, vs1, vs2^ vm     is op2631=0x3d & vm & vs2 & vs1 & op1214=0x2 & vd & op0006=0x57  unimpl
-+:vwmacc.vv  vd, vs1, vs2         is op2631=0x3d & op2525=1 & vs2 & vs1 & op1214=0x2 & vd & op0006=0x57 {vd=vwmacc_vv(vs1,vs2);}
-+:vwmacc.vv  vd, vs1, vs2, "v0.t" is op2631=0x3d & op2525=0 & vs2 & vs1 & op1214=0x2 & vd & op0006=0x57 {vd=vwmacc_vv(vs1,vs2,v0);}
++:vwmacc.vv  vd, vs1, vs2         is op2631=0x3d & op2525=1 & vs2 & vs1 & op1214=0x2 & vd & op0006=0x57 {vd=vwmacc_vv(vs1,vs2,vd);}
++:vwmacc.vv  vd, vs1, vs2, "v0.t" is op2631=0x3d & op2525=0 & vs2 & vs1 & op1214=0x2 & vd & op0006=0x57 {vd=vwmacc_vv(vs1,vs2,vd,v0);}
  
 +define pcodeop vwmacc_vx;
  # vwmacc.vx      31..26=0x3d vm vs2 rs1 14..12=0x6 vd 6..0=0x57
  # vwmacc.vx vd, rs1, vs2, vm    # vd[i] = +(x[rs1] * vs2[i]) + vd[i]
 -:vwmacc.vx  vd, rs1, vs2^ vm     is op2631=0x3d & vm & vs2 & rs1 & op1214=0x6 & vd & op0006=0x57  unimpl
-+:vwmacc.vx  vd, rs1, vs2         is op2631=0x3d & op2525=1 & vs2 & rs1 & op1214=0x6 & vd & op0006=0x57 {vd=vwmacc_vx(rs1,vs2);}
-+:vwmacc.vx  vd, rs1, vs2, "v0.t" is op2631=0x3d & op2525=0 & vs2 & rs1 & op1214=0x6 & vd & op0006=0x57 {vd=vwmacc_vx(rs1,vs2,v0);}
++:vwmacc.vx  vd, rs1, vs2         is op2631=0x3d & op2525=1 & vs2 & rs1 & op1214=0x6 & vd & op0006=0x57 {vd=vwmacc_vx(rs1,vs2,vd);}
++:vwmacc.vx  vd, rs1, vs2, "v0.t" is op2631=0x3d & op2525=0 & vs2 & rs1 & op1214=0x6 & vd & op0006=0x57 {vd=vwmacc_vx(rs1,vs2,vd,v0);}
  
 +define pcodeop vwmaccsu_vv;
  # vwmaccsu.vv    31..26=0x3f vm vs2 vs1 14..12=0x2 vd 6..0=0x57
  # vwmaccsu.vv vd, vs1, vs2, vm    # vd[i] = +(signed(vs1[i]) * unsigned(vs2[i])) + vd[i]
 -:vwmaccsu.vv  vd, vs1, vs2^ vm     is op2631=0x3f & vm & vs2 & vs1 & op1214=0x2 & vd & op0006=0x57  unimpl
-+:vwmaccsu.vv  vd, vs1, vs2         is op2631=0x3f & op2525=1 & vs2 & vs1 & op1214=0x2 & vd & op0006=0x57 {vd=vwmaccsu_vv(vs1,vs2);}
-+:vwmaccsu.vv  vd, vs1, vs2, "v0.t" is op2631=0x3f & op2525=0 & vs2 & vs1 & op1214=0x2 & vd & op0006=0x57 {vd=vwmaccsu_vv(vs1,vs2,v0);}
++:vwmaccsu.vv  vd, vs1, vs2         is op2631=0x3f & op2525=1 & vs2 & vs1 & op1214=0x2 & vd & op0006=0x57 {vd=vwmaccsu_vv(vs1,vs2,vd);}
++:vwmaccsu.vv  vd, vs1, vs2, "v0.t" is op2631=0x3f & op2525=0 & vs2 & vs1 & op1214=0x2 & vd & op0006=0x57 {vd=vwmaccsu_vv(vs1,vs2,vd,v0);}
  
 +define pcodeop vwmaccsu_vx;
  # vwmaccsu.vx    31..26=0x3f vm vs2 rs1 14..12=0x6 vd 6..0=0x57
  # vwmaccsu.vx vd, rs1, vs2, vm    # vd[i] = +(signed(x[rs1]) * unsigned(vs2[i])) + vd[i]
 -:vwmaccsu.vx  vd, rs1, vs2^ vm     is op2631=0x3f & vm & vs2 & rs1 & op1214=0x6 & vd & op0006=0x57  unimpl
-+:vwmaccsu.vx  vd, rs1, vs2         is op2631=0x3f & op2525=1 & vs2 & rs1 & op1214=0x6 & vd & op0006=0x57 {vd=vwmaccsu_vx(rs1,vs2);}
-+:vwmaccsu.vx  vd, rs1, vs2, "v0.t" is op2631=0x3f & op2525=0 & vs2 & rs1 & op1214=0x6 & vd & op0006=0x57 {vd=vwmaccsu_vx(rs1,vs2,v0);}
++:vwmaccsu.vx  vd, rs1, vs2         is op2631=0x3f & op2525=1 & vs2 & rs1 & op1214=0x6 & vd & op0006=0x57 {vd=vwmaccsu_vx(rs1,vs2,vd);}
++:vwmaccsu.vx  vd, rs1, vs2, "v0.t" is op2631=0x3f & op2525=0 & vs2 & rs1 & op1214=0x6 & vd & op0006=0x57 {vd=vwmaccsu_vx(rs1,vs2,vd,v0);}
  
 +define pcodeop vwmaccu_vv;
  # vwmaccu.vv     31..26=0x3c vm vs2 vs1 14..12=0x2 vd 6..0=0x57
  # vwmaccu.vv vd, vs1, vs2, vm    # vd[i] = +(vs1[i] * vs2[i]) + vd[i]
 -:vwmaccu.vv  vd, vs1, vs2^ vm     is op2631=0x3c & vm & vs2 & vs1 & op1214=0x2 & vd & op0006=0x57  unimpl
-+:vwmaccu.vv  vd, vs1, vs2         is op2631=0x3c & op2525=1 & vs2 & vs1 & op1214=0x2 & vd & op0006=0x57 {vd=vwmaccsu_vv(vs1,vs2);}
-+:vwmaccu.vv  vd, vs1, vs2, "v0.t" is op2631=0x3c & op2525=0 & vs2 & vs1 & op1214=0x2 & vd & op0006=0x57 {vd=vwmaccsu_vv(vs1,vs2,v0);}
++:vwmaccu.vv  vd, vs1, vs2         is op2631=0x3c & op2525=1 & vs2 & vs1 & op1214=0x2 & vd & op0006=0x57 {vd=vwmaccsu_vv(vs1,vs2,vd);}
++:vwmaccu.vv  vd, vs1, vs2, "v0.t" is op2631=0x3c & op2525=0 & vs2 & vs1 & op1214=0x2 & vd & op0006=0x57 {vd=vwmaccsu_vv(vs1,vs2,vd,v0);}
  
 +define pcodeop vwmaccu_vx;
  # vwmaccu.vx     31..26=0x3c vm vs2 rs1 14..12=0x6 vd 6..0=0x57
  # vwmaccu.vx vd, rs1, vs2, vm    # vd[i] = +(x[rs1] * vs2[i]) + vd[i]
 -:vwmaccu.vx  vd, rs1, vs2^ vm     is op2631=0x3c & vm & vs2 & rs1 & op1214=0x6 & vd & op0006=0x57  unimpl
-+:vwmaccu.vx  vd, rs1, vs2         is op2631=0x3c & op2525=1 & vs2 & rs1 & op1214=0x6 & vd & op0006=0x57 {vd=vwmaccu_vx(rs1,vs2);}
-+:vwmaccu.vx  vd, rs1, vs2, "v0.t" is op2631=0x3c & op2525=0 & vs2 & rs1 & op1214=0x6 & vd & op0006=0x57 {vd=vwmaccu_vx(rs1,vs2,v0);}
++:vwmaccu.vx  vd, rs1, vs2         is op2631=0x3c & op2525=1 & vs2 & rs1 & op1214=0x6 & vd & op0006=0x57 {vd=vwmaccu_vx(rs1,vs2,vd);}
++:vwmaccu.vx  vd, rs1, vs2, "v0.t" is op2631=0x3c & op2525=0 & vs2 & rs1 & op1214=0x6 & vd & op0006=0x57 {vd=vwmaccu_vx(rs1,vs2,vd,v0);}
  
 +define pcodeop vwmaccus_vx;
  # vwmaccus.vx    31..26=0x3e vm vs2 rs1 14..12=0x6 vd 6..0=0x57
  # vwmaccus.vx vd, rs1, vs2, vm    # vd[i] = +(unsigned(x[rs1]) * signed(vs2[i])) + vd[i]
 -:vwmaccus.vx  vd, rs1, vs2^ vm     is op2631=0x3e & vm & vs2 & rs1 & op1214=0x6 & vd & op0006=0x57  unimpl
-+:vwmaccus.vx  vd, rs1, vs2         is op2631=0x3e & op2525=1 & vs2 & rs1 & op1214=0x6 & vd & op0006=0x57 {vd=vwmaccus_vx(rs1,vs2);}
-+:vwmaccus.vx  vd, rs1, vs2, "v0.t" is op2631=0x3e & op2525=0 & vs2 & rs1 & op1214=0x6 & vd & op0006=0x57 {vd=vwmaccus_vx(rs1,vs2,v0);}
++:vwmaccus.vx  vd, rs1, vs2         is op2631=0x3e & op2525=1 & vs2 & rs1 & op1214=0x6 & vd & op0006=0x57 {vd=vwmaccus_vx(rs1,vs2,vd);}
++:vwmaccus.vx  vd, rs1, vs2, "v0.t" is op2631=0x3e & op2525=0 & vs2 & rs1 & op1214=0x6 & vd & op0006=0x57 {vd=vwmaccus_vx(rs1,vs2,vd,v0);}
  
 +define pcodeop vwmul_vv;
  # vwmul.vv       31..26=0x3b vm vs2 vs1 14..12=0x2 vd 6..0=0x57
@@ -7609,10 +7540,10 @@ index bb37a6c42b..6fb5327056 100644
 +:vzext.vf8  vd, vs2         is op2631=0x12 & op2525=1 & vs2 & op1519=0x2 & op1214=0x2 & vd & op0006=0x57 {vd=vzext_vf8(vs2);}
 +:vzext.vf8  vd, vs2, "v0.t" is op2631=0x12 & op2525=0 & vs2 & op1519=0x2 & op1214=0x2 & vd & op0006=0x57 {vd=vzext_vf8(vs2,v0);}
 diff --git a/Ghidra/Processors/RISCV/data/languages/riscv.table.sinc b/Ghidra/Processors/RISCV/data/languages/riscv.table.sinc
-index 05d1692c7f..73ead8dcd3 100644
+index 5e7a356de7..2f16135553 100644
 --- a/Ghidra/Processors/RISCV/data/languages/riscv.table.sinc
 +++ b/Ghidra/Processors/RISCV/data/languages/riscv.table.sinc
-@@ -635,6 +635,7 @@ rs1L: zero is r1519 & zero & op1519=0 { export 0:8; }
+@@ -626,6 +626,7 @@ rs1L: zero is r1519 & zero & op1519=0 { export 0:8; }
  rs2L: r2024 is r2024 { export r2024; }
  rs2L: zero is r2024 & zero & op2024=0 { export 0:8; }
  
@@ -7620,7 +7551,7 @@ index 05d1692c7f..73ead8dcd3 100644
  rdL: r0711 is r0711 { export r0711; }
  rdL: zero is r0711=0 & zero { local tmp:8 = 0; export tmp; }
  
-@@ -953,6 +954,7 @@ vm: ,v0^".t" is op2525=0 & v0 & vd { vd = vd & v0; }
+@@ -944,6 +945,7 @@ vm: ,v0^".t" is op2525=0 & v0 & vd { vd = vd & v0; }
  vm: "" is op2525=1 { }
  
  simm5: sop1519 is sop1519 { local tmp:$(XLEN) = sop1519; export tmp; }

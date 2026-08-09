@@ -4,27 +4,27 @@ Date: Mon, 6 Oct 2025 07:51:35 -0500
 Subject: [PATCH] 8587: 8586 Correctly decompile 1 indexing for globals
 
 ---
- .../src/decompile/cpp/coreaction.cc           | 123 +++++++++++++++---
+ .../src/decompile/cpp/coreaction.cc           | 127 +++++++++++++++---
  .../Decompiler/src/decompile/cpp/funcdata.cc  |  23 ++++
  .../cpp/include/ghidra/coreaction.hh          |   1 +
- 3 files changed, 132 insertions(+), 15 deletions(-)
+ 3 files changed, 133 insertions(+), 18 deletions(-)
 
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
-index 20ea789afa..09aaaf2621 100644
+index 24f439135d..0888d2b2eb 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
-@@ -1054,6 +1054,93 @@ bool ActionConstantPtr::checkCopy(PcodeOp *op,Funcdata &data)
+@@ -1057,6 +1057,93 @@ bool ActionConstantPtr::checkCopy(PcodeOp *op,Funcdata &data)
    return data.getArch()->infer_pointers;
  }
  
-+SymbolEntry *getSymbolEntry(Address &rampoint, bool &needexacthit, Funcdata &data)
++MapEntry *getMapEntry(Address &rampoint, bool &needexacthit, Funcdata &data)
 +{
 +  if (rampoint.isInvalid())
-+    return (SymbolEntry *)0;
++    return (MapEntry *)0;
 +  // Since we are looking for a global address
 +  // Assume it is address tied and use empty usepoint
-+  SymbolEntry *entry = data.getScopeLocal()->getParent()->queryContainer(rampoint, 1, Address());
-+  if (entry != (SymbolEntry *)0)
++  MapEntry *entry = data.getScopeLocal()->getParent()->queryContainer(rampoint, 1, Address());
++  if (entry != (MapEntry *)0)
 +  {
 +    Datatype *ptrType = entry->getSymbol()->getType();
 +    if (ptrType->getMetatype() == TYPE_ARRAY)
@@ -36,13 +36,13 @@ index 20ea789afa..09aaaf2621 100644
 +        needexacthit = false;
 +    }
 +    if (needexacthit && entry->getAddr() != rampoint)
-+      return (SymbolEntry *)0;
++      return (MapEntry *)0;
 +  }
 +
 +  return entry;
 +}
 +
-+int8 isEntryMatch(SymbolEntry *entry, Address &rampoint, bool &isArray) {
++int8 isEntryMatch(MapEntry *entry, Address &rampoint, bool &isArray) {
 +  int8 size = 0;
 +  isArray = false;
 +  if (entry != 0)
@@ -107,27 +107,29 @@ index 20ea789afa..09aaaf2621 100644
  /// \brief Determine if given Varnode might be a pointer constant.
  ///
  /// If it is a pointer, return the symbol it points to, or NULL otherwise. If it is determined
-@@ -1126,10 +1213,10 @@ SymbolEntry *ActionConstantPtr::isPointer(AddrSpace *spc,Varnode *vn,PcodeOp *op
+@@ -1128,11 +1215,11 @@ MapEntry *ActionConstantPtr::isPointer(AddrSpace *spc,Varnode *vn,PcodeOp *op,in
+ 	// Is there another pointer base in this expression
  	if (op->getIn(1-slot)->getTypeReadFacing(op)->getMetatype()==TYPE_PTR)
- 	  return (SymbolEntry *)0; // If so, we are not a pointer
- 	// FIXME: need to fully explore additive tree
+ 	  return (MapEntry *)0; // If so, we are not a pointer
+-	// FIXME: need to fully explore additive tree
 -	needexacthit = false;
        }
        else if (!glb->infer_pointers)
- 	return (SymbolEntry *)0;
-+	needexacthit = false;
+ 	return (MapEntry *)0;
++      // FIXME: need to fully explore additive tree
++      needexacthit = false;
        break;
      case CPUI_STORE:
        if (slot != 2)
-@@ -1149,22 +1236,28 @@ SymbolEntry *ActionConstantPtr::isPointer(AddrSpace *spc,Varnode *vn,PcodeOp *op
+@@ -1152,24 +1239,28 @@ MapEntry *ActionConstantPtr::isPointer(AddrSpace *spc,Varnode *vn,PcodeOp *op,in
      rampoint = glb->resolveConstant(spc,vn->getOffset(),vn->getSize(),op->getAddr(),fullEncoding);
    }
  
--  if (rampoint.isInvalid()) return (SymbolEntry *)0;
+-  if (rampoint.isInvalid()) return (MapEntry *)0;
 -    // Since we are looking for a global address
 -    // Assume it is address tied and use empty usepoint
--  SymbolEntry *entry = data.getScopeLocal()->getParent()->queryContainer(rampoint,1,Address());
--  if (entry != (SymbolEntry *)0) {
+-  MapEntry *entry = data.getScopeLocal()->getParent()->queryContainer(rampoint,1,Address());
+-  if (entry != (MapEntry *)0) {
 -    Datatype *ptrType = entry->getSymbol()->getType();
 -    if (ptrType->getMetatype() == TYPE_ARRAY) {
 -      Datatype *ct = ((TypeArray *)ptrType)->getBase();
@@ -135,8 +137,12 @@ index 20ea789afa..09aaaf2621 100644
 -      // refer to the middle of the string
 -      if (ct->isCharPrint())
 -	needexacthit = false;
+-    }
+-    if (needexacthit && entry->getAddr() != rampoint) {
+-      vn->setSymbolCheck(Varnode::symcheck_incomplete);	// May need to retest if we later discover vn is a pointer
+-      return (MapEntry *)0;
 +  bool isArray = false;
-+  SymbolEntry *entry = getSymbolEntry(rampoint, needexacthit, data);
++  MapEntry *entry = getMapEntry(rampoint, needexacthit, data);
 +  int8 size = isEntryMatch(entry, rampoint, isArray);
 +
 +  // Check if pointer is pointing at correctly size data
@@ -151,26 +157,24 @@ index 20ea789afa..09aaaf2621 100644
 +  {
 +    // Check for 1-indexing
 +    Address new_rampoint = rampoint + mult;
-+    SymbolEntry *tmp_entry = getSymbolEntry(new_rampoint, needexacthit, data);
++    MapEntry *tmp_entry = getMapEntry(new_rampoint, needexacthit, data);
 +    if (tmp_entry != 0 && mult == isEntryMatch(tmp_entry, new_rampoint, isArray) && isArray) {
 +      entry = tmp_entry;
      }
--    if (needexacthit && entry->getAddr() != rampoint)
--      return (SymbolEntry *)0;
    }
 +
    return entry;
  }
  
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/funcdata.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/funcdata.cc
-index 0cf7788256..485ba825dc 100644
+index 2c7206fe6d..9111a8ded5 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/funcdata.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/funcdata.cc
-@@ -416,6 +416,29 @@ void Funcdata::spacebaseConstant(PcodeOp *op,int4 slot,SymbolEntry *entry,const
+@@ -416,6 +416,29 @@ void Funcdata::spacebaseConstant(PcodeOp *op,int4 slot,MapEntry *entry,const Add
      typelock = false;
    outvn->updateType(ptrentrytype,typelock,false);
    if (extra != 0) {
-+	 if ((intb)extra < 0) {
++    if ((intb)extra < 0) {
 +      // Negative "extra" is likely an array offset
 +      Datatype *dt = entry->getSizedType(Address(rampoint.getSpace(), 0), entry->getSize());
 +      if (dt != 0 && dt->getMetatype() == TYPE_ARRAY)
@@ -187,7 +191,7 @@ index 0cf7788256..485ba825dc 100644
 +        newUniqueOut(sz,negOp);
 +        opInsertBefore(negOp,op);
 +        Varnode *negconst = newConstant(sz, -datasize);
-+        negconst->setPtrCheck();
++        negconst->setSymbolCheck(Varnode::symcheck_complete);
 +        opSetInput(negOp,outvn,0);
 +        opSetInput(negOp,negconst,1);
 +        outvn = negOp->getOut();
@@ -197,13 +201,13 @@ index 0cf7788256..485ba825dc 100644
        extraOp = newOp(2,op->getAddr());
        opSetOpcode(extraOp,CPUI_INT_ADD);
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/coreaction.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/coreaction.hh
-index baf7c6cdd0..389261617e 100644
+index 55448ab076..0b918939b3 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/coreaction.hh
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/coreaction.hh
 @@ -192,6 +192,7 @@ class ActionConstantPtr : public Action {
    static bool checkCopy(PcodeOp *op,Funcdata &data);
-   static SymbolEntry *isPointer(AddrSpace *spc,Varnode *vn,PcodeOp *op,int4 slot,
- 				Address &rampoint,uintb &fullEncoding,Funcdata &data);
+   static MapEntry *isPointer(AddrSpace *spc,Varnode *vn,PcodeOp *op,int4 slot,
+ 			     Address &rampoint,uintb &fullEncoding,Funcdata &data);
 +  static int8 getConstOffsetBack(Varnode *vn,int8 &multiplier,int4 maxLevel);
  public:
    ActionConstantPtr(const string &g) : Action(0,"constantptr",g) {}	///< Constructor

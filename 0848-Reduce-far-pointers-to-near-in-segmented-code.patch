@@ -49,13 +49,14 @@ Update coreaction.cc
  .../src/decompile/cpp/coreaction.cc           | 19 ++++++
  .../Decompiler/src/decompile/cpp/funcdata.cc  | 66 +++++++++++++++++++
  .../Decompiler/src/decompile/cpp/funcdata.hh  |  1 +
- 3 files changed, 86 insertions(+)
+ .../Decompiler/src/decompile/cpp/varnode.hh   |  2 +
+ 4 files changed, 88 insertions(+)
 
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
-index 3512f71359..c3ec05132c 100644
+index 15648f9663..04cdcaaaf8 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
-@@ -1535,6 +1535,7 @@ void ActionFuncLink::funcLinkInput(FuncCallSpecs *fc,Funcdata &data)
+@@ -1601,6 +1601,7 @@ void ActionFuncLink::funcLinkInput(FuncCallSpecs *fc,Funcdata &data)
  	}
        }
        data.opInsertInput(op,data.newVarnode(param->getSize(),param->getAddress()),op->numInput());
@@ -63,7 +64,7 @@ index 3512f71359..c3ec05132c 100644
      }
    }
    if (spacebase != (AddrSpace *)0)	// If we need it, create the stackplaceholder
-@@ -1578,6 +1579,7 @@ void ActionFuncLink::funcLinkOutput(FuncCallSpecs *fc,Funcdata &data)
+@@ -1644,6 +1645,7 @@ void ActionFuncLink::funcLinkOutput(FuncCallSpecs *fc,Funcdata &data)
  	return;
        }
        data.newVarnodeOut(sz,addr,callop);
@@ -71,7 +72,7 @@ index 3512f71359..c3ec05132c 100644
        VarnodeData vdata;
        OpCode res = fc->assumedOutputExtension(addr,sz,vdata);
        if (res == CPUI_PIECE) {		// Pick an extension based on type
-@@ -5542,6 +5544,23 @@ int4 ActionInferTypes::apply(Funcdata &data)
+@@ -5767,6 +5769,23 @@ int4 ActionInferTypes::apply(Funcdata &data)
      }
      return 0;
    }
@@ -96,10 +97,10 @@ index 3512f71359..c3ec05132c 100644
    buildLocaltypes(data);	// Set up initial types (based on local info)
    for(iter=data.beginLoc();iter!=data.endLoc();++iter) {
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/funcdata.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/funcdata.cc
-index 6571bfe9b5..29b7706944 100644
+index 9d21071611..5f55cb1fa4 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/funcdata.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/funcdata.cc
-@@ -459,6 +459,72 @@ void Funcdata::spacebaseConstant(PcodeOp *op,int4 slot,SymbolEntry *entry,const
+@@ -459,6 +459,72 @@ void Funcdata::spacebaseConstant(PcodeOp *op,int4 slot,MapEntry *entry,const Add
      opSetInput(op,outvn,slot);
  }
  
@@ -141,8 +142,8 @@ index 6571bfe9b5..29b7706944 100644
 +		opSetInput(newop, vn1, 1); //need to check size of segment
 +		opSetInput(newop, vn2, 2); //need to check size of offset
 +		opInsertAfter(newop, piece2);
-+		vn->setPtrCheck();
-+		outvn->setPtrCheck();
++		vn->setSymbolCheck(Varnode::symcheck_complete);
++		outvn->setSymbolCheck(Varnode::symcheck_complete);
 +
 +		if (segmentize) {//FuncLinkInput/FuncLinkOutput come before segmentize, the rest require at least Spacebase for type locks
 +			segroot = vn->getDef();
@@ -173,17 +174,30 @@ index 6571bfe9b5..29b7706944 100644
  
  {
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/funcdata.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/funcdata.hh
-index 6558ee8d59..9706e9f129 100644
+index f394e91ff1..662868d116 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/funcdata.hh
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/funcdata.hh
-@@ -235,6 +235,7 @@ public:
+@@ -231,6 +231,7 @@ public:
    Varnode *constructSpacebaseInput(AddrSpace *id);
    Varnode *constructConstSpacebase(AddrSpace *id);
-   void spacebaseConstant(PcodeOp *op,int4 slot,SymbolEntry *entry,const Address &rampoint,uintb origval,int4 origsize);
+   void spacebaseConstant(PcodeOp *op,int4 slot,MapEntry *entry,const Address &rampoint,uintb origval,int4 origsize);
 +  void segmentizeFarPtr(Datatype* ct, bool locked, Varnode* vn, bool segmentize);
  
    int4 getHeritagePass(void) const { return heritage.getPass(); }	///< Get overall count of heritage passes
  
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/varnode.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/varnode.hh
+index a04b619e14..c552c99977 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/varnode.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/varnode.hh
+@@ -259,6 +259,8 @@ public:
+   bool isReturnAddress(void) const { return ((flags&Varnode::return_address)!=0); } ///< Is this storage for a calls return address?
+   bool isProtoPartial(void) const { return ((flags&Varnode::proto_partial)!=0); } ///< Is \b this getting pieced together into a larger whole
+   uint4 getSymbolCheck(void) const { return addlflags & symcheck_complete; } ///< Get state of checks for \b this as constant symbol reference
++  bool isPtrCheck(void) const { return ((getSymbolCheck() == Varnode::symcheck_complete) || // Have we checked this variable before
++    (getSymbolCheck() == Varnode::symcheck_incomplete && getType()->getMetatype() != TYPE_PTR)); }
+   bool isPtrFlow(void) const { return ((addlflags&Varnode::ptrflow)!=0); } ///< Does this varnode flow to or from a known pointer
+   bool isSpacebasePlaceholder(void) const { return ((addlflags&Varnode::spacebase_placeholder)!=0); } ///< Is \b this used specifically to track stackpointer values?
+   bool hasNoLocalAlias(void) const { return ((flags&Varnode::nolocalalias)!=0); } ///< Are there (not) any local pointers that might affect \b this?
 -- 
 2.45.1
 

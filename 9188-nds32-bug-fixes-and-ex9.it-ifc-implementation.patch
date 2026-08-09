@@ -51,7 +51,6 @@ enough to be merged.
  .../decompiler/inline/IfcPcodeEmitter.java    |  652 +++++++++
  .../IfcPropertyMapPcodeOverrideHook.java      |  155 ++
  .../app/decompiler/spi/PcodeOverrideHook.java |   97 ++
- .../decompile/actions/ForceUnionAction.java   |    9 +-
  .../ghidra/program/database/ProgramDB.java    |   12 +
  .../database/function/FunctionManagerDB.java  |   43 +
  .../util/AddressSetPropertyMapDB.java         |   19 +
@@ -77,7 +76,7 @@ enough to be merged.
  .../util/opinion/Mt76ConnacPatchLoader.java   |  287 ++++
  .../app/util/pcodeInject/InjectEX9IT.java     |  202 +++
  .../pcodeInject/PcodeInjectLibraryNDS32.java  |   68 +
- .../NDS32PcodeUseropLibraryFactory.java       |  241 ++++
+ .../NDS32PcodeUseropLibraryFactory.java       |  242 ++++
  .../core/analysis/NDS32EX9ITDispatchTest.java |  193 +++
  .../analysis/NDS32IFCBodyInvariantsTest.java  |  194 +++
  .../core/analysis/NDS32IFCEmulationTest.java  |  253 ++++
@@ -91,7 +90,7 @@ enough to be merged.
  .../analysis/NDS32MT7663LoadFlowTest.java     |  474 ++++++
  .../resources/firmware/mt7663_00000000.bin    |  Bin 0 -> 901120 bytes
  .../firmware/mt7663_patch_e2_hdr.bin          |  Bin 0 -> 278558 bytes
- 49 files changed, 10055 insertions(+), 219 deletions(-)
+ 48 files changed, 10048 insertions(+), 218 deletions(-)
  create mode 100644 Ghidra/Features/Decompiler/data/ExtensionPoint.manifest
  create mode 100644 Ghidra/Features/Decompiler/src/main/java/ghidra/app/decompiler/inline/IfcDialect.java
  create mode 100644 Ghidra/Features/Decompiler/src/main/java/ghidra/app/decompiler/inline/IfcPcodeEmitter.java
@@ -375,7 +374,7 @@ index 69bbd150c0..f13f75dfda 100644
  		tempVals = new HashMap<>();
  		clearVals = new HashSet<>();
 diff --git a/Ghidra/Features/Decompiler/certification.manifest b/Ghidra/Features/Decompiler/certification.manifest
-index 86be1aae60..0df05ed292 100644
+index b83478905d..6745d3e338 100644
 --- a/Ghidra/Features/Decompiler/certification.manifest
 +++ b/Ghidra/Features/Decompiler/certification.manifest
 @@ -7,6 +7,7 @@
@@ -394,7 +393,7 @@ index 0000000000..79a1d90745
 @@ -0,0 +1 @@
 +PcodeOverrideHook
 diff --git a/Ghidra/Features/Decompiler/src/main/java/ghidra/app/decompiler/DecompileCallback.java b/Ghidra/Features/Decompiler/src/main/java/ghidra/app/decompiler/DecompileCallback.java
-index d43fa7e46e..53a5c0e58d 100644
+index 0d6ccdf3b5..16e41753fd 100644
 --- a/Ghidra/Features/Decompiler/src/main/java/ghidra/app/decompiler/DecompileCallback.java
 +++ b/Ghidra/Features/Decompiler/src/main/java/ghidra/app/decompiler/DecompileCallback.java
 @@ -21,8 +21,17 @@ import static ghidra.program.model.pcode.ElementId.*;
@@ -430,8 +429,8 @@ index d43fa7e46e..53a5c0e58d 100644
  import ghidra.util.exception.NotFoundException;
  import ghidra.util.exception.UsrException;
  import ghidra.util.task.TaskMonitor;
-@@ -227,6 +242,10 @@ public class DecompileCallback {
- 				}
+@@ -226,6 +241,10 @@ public class DecompileCallback {
+ 				debug.handleOverrides(addr, instr);
  			}
  
 +			if (emitFunctionPcodeOverride(addr, instr, resultEncoder)) {
@@ -441,7 +440,7 @@ index d43fa7e46e..53a5c0e58d 100644
  			instr.getPrototype()
  					.getPcodePacked(resultEncoder, instr.getInstructionContext(),
  						new InstructionPcodeOverride(instr));
-@@ -244,6 +263,54 @@ public class DecompileCallback {
+@@ -243,6 +262,54 @@ public class DecompileCallback {
  		resultEncoder.clear();	// Make sure the result is empty
  	}
  
@@ -496,7 +495,7 @@ index d43fa7e46e..53a5c0e58d 100644
  	/**
  	 * Encode a list of pcode, representing an entire Instruction, to the stream
  	 * 
-@@ -1094,6 +1161,13 @@ public class DecompileCallback {
+@@ -1097,6 +1164,13 @@ public class DecompileCallback {
  		if (cachedFunction != null && cachedFunction.getBody().contains(addr)) {
  			return cachedFunction;
  		}
@@ -510,7 +509,7 @@ index d43fa7e46e..53a5c0e58d 100644
  		return listing.getFunctionContaining(addr);
  	}
  
-@@ -1105,9 +1179,22 @@ public class DecompileCallback {
+@@ -1108,9 +1182,22 @@ public class DecompileCallback {
  		if (extRef != null) {
  			return listing.getFunctionAt(extRef.getToAddress());
  		}
@@ -1625,28 +1624,8 @@ index 0000000000..4be3b14a57
 +			Instruction instr, PatchEncoder resultEncoder)
 +			throws IOException, NoValueException;
 +}
-diff --git a/Ghidra/Features/Decompiler/src/main/java/ghidra/app/plugin/core/decompile/actions/ForceUnionAction.java b/Ghidra/Features/Decompiler/src/main/java/ghidra/app/plugin/core/decompile/actions/ForceUnionAction.java
-index 022edfad8b..90ae12f7e0 100644
---- a/Ghidra/Features/Decompiler/src/main/java/ghidra/app/plugin/core/decompile/actions/ForceUnionAction.java
-+++ b/Ghidra/Features/Decompiler/src/main/java/ghidra/app/plugin/core/decompile/actions/ForceUnionAction.java
-@@ -69,7 +69,14 @@ public class ForceUnionAction extends AbstractDecompilerAction {
- 		}
- 		Varnode vn = tokenAtCursor.getVarnode();
- 		if (vn != null) {
--			DataType dt = vn.getHigh().getDataType();
-+			// Some Varnodes -- volatile-memory loads in particular -- never get
-+			// a HighVariable assigned during decompile, so getHigh() can be null.
-+			// Same guard pattern as typeIsUnionRelated below.
-+			HighVariable high = vn.getHigh();
-+			if (high == null) {
-+				return null;
-+			}
-+			DataType dt = high.getDataType();
- 			if (dt instanceof TypeDef) {
- 				dt = ((TypeDef) dt).getBaseDataType();
- 			}
 diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/ProgramDB.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/ProgramDB.java
-index e3bee45402..c6ad8151de 100644
+index 1f6d0915f4..3e72db1ee3 100644
 --- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/ProgramDB.java
 +++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/ProgramDB.java
 @@ -2295,6 +2295,18 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
@@ -1814,10 +1793,10 @@ index f70442ca70..ba6253ef8f 100644
  	 * Returns an iterator over all non-external functions in address (entry point) order
  	 * @param forward true means to iterate in ascending address order
 diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/listing/Program.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/listing/Program.java
-index 71b0c75ecb..f518a49470 100644
+index bb969dc78c..16edac4401 100644
 --- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/listing/Program.java
 +++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/listing/Program.java
-@@ -563,6 +563,17 @@ public interface Program extends DataTypeManagerDomainObject, ProgramArchitectur
+@@ -568,6 +568,17 @@ public interface Program extends DataTypeManagerDomainObject, ProgramArchitectur
  	 */
  	public AddressSetPropertyMap getAddressSetPropertyMap(String name);
  
@@ -1994,11 +1973,11 @@ index ed3a93b095..e6536852a4 100644
  </compiler_spec>
  
 diff --git a/Ghidra/Processors/NDS32/data/languages/nds32.ldefs b/Ghidra/Processors/NDS32/data/languages/nds32.ldefs
-index 8ee0ac46ac..c3dad3d44a 100644
+index e0a035603a..2121ad1892 100644
 --- a/Ghidra/Processors/NDS32/data/languages/nds32.ldefs
 +++ b/Ghidra/Processors/NDS32/data/languages/nds32.ldefs
-@@ -29,5 +29,19 @@
-     <external_name tool="gnu" name="n1h_v3m"/>
+@@ -31,5 +31,19 @@
+     <external_name tool="IDA-PRO" name="nds32"/>
      <external_name tool="DWARF.register.mapping.file" name="nds32.dwarf"/>
    </language>
 +  <language processor="NDS32"
@@ -7734,7 +7713,7 @@ index 0000000000..601c785a21
 +}
 diff --git a/Ghidra/Processors/NDS32/src/main/java/ghidra/app/util/opinion/Mt76ConnacPatchLoader.java b/Ghidra/Processors/NDS32/src/main/java/ghidra/app/util/opinion/Mt76ConnacPatchLoader.java
 new file mode 100644
-index 0000000000..1b8e5a729f
+index 0000000000..5ba40dd77f
 --- /dev/null
 +++ b/Ghidra/Processors/NDS32/src/main/java/ghidra/app/util/opinion/Mt76ConnacPatchLoader.java
 @@ -0,0 +1,287 @@
@@ -7815,7 +7794,7 @@ index 0000000000..1b8e5a729f
 +	}
 +
 +	@Override
-+	public boolean supportsLoadIntoProgram() {
++	public boolean supportsLoadIntoProgram(Program program) {
 +		return true;
 +	}
 +
@@ -8309,10 +8288,10 @@ index 0000000000..7a5cea8370
 +}
 diff --git a/Ghidra/Processors/NDS32/src/main/java/ghidra/program/emulation/NDS32PcodeUseropLibraryFactory.java b/Ghidra/Processors/NDS32/src/main/java/ghidra/program/emulation/NDS32PcodeUseropLibraryFactory.java
 new file mode 100644
-index 0000000000..a1f8bf3c33
+index 0000000000..765bf6de7d
 --- /dev/null
 +++ b/Ghidra/Processors/NDS32/src/main/java/ghidra/program/emulation/NDS32PcodeUseropLibraryFactory.java
-@@ -0,0 +1,241 @@
+@@ -0,0 +1,242 @@
 +/* ###
 + * IP: GHIDRA
 + *
@@ -8342,6 +8321,7 @@ index 0000000000..a1f8bf3c33
 +import ghidra.pcode.exec.PcodeProgram;
 +import ghidra.pcode.exec.PcodeUseropLibrary;
 +import ghidra.pcode.exec.PcodeUseropLibraryFactory;
++import ghidra.pcode.exec.PcodeUseropLibraryFactory.UseropLibrary;
 +import ghidra.pcode.exec.PcodeExecutionException;
 +import ghidra.pcode.emu.DefaultPcodeThread.PcodeThreadExecutor;
 +import ghidra.pcode.emu.PcodeThread;
@@ -8364,7 +8344,7 @@ index 0000000000..a1f8bf3c33
 + * emulator-based analyses don't choke on boot code.  Hooked up via the
 + * {@code useropLibs} property in {@code nds32.pspec}.
 + */
-+@PcodeUseropLibraryFactory.UseropLibrary("nds32")
++@UseropLibrary(id = "nds32")
 +public class NDS32PcodeUseropLibraryFactory implements PcodeUseropLibraryFactory {
 +
 +	@Override

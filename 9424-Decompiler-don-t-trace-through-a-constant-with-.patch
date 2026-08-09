@@ -1,0 +1,142 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Benjamin Schwarze <chaosben@users.noreply.github.com>
+Date: Mon, 27 Jul 2026 08:32:44 +0200
+Subject: [PATCH] 9424: Decompiler: don't trace through a constant with bits
+ outside the SubvariableFlow mask
+
+ constant with bits outside the traced mask
+
+setReplacement() accepted a constant into the traced flow unconditionally, and addConstant()
+then narrowed it to the mask, silently changing its value.  For a flag sized logical variable
+the guard that nothing outside the mask is consumed is skipped, so the truncated bits could
+still be read from the same storage location.  Abort the trace in that case, mirroring the
+check that already exists for the sign extension case.
+
+Adds datatests/subvarconstmask.xml with the failing shape and four ablations.
+---
+ .../Decompiler/certification.manifest         |  1 +
+ .../Decompiler/src/decompile/cpp/subflow.cc   |  7 ++
+ .../decompile/datatests/subvarconstmask.xml   | 81 +++++++++++++++++++
+ 3 files changed, 89 insertions(+)
+ create mode 100644 Ghidra/Features/Decompiler/src/decompile/datatests/subvarconstmask.xml
+
+diff --git a/Ghidra/Features/Decompiler/certification.manifest b/Ghidra/Features/Decompiler/certification.manifest
+index 1b8975ebe1..138dca825a 100644
+--- a/Ghidra/Features/Decompiler/certification.manifest
++++ b/Ghidra/Features/Decompiler/certification.manifest
+@@ -100,6 +100,7 @@ src/decompile/datatests/stackreturn.xml||GHIDRA||||END|
+ src/decompile/datatests/stackspill.xml||GHIDRA||||END|
+ src/decompile/datatests/stackstring.xml||GHIDRA||||END|
+ src/decompile/datatests/statuscmp.xml||GHIDRA||||END|
++src/decompile/datatests/subvarconstmask.xml||GHIDRA||||END|
+ src/decompile/datatests/switchhide.xml||GHIDRA||||END|
+ src/decompile/datatests/switchind.xml||GHIDRA||||END|
+ src/decompile/datatests/switchloop.xml||GHIDRA||||END|
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/subflow.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/subflow.cc
+index be9665b09c..4d2364d385 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/subflow.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/subflow.cc
+@@ -86,6 +86,13 @@ SubvariableFlow::ReplaceVarnode *SubvariableFlow::setReplacement(Varnode *vn,uin
+       if (sextval != cval)
+ 	return (ReplaceVarnode *)0;
+     }
++    else if ((vn->getOffset() & calc_mask(vn->getSize()) & ~mask) != 0) {
++      // The constant has bits set outside of the logical variable.  addConstant() would truncate
++      // it to -mask-, silently changing its value.  For a flag sized variable the check below,
++      // that nothing outside of -mask- is consumed, is skipped, so the untruncated bits may still
++      // be read from the same storage location.  Don't trace through the constant in that case.
++      return (ReplaceVarnode *)0;
++    }
+     return addConstant((ReplaceOp *)0,mask,0,vn);
+   }
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/datatests/subvarconstmask.xml b/Ghidra/Features/Decompiler/src/decompile/datatests/subvarconstmask.xml
+new file mode 100644
+index 0000000000..4be839b6fb
+--- /dev/null
++++ b/Ghidra/Features/Decompiler/src/decompile/datatests/subvarconstmask.xml
+@@ -0,0 +1,81 @@
++<decompilertest>
++<binaryimage arch="x86:LE:32:default">
++<!--
++  SubvariableFlow must not trace through a constant that has bits set outside of the
++  logical variable being traced.  addConstant() truncates such a constant to the mask,
++  which silently changes its value:
++
++      res->val = (mask & constvn->getOffset()) >> leastsigbit_set(mask);
++
++  For a flag sized logical variable (bitsize < 8) setReplacement() skips the check that
++  nothing outside of the mask is consumed, because a flag location legitimately holds
++  several independent one bit variables.  A general purpose register is not such a
++  location, so the truncated bits can still be read from it.
++
++  All five functions below share this shape:
++
++        MOV  AL,byte ptr [ESI]        ; AL is unknown here
++        BT   AX,0x0
++        SETC AL                       ; only bit 0 of AL can be non-zero now
++        OR   AL,AL
++        JZ   merge                    ; taken => AL == 0
++        MOV  AL,0x6                   ; not taken => AL := 6, unconditionally
++        MOV  EBX,dword ptr [EDI + 0x8]
++        MOV  byte ptr [EBX + 0x24],AL ; must store 6, never 0
++    merge:
++        OR   AL,AL                    ; AL is read again here (flag style return)
++        RET
++
++  The SETC reduces the non-zero mask of AL to a single bit, so RuleSubvarCompZero fires
++  on the OR/JZ comparison and starts SubvariableFlow with mask == 0x1.  The traced flow
++  reaches MOV AL,0x6 through the MULTIEQUAL at the merge block, and 0x6 & 0x1 == 0, so before the
++  fix v1 decompiled to
++
++        *(undefined1 *)(*(int *)(unaff_EDI + 8) + 0x24) = 0;
++
++  even though the store is only reachable by falling through the JZ, MOV AL,0x6
++  dominates it, and nothing writes AL in between.  The bogus value also propagated into
++  the return value of the function.
++
++  Each of the three conditions is necessary, so the ablations must keep working:
++
++    v1  the full shape
++    v2  no OR AL,AL behind the merge
++    v3  the value is carried in EAX, so the traced variable is not a partial register
++    v4  the JZ skips past the RET, so there is no shared merge block
++    v5  the stored value is a loaded byte instead of a constant
++-->
++<bytechunk space="ram" offset="0x100000">
++8a06660fbae0000f92c00ac07408b0068b5f088843240ac0c38a06660fbae0000f92c0
++0ac07408b0068b5f08884324c38a06660fbae0000f92c00ac07406b8060000008b5f08
++8943240ac0c38a06660fbae0000f92c00ac0740bb0068b5f088843240ac0c332c0c38a
++06660fbae0000f92c00ac074098a46018b5f088843240ac0c3
++</bytechunk>
++<symbol name="v1" space="ram" offset="0x100000"/>
++<symbol name="v2" space="ram" offset="0x100019"/>
++<symbol name="v3" space="ram" offset="0x100030"/>
++<symbol name="v4" space="ram" offset="0x10004c"/>
++<symbol name="v5" space="ram" offset="0x100068"/>
++</binaryimage>
++<script>
++  <com>lo fu v1</com>
++  <com>decompile</com>
++  <com>print C</com>
++  <com>lo fu v2</com>
++  <com>decompile</com>
++  <com>print C</com>
++  <com>lo fu v3</com>
++  <com>decompile</com>
++  <com>print C</com>
++  <com>lo fu v4</com>
++  <com>decompile</com>
++  <com>print C</com>
++  <com>lo fu v5</com>
++  <com>decompile</com>
++  <com>print C</com>
++  <com>quit</com>
++</script>
++<stringmatch name="Subvariable constant outside mask #1" min="4" max="4">0x24\) = 6;</stringmatch>
++<stringmatch name="Subvariable constant outside mask #2" min="0" max="0">0x24\) = 0;</stringmatch>
++<stringmatch name="Subvariable constant outside mask #3" min="5" max="5">\+ 0x24\) =</stringmatch>
++</decompilertest>
+-- 
+2.45.1
+

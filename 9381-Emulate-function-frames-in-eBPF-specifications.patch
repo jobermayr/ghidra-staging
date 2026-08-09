@@ -1,0 +1,221 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Nicolas Iooss <nicolas.iooss@ledger.fr>
+Date: Fri, 17 Jul 2026 16:14:36 +0200
+Subject: [PATCH] 9381: Emulate function frames in eBPF specifications
+
+When the Linux kernel runs an eBPF programs, it provides a function
+frame of at most 512 bytes through register `FP` = `R10`:
+https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/kernel/bpf/core.c?h=v7.1#n2333
+
+    #define DEFINE_BPF_PROG_RUN(stack_size) \
+    static unsigned int PROG_NAME(stack_size)(const void *ctx, const struct bpf_insn *insn) \
+    { \
+        u64 stack[stack_size / sizeof(u64)]; \
+        u64 regs[MAX_BPF_EXT_REG]; \
+        /* ... */
+        FP = (u64) (unsigned long) &stack[ARRAY_SIZE(stack)]; \
+
+    /* ... */
+    EVAL6(DEFINE_BPF_PROG_RUN, 32, 64, 96, 128, 160, 192);
+    EVAL6(DEFINE_BPF_PROG_RUN, 224, 256, 288, 320, 352, 384);
+    EVAL4(DEFINE_BPF_PROG_RUN, 416, 448, 480, 512);
+
+https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/include/linux/filter.h?h=v7.1#n97
+
+    /* BPF program can access up to 512 bytes of stack space. */
+    #define MAX_BPF_STACK   512
+
+When calling a subprogram through instruction `CALL`, it simply calls
+the same function to run the subprogram:
+https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/kernel/bpf/core.c?h=v7.1#n2082
+
+    JMP_CALL_ARGS:
+        BPF_R0 = interpreters_args[insn->off](BPF_R1, BPF_R2, BPF_R3,
+                                              BPF_R4, BPF_R5,
+                                              insn + insn->imm + 1);
+
+This means the subprogram runs with a dedicated stack and dedicated
+registers, and that no registers except `R0` (holding the return value)
+are modified by eBPF function calls.
+
+This mechanism also relies on the `CALL` instructions being patched to
+provide the stack depth in `insn->off`:
+https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/kernel/bpf/core.c?h=v7.1#n2399
+
+    int bpf_patch_call_args(struct bpf_insn *insn, u32 stack_depth)
+    {
+            stack_depth = max_t(u32, stack_depth, 1);
+            /* Prevent out-of-bounds read to interpreters_args */
+            if (stack_depth > MAX_BPF_STACK)
+                    return -EINVAL;
+            insn->off = (round_up(stack_depth, 32) / 32) - 1;
+            insn->code = BPF_JMP | BPF_CALL_ARGS;
+            return 0;
+    }
+
+eBPF code does not adjust the frame pointer (`R10`) in prologs and
+epilogs of functions. Moreover, the program counter (`PC`) is never
+saved to the stack or restored when functions return.
+
+In Ghidra, it is not possible to compute how much stack space is used by
+a function. To have a proper emulation of function calls, the frame
+pointer has to be adjusted in Sleigh and the program counter saved and
+restored like other ISAs.
+
+Moreover, regarding the registers the kernel documentation states in
+https://kernel.org/doc/html/latest/bpf/standardization/abi.html
+
+> The BPF calling convention is defined as:
+>
+> - R0: return value from function calls, and exit value for BPF programs
+> - R1 - R5: arguments for function calls
+> - R6 - R9: callee saved registers that function calls will preserve
+> - R10: read-only frame pointer to access stack
+>
+> R0 - R5 are scratch registers and BPF programs needs to spill/fill
+> them if necessary across calls.
+>
+> The BPF program needs to store the return value into register R0
+> before doing an EXIT.
+
+For Ghidra Emulator to be correct, `CALL` and `EXIT` instructions need
+to save/restore registers `R6` to `R9`. As in practice the
+implementation of the eBPF interpreter keeps registers `R1` to `R5`,
+save them as well. The ABI specification in `eBPF.cspec` may however
+be kept as it currently is. A varnode was nonetheless incorrectly
+stating that the 8 bytes at offset 8 from the stack were unaffected by
+function call, whereas it makes more sence to use offset 0 to target the
+saved program counter:
+
+      <unaffected>
+    -   <varnode space="ram" offset="8" size="8"/>
+    +   <varnode space="ram" offset="0" size="8"/>
+
+Moreover, other eBPF implementations may use larger frame sizes. For
+example Solana uses 4KB frames:
+https://github.com/anza-xyz/agave/blob/v3.1.8/program-runtime/src/execution_budget.rs#L37
+
+    /// The size of one SBF stack frame.
+    pub const STACK_FRAME_SIZE: usize = 4096;
+
+Define a new constant, `BPF_FRAME_SIZE`, and use it in the specification
+of `CALL` and `EXIT` to ajust the frame pointer accordingly.
+---
+ .../Processors/eBPF/data/languages/eBPF.cspec | 12 ++---
+ .../Processors/eBPF/data/languages/eBPF.sinc  | 53 ++++++++++++++++++-
+ 2 files changed, 58 insertions(+), 7 deletions(-)
+
+diff --git a/Ghidra/Processors/eBPF/data/languages/eBPF.cspec b/Ghidra/Processors/eBPF/data/languages/eBPF.cspec
+index 6c45e6ef6d..ba12f775e6 100644
+--- a/Ghidra/Processors/eBPF/data/languages/eBPF.cspec
++++ b/Ghidra/Processors/eBPF/data/languages/eBPF.cspec
+@@ -51,13 +51,13 @@
+         </pentry>
+        </output>
+       <unaffected>
+-        <varnode space="ram" offset="8" size="8"/>
+-        <register name="R6"/>       
+-	    <register name="R7"/>
++        <varnode space="ram" offset="0" size="8"/>
++        <register name="R6"/>
++        <register name="R7"/>
+         <register name="R8"/>
+-        <register name="R9"/>       
+-		<register name="R10"/> 	
+-      </unaffected> 
++        <register name="R9"/>
++        <register name="R10"/>
++      </unaffected>
+     </prototype>
+   </default_proto>
+  </compiler_spec>
+diff --git a/Ghidra/Processors/eBPF/data/languages/eBPF.sinc b/Ghidra/Processors/eBPF/data/languages/eBPF.sinc
+index fd522ca3df..d005ea1916 100644
+--- a/Ghidra/Processors/eBPF/data/languages/eBPF.sinc
++++ b/Ghidra/Processors/eBPF/data/languages/eBPF.sinc
+@@ -14,6 +14,39 @@ define space syscall type=ram_space size=4;
+ 
+ define register offset=0 size=8 [ R0  R1  R2  R3  R4  R5  R6  R7  R8  R9  R10  PC ];
+ 
++# In Linux kernel, when a function calls another function, a new stack frame is allocated (to R10) and all registers
++# are reset (except R1, R2..., R5 holding parameters). All registers are restored when the function returns but R0.
++# To emulate this behavior in Ghidra, R10 is decreased by the maximum stack frame size and enough space to save the
++# registers. Linux kernel uses frames of at most 512 bytes and Solana eBPF VM uses 4096 bytes, so use the largest.
++# The frame layout is:
++#   R10             return address (saved PC)
++#   R10-8...-4096   local variables
++#   R10-4104        saved R1
++#   R10-4112        saved R2
++#   R10-4120        saved R3
++#   R10-4128        saved R4
++#   R10-4136        saved R5
++#   R10-4144        saved R6
++#   R10-4152        saved R7
++#   R10-4160        saved R8
++#   R10-4168        saved R9
++# When a function is called, R10 is decreased by $(BPF_FRAME_SIZE)
++@define BPF_FRAME_SIZE 4176
++
++macro save_regs_with_new_frame() {
++    R10 = R10 - $(BPF_FRAME_SIZE);
++    *:8 R10 = inst_next;
++    *:8 (R10 - 4104) = R1;
++    *:8 (R10 - 4112) = R2;
++    *:8 (R10 - 4120) = R3;
++    *:8 (R10 - 4128) = R4;
++    *:8 (R10 - 4136) = R5;
++    *:8 (R10 - 4144) = R6;
++    *:8 (R10 - 4152) = R7;
++    *:8 (R10 - 4160) = R8;
++    *:8 (R10 - 4168) = R9;
++}
++
+ # Instruction encoding: Insop:8, dst_reg:4, src_reg:4, off:16, imm:32 - from lsb to msb
+ @if ENDIAN == "little"
+ define token instr(64)
+@@ -439,11 +472,13 @@ SysCall:  imm is imm { export *[syscall]:1 imm; }
+ disp32: reloc is imm [ reloc = inst_next + imm * 8; ] { export *:4 reloc; }
+ 
+ :CALL disp32 is imm & src=1 & op_alu_jmp_opcode=0x8 & op_alu_jmp_source=0 & op_insn_class=0x5 & disp32 {
++    save_regs_with_new_frame();
+     call disp32;
+ }
+ 
+ # GCC encoding and LLVM 19.1+ encoding
+ :CALLX dst is op_alu_jmp_opcode=0x8 & op_alu_jmp_source=1 & op_insn_class=0x5 & src=0 & imm=0 & dst {
++    save_regs_with_new_frame();
+     call [dst];
+ }
+ 
+@@ -451,11 +486,27 @@ disp32: reloc is imm [ reloc = inst_next + imm * 8; ] { export *:4 reloc; }
+ # Introduced in https://github.com/llvm/llvm-project/commit/9a67245d881f4cf89fd8f897ae2cd0bccec49496
+ # Modified in https://github.com/llvm/llvm-project/commit/c43ad6c0fddac0bbed5e881801dd2bc2f9eeba2d
+ :CALLX llvm_reg_callx is op_alu_jmp_opcode=0x8 & op_alu_jmp_source=1 & op_insn_class=0x5 & dst=0 & src=0 & llvm_imm_callx_zero=0 & llvm_reg_callx {
++    save_regs_with_new_frame();
+     call [llvm_reg_callx];
+ }
+ # Both CALLX encodings are matched when both dst and imm are zero
+ :CALLX R0 is op_alu_jmp_opcode=0x8 & op_alu_jmp_source=1 & op_insn_class=0x5 & dst=0 & src=0 & imm=0 & R0 {
++    save_regs_with_new_frame();
+     call [R0];
+ }
+ 
+-:EXIT is op_alu_jmp_opcode=0x9 & op_alu_jmp_source=0 & op_insn_class=0x5 { return [*:8 R10]; }
++:EXIT is op_alu_jmp_opcode=0x9 & op_alu_jmp_source=0 & op_insn_class=0x5 {
++    # Restore all registers except R0
++    R1 = *:8 (R10 - 4104);
++    R2 = *:8 (R10 - 4112);
++    R3 = *:8 (R10 - 4120);
++    R4 = *:8 (R10 - 4128);
++    R5 = *:8 (R10 - 4136);
++    R6 = *:8 (R10 - 4144);
++    R7 = *:8 (R10 - 4152);
++    R8 = *:8 (R10 - 4160);
++    R9 = *:8 (R10 - 4168);
++    PC = *:8 R10;
++    R10 = R10 + $(BPF_FRAME_SIZE);
++    return [PC];
++}
+-- 
+2.45.1
+

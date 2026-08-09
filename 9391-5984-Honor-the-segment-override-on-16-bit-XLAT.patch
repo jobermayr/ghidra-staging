@@ -1,0 +1,48 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Erik Berg <github@slipsprogrammor.no>
+Date: Mon, 13 Jul 2026 17:54:14 +0200
+Subject: [PATCH] 9391: 5984: Honor the segment override on 16-bit XLAT
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The addrsize=0 XLAT constructor parses and prints its seg16 selector but
+then discards it, computing the table address through ptr2's flat zext
+of BX+AL. It is the only memory access in the spec modeled this way:
+every other 16-bit memory operand builds its address with
+segment(seg16,...). The result is that XLAT reads linear 0000:(BX+AL) —
+in real mode, the interrupt vector table — regardless of DS, and a CS:
+or SS: override prefix is decoded but silently ignored. Per the SDM,
+XLAT reads DS:(BX+AL) by default and honors a segment-override prefix.
+
+On real-mode programs this surfaces as "Unable to read bytes at
+ram:0000:*" warnings from the decompiler whenever it tries to read an
+XLAT lookup table, and as wrong constant propagation when the table at
+linear BX+AL happens to be readable.
+
+Build the address with segment(seg16,BX+zext(AL)), exactly like Mem16.
+The 32/64-bit forms are untouched: their segWide/ptr4/ptr8 flat
+addressing matches the other wide memory operands, and their missing
+FS/GS base handling is a separate, milder issue.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+---
+ Ghidra/Processors/x86/data/languages/ia.sinc | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/Ghidra/Processors/x86/data/languages/ia.sinc b/Ghidra/Processors/x86/data/languages/ia.sinc
+index 35b3d85cd0..56464a2eb0 100644
+--- a/Ghidra/Processors/x86/data/languages/ia.sinc
++++ b/Ghidra/Processors/x86/data/languages/ia.sinc
+@@ -6793,7 +6793,7 @@ define pcodeop xend;
+ :XCHG Rmr64,Reg64   is $(LONGMODE_ON) & vexMode=0 & opsize=2 & byte=0x87; mod=3 & Rmr64 & Reg64        { local tmp = Rmr64; Rmr64 = Reg64; Reg64 = tmp; }
+ @endif
+ 
+-:XLAT seg16^BX      is vexMode=0 & addrsize=0 & seg16 & byte=0xd7; BX           { tmp:$(SIZE)= 0; ptr2(tmp,BX+zext(AL)); AL = *tmp; }
++:XLAT seg16^BX      is vexMode=0 & addrsize=0 & seg16 & byte=0xd7; BX           { tmp:$(SIZE) = segment(seg16,BX+zext(AL)); AL = *tmp; }
+ :XLAT segWide^EBX     is vexMode=0 & addrsize=1 & segWide & byte=0xd7; EBX          { tmp:$(SIZE)= 0; ptr4(tmp,EBX+zext(AL)); AL = *tmp; }
+ @ifdef IA64
+ :XLAT segWide^RBX     is $(LONGMODE_ON) & vexMode=0 & addrsize=2 & segWide & byte=0xd7; RBX          { tmp:$(SIZE)= 0; ptr8(tmp,RBX+zext(AL)); AL = *tmp; }
+-- 
+2.45.1
+

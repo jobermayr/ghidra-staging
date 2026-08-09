@@ -1,0 +1,79 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Quintin Kong <2358543632@qq.com>
+Date: Thu, 30 Jul 2026 19:32:10 -0400
+Subject: [PATCH] 9436: #9434 Fix LoongArch scalar rotate semantics
+
+The LoongArch SLEIGH constructors for rotr.w, rotri.w, rotr.d, and rotri.d use
+signed right shift for the right-hand portion of the rotate. Inputs with the
+sign bit set therefore propagate ones into the result instead of shifting in
+zeros.
+
+This changes the right-hand portion to a logical right shift and combines the
+two non-overlapping portions with bitwise OR.
+
+For example, rotri.d a0,a1,1 with a1=0x8000000000000000 should produce
+0x4000000000000000. The modified language compiles with SLEIGH, and all four
+forms have been checked with sign-bit-set inputs.
+---
+ .../data/languages/loongarch32_instructions.sinc          | 8 ++++----
+ .../data/languages/loongarch64_instructions.sinc          | 8 ++++----
+ 2 files changed, 8 insertions(+), 8 deletions(-)
+
+diff --git a/Ghidra/Processors/Loongarch/data/languages/loongarch32_instructions.sinc b/Ghidra/Processors/Loongarch/data/languages/loongarch32_instructions.sinc
+index 9ac1d549a5..6d4f408221 100644
+--- a/Ghidra/Processors/Loongarch/data/languages/loongarch32_instructions.sinc
++++ b/Ghidra/Processors/Loongarch/data/languages/loongarch32_instructions.sinc
+@@ -259,9 +259,9 @@
+ #0x001b0000	0xffff8000	r0:5,r5:5,r10:5	['reg0_5_s0', 'reg5_5_s0', 'reg10_5_s0']
+ :rotr.w  RD, RJ32src, RK32src  is op15_31=0x36 & RD & RJ32src & RK32src {
+ 	local shift:1 = RK32src(0) & 0x1f;
+-	local tmp1:4 = RJ32src s>> shift;
++	local tmp1:4 = RJ32src >> shift;
+ 	local tmp2:4 = RJ32src << (32 - shift);
+-	local result = tmp1 + tmp2;
++	local result = tmp1 | tmp2;
+ 
+ 	RD = sext(result);
+ 
+@@ -271,9 +271,9 @@
+ #0x004c8000	0xffff8000	r0:5,r5:5,u10:5	['reg0_5_s0', 'reg5_5_s0', 'imm10_5_s0']
+ :rotri.w  RD, RJ32src, imm10_5 is op15_31=0x99 & RD & RJ32src & imm10_5 {
+ 	local shift:1 = imm10_5;
+-	local tmp1:4 = RJ32src s>> shift;
++	local tmp1:4 = RJ32src >> shift;
+ 	local tmp2:4 = RJ32src << (32 - shift);
+-	local result = tmp1 + tmp2;
++	local result = tmp1 | tmp2;
+ 
+ 	RD = sext(result);
+ 
+diff --git a/Ghidra/Processors/Loongarch/data/languages/loongarch64_instructions.sinc b/Ghidra/Processors/Loongarch/data/languages/loongarch64_instructions.sinc
+index dc923e6060..ae5bc25a43 100644
+--- a/Ghidra/Processors/Loongarch/data/languages/loongarch64_instructions.sinc
++++ b/Ghidra/Processors/Loongarch/data/languages/loongarch64_instructions.sinc
+@@ -126,18 +126,18 @@
+ #0x001b8000	0xffff8000	r0:5,r5:5,r10:5	['reg0_5_s0', 'reg5_5_s0', 'reg10_5_s0']
+ :rotr.d RD, RJsrc, RKsrc              is op15_31=0x37 & RD & RJsrc & RKsrc {
+ 	local shift:1 = RKsrc(0) & 0x3f;
+-	local tmp1:8 = RJsrc s>> shift;
++	local tmp1:8 = RJsrc >> shift;
+ 	local tmp2:8 = RJsrc << (64 - shift);
+-	RD = tmp1 + tmp2;
++	RD = tmp1 | tmp2;
+ }
+ 
+ #la-base-64.txt rotri.d mask=0x004d0000	[@qemu]
+ #0x004d0000	0xffff0000	r0:5,r5:5,u10:6	['reg0_5_s0', 'reg5_5_s0', 'imm10_6_s0']
+ :rotri.d RD, RJsrc, imm10_6           is op16_31=0x4d & RD & RJsrc & imm10_6 {
+ 	local shift:1 = imm10_6 & 0x3f;
+-	local tmp1:8 = RJsrc s>> shift;
++	local tmp1:8 = RJsrc >> shift;
+ 	local tmp2:8 = RJsrc << (64 - shift);
+-	RD = tmp1 + tmp2;
++	RD = tmp1 | tmp2;
+ }
+ 
+ 
+-- 
+2.45.1
+

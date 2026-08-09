@@ -1,0 +1,143 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: burhan_250 <burhan_250@live.de>
+Date: Thu, 6 Aug 2026 13:15:52 +0200
+Subject: [PATCH] 9471: #9470 Recover pass-through return values when the
+ callee prototype is known
+
+---
+ .../Decompiler/certification.manifest         |  1 +
+ .../src/decompile/cpp/coreaction.cc           | 49 ++++++++++++++++++-
+ .../decompile/datatests/retpassthrough.xml    | 40 +++++++++++++++
+ 3 files changed, 89 insertions(+), 1 deletion(-)
+ create mode 100644 Ghidra/Features/Decompiler/src/decompile/datatests/retpassthrough.xml
+
+diff --git a/Ghidra/Features/Decompiler/certification.manifest b/Ghidra/Features/Decompiler/certification.manifest
+index eb12943d03..4b527ee27a 100644
+--- a/Ghidra/Features/Decompiler/certification.manifest
++++ b/Ghidra/Features/Decompiler/certification.manifest
+@@ -90,6 +90,7 @@ src/decompile/datatests/pointersub.xml||GHIDRA||||END|
+ src/decompile/datatests/promotecompare.xml||GHIDRA||||END|
+ src/decompile/datatests/ptrtoarray.xml||GHIDRA||||END|
+ src/decompile/datatests/readvolatile.xml||GHIDRA||||END|
++src/decompile/datatests/retpassthrough.xml||GHIDRA||||END|
+ src/decompile/datatests/retspecial.xml||GHIDRA||||END|
+ src/decompile/datatests/retstruct.xml||GHIDRA||||END|
+ src/decompile/datatests/revisit.xml||GHIDRA||||END|
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
+index a1368a7bf7..895b25d9e4 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
+@@ -2103,6 +2103,50 @@ void ActionReturnRecovery::buildReturnOutput(ParamActive *active,PcodeOp *retop,
+   }
+ }
+ 
++/// \brief Check if a return trial Varnode holds a called function's return value
++///
++/// A function that ends in \b return \b callee(...) leaves the value produced by the
++/// CALL in the return storage without ever writing it itself. Funcdata::ancestorOpUse()
++/// deliberately refuses to accept a CALL as evidence of a single use, because every call
++/// leaves its return storage defined whether or not the caller passes that value on. When
++/// the callee's prototype is known and declares a return value occupying exactly the
++/// trial's storage, that ambiguity is resolved: the value reaching the RETURN is the
++/// callee's return value, not an incidental leftover.  If the trial Varnode merges
++/// several control-flow paths (MULTIEQUAL), every path must be such a declared return
++/// value for the trial to qualify.
++/// \param data is the function being analyzed
++/// \param vn is the trial Varnode reaching the RETURN
++/// \param trial is the associated parameter trial object
++/// \param depth is the remaining depth for following MULTIEQUAL merges
++/// \return \b true if the Varnode is a called function's declared return value
++static bool trialIsCalleeReturnValue(const Funcdata &data,const Varnode *vn,const ParamTrial &trial,int4 depth)
++
++{
++  if (!vn->isWritten()) return false;
++  const PcodeOp *def = vn->getDef();
++  OpCode opc = def->code();
++  if (opc == CPUI_MULTIEQUAL) {
++    if (depth <= 0) return false;	// Also acts as a loop guard
++    for(int4 i=0;i<def->numInput();++i) {
++      if (!trialIsCalleeReturnValue(data,def->getIn(i),trial,depth-1))
++	return false;
++    }
++    return true;
++  }
++  if ((opc != CPUI_CALL)&&(opc != CPUI_CALLIND)) return false;
++  FuncCallSpecs *fc = data.getCallSpecs(def);
++  if (fc == (FuncCallSpecs *)0) return false;
++  if (!fc->isOutputLocked()) return false;	// Only a known prototype resolves the ambiguity
++  ProtoParameter *outparam = fc->getOutput();
++  if (outparam == (ProtoParameter *)0) return false;
++  Datatype *ct = outparam->getType();
++  if (ct == (Datatype *)0) return false;
++  if (ct->getMetatype() == TYPE_VOID) return false;
++  if (outparam->getSize() != trial.getSize()) return false;
++  if (outparam->getAddress() != trial.getAddress()) return false;
++  return true;
++}
++
+ int4 ActionReturnRecovery::apply(Funcdata &data)
+ 
+ {
+@@ -2125,9 +2169,12 @@ int4 ActionReturnRecovery::apply(Funcdata &data)
+ 	if (trial.isChecked()) continue; // Already checked
+ 	int4 slot = trial.getSlot();
+ 	vn = op->getIn(slot);
+-	if (ancestorReal.execute(op,slot,&trial,false))
++	if (ancestorReal.execute(op,slot,&trial,false)) {
+ 	  if (data.ancestorOpUse(maxancestor,vn,op,trial,0,0))
+ 	    trial.markActive(); // This varnode sees active use as a parameter
++	  else if (trialIsCalleeReturnValue(data,vn,trial,4))
++	    trial.markActive(); // Passed through from a callee with a known return value
++	}
+ 	count += 1;
+       }
+     }
+diff --git a/Ghidra/Features/Decompiler/src/decompile/datatests/retpassthrough.xml b/Ghidra/Features/Decompiler/src/decompile/datatests/retpassthrough.xml
+new file mode 100644
+index 0000000000..763413fff0
+--- /dev/null
++++ b/Ghidra/Features/Decompiler/src/decompile/datatests/retpassthrough.xml
+@@ -0,0 +1,40 @@
++<decompilertest>
++<binaryimage arch="x86:LE:64:default:gcc">
++  <!--
++      callee_ret  (0x100000):  mov rax,rdi ; sub rax,rsi ; ret
++      wrapper     (0x100007):  call callee_ret ; ret
++      callee_ret2 (0x100010):  mov rax,rdi ; add rax,rsi ; ret
++      wrapper2    (0x100020):  test rdx,rdx ; je L2 ; call callee_ret ; jmp L3
++                               L2: call callee_ret2 ; L3: ret
++
++      Neither wrapper ever writes RAX itself: the value each returns is
++      produced by a CALL.  With the callees' prototypes known to return an
++      8-byte value in RAX, the wrappers must be recovered as returning that
++      value, not as void.  wrapper2 exercises the case where return paths
++      from two different calls merge (MULTIEQUAL) before the RETURN.
++  -->
++<bytechunk space="ram" offset="0x100000" readonly="true">
++4889f84829f0c3e8f4ffffffc39090904889f84801f0c39090909090909090904885d27407e8d6ffffffeb05e8dfffffffc3
++</bytechunk>
++</binaryimage>
++<script>
++  <com>map fun r0x100000 callee_ret</com>
++  <com>map fun r0x100007 wrapper</com>
++  <com>map fun r0x100010 callee_ret2</com>
++  <com>map fun r0x100020 wrapper2</com>
++  <com>parse line extern int8 callee_ret(int8 a,int8 b);</com>
++  <com>parse line extern int8 callee_ret2(int8 a,int8 b);</com>
++  <com>lo fu wrapper</com>
++  <com>decompile</com>
++  <com>print C</com>
++  <com>lo fu wrapper2</com>
++  <com>decompile</com>
++  <com>print C</com>
++  <com>quit</com>
++</script>
++<stringmatch name="Return passthrough #1" min="1" max="1">int8 wrapper\(</stringmatch>
++<stringmatch name="Return passthrough #2" min="1" max="2">= callee_ret\(param_1,param_2\);</stringmatch>
++<stringmatch name="Return passthrough #3" min="0" max="0">void wrapper</stringmatch>
++<stringmatch name="Return passthrough #4" min="1" max="1">int8 wrapper2\(</stringmatch>
++<stringmatch name="Return passthrough #5" min="1" max="1">= callee_ret2\(param_1,param_2\);</stringmatch>
++</decompilertest>
+-- 
+2.45.1
+

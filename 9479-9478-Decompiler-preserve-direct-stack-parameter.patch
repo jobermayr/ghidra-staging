@@ -1,0 +1,227 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: burhan_250 <burhan_250@live.de>
+Date: Thu, 6 Aug 2026 14:05:13 +0200
+Subject: [PATCH] 9479: #9478 Decompiler: preserve direct stack parameter
+ trials across register holes
+
+---
+ .../Decompiler/certification.manifest         |  1 +
+ .../Decompiler/src/decompile/cpp/fspec.cc     | 42 +++++++++++-
+ .../src/decompile/cpp/include/ghidra/fspec.hh |  1 +
+ .../cpp/include/ghidra/modelrules.hh          | 18 +++++
+ .../src/decompile/datatests/memclassparam.xml | 68 +++++++++++++++++++
+ 5 files changed, 129 insertions(+), 1 deletion(-)
+ create mode 100644 Ghidra/Features/Decompiler/src/decompile/datatests/memclassparam.xml
+
+diff --git a/Ghidra/Features/Decompiler/certification.manifest b/Ghidra/Features/Decompiler/certification.manifest
+index 8bc673c591..05852e5af4 100644
+--- a/Ghidra/Features/Decompiler/certification.manifest
++++ b/Ghidra/Features/Decompiler/certification.manifest
+@@ -63,6 +63,7 @@ src/decompile/datatests/loadwidth.xml||GHIDRA||||END|
+ src/decompile/datatests/longdouble.xml||GHIDRA||||END|
+ src/decompile/datatests/loopcomment.xml||GHIDRA||||END|
+ src/decompile/datatests/lzcount.xml||GHIDRA||||END|
++src/decompile/datatests/memclassparam.xml||GHIDRA||||END|
+ src/decompile/datatests/mixfloatint.xml||GHIDRA||||END|
+ src/decompile/datatests/modulo.xml||GHIDRA||||END|
+ src/decompile/datatests/modulo2.xml||GHIDRA||||END|
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.cc
+index 9c9cd23eee..795c86b643 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.cc
+@@ -618,6 +618,20 @@ ParamListStandard::~ParamListStandard(void)
+     delete resolver;
+ }
+ 
++/// A \e direct stack assignment means a ModelRule (such as \<goto_stack>) can place a
++/// parameter at the stack resource even though earlier register resources are unconsumed.
++/// \return \b true if the model contains such a rule
++bool ParamListStandard::hasDirectStackAssignment(void) const
++
++{
++  list<ModelRule>::const_iterator iter;
++  for(iter=modelRules.begin();iter!=modelRules.end();++iter) {
++    if ((*iter).assignsStackDirectly())
++      return true;
++  }
++  return false;
++}
++
+ /// \param tiles will contain the set of matching entries
+ /// \param type is the storage class
+ /// \return the first matching iterator
+@@ -1344,9 +1358,35 @@ void ParamListStandard::fillinMap(ParamActive *active) const
+     // Definitely not used -- overrides active
+     forceNoUse(active,trialStart[i],trialStart[i+1]);
+   }
++  // The model may be able to assign a parameter to the stack without consuming register
++  // resources (e.g. a <goto_stack> rule for data-types the ABI passes in memory).  A chain of
++  // unused register entries then implies nothing about trials in the stack region, so the chain
++  // and hole rules are enforced separately on the register and stack portions of a section.
++  // This is restricted to recovering the active function's own parameters:  for a sub-function
++  // call site, a caller-side spill that happens to sit in the outgoing argument area is
++  // indistinguishable from a stack argument, and the chain rule is kept as a filter.
++  bool directStack = hasDirectStackAssignment() && !active->isRecoverSubcall();
+   for(int4 i=0;i<numSection;++i) {
+     // Chains of inactivity override later actives
+-    forceInactiveChain(active,2,trialStart[i],trialStart[i+1],resourceStart[i]);
++    int4 sectionStart = trialStart[i];
++    int4 sectionStop = trialStart[i+1];
++    int4 stackStart = sectionStop;
++    if (directStack) {
++      for(int4 j=sectionStart;j<sectionStop;++j) {
++	const ParamEntry *curEntry = active->getTrial(j).getEntry();
++	if (curEntry == (const ParamEntry *)0) continue;
++	if (!curEntry->isExclusion() && curEntry->getSpace()->getType() == IPTR_SPACEBASE) {
++	  stackStart = j;
++	  break;
++	}
++      }
++    }
++    if (sectionStart < stackStart && stackStart < sectionStop) {
++      forceInactiveChain(active,2,sectionStart,stackStart,resourceStart[i]);
++      forceInactiveChain(active,2,stackStart,sectionStop,active->getTrial(stackStart).getEntry()->getGroup());
++    }
++    else
++      forceInactiveChain(active,2,sectionStart,sectionStop,resourceStart[i]);
+   }
+ 
+   // Mark every active trial as used
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/fspec.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/fspec.hh
+index 5235b9d6ec..ddb3f3be38 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/fspec.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/fspec.hh
+@@ -599,6 +599,7 @@ protected:
+   list<ModelRule> modelRules;		///< Rules to apply when assigning addresses
+   AddrSpace *spacebase;			///< Address space containing relative offset parameters
+   const ParamEntry *findEntry(const Address &loc,int4 size,bool just) const;	///< Given storage location find matching ParamEntry
++  bool hasDirectStackAssignment(void) const;	///< Return \b true if a rule can assign stack storage while skipping registers
+   const ParamEntry *selectUnreferenceEntry(int4 grp,type_class prefType) const;	///< Select entry to fill an unreferenced param
+   void buildTrialMap(ParamActive *active) const;	///< Build map from parameter trials to model ParamEntrys
+   void separateSections(ParamActive *active,vector<int4> &trialStart) const;
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/modelrules.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/modelrules.hh
+index 17ebcc8a5c..65a8d5f5ae 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/modelrules.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/modelrules.hh
+@@ -312,6 +312,15 @@ public:
+   /// \return \b true if the trials could form a valid return value
+   virtual bool fillinOutputMap(ParamActive *active) const;
+ 
++  /// \brief Return \b true if \b this action can assign a parameter to the stack resource
++  /// without consuming any register resources
++  ///
++  /// By default, an input parameter is assigned to the stack only after all register resources
++  /// (in its resource section) are consumed.  An action returning \b true here (GotoStack) can
++  /// assign a parameter to the stack while skipping unused register resources entirely.
++  /// \return \b true if the action can assign stack storage while registers remain unconsumed
++  virtual bool assignsStackDirectly(void) const { return false; }
++
+   /// \brief Configure any details of how \b this action should behave from the stream
+   ///
+   /// \param decoder is the given stream decoder
+@@ -333,6 +342,7 @@ public:
+   virtual uint4 assignAddress(Datatype *dt,const PrototypePieces &proto,int4 pos,TypeFactory &tlist,
+ 			      vector<int4> &status,ParameterPieces &res) const;
+   virtual bool fillinOutputMap(ParamActive *active) const;
++  virtual bool assignsStackDirectly(void) const { return true; }
+   virtual void decode(Decoder &decoder);
+ };
+ 
+@@ -550,6 +560,7 @@ public:
+ 		      vector<int4> &status,ParameterPieces &res) const;
+   bool fillinOutputMap(ParamActive *active) const;	///< Test and mark the trial(s) that can be valid return value
+   bool canAffectFillinOutput(void) const;		///< Return \b true if fillinOutputMap is active for \b this rule
++  bool assignsStackDirectly(void) const;	///< Return \b true if \b this rule can assign stack storage while skipping registers
+   void decode(Decoder &decoder,const ParamListStandard *res);		///< Decode \b this rule from stream
+ };
+ 
+@@ -569,5 +580,12 @@ inline bool ModelRule::canAffectFillinOutput(void) const
+   return assign->canAffectFillinOutput();
+ }
+ 
++/// \return \b true if the assign action can place a parameter on the stack while registers remain unconsumed
++inline bool ModelRule::assignsStackDirectly(void) const
++
++{
++  return (assign != (AssignAction *)0) && assign->assignsStackDirectly();
++}
++
+ } // End namespace ghidra
+ #endif
+diff --git a/Ghidra/Features/Decompiler/src/decompile/datatests/memclassparam.xml b/Ghidra/Features/Decompiler/src/decompile/datatests/memclassparam.xml
+new file mode 100644
+index 0000000000..e4a69b9441
+--- /dev/null
++++ b/Ghidra/Features/Decompiler/src/decompile/datatests/memclassparam.xml
+@@ -0,0 +1,68 @@
++<decompilertest>
++<binaryimage arch="x86:LE:64:default:gcc">
++<!--
++  Compiled from (gcc -O0, x86-64 System V):
++
++    const char *to_human(long double size, char *buf) {
++      const char units[] = "\0KMGTPEZY";
++      unsigned i = 0;
++      while (size >= 1024) { size /= 1024; i++; }
++      sprintf(buf, "%.2Lf%c", size, units[i]);
++      return buf;
++    }
++    struct desc { void *ptr; unsigned long len; unsigned long long off; }; /* 24 bytes */
++    unsigned long long sum_desc(struct desc d, int tag) {
++      return (unsigned long long)d.len + d.off + (unsigned)tag;
++    }
++
++  Both functions take a SysV MEMORY-class parameter (long double / 24-byte
++  aggregate) passed on the stack while a LATER parameter still occupies the
++  first integer register.  The register sequence therefore has a "hole"
++  (RSI-R9 unused, stack used), which the chain heuristic must not treat as
++  evidence against the stack trials: the model's <goto_stack> rule says
++  MEMORY-class parameters consume no registers.
++  to_human @0x1149, sum_desc @0x11c9, main @0x11e5, sprintf@plt @0x1040,
++  printf@plt @0x1030, rodata (format strings, 1024.0L, 1234567.0L) @0x2000.
++-->
++<bytechunk space="ram" offset="0x1020" readonly="true">
++ff35ca2f0000ff25cc2f00000f1f4000ff25ca2f00006800000000e9e0ffffffff25c22f00006801000000e9d0ffffffff258a2f000066900000000000000000
++31ed4989d15e4889e24883e4f050544531c031c9488d3d6a010000ff153f2f0000f4662e0f1f8400000000000f1f4000488d3d892f0000488d05822f00004839
++f87415488b051e2f00004885c07409ffe00f1f8000000000c30f1f8000000000488d3d592f0000488d35522f00004829fe4889f048c1ee3f48c1f8034801c648
++d1fe7414488b05ed2e00004885c07408ffe0660f1f440000c30f1f8000000000f30f1efa803d152f000000752b5548833dca2e0000004889e5740c488b3df62e
++0000e829ffffffe864ffffffc605ed2e0000015dc30f1f00c30f1f8000000000f30f1efae977ffffff554889e54883ec2048897de848b8004b4d475450455a48
++8945f266c745fa5900c745fc00000000eb12db6d10db2db50e0000def9db7d108345fc01db2da60e0000db6d10dff1ddd873df8b45fc0fb64405f20fbed0488b
++45e8ff7518ff7510488d0d610e00004889ce4889c7b800000000e881feffff4883c410488b45e8c9c3554889e5897dfc488b5518488b45204801d08b55fc89d2
++4801d05dc3554889e5534883ec48488d45d0488945b048c745b80700000048c745c0090000004883ec184889e1488b45b0488b55b848890148895108488b45c0
++48894110bf03000000e89bffffff4883c4184889c3488d45d0db2d010e0000488d6424f0db3c244889c7e8fafeffff4883c4104889da4889c6488d05b80d0000
++4889c7b800000000e8c3fdffffb800000000488b5df8c9c3
++</bytechunk>
++<bytechunk space="ram" offset="0x2000" readonly="true">
++01000200000000000000000000000000252e324c66256300257320256c6c750a0000000000000000000000000000000000000000000000800940000000000000
++000000000038b4961340000000000000
++</bytechunk>
++</binaryimage>
++<script>
++  <com>map fun r0x1030 printf</com>
++  <com>map fun r0x1040 sprintf</com>
++  <com>map fun r0x1149 to_human</com>
++  <com>map fun r0x11c9 sum_desc</com>
++  <com>map fun r0x11e5 main</com>
++  <com>parse line extern int4 printf(char * format,...);</com>
++  <com>parse line extern int4 sprintf(char * s,char * format,...);</com>
++  <com>lo fu to_human</com>
++  <com>decompile</com>
++  <com>print C</com>
++  <com>lo fu sum_desc</com>
++  <com>decompile</com>
++  <com>print C</com>
++  <com>lo fu main</com>
++  <com>decompile</com>
++  <com>print C</com>
++  <com>quit</com>
++</script>
++<stringmatch name="Memory-class param #1" min="0" max="0">in_stack_</stringmatch>
++<stringmatch name="Memory-class param #2" min="1" max="1">char \* to_human\(char \*param_1,xunknown8 param_2,xunknown2 param_3\)</stringmatch>
++<stringmatch name="Memory-class param #3" min="1" max="1">int8 sum_desc\(uint4 param_1,xunknown8 param_2,int8 param_3,int8 param_4\)</stringmatch>
++<stringmatch name="Memory-class param #4" min="1" max="1">return param_4 \+ param_3 \+ \(uint8\)param_1;</stringmatch>
++<stringmatch name="Memory-class param #5" min="1" max="1">param_2 = SUB108\(fVar1,0\);</stringmatch>
++</decompilertest>
+-- 
+2.45.1
+

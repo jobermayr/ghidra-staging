@@ -1,0 +1,68 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: burhan_250 <burhan_250@live.de>
+Date: Sun, 2 Aug 2026 22:21:25 +0200
+Subject: [PATCH] 9446: #9445 Preserve inferred mixed-width load sizes
+
+---
+ .../Decompiler/certification.manifest         |  1 +
+ .../src/decompile/cpp/ruleaction.cc           |  3 ++-
+ .../src/decompile/datatests/loadwidth.xml     | 21 +++++++++++++++++++
+ 3 files changed, 24 insertions(+), 1 deletion(-)
+ create mode 100644 Ghidra/Features/Decompiler/src/decompile/datatests/loadwidth.xml
+
+diff --git a/Ghidra/Features/Decompiler/certification.manifest b/Ghidra/Features/Decompiler/certification.manifest
+index 138dca825a..eb12943d03 100644
+--- a/Ghidra/Features/Decompiler/certification.manifest
++++ b/Ghidra/Features/Decompiler/certification.manifest
+@@ -59,6 +59,7 @@ src/decompile/datatests/indproto.xml||GHIDRA||||END|
+ src/decompile/datatests/injectoverride.xml||GHIDRA||||END|
+ src/decompile/datatests/inline.xml||GHIDRA||||END|
+ src/decompile/datatests/inlinetarget.xml||GHIDRA||||END|
++src/decompile/datatests/loadwidth.xml||GHIDRA||||END|
+ src/decompile/datatests/longdouble.xml||GHIDRA||||END|
+ src/decompile/datatests/loopcomment.xml||GHIDRA||||END|
+ src/decompile/datatests/lzcount.xml||GHIDRA||||END|
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc
+index b44ddb70b5..5a68b14ed5 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc
+@@ -11594,7 +11594,8 @@ int4 RuleExpandLoad::applyOp(PcodeOp *op,Funcdata &data)
+       lsbCut = offset;
+   }
+   else {
+-    // Check for natural integer truncation
++    // Check for natural integer truncation from an explicitly typed pointer
++    if (!rootPtr->isTypeLock()) return 0;
+     if (meta != TYPE_INT && meta != TYPE_UINT) return 0;
+     type_metatype outMeta = outVn->getTypeDefFacing()->getMetatype();
+     if (outMeta != TYPE_INT && outMeta != TYPE_UINT && outMeta != TYPE_UNKNOWN && outMeta != TYPE_BOOL)
+diff --git a/Ghidra/Features/Decompiler/src/decompile/datatests/loadwidth.xml b/Ghidra/Features/Decompiler/src/decompile/datatests/loadwidth.xml
+new file mode 100644
+index 0000000000..26c1e29c82
+--- /dev/null
++++ b/Ghidra/Features/Decompiler/src/decompile/datatests/loadwidth.xml
+@@ -0,0 +1,21 @@
++<decompilertest>
++<binaryimage arch="x86:LE:64:default:gcc">
++  <!--
++      A pointer is used by LOADs of two different widths.  The inferred uint8
++      pointer must be cast before the one-byte LOAD; casting its result would
++      retain an incorrect eight-byte dereference in the emitted C.
++  -->
++<bytechunk space="ram" offset="0x100000" readonly="true">
++85f67404488b07c30fb607c3
++</bytechunk>
++</binaryimage>
++<script>
++  <com>map fun r0x100000 mixed_width_load</com>
++  <com>decompile</com>
++  <com>print C</com>
++  <com>quit</com>
++</script>
++<stringmatch name="Mixed-width load #1" min="1" max="1">return \(uint8\)\*\(uint1 \*\)param_1;</stringmatch>
++<stringmatch name="Mixed-width load #2" min="1" max="1">return \*param_1;</stringmatch>
++<stringmatch name="Mixed-width load #3" min="0" max="0">return \(uint8\)\(uint1\)\*param_1;</stringmatch>
++</decompilertest>
+-- 
+2.45.1
+

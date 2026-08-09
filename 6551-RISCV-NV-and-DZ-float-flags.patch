@@ -4,15 +4,15 @@ Date: Mon, 20 May 2024 14:35:47 +0930
 Subject: [PATCH] 6551: RISCV: NV and DZ float flags
 
 ---
- .../RISCV/data/languages/riscv.rv32d.sinc     | 57 ++++++++++++--
- .../RISCV/data/languages/riscv.rv32f.sinc     | 76 +++++++++++++++----
- .../RISCV/data/languages/riscv.rv64d.sinc     | 16 +++-
- .../RISCV/data/languages/riscv.rv64f.sinc     | 16 +++-
- .../RISCV/data/languages/riscv.table.sinc     | 50 +++++++++---
- 5 files changed, 182 insertions(+), 33 deletions(-)
+ .../RISCV/data/languages/riscv.rv32d.sinc     | 57 +++++++++++++++--
+ .../RISCV/data/languages/riscv.rv32f.sinc     | 61 +++++++++++++++++--
+ .../RISCV/data/languages/riscv.rv64d.sinc     | 15 ++++-
+ .../RISCV/data/languages/riscv.rv64f.sinc     | 13 +++-
+ .../RISCV/data/languages/riscv.table.sinc     | 50 +++++++++++----
+ 5 files changed, 172 insertions(+), 24 deletions(-)
 
 diff --git a/Ghidra/Processors/RISCV/data/languages/riscv.rv32d.sinc b/Ghidra/Processors/RISCV/data/languages/riscv.rv32d.sinc
-index 0f4157d24c..9f7ae4eca9 100644
+index 45e502a9f8..4034171bbe 100644
 --- a/Ghidra/Processors/RISCV/data/languages/riscv.rv32d.sinc
 +++ b/Ghidra/Processors/RISCV/data/languages/riscv.rv32d.sinc
 @@ -1,13 +1,26 @@
@@ -52,7 +52,7 @@ index 0f4157d24c..9f7ae4eca9 100644
 +	if (frs1D f>= low && frs1D f<= high) goto <VALID>;
 +	setFflags($(FFLAGNV));
 +	<VALID>
- 	local tmp:$(XLEN) = trunc(frs1D);
+ 	local tmp:4 = trunc(frs1D);
  	rd = sext(tmp);
  }
 @@ -71,6 +89,11 @@
@@ -64,9 +64,9 @@ index 0f4157d24c..9f7ae4eca9 100644
 +	if (frs1D f>= low && frs1D f<= high) goto <VALID>;
 +	setFflags($(FFLAGNV));
 +	<VALID>
- 	#TODO  unsigned
- 	local tmp:$(XLEN) = trunc(frs1D);
- 	rd = sext(tmp);
+ 	local cond = (frs1D s<0);
+ 	local tmp:4 = (zext(cond) * 0) + (zext(!cond) * trunc(frs1D));
+ 	rd = sext(tmp); # x[rd] = sext(f32->u32(f[rs1]))
 @@ -80,6 +103,13 @@
  # fdiv.d D,S,T,m 1a000053 fe00007f SIMPLE (0, 0) 
  :fdiv.d frd,frs1D,frs2D,FRM is frs1D & frd & frs2D & FRM & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct7=0xd
@@ -153,7 +153,7 @@ index 0f4157d24c..9f7ae4eca9 100644
  	frd = frs1D f- frs2D;
  }
 diff --git a/Ghidra/Processors/RISCV/data/languages/riscv.rv32f.sinc b/Ghidra/Processors/RISCV/data/languages/riscv.rv32f.sinc
-index b8e0ca1ea6..d15c60f141 100644
+index f3e4aaf26d..5766dd3d99 100644
 --- a/Ghidra/Processors/RISCV/data/languages/riscv.rv32f.sinc
 +++ b/Ghidra/Processors/RISCV/data/languages/riscv.rv32f.sinc
 @@ -1,9 +1,24 @@
@@ -182,24 +182,6 @@ index b8e0ca1ea6..d15c60f141 100644
  	fassignS(frd, tmp);
  }
  
-@@ -29,7 +44,7 @@
- # fcvt.s.w D,s,m d0000053 fff0007f SIMPLE (0, 0) 
- :fcvt.s.w frd,rs1W,FRM is frd & FRM & rs1W & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct7=0x68 & op2024=0x0
- {
--	local tmp:4 = int2float(rs1W);
-+	local tmp:$(SFLEN) = int2float(rs1W);
- 	fassignS(frd, tmp);
- }
- 
-@@ -39,7 +54,7 @@
- {
- 	#ATTN  unsigned can be an issue here
- 	local u32:$(XLEN2) = zext(rs1W);
--	local tmp:4 = int2float(u32);
-+	local tmp:$(SFLEN) = int2float(u32);
- 	fassignS(frd, tmp);
- }
- 
 @@ -47,6 +62,11 @@
  # fcvt.w.s d,S,m c0000053 fff0007f SIMPLE (0, 0) 
  :fcvt.w.s rd,frs1S,FRM is frs1S & FRM & rd & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct7=0x60 & op2024=0x0
@@ -209,26 +191,26 @@ index b8e0ca1ea6..d15c60f141 100644
 +	if (frs1S f>= low && frs1S f<= high) goto <VALID>;
 +	setFflags($(FFLAGNV));
 +	<VALID>
- 	local tmp:$(WXLEN) = trunc(frs1S);
+ 	local tmp:4 = trunc(frs1S);
  	rd = sext(tmp);
  }
-@@ -56,6 +76,11 @@
+@@ -55,6 +75,12 @@
+ # fcvt.wu.s d,S,m c0100053 fff0007f SIMPLE (0, 0) 
  :fcvt.wu.s rd,frs1S,FRM is frs1S & FRM & rd & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct7=0x60 & op2024=0x1
  {
- 	#TODO proper emulation needs a trunc_unsigned
++	#TODO proper emulation needs a trunc_unsigned
 +	local low:4 = 0x0;
 +	local high:4 = 0x4F800000;
 +	if (frs1S f>= low && frs1S f<= high) goto <VALID>;
 +	setFflags($(FFLAGNV));
 +	<VALID>
- 	local tmp:$(WXLEN) = trunc(frs1S);
- 	rd = sext(tmp);
- }
-@@ -64,7 +89,15 @@
+ 	local cond = (frs1S s<0);
+ 	local tmp:4 = (zext(cond) * 0:4) + (zext(!cond) * trunc(frs1S));
+ 	rd = sext(tmp); # x[rd] = sext(f32->u32(f[rs1]))
+@@ -64,6 +90,14 @@
  # fdiv.s D,S,T,m 18000053 fe00007f SIMPLE (0, 0) 
  :fdiv.s frd,frs1S,frs2S,FRM is frs1S & frd & frs2S & FRM & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct7=0xc
  {
--	local tmp:4 = frs1S f/ frs2S;
 +	if ((frs1S[0,31] != 0 || frs2S[0,31] != 0)
 +		&& (frs1S[0,31] != 0x7F800000 || frs2S[0,31] != 0x7F800000)) goto <VALID>;
 +	setFflags($(FFLAGNV));
@@ -237,113 +219,88 @@ index b8e0ca1ea6..d15c60f141 100644
 +	setFflags($(FFLAGDZ));
 +	<NOTDIVZERO>
 +
-+	local tmp:$(SFLEN) = frs1S f/ frs2S;
+ 	local tmp:4 = frs1S f/ frs2S;
  	fassignS(frd, tmp);
  }
- 
-@@ -101,7 +134,10 @@
+@@ -101,7 +135,10 @@
  # fmadd.s D,S,T,R,m 00000043 0600007f SIMPLE (0, 0) 
  :fmadd.s frd,frs1S,frs2S,frs3S,FRM is frs1S & frd & frs2S & FRM & frs3S & op0001=0x3 & op0204=0x0 & op0506=0x2 & op2526=0x0
  {
 -	local tmp:4 = (frs1S f* frs2S) f+ frs3S;
 +	invalidOpForMultS(frs1S, frs2S);
-+	local tmp:$(SFLEN) = (frs1S f* frs2S);
++	local tmp:4 = (frs1S f* frs2S);
 +	invalidOpForAddS(tmp, frs3S);
 +	tmp = tmp f+ frs3S;
  	fassignS(frd, tmp);
  }
  
-@@ -133,7 +169,10 @@
+@@ -133,7 +170,10 @@
  # fmsub.s D,S,T,R,m 00000047 0600007f SIMPLE (0, 0) 
  :fmsub.s frd,frs1S,frs2S,frs3S,FRM is frs1S & frd & frs2S & FRM & frs3S & op0001=0x3 & op0204=0x1 & op0506=0x2 & op2526=0x0
  {
 -	local tmp:4 = (frs1S f* frs2S) f- frs3S;
 +	invalidOpForMultS(frs1S, frs2S);
-+	local tmp:$(SFLEN) = (frs1S f* frs2S);
++	local tmp:4 = (frs1S f* frs2S);
 +	invalidOpForAddS(tmp, f- frs3S);
 +	tmp = tmp f- frs3S;
  	fassignS(frd, tmp);
  }
  
-@@ -141,7 +180,8 @@
+@@ -141,6 +181,7 @@
  # fmul.s D,S,T,m 10000053 fe00007f SIMPLE (0, 0) 
  :fmul.s frd,frs1S,frs2S,FRM is frs1S & frd & frs2S & FRM & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct7=0x8
  {
--	local tmp:4 = frs1S f* frs2S;
 +	invalidOpForMultS(frs1S, frs2S);
-+	local tmp:$(SFLEN) = frs1S f* frs2S;
+ 	local tmp:4 = frs1S f* frs2S;
  	fassignS(frd, tmp);
  }
- 
-@@ -163,7 +203,10 @@
+@@ -164,7 +205,10 @@
  # fnmadd.s D,S,T,R,m 0000004f 0600007f SIMPLE (0, 0) 
  :fnmadd.s frd,frs1S,frs2S,frs3S,FRM is frs1S & frd & frs2S & FRM & frs3S & op0001=0x3 & op0204=0x3 & op0506=0x2 & op2526=0x0
  {
 -	local tmp:4 = (f- (frs1S f* frs2S)) f- frs3S;
 +	invalidOpForMultS(frs1S, frs2S);
-+	local tmp:$(SFLEN) = (f- (frs1S f* frs2S));
++	local tmp:4 = (f- (frs1S f* frs2S));
 +	invalidOpForAddS(tmp, f- frs3S);
 +	tmp = tmp f- frs3S;
  	fassignS(frd, tmp);
  }
  
-@@ -171,7 +214,10 @@
+@@ -172,7 +216,10 @@
  # fnmsub.s D,S,T,R,m 0000004b 0600007f SIMPLE (0, 0) 
  :fnmsub.s frd,frs1S,frs2S,frs3S,FRM is frs1S & frd & frs2S & FRM & frs3S & op0001=0x3 & op0204=0x2 & op0506=0x2 & op2526=0x0
  {
 -	local tmp:4 = (f- (frs1S f* frs2S)) f+ frs3S;
 +	invalidOpForMultS(frs1S, frs2S);
-+	local tmp:$(SFLEN) = (f- (frs1S f* frs2S));
++	local tmp:4 = (f- (frs1S f* frs2S));
 +	invalidOpForAddS(tmp, frs3S);
 +	tmp = tmp f+ frs3S;
  	fassignS(frd, tmp);
  }
  
-@@ -202,7 +248,7 @@
- # fneg.s D,U 20001053 fe00707f ALIAS (0, 0)
- :fneg.s frd,frs1S is frs1S & frd & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct3=0x1 & funct7=0x10 & op1519=op2024
- {
--	local tmp:4 = f- frs1S;
-+	local tmp:$(SFLEN) = f- frs1S;
- 	fassignS(frd, tmp);
- }
- 
-@@ -218,7 +264,7 @@
- # fabs.s D,U 20002053 fe00707f ALIAS (0, 0)
- :fabs.s frd,frs1S is frd & frs1S & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct3=0x2 & funct7=0x10 & op1519=op2024
- {
--	local tmp:4 = abs(frs1S);
-+	local tmp:$(SFLEN) = abs(frs1S);
- 	fassignS(frd, tmp);
- }
- 
-@@ -226,7 +272,10 @@
+@@ -227,6 +274,9 @@
  # fsqrt.s D,S,m 58000053 fff0007f SIMPLE (0, 0) 
  :fsqrt.s frd,frs1S,FRM is frs1S & frd & FRM & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct7=0x2c & op2024=0x0
  {
--	local tmp:4 = sqrt(frs1S);
 +	if (nan(frs1S) | frs1S f>= 0) goto <VALID>;
 +	setFflags($(FFLAGNV));
 +	<VALID>
-+	local tmp:$(SFLEN) = sqrt(frs1S);
+ 	local tmp:4 = sqrt(frs1S);
  	fassignS(frd, tmp);
  }
- 
-@@ -234,7 +283,8 @@
+@@ -235,6 +285,7 @@
  # fsub.s D,S,T,m 08000053 fe00007f SIMPLE (0, 0) 
  :fsub.s frd,frs1S,frs2S,FRM is frs1S & frd & frs2S & FRM & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct7=0x4
  {
--	local tmp:4 = frs1S f- frs2S;
 +	invalidOpForAddS(frs1S, f- frs2S);
-+	local tmp:$(SFLEN) = frs1S f- frs2S;
+ 	local tmp:4 = frs1S f- frs2S;
  	fassignS(frd, tmp);
  }
- 
 diff --git a/Ghidra/Processors/RISCV/data/languages/riscv.rv64d.sinc b/Ghidra/Processors/RISCV/data/languages/riscv.rv64d.sinc
-index 0436594765..9e1d57f9ef 100644
+index 7029ee677a..f2ceb8e64c 100644
 --- a/Ghidra/Processors/RISCV/data/languages/riscv.rv64d.sinc
 +++ b/Ghidra/Processors/RISCV/data/languages/riscv.rv64d.sinc
-@@ -21,15 +21,27 @@
+@@ -21,16 +21,27 @@
  # fcvt.l.d d,S,m c2200053 fff0007f SIMPLE (64, 0) 
  :fcvt.l.d rdL,frs1D,FRM is frs1D & FRM & rdL & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct7=0x61 & op2024=0x2
  {
@@ -366,18 +323,18 @@ index 0436594765..9e1d57f9ef 100644
 +	if (frs1D f>= low && frs1D f<= high) goto <VALID>;
 +	setFflags($(FFLAGNV));
 +	<VALID>
- 	#TODO  unsigned
--	rdL = trunc(frs1D);
-+	local tmp:$(DXLEN) = trunc(frs1D);
+ 	local cond = (frs1D s<0);
+ 	local tmp:8 = (zext(cond) * 0:8) + (zext(!cond) * trunc(frs1D));
+-	rdL = tmp;
 +	rdL = zext(tmp);
  }
  
  
 diff --git a/Ghidra/Processors/RISCV/data/languages/riscv.rv64f.sinc b/Ghidra/Processors/RISCV/data/languages/riscv.rv64f.sinc
-index 9a88490281..01176641b6 100644
+index 55c28ca82c..fc5e955d89 100644
 --- a/Ghidra/Processors/RISCV/data/languages/riscv.rv64f.sinc
 +++ b/Ghidra/Processors/RISCV/data/languages/riscv.rv64f.sinc
-@@ -3,15 +3,27 @@
+@@ -3,13 +3,24 @@
  # fcvt.l.s d,S,m c0200053 fff0007f SIMPLE (64, 0) 
  :fcvt.l.s rdL,frs1S,FRM is frs1S & FRM & rdL & op0001=0x3 & op0204=0x4 & op0506=0x2 & funct7=0x60 & op2024=0x2
  {
@@ -400,15 +357,11 @@ index 9a88490281..01176641b6 100644
 +	if (frs1S f>= low && frs1S f<= high) goto <VALID>;
 +	setFflags($(FFLAGNV));
 +	<VALID>
-+	local tmp:$(DXLEN) = trunc(frs1S);
- 	#TODO  unsigned
--	rdL = trunc(frs1S);
-+	rdL = sext(tmp);
- }
- 
- 
+ 	local cond = (frs1S s<0);
+ 	local tmp:8 = (zext(cond) * 0) + (zext(!cond) * trunc(frs1S));
+ 	rdL = tmp;
 diff --git a/Ghidra/Processors/RISCV/data/languages/riscv.table.sinc b/Ghidra/Processors/RISCV/data/languages/riscv.table.sinc
-index 2e7d937b53..334ac42a99 100644
+index ef9d291d41..f0c0d12367 100644
 --- a/Ghidra/Processors/RISCV/data/languages/riscv.table.sinc
 +++ b/Ghidra/Processors/RISCV/data/languages/riscv.table.sinc
 @@ -595,6 +595,11 @@ attach variables [ v0711 v1519 v2024 ]
@@ -423,7 +376,7 @@ index 2e7d937b53..334ac42a99 100644
  
  define pcodeop unimp;
  define pcodeop trap;
-@@ -657,46 +662,71 @@ rdL: zero is r0711=0 & zero { local tmp:8 = 0; export tmp; }
+@@ -648,46 +653,71 @@ rdL: zero is r0711=0 & zero { local tmp:8 = 0; export tmp; }
  # # 128-bit quad-precision  $(QFLEN)
  # fmt: ".q" is op2526=3 { export $(QFLEN):1; }
  
@@ -504,7 +457,7 @@ index 2e7d937b53..334ac42a99 100644
  @endif
  
  macro fassignS(dest, src) {
-@@ -707,7 +737,6 @@ macro fassignS(dest, src) {
+@@ -698,7 +728,6 @@ macro fassignS(dest, src) {
  @endif
  }
  
@@ -512,7 +465,7 @@ index 2e7d937b53..334ac42a99 100644
  macro assignW(dest, src) {
  @if ADDRSIZE == "32"
  	dest = src;
-@@ -740,7 +769,6 @@ macro assignD(dest, src) {
+@@ -731,7 +760,6 @@ macro assignD(dest, src) {
  @endif
  }
  

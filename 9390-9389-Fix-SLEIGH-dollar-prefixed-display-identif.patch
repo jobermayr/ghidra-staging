@@ -1,0 +1,185 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: red <red@dreamleaves.org>
+Date: Sun, 19 Jul 2026 10:57:49 +0200
+Subject: [PATCH] 9390: #9389 Fix SLEIGH dollar-prefixed display identifiers
+
+---
+ .../antlr/ghidra/sleigh/grammar/BaseLexer.g   | 18 ++++-
+ .../ghidra/sleigh/grammar/BaseLexerTest.java  | 48 ++++++++++++
+ .../sleigh/grammar/DisplayLexerTest.java      | 73 +++++++++++++++++++
+ 3 files changed, 135 insertions(+), 4 deletions(-)
+ create mode 100644 Ghidra/Framework/SoftwareModeling/src/test/java/ghidra/sleigh/grammar/BaseLexerTest.java
+ create mode 100644 Ghidra/Framework/SoftwareModeling/src/test/java/ghidra/sleigh/grammar/DisplayLexerTest.java
+
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/antlr/ghidra/sleigh/grammar/BaseLexer.g b/Ghidra/Framework/SoftwareModeling/src/main/antlr/ghidra/sleigh/grammar/BaseLexer.g
+index 61703b7d76..a0be7df7ae 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/antlr/ghidra/sleigh/grammar/BaseLexer.g
++++ b/Ghidra/Framework/SoftwareModeling/src/main/antlr/ghidra/sleigh/grammar/BaseLexer.g
+@@ -134,6 +134,9 @@ tokens {
+ 	OP_WITH;
+ 	OP_WORDSIZE;
+ 	OP_XOR;
++	SPEC_AND;
++	SPEC_OR;
++	SPEC_XOR;
+ }
+ 
+ /**
+@@ -243,10 +246,17 @@ ASTERISK		:	'*';
+ SLASH			:	'/';
+ PERCENT			:	'%';
+ 
+-// Explicitly named boolean operations
+-SPEC_OR			:	'$or';
+-SPEC_AND		:	'$and';
+-SPEC_XOR		:	'$xor';
++// A single rule prevents boolean operators from claiming an identifier prefix. DOLLARPREFIX is a
++// dispatch rule; every branch emits a more specific token type.
++DOLLARPREFIX
++	:	'$'
++		(
++			('o' 'r' (~('a'..'z'|'A'..'Z'|'0'..'9'|'_'|'.') | EOF)) => 'o' 'r' { $type = SPEC_OR; }
++		|	('a' 'n' 'd' (~('a'..'z'|'A'..'Z'|'0'..'9'|'_'|'.') | EOF)) => 'a' 'n' 'd' { $type = SPEC_AND; }
++		|	('x' 'o' 'r' (~('a'..'z'|'A'..'Z'|'0'..'9'|'_'|'.') | EOF)) => 'x' 'o' 'r' { $type = SPEC_XOR; }
++		|	{ $type = DISPCHAR; }
++		)
++	;
+ 
+ 
+ // IDs, Literals
+diff --git a/Ghidra/Framework/SoftwareModeling/src/test/java/ghidra/sleigh/grammar/BaseLexerTest.java b/Ghidra/Framework/SoftwareModeling/src/test/java/ghidra/sleigh/grammar/BaseLexerTest.java
+new file mode 100644
+index 0000000000..6ee3f9154a
+--- /dev/null
++++ b/Ghidra/Framework/SoftwareModeling/src/test/java/ghidra/sleigh/grammar/BaseLexerTest.java
+@@ -0,0 +1,48 @@
++/* ###
++ * IP: GHIDRA
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package ghidra.sleigh.grammar;
++
++import static org.junit.Assert.assertEquals;
++
++import java.io.IOException;
++
++import org.antlr.runtime.ANTLRStringStream;
++import org.antlr.runtime.Token;
++import org.junit.Test;
++
++public class BaseLexerTest {
++
++  @Test
++  public void testDollarBooleanOperators() throws IOException {
++    assertTokens("$and", BaseLexer.SPEC_AND);
++    assertTokens("$or", BaseLexer.SPEC_OR);
++    assertTokens("$xor", BaseLexer.SPEC_XOR);
++  }
++
++  private static void assertTokens(String input, int expectedType) throws IOException {
++    LineArrayListWriter writer = new LineArrayListWriter();
++    writer.write(input.toCharArray(), 0, input.length());
++    ParsingEnvironment env = new ParsingEnvironment(writer);
++    BaseLexer lexer = new BaseLexer(new ANTLRStringStream(input));
++    lexer.setEnv(env);
++
++    Token token = lexer.nextToken();
++    assertEquals(input, expectedType, token.getType());
++    assertEquals(input, input, token.getText());
++    assertEquals(input, Token.EOF, lexer.nextToken().getType());
++    assertEquals(input, 0, env.getLexingErrors());
++  }
++}
+diff --git a/Ghidra/Framework/SoftwareModeling/src/test/java/ghidra/sleigh/grammar/DisplayLexerTest.java b/Ghidra/Framework/SoftwareModeling/src/test/java/ghidra/sleigh/grammar/DisplayLexerTest.java
+new file mode 100644
+index 0000000000..406de833bb
+--- /dev/null
++++ b/Ghidra/Framework/SoftwareModeling/src/test/java/ghidra/sleigh/grammar/DisplayLexerTest.java
+@@ -0,0 +1,73 @@
++/* ###
++ * IP: GHIDRA
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package ghidra.sleigh.grammar;
++
++import static org.junit.Assert.assertEquals;
++
++import java.io.IOException;
++
++import org.antlr.runtime.ANTLRStringStream;
++import org.antlr.runtime.Token;
++import org.junit.Test;
++
++public class DisplayLexerTest {
++
++  @Test
++  public void testDollarOperatorPrefixesAreIdentifiers() throws IOException {
++    assertDisplayTokens("$anderson",
++      new int[] { DisplayLexer.DISPCHAR, DisplayLexer.IDENTIFIER },
++      new String[] { "$", "anderson" });
++    assertDisplayTokens("$orphan",
++      new int[] { DisplayLexer.DISPCHAR, DisplayLexer.IDENTIFIER },
++      new String[] { "$", "orphan" });
++    assertDisplayTokens("$xorValue",
++      new int[] { DisplayLexer.DISPCHAR, DisplayLexer.IDENTIFIER },
++      new String[] { "$", "xorValue" });
++  }
++
++  @Test
++  public void testDollarPrefixedDisplayIdentifierMatchesExistingTokenization()
++      throws IOException {
++    assertDisplayTokens("!$jumpAddressAbsolute is",
++      new int[] { DisplayLexer.EXCLAIM, DisplayLexer.DISPCHAR, DisplayLexer.IDENTIFIER,
++        DisplayLexer.WS, DisplayLexer.RES_IS },
++      new String[] { "!", "$", "jumpAddressAbsolute", " ", "is" });
++    assertDisplayTokens("!$absoluteJumpAddress is",
++      new int[] { DisplayLexer.EXCLAIM, DisplayLexer.DISPCHAR, DisplayLexer.IDENTIFIER,
++        DisplayLexer.WS, DisplayLexer.RES_IS },
++      new String[] { "!", "$", "absoluteJumpAddress", " ", "is" });
++  }
++
++  private static void assertDisplayTokens(String input, int[] expectedTypes,
++      String[] expectedTexts) throws IOException {
++    assertEquals("Expected token type/text counts", expectedTypes.length, expectedTexts.length);
++
++    LineArrayListWriter writer = new LineArrayListWriter();
++    writer.write(input.toCharArray(), 0, input.length());
++    ParsingEnvironment env = new ParsingEnvironment(writer);
++    DisplayLexer lexer = new DisplayLexer(new ANTLRStringStream(input));
++    lexer.setEnv(env);
++
++    for (int i = 0; i < expectedTypes.length; i++) {
++      Token token = lexer.nextToken();
++      assertEquals(input, expectedTypes[i], token.getType());
++      assertEquals(input, expectedTexts[i], token.getText());
++    }
++
++    assertEquals(input, Token.EOF, lexer.nextToken().getType());
++    assertEquals(input, 0, env.getLexingErrors());
++  }
++}
+-- 
+2.45.1
+

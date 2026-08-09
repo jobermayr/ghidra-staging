@@ -7,16 +7,16 @@ Building decomp_dbg and sleigh_dbg can now easily enabled via 'gradle -Pdebug' s
 
 Fixes: #5296
 ---
- .../Features/Decompiler/buildNatives.gradle   | 537 ++++++++++++------
+ .../Features/Decompiler/buildNatives.gradle   | 538 ++++++++++++------
  .../src/decompile/cpp/ghidra_arch.cc          |   7 +
  .../src/decompile/cpp/ghidra_process.cc       |  48 ++
- 3 files changed, 413 insertions(+), 179 deletions(-)
+ 3 files changed, 414 insertions(+), 179 deletions(-)
 
 diff --git a/Ghidra/Features/Decompiler/buildNatives.gradle b/Ghidra/Features/Decompiler/buildNatives.gradle
-index 722ddbdba2..7b69207290 100644
+index 722ddbdba2..ab1e763863 100644
 --- a/Ghidra/Features/Decompiler/buildNatives.gradle
 +++ b/Ghidra/Features/Decompiler/buildNatives.gradle
-@@ -22,20 +22,184 @@ if (findProject(':Generic') == null) {
+@@ -22,20 +22,179 @@ if (findProject(':Generic') == null) {
  	apply from: "../../../GPL/nativeBuildProperties.gradle"
  }
  
@@ -164,24 +164,19 @@ index 722ddbdba2..7b69207290 100644
 + * Try to find libbfd*.so or a static libbfd.a for linking decomp_dbg
 + */
 +def linkBFDUnix = {
-+	def getLibName = {
-+		def stdout = new ByteArrayOutputStream()
-+		['bash', '-c', 'ld.bfd -v | grep -o \"[0-9].*$\"'].execute().with {
-+			consumeProcessOutput(stdout, System.err)
-+			waitFor()
-+		}
-+		return "-lbfd-" + stdout.toString().trim()
++	def fallback = '-lbfd -Wl,--no-whole-archive -liberty -lsframe -lz -lzstd'
++	def versionProc = 'ld.bfd -v'.execute()
++	def versionOut = versionProc.text
++	def matcher = versionOut =~ /([0-9].*)/
++	if (!matcher.find()) return fallback
++	def libName = "-lbfd-${matcher.group(1)}"
++	def checkProc = ["ld", "-shared", "-o", "/dev/null", libName].execute()
++	def checkErr = checkProc.err.text
++	checkProc.waitFor()
++	if (!checkErr.contains("cannot find")) {
++		return "${libName} -Wl,--no-whole-archive -liberty -lsframe -lz -lzstd"
 +	}
-+	def lib = getLibName()
-+	def check = ["bash", "-c", "ld -o /dev/null ${lib} 2>&1 | grep -o 'cannot find -'"].execute()
-+	def result = new StringBuffer()
-+	check.consumeProcessOutput(result, System.err)
-+	check.waitFor()
-+	/* Use libbfd-* if found */
-+	if (result.toString().trim().isEmpty())
-+		return "${lib} -Wl,--no-whole-archive -liberty -lsframe -lz -lzstd"
-+	/* Fallback to libbfd */
-+	return "-lbfd -Wl,--no-whole-archive -liberty -lsframe -lz -lzstd"
++	return fallback
 +}
 +
 +/*
@@ -209,7 +204,7 @@ index 722ddbdba2..7b69207290 100644
  			// these tell gradle for which platforms to build a decompiler executable.
  			targetPlatform "win_x86_64"
  			targetPlatform "win_arm_64"
-@@ -49,105 +213,37 @@ model {
+@@ -49,105 +208,37 @@ model {
  			targetPlatform "openbsd_arm_64"
  			sources {
  				cpp {
@@ -343,7 +338,7 @@ index 722ddbdba2..7b69207290 100644
  		} // end decompile
  
  		sleigh(NativeExecutableSpec) {
-@@ -163,90 +259,188 @@ model {
+@@ -163,90 +254,194 @@ model {
  			targetPlatform "openbsd_arm_64"
  			sources {
  				cpp {
@@ -445,6 +440,9 @@ index 722ddbdba2..7b69207290 100644
 +				targetPlatform "mac_x86_64"
 +				targetPlatform "mac_arm_64"
 +				targetPlatform "freebsd_x86_64"
++				targetPlatform "freebsd_arm_64"
++				targetPlatform "openbsd_x86_64"
++				targetPlatform "openbsd_arm_64"
 +				sources {
 +					cpp {
 +						source {
@@ -492,6 +490,9 @@ index 722ddbdba2..7b69207290 100644
 +				targetPlatform "mac_x86_64"
 +				targetPlatform "mac_arm_64"
 +				targetPlatform "freebsd_x86_64"
++				targetPlatform "freebsd_arm_64"
++				targetPlatform "openbsd_x86_64"
++				targetPlatform "openbsd_arm_64"
 +				sources {
 +					cpp {
 +						source {
@@ -590,7 +591,7 @@ index 722ddbdba2..7b69207290 100644
  				if (b.targetPlatform.operatingSystem.windows) {
  					b.cppCompiler.define "WINDOWS"
  					b.cppCompiler.define "_WINDOWS"
-@@ -257,25 +451,10 @@ model {
+@@ -257,25 +452,10 @@ model {
  						b.cppCompiler.define "_WIN64"
  					}	
  				}
@@ -619,7 +620,7 @@ index 722ddbdba2..7b69207290 100644
 +	} // end binaries
  } // end model
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/ghidra_arch.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/ghidra_arch.cc
-index 9de2daeec2..1af81feaaf 100644
+index 27c76b0a7d..5c24bde0e0 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/ghidra_arch.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/ghidra_arch.cc
 @@ -23,6 +23,13 @@
@@ -637,7 +638,7 @@ index 9de2daeec2..1af81feaaf 100644
  
  //AttributeId ATTRIB_BADDATA = AttributeId("baddata",145);
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/ghidra_process.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/ghidra_process.cc
-index 2e15906f03..e6fabd7939 100644
+index 1f8216c87a..dd246ea244 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/ghidra_process.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/ghidra_process.cc
 @@ -26,6 +26,21 @@
@@ -662,7 +663,7 @@ index 2e15906f03..e6fabd7939 100644
  namespace ghidra {
  
  #ifdef __REMOTE_SOCKET__
-@@ -506,6 +521,31 @@ void GhidraDecompCapability::initialize(void)
+@@ -498,6 +513,31 @@ void GhidraDecompCapability::initialize(void)
  static void segvHandler(int4 sig)
  
  {
@@ -694,7 +695,7 @@ index 2e15906f03..e6fabd7939 100644
    _Exit(1);	// Don't do any cleanup, just die - prevents OS from popping-up a dialog
  }
  
-@@ -516,6 +556,14 @@ int main(int argc,char **argv)
+@@ -508,6 +548,14 @@ int main(int argc,char **argv)
  {
    using namespace ghidra;
  

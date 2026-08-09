@@ -1,0 +1,114 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Eatgrapes <Eatgrapesem232@qq.com>
+Date: Thu, 9 Jul 2026 16:34:06 +0800
+Subject: [PATCH] 9360: Fix partial register return recovery
+
+---
+ .../Decompiler/certification.manifest         |  1 +
+ .../cpp/include/ghidra/ruleaction.hh          |  1 +
+ .../src/decompile/cpp/ruleaction.cc           | 26 +++++++++++++++++++
+ .../src/decompile/datatests/partialreturn.xml | 24 +++++++++++++++++
+ 4 files changed, 52 insertions(+)
+ create mode 100644 Ghidra/Features/Decompiler/src/decompile/datatests/partialreturn.xml
+
+diff --git a/Ghidra/Features/Decompiler/certification.manifest b/Ghidra/Features/Decompiler/certification.manifest
+index 6745d3e338..1b8975ebe1 100644
+--- a/Ghidra/Features/Decompiler/certification.manifest
++++ b/Ghidra/Features/Decompiler/certification.manifest
+@@ -78,6 +78,7 @@ src/decompile/datatests/orcompare.xml||GHIDRA||||END|
+ src/decompile/datatests/overridedest.xml||GHIDRA||||END|
+ src/decompile/datatests/packstructaccess.xml||GHIDRA||||END|
+ src/decompile/datatests/partialmerge.xml||GHIDRA||||END|
++src/decompile/datatests/partialreturn.xml||GHIDRA||||END|
+ src/decompile/datatests/partialsplit.xml||GHIDRA||||END|
+ src/decompile/datatests/partialunion.xml||GHIDRA||||END|
+ src/decompile/datatests/pic_branch_ge.xml||GHIDRA||||END|
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/ruleaction.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/ruleaction.hh
+index 61693cef64..19e668d692 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/ruleaction.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/ruleaction.hh
+@@ -1570,6 +1570,7 @@ public:
+ };
+ 
+ class RulePiecePathology : public Rule {
++  static bool isPartialWrite(PcodeOp *op);
+   static bool isPathology(Varnode *vn,Funcdata &data);
+   static int4 tracePathologyForward(PcodeOp *op,Funcdata &data);
+ public:
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc
+index 65d94ecc3a..d3366bbd1a 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc
+@@ -10722,6 +10722,30 @@ Varnode *RulePopcountBoolXor::getBooleanResult(Varnode *vn,int4 bitPos,int4 &con
+   }
+ }
+ 
++/// \brief Return \b true if the PIECE looks like a partial register write
++///
++/// A partial write to the least significant bytes of a register can be modeled
++/// by assigning the most significant bytes of the register, then concatenating
++/// them with the new least significant bytes.  Treat this as pathological if
++/// the most significant input is stored in the corresponding high bytes of the
++/// PIECE output.
++/// \param op is the CPUI_PIECE op
++/// \return \b true if the PIECE writes only the least significant output bytes
++bool RulePiecePathology::isPartialWrite(PcodeOp *op)
++
++{
++  Varnode *outVn = op->getOut();
++  if (outVn == (Varnode *)0) return false;
++  if (outVn->getSpace()->getType() == IPTR_INTERNAL) return false;
++  Varnode *hiVn = op->getIn(0);
++  int4 loSize = op->getIn(1)->getSize();
++  if (hiVn->getSize() + loSize != outVn->getSize()) return false;
++  Address addr = outVn->getAddr();
++  if (!addr.getSpace()->isBigEndian())
++    addr = addr + loSize;
++  return (addr == hiVn->getAddr());
++}
++
+ /// \brief Return \b true if concatenating with a SUBPIECE of the given Varnode is unusual
+ ///
+ /// \param vn is the given Varnode
+@@ -10884,6 +10908,8 @@ int4 RulePiecePathology::applyOp(PcodeOp *op,Funcdata &data)
+   Varnode *vn = op->getIn(0);
+   if (!vn->isWritten()) return 0;
+   PcodeOp *subOp = vn->getDef();
++  if (isPartialWrite(op))
++    return tracePathologyForward(op, data);
+ 
+   // Make sure we are concatenating the most significant bytes of a truncation
+   OpCode opc = subOp->code();
+diff --git a/Ghidra/Features/Decompiler/src/decompile/datatests/partialreturn.xml b/Ghidra/Features/Decompiler/src/decompile/datatests/partialreturn.xml
+new file mode 100644
+index 0000000000..a29bba7140
+--- /dev/null
++++ b/Ghidra/Features/Decompiler/src/decompile/datatests/partialreturn.xml
+@@ -0,0 +1,24 @@
++<decompilertest>
++<binaryimage arch="x86:LE:64:default:windows">
++<!--
++  A small return value is written through AL.  The old high bytes of RAX
++  should not force recovery of an 8-byte return value with a CONCAT expression.
++-->
++<bytechunk space="ram" offset="0x100000" readonly="true">
++31d248c7c0ffffffff48ffc066833c4100
++75f64839c273110fb704516683f87f7603
++b001c3ffc2ebd930c0c390909090
++</bytechunk>
++<symbol space="ram" offset="0x100000" name="partial_register_return"/>
++</binaryimage>
++<script>
++  <com>lo fu partial_register_return</com>
++  <com>decompile</com>
++  <com>print C</com>
++  <com>quit</com>
++</script>
++<stringmatch name="Partial register return #1" min="0" max="0">CONCAT</stringmatch>
++<stringmatch name="Partial register return #2" min="0" max="0">uint8 partial_register_return</stringmatch>
++<stringmatch name="Partial register return #3" min="1" max="1">return 1;</stringmatch>
++<stringmatch name="Partial register return #4" min="1" max="1">return 0;</stringmatch>
++</decompilertest>
+-- 
+2.45.1
+

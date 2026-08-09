@@ -1,0 +1,252 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: burhan_250 <burhan_250@live.de>
+Date: Thu, 6 Aug 2026 13:23:23 +0200
+Subject: [PATCH] 9473: #9472 Keep a call-aliased stack object open across
+ interior field accesses
+
+---
+ .../Decompiler/certification.manifest         |  1 +
+ .../decompile/cpp/include/ghidra/varmap.hh    |  8 +--
+ .../Decompiler/src/decompile/cpp/varmap.cc    | 51 +++++++++++++++++--
+ .../decompile/datatests/stackobjectalias.xml  | 37 ++++++++++++++
+ 4 files changed, 89 insertions(+), 8 deletions(-)
+ create mode 100644 Ghidra/Features/Decompiler/src/decompile/datatests/stackobjectalias.xml
+
+diff --git a/Ghidra/Features/Decompiler/certification.manifest b/Ghidra/Features/Decompiler/certification.manifest
+index 4b527ee27a..3c4799bcd9 100644
+--- a/Ghidra/Features/Decompiler/certification.manifest
++++ b/Ghidra/Features/Decompiler/certification.manifest
+@@ -98,6 +98,7 @@ src/decompile/datatests/riscv_isaext_memcpy.xml||GHIDRA||||END|
+ src/decompile/datatests/sbyte.xml||GHIDRA||||END|
+ src/decompile/datatests/skipnext2.xml||GHIDRA||||END|
+ src/decompile/datatests/stackcorner.xml||GHIDRA||||END|
++src/decompile/datatests/stackobjectalias.xml||GHIDRA||||END|
+ src/decompile/datatests/stackreturn.xml||GHIDRA||||END|
+ src/decompile/datatests/stackspill.xml||GHIDRA||||END|
+ src/decompile/datatests/stackstring.xml||GHIDRA||||END|
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/varmap.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/varmap.hh
+index 8dfb4a4a2f..934559cc5b 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/varmap.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/varmap.hh
+@@ -113,10 +113,11 @@ private:
+   RangeType rangeType;	///< The type of range
+   int4 highind;		///< Minimum upper bound on the array index (if \b this is \e open)
+   void backfillToPoint(intb point);	///< Move \b start backward as close as possible to point
++  bool callAlias;	///< True if \b this is an \e open range whose base address is passed to a sub-function
+ public:
+   RangeHint(void) {}	///< Uninitialized constructor
+   RangeHint(uintb st,int4 sz,intb sst,Datatype *ct,uint4 fl,RangeType rt,int4 hi) {
+-    start=st; size=sz; sstart=sst; type=ct; flags=fl; rangeType = rt; highind=hi; }	///< Initialized constructor
++    start=st; size=sz; sstart=sst; type=ct; flags=fl; rangeType = rt; highind=hi; callAlias=false; }	///< Initialized constructor
+   bool isTypeLock(void) const { return ((flags & typelock)!=0); }	///< Is the data-type for \b this range locked
+   bool isBackfill(void) const { return ((flags & backfill)!=0); }	///< Does \b this hint want to back fill its data-type
+   bool isConstAbsorbable(const RangeHint *b) const;	///< Can another range by absorbed into \b this as a constant
+@@ -146,7 +147,8 @@ public:
+   struct AddBase {
+     Varnode *base;		///< The Varnode holding the base pointer
+     Varnode *index;		///< The index value or NULL
+-    AddBase(Varnode *b,Varnode *i) { base=b; index=i; }	///< Constructor
++    bool callUse;		///< True if the pointer is passed to a sub-function (CALL or CALLIND)
++    AddBase(Varnode *b,Varnode *i,bool c=false) { base=b; index=i; callUse=c; }	///< Constructor
+   };
+ private:
+   const Funcdata *fd;		///< Function being searched for aliases
+@@ -189,7 +191,7 @@ class MapState {
+   bool paramRangeHit;			///< \b true if we see open reference to stack region reserved for parameters
+   void addGuard(const LoadGuard &guard,OpCode opc,TypeFactory *typeFactory);	///< Add LoadGuard record as a hint to the collection
+   bool adjustOutOfRange(uintb &st,Datatype *&ct,uint4 &fl);	///< Try to adjust a hint that is out of range
+-  void addRange(uintb st,Datatype *ct,uint4 fl,RangeHint::RangeType rt,int4 hi);	///< Add a hint to the collection
++  void addRange(uintb st,Datatype *ct,uint4 fl,RangeHint::RangeType rt,int4 hi,bool ca=false);	///< Add a hint to the collection
+   void addFixedType(uintb start,Datatype *ct,uint4 flags,TypeFactory *types);	///< Add a fixed reference to a specific data-type
+   void reconcileDatatypes(void);	///< Decide on data-type for RangeHints at the same address
+   static bool isReadActive(Varnode *vn);	///< Is the given Varnode read by an active operation
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/varmap.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/varmap.cc
+index 697ee0c37d..d2c9e01fa6 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/varmap.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/varmap.cc
+@@ -167,6 +167,10 @@ bool RangeHint::preferred(const RangeHint *b,bool reconcile) const
+ ///   - must not be a locked data-type
+ ///   - must not extend the size of the first array beyond what is known of its limits
+ ///
++/// Alternately, if \b this is an \e open range whose base address is passed to a sub-function
++/// and there is no data-type evidence bounding the underlying object, the following RangeHint
++/// is absorbed unless there is evidence that a distinct object starts at it (see the comment
++/// in the method body).
+ /// \param b is the other RangeHint to absorb
+ /// \return \b true if the other RangeHint was successfully absorbed
+ bool RangeHint::attemptJoin(RangeHint *b)
+@@ -182,6 +186,29 @@ bool RangeHint::attemptJoin(RangeHint *b)
+     absorb(b);
+     return true;
+   }
++  if (callAlias && highind < 0 && type->getSize() == 1 && !isTypeLock() &&
++      b->rangeType == fixed && !b->isTypeLock()) {
++    // The base address of this open range is passed to a sub-function, which may read or write
++    // any part of the underlying object.  The alias analysis commits to exactly this
++    // (see AliasChecker::gatherInternal and ScopeLocal::markUnaliased): every offset from the base
++    // up is treated as potentially accessed through the pointer, and Varnodes there keep their
++    // INDIRECT effects across the calls.  If the variable model nevertheless cut the object at the
++    // next directly referenced offset, accesses the sub-function makes beyond the cut could not be
++    // expressed in terms of any variable, contradicting the alias analysis and producing an object
++    // too small for the sub-function's accesses.  So a following direct reference is treated as
++    // evidence of an access to the interior of the object, not of a distinct variable, and is
++    // absorbed.  The rule only applies while there is no better evidence of the object's extent:
++    //   - highind >= 0 means an access pattern (indexing or constant fill) has been observed;
++    //     that extent evidence takes precedence, and the data-type driven join below governs;
++    //   - a recovered element data-type (more than a 1-byte placeholder, or a type-lock on
++    //     \b this) likewise carries extent/alignment information and takes precedence.
++    // Positive evidence that a distinct object starts at -b- also blocks absorption:
++    //   - -b- is type-locked: a user assertion outranks this inference;
++    //   - -b- is itself an open range: its base address was independently derived or escaped,
++    //     marking the start of a separate object (the artificial endpoint is excluded above).
++    absorb(b);
++    return true;
++  }
+   if (highind < 0) return false;
+   Datatype *settype = type;					// Assume we will keep this data-type
+   if (settype->getAlignSize() != b->type->getAlignSize()) return false;
+@@ -273,6 +300,8 @@ void RangeHint::backfillOpen(const Range &range,int4 maxElements)
+ void RangeHint::absorb(RangeHint *b)
+ 
+ {
++  if (b->callAlias)
++    callAlias = true;		// The base address of the combined range still escapes to a sub-function
+   if (b->rangeType == open) {
+     if (type->getAlignSize() == b->type->getAlignSize()) {	// Compatible element data-type
+       rangeType = open;
+@@ -351,6 +380,7 @@ bool RangeHint::merge(RangeHint *b,AddrSpace *space,TypeFactory *typeFactory)
+     rangeType = b->rangeType;
+     highind = b->highind;
+     size = b->size;
++    callAlias = b->callAlias;	// absorb() recovers the property from the original range
+     absorb(&copyRange);
+   }
+   else if (resType == 2) {
+@@ -372,8 +402,8 @@ bool RangeHint::merge(RangeHint *b,AddrSpace *space,TypeFactory *typeFactory)
+   return false;
+ }
+ 
+-/// Compare (signed) offset, size, RangeType, flags, and high index, in that order.
+-/// Datatype is \e not compared.
++/// Compare (signed) offset, size, RangeType, flags, high index, and the \b callAlias
++/// property, in that order.  Datatype is \e not compared.
+ /// \param op2 is the other RangeHint to compare with \b this
+ /// \return -1, 0, or 1 depending on if \b this comes before, is equal to, or comes after
+ int4 RangeHint::compare(const RangeHint &op2) const
+@@ -389,6 +419,8 @@ int4 RangeHint::compare(const RangeHint &op2) const
+     return (flags < op2.flags) ? -1 : 1;
+   if (highind != op2.highind)
+     return (highind < op2.highind) ? -1 : 1;
++  if (callAlias != op2.callAlias)
++    return op2.callAlias ? -1 : 1;		// Ranges without the callAlias property come first
+   return 0;
+ }
+ 
+@@ -822,6 +854,7 @@ void AliasChecker::gatherAdditiveBase(Varnode *startvn,vector<AddBase> &addbase)
+   list<PcodeOp *>::const_iterator iter;
+   PcodeOp *op;
+   bool nonadduse;
++  bool calluse;
+   int4 i=0;
+ 
+   vn = startvn;
+@@ -831,6 +864,7 @@ void AliasChecker::gatherAdditiveBase(Varnode *startvn,vector<AddBase> &addbase)
+     vn = vnqueue[i].base;
+     indexvn = vnqueue[i++].index;
+     nonadduse = false;
++    calluse = false;
+     for(iter=vn->beginDescend();iter!=vn->endDescend();++iter) {
+       op = *iter;
+       switch(op->code()) {
+@@ -872,12 +906,17 @@ void AliasChecker::gatherAdditiveBase(Varnode *startvn,vector<AddBase> &addbase)
+ 	  vnqueue.push_back(AddBase(subvn,indexvn));
+ 	}
+ 	break;
++      case CPUI_CALL:
++      case CPUI_CALLIND:
++	calluse = true;		// The pointer escapes to a sub-function
++	nonadduse = true;
++	break;
+       default:
+ 	nonadduse = true;	// Used in non-additive expression
+       }
+     }
+     if (nonadduse)
+-      addbase.push_back(AddBase(vn,indexvn));
++      addbase.push_back(AddBase(vn,indexvn,calluse));
+   }
+   for(i=0;i<vnqueue.size();++i)
+     vnqueue[i].base->clearMark();
+@@ -1023,7 +1062,8 @@ bool MapState::adjustOutOfRange(uintb &st,Datatype *&ct,uint4 &fl)
+ /// \param fl is additional boolean properties
+ /// \param rt is the type of the hint
+ /// \param hi is the biggest guaranteed index for \e open range hints
+-void MapState::addRange(uintb st,Datatype *ct,uint4 fl,RangeHint::RangeType rt,int4 hi)
++/// \param ca is \b true if the base address of an \e open range is passed to a sub-function
++void MapState::addRange(uintb st,Datatype *ct,uint4 fl,RangeHint::RangeType rt,int4 hi,bool ca)
+ 
+ {
+   if ((ct == (Datatype *)0)||(ct->getSize()==0)) // Must have a real type
+@@ -1038,6 +1078,7 @@ void MapState::addRange(uintb st,Datatype *ct,uint4 fl,RangeHint::RangeType rt,i
+   sst = sign_extend(sst,spaceid->getAddrSize()*8-1);
+   sst = (intb)AddrSpace::addressToByte(sst,spaceid->getWordSize());
+   RangeHint *newRange = new RangeHint(st,ct->getSize(),sst,ct,fl,rt,hi);
++  newRange->callAlias = ca;
+   maplist.push_back(newRange);
+ #ifdef OPACTION_DEBUG
+   if (debugon) {
+@@ -1375,7 +1416,7 @@ void MapState::gatherOpen(const Funcdata &fd)
+     else {
+       minItems = -1;
+     }
+-    addRange(offset,ct,0,RangeHint::open,minItems);
++    addRange(offset,ct,0,RangeHint::open,minItems,addbase[i].callUse);
+   }
+ 
+   TypeFactory *typeFactory = fd.getArch()->types;
+diff --git a/Ghidra/Features/Decompiler/src/decompile/datatests/stackobjectalias.xml b/Ghidra/Features/Decompiler/src/decompile/datatests/stackobjectalias.xml
+new file mode 100644
+index 0000000000..36dd58228f
+--- /dev/null
++++ b/Ghidra/Features/Decompiler/src/decompile/datatests/stackobjectalias.xml
+@@ -0,0 +1,37 @@
++<decompilertest>
++<binaryimage arch="x86:LE:64:default:gcc">
++<!--
++   A stack object is passed by address to external calls and later read through an
++   interior field.  The open stack range for the address-taken object should not
++   be cut off at the first following field access.
++-->
++<bytechunk space="ram" offset="0x100000" readonly="true">
++4881ec2804000048897c2408488d442410
++baffffff7fbe010000004889c7e8dd0000
++00488d4424104889c7e8e000000085c0
++7519488d442410be000000004889c7e8
++da000000b8f4ffffffeb33488b542408
++488d4424104889d64889c7e8be000000
++8984241c04000083bc241c0400000079
++098b84241c040000eb048b4424184881
++c428040000c3
++</bytechunk>
++<symbol space="ram" offset="0x100000" name="stack_object_call_alias"/>
++<symbol space="ram" offset="0x100100" name="init_bigprint"/>
++<symbol space="ram" offset="0x100110" name="is_complete"/>
++<symbol space="ram" offset="0x100120" name="finalize_bigprint"/>
++</binaryimage>
++<script>
++  <com>parse line extern void init_bigprint(char *bp, int4 size, int4 max);</com>
++  <com>parse line extern int4 is_complete(char *bp);</com>
++  <com>parse line extern int4 finalize_bigprint(char *bp, char **out);</com>
++  <com>parse line extern int4 stack_object_call_alias(char **out);</com>
++  <com>lo fu stack_object_call_alias</com>
++  <com>decompile</com>
++  <com>print C</com>
++  <com>quit</com>
++</script>
++<stringmatch name="Stack object alias #1" min="1" max="1">char acStack_418 \[1048\];</stringmatch>
++<stringmatch name="Stack object alias #2" min="1" max="1">init_bigprint\(acStack_418,1,0x7fffffff\);</stringmatch>
++<stringmatch name="Stack object alias #3" min="0" max="0">char acStack_418 \[8\];</stringmatch>
++</decompilertest>
+-- 
+2.45.1
+

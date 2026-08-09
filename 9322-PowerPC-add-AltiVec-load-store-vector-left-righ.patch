@@ -1,0 +1,240 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Nick Renieris <velocityra@gmail.com>
+Date: Sun, 28 Jun 2026 13:35:49 +0300
+Subject: [PATCH] 9322: PowerPC: add AltiVec load/store vector left/right
+ indexed instructions
+
+`lvlx` was seen used in a commecrial PlayStation 3 game and Ghidra
+previously failed to decode them, which this PR fixes. Also added the
+rest for completeness.
+
+lvlx  lvrx  stvlx  stvrx       (ext opcodes 519/551/647/679)
+lvlxl lvrxl stvlxl stvrxl      (ext opcodes 775/807/903/935)
+
+The loads are modeled directly: align EA to 16 bytes, do the 128-bit load,
+then shift to left- or right-justify the bytes that land inside the block.
+The stores write a variable number of bytes (EA out to the block edge) with
+no fixed-width equivalent, so they stay as pcodeops.
+
+lvlxl (0x307) and lvrxl (0x327) share encodings with the embedded-PowerISA
+stvepxl/stvepx in ppc_isa.sinc. Nothing runs both, so a new INCLUDE_ALTIVEC
+guard drops stvepx/stvepxl in the AltiVec variants and lets the Cell forms
+decode.
+---
+ .../PowerPC/data/languages/altivec.sinc       | 96 ++++++++++++++++---
+ .../languages/ppc_64_isa_altivec_be.slaspec   |  4 +
+ .../languages/ppc_64_isa_altivec_le.slaspec   |  4 +
+ .../ppc_64_isa_altivec_vle_be.slaspec         |  4 +
+ .../PowerPC/data/languages/ppc_isa.sinc       |  9 +-
+ 5 files changed, 102 insertions(+), 15 deletions(-)
+
+diff --git a/Ghidra/Processors/PowerPC/data/languages/altivec.sinc b/Ghidra/Processors/PowerPC/data/languages/altivec.sinc
+index 98978d936d..0ba47e8d4b 100644
+--- a/Ghidra/Processors/PowerPC/data/languages/altivec.sinc
++++ b/Ghidra/Processors/PowerPC/data/languages/altivec.sinc
+@@ -12,8 +12,6 @@ define pcodeop loadVectorForShiftLeft;
+ define pcodeop loadVectorForShiftRight;
+ define pcodeop loadVectorIndexed;
+ define pcodeop loadVectorIndexedLRU;
+-define pcodeop loadVectorLeftIndexed;
+-define pcodeop loadVectorRightIndexed;
+ define pcodeop moveFromVectorStatusAndControlRegister;
+ define pcodeop moveToVectorStatusAndControlRegister;
+ define pcodeop storeVectorElementByteIndexed;
+@@ -21,6 +19,8 @@ define pcodeop storeVectorElementHalfWordIndexed;
+ define pcodeop storeVectorElementWordIndexed;
+ define pcodeop storeVectorIndexed;
+ define pcodeop storeVectorIndexedLRU;
++define pcodeop storeVectorLeftIndexed;
++define pcodeop storeVectorRightIndexed;
+ define pcodeop vectorAddCarryoutUnsignedWord;
+ define pcodeop vectorAddFloatingPoint;
+ define pcodeop vectorAddSignedByteSaturate;
+@@ -248,16 +248,6 @@ define pcodeop vectorUnpackLowSignedHalfWord;
+ 	vrD = loadVectorIndexedLRU(A,B);
+ }
+ 
+-:lvlx vrD,RA_OR_ZERO,B      is OP=31 & vrD & RA_OR_ZERO & B & XOP_1_10=519 & Rc=0
+-{
+-    vrD = loadVectorLeftIndexed(RA_OR_ZERO,B);
+-}
+-
+-:lvrx vrD,RA_OR_ZERO,B      is OP=31 & vrD & RA_OR_ZERO & B & XOP_1_10=551 & Rc=0
+-{
+-    vrD = loadVectorRightIndexed(RA_OR_ZERO,B);
+-}
+-
+ :mfvscr vrD			is OP=4 & vrD & vrAR=0 & vrBR=0 & XOP_1_10=770 & Rc=0
+ {   # TODO definition
+ 	vrD = moveFromVectorStatusAndControlRegister();
+@@ -293,12 +283,92 @@ define pcodeop vectorUnpackLowSignedHalfWord;
+ }
+ 
+ :stvxl vrS,RA_OR_ZERO,B		is OP=31 & vrS & B & RA_OR_ZERO & XOP_1_10=487 & Rc=0
+-{   # TODO definition 
++{   # TODO definition
+ 	tmp:$(REGISTER_SIZE) = (RA_OR_ZERO + B) & 0xfffffffffffffff0;
+ 	*[ram]:16 tmp = vrS;
+ 	# mark_as_not_likely_to_be_needed_again_anytime_soon(tmp);
+ }
+ 
++# Cell BE / Xenon unaligned 128-bit vector load/store: lvlx, lvrx, stvlx, stvrx.
++# Each works on the 16-byte-aligned block holding EA = (RA|0) + RB, moving the
++# bytes between EA and the block edge into (or out of) one end of the register.
++
++# lvlx grabs [EA, top of block) and left-justifies it in vrD, zeros elsewhere.
++# The 128-bit load is big-endian, so a left shift by (EA & 15)*8 lifts the byte
++# at EA up to the top.
++:lvlx vrD,RA_OR_ZERO,B		is OP=31 & vrD & RA_OR_ZERO & B & XOP_1_10=519 & Rc=0
++{
++	build RA_OR_ZERO;
++	ea:$(REGISTER_SIZE) = RA_OR_ZERO + B;
++	sh:$(REGISTER_SIZE) = (ea & 0xf) * 8;
++	tmp:$(REGISTER_SIZE) = ea & 0xfffffffffffffff0;
++	data:16 = *[ram]:16 tmp;
++	vrD = data << sh;
++}
++
++# lvrx grabs [bottom of block, EA) and right-justifies it in vrD, zeros elsewhere.
++# Shift right by (16 - (EA & 15))*8 bits, split into two shifts so an aligned EA
++# (a full 128-bit shift) still yields 0 instead of hitting the >= width case.
++:lvrx vrD,RA_OR_ZERO,B		is OP=31 & vrD & RA_OR_ZERO & B & XOP_1_10=551 & Rc=0
++{
++	build RA_OR_ZERO;
++	ea:$(REGISTER_SIZE) = RA_OR_ZERO + B;
++	sh:$(REGISTER_SIZE) = (~ea & 0xf) * 8;
++	tmp:$(REGISTER_SIZE) = ea & 0xfffffffffffffff0;
++	data:16 = *[ram]:16 tmp;
++	vrD = (data >> sh) >> 8;
++}
++
++# stvlx / stvrx write a variable byte count (EA out to the block edge). No
++# fixed-width store fits that, so they stay as pcodeops.
++:stvlx vrS,RA_OR_ZERO,B		is OP=31 & vrS & RA_OR_ZERO & B & XOP_1_10=647 & Rc=0
++{
++	ea:$(REGISTER_SIZE) = RA_OR_ZERO + B;
++	storeVectorLeftIndexed(ea, vrS);
++}
++
++:stvrx vrS,RA_OR_ZERO,B		is OP=31 & vrS & RA_OR_ZERO & B & XOP_1_10=679 & Rc=0
++{
++	ea:$(REGISTER_SIZE) = RA_OR_ZERO + B;
++	storeVectorRightIndexed(ea, vrS);
++}
++
++# Same four with an LRU cache hint. The hint changes nothing we model, so the
++# pcode matches the base forms. Watch out: lvlxl (775) and lvrxl (807) reuse the
++# encodings embedded PowerISA hands to stvepxl / stvepx. ppc_isa.sinc drops those
++# when AltiVec is on (INCLUDE_ALTIVEC) so these win.
++:lvlxl vrD,RA_OR_ZERO,B		is OP=31 & vrD & RA_OR_ZERO & B & XOP_1_10=775 & Rc=0
++{
++	build RA_OR_ZERO;
++	ea:$(REGISTER_SIZE) = RA_OR_ZERO + B;
++	sh:$(REGISTER_SIZE) = (ea & 0xf) * 8;
++	tmp:$(REGISTER_SIZE) = ea & 0xfffffffffffffff0;
++	data:16 = *[ram]:16 tmp;
++	vrD = data << sh;
++}
++
++:lvrxl vrD,RA_OR_ZERO,B		is OP=31 & vrD & RA_OR_ZERO & B & XOP_1_10=807 & Rc=0
++{
++	build RA_OR_ZERO;
++	ea:$(REGISTER_SIZE) = RA_OR_ZERO + B;
++	sh:$(REGISTER_SIZE) = (~ea & 0xf) * 8;
++	tmp:$(REGISTER_SIZE) = ea & 0xfffffffffffffff0;
++	data:16 = *[ram]:16 tmp;
++	vrD = (data >> sh) >> 8;
++}
++
++:stvlxl vrS,RA_OR_ZERO,B	is OP=31 & vrS & RA_OR_ZERO & B & XOP_1_10=903 & Rc=0
++{
++	ea:$(REGISTER_SIZE) = RA_OR_ZERO + B;
++	storeVectorLeftIndexed(ea, vrS);
++}
++
++:stvrxl vrS,RA_OR_ZERO,B	is OP=31 & vrS & RA_OR_ZERO & B & XOP_1_10=935 & Rc=0
++{
++	ea:$(REGISTER_SIZE) = RA_OR_ZERO + B;
++	storeVectorRightIndexed(ea, vrS);
++}
++
+ :vaddcuw vrD,vrA,vrB	is OP=4 & vrD & vrA & vrB & XOP_0_10=384
+ {  # TODO definition
+ 	vrD = vectorAddCarryoutUnsignedWord(vrA,vrB);
+diff --git a/Ghidra/Processors/PowerPC/data/languages/ppc_64_isa_altivec_be.slaspec b/Ghidra/Processors/PowerPC/data/languages/ppc_64_isa_altivec_be.slaspec
+index 7e2c7dfe9b..a50903aa96 100644
+--- a/Ghidra/Processors/PowerPC/data/languages/ppc_64_isa_altivec_be.slaspec
++++ b/Ghidra/Processors/PowerPC/data/languages/ppc_64_isa_altivec_be.slaspec
+@@ -13,6 +13,10 @@
+ 
+ @define CTR_OFFSET "32"
+ 
++# Pick the AltiVec meaning for the encodings embedded PowerISA also claims
++# (the stvepx/stvepxl guard in ppc_isa.sinc).
++@define INCLUDE_ALTIVEC "1"
++
+ @include "ppc_common.sinc"
+ @include "ppc_isa.sinc"
+ 
+diff --git a/Ghidra/Processors/PowerPC/data/languages/ppc_64_isa_altivec_le.slaspec b/Ghidra/Processors/PowerPC/data/languages/ppc_64_isa_altivec_le.slaspec
+index 4bb1fe400a..460ed27013 100644
+--- a/Ghidra/Processors/PowerPC/data/languages/ppc_64_isa_altivec_le.slaspec
++++ b/Ghidra/Processors/PowerPC/data/languages/ppc_64_isa_altivec_le.slaspec
+@@ -13,6 +13,10 @@
+ 
+ @define CTR_OFFSET "32"
+ 
++# Pick the AltiVec meaning for the encodings embedded PowerISA also claims
++# (the stvepx/stvepxl guard in ppc_isa.sinc).
++@define INCLUDE_ALTIVEC "1"
++
+ @include "ppc_common.sinc"
+ @include "ppc_isa.sinc"
+ 
+diff --git a/Ghidra/Processors/PowerPC/data/languages/ppc_64_isa_altivec_vle_be.slaspec b/Ghidra/Processors/PowerPC/data/languages/ppc_64_isa_altivec_vle_be.slaspec
+index 9a39b19755..ef405acc61 100644
+--- a/Ghidra/Processors/PowerPC/data/languages/ppc_64_isa_altivec_vle_be.slaspec
++++ b/Ghidra/Processors/PowerPC/data/languages/ppc_64_isa_altivec_vle_be.slaspec
+@@ -13,6 +13,10 @@
+ 
+ @define CTR_OFFSET "32"
+ 
++# Pick the AltiVec meaning for the encodings embedded PowerISA also claims
++# (the stvepx/stvepxl guard in ppc_isa.sinc).
++@define INCLUDE_ALTIVEC "1"
++
+ @include "ppc_common.sinc"
+ @include "ppc_isa.sinc"
+ 
+diff --git a/Ghidra/Processors/PowerPC/data/languages/ppc_isa.sinc b/Ghidra/Processors/PowerPC/data/languages/ppc_isa.sinc
+index 027d3feaf3..2436c5ea26 100644
+--- a/Ghidra/Processors/PowerPC/data/languages/ppc_isa.sinc
++++ b/Ghidra/Processors/PowerPC/data/languages/ppc_isa.sinc
+@@ -1936,17 +1936,22 @@ define pcodeop stfdpOp;
+ @endif
+ } 
+ 
++# stvepx (807) and stvepxl (775) sit on the same encodings Cell/AltiVec use for
++# lvrxl / lvlxl (see altivec.sinc). No chip implements both, so when AltiVec is
++# selected we drop these and let the AltiVec forms decode instead.
++@ifndef INCLUDE_ALTIVEC
+ define pcodeop stvepxOp;
+ :stvepx S,RA_OR_ZERO,B is OP=31 & S & RA_OR_ZERO & B & XOP_1_10=807 & BIT_0=0  {
+ 	EA:$(REGISTER_SIZE) = RA_OR_ZERO + B;
+ 	*[ram]:16 EA = stvepxOp(S, RA_OR_ZERO, B);
+-} 
++}
+ 
+ define pcodeop stvepxlOp;
+ :stvepxl S,RA_OR_ZERO,B is OP=31 & S & RA_OR_ZERO & B & XOP_1_10=775 & BIT_0=0  {
+ 	EA:$(REGISTER_SIZE) = RA_OR_ZERO + B;
+ 	*[ram]:16 EA = stvepxlOp(S, RA_OR_ZERO, B);
+-} 
++}
++@endif
+ 
+ # binutils-descr: "dquaq",	ZRC(63,3,0),	Z2_MASK,     POWER6,	PPCNONE,	{FRT, FRA, FRB, RMC}
+ define pcodeop dquaqOp;
+-- 
+2.45.1
+

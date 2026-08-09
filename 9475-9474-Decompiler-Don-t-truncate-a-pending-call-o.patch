@@ -1,0 +1,140 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: burhan_250 <burhan_250@live.de>
+Date: Thu, 6 Aug 2026 13:34:22 +0200
+Subject: [PATCH] 9475: #9474 Decompiler: Don't truncate a pending call-output
+ trial to an unjustifiable piece
+
+#9474 Keep call output trials bindable when only the high
+ half is consumed
+---
+ .../Decompiler/certification.manifest         |  2 +
+ .../src/decompile/cpp/ruleaction.cc           | 14 +++++++
+ .../decompile/datatests/retvalhighhalf.xml    | 33 +++++++++++++++++
+ .../decompile/datatests/retvalhighhalf_be.xml | 37 +++++++++++++++++++
+ 4 files changed, 86 insertions(+)
+ create mode 100644 Ghidra/Features/Decompiler/src/decompile/datatests/retvalhighhalf.xml
+ create mode 100644 Ghidra/Features/Decompiler/src/decompile/datatests/retvalhighhalf_be.xml
+
+diff --git a/Ghidra/Features/Decompiler/certification.manifest b/Ghidra/Features/Decompiler/certification.manifest
+index 3c4799bcd9..8bc673c591 100644
+--- a/Ghidra/Features/Decompiler/certification.manifest
++++ b/Ghidra/Features/Decompiler/certification.manifest
+@@ -93,6 +93,8 @@ src/decompile/datatests/readvolatile.xml||GHIDRA||||END|
+ src/decompile/datatests/retpassthrough.xml||GHIDRA||||END|
+ src/decompile/datatests/retspecial.xml||GHIDRA||||END|
+ src/decompile/datatests/retstruct.xml||GHIDRA||||END|
++src/decompile/datatests/retvalhighhalf.xml||GHIDRA||||END|
++src/decompile/datatests/retvalhighhalf_be.xml||GHIDRA||||END|
+ src/decompile/datatests/revisit.xml||GHIDRA||||END|
+ src/decompile/datatests/riscv_isaext_memcpy.xml||GHIDRA||||END|
+ src/decompile/datatests/sbyte.xml||GHIDRA||||END|
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc
+index 5a68b14ed5..919baa3907 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc
+@@ -999,6 +999,20 @@ int4 RulePullsubIndirect::applyOp(PcodeOp *op,Funcdata &data)
+ 
+   if (indir->isIndirectCreation()) {
+     bool possibleout = !indir->getIn(0)->isIndirectZero();
++    if (possibleout) {
++      FuncCallSpecs *fc = data.getCallSpecs(targ_op);
++      if (fc != (FuncCallSpecs *)0 && fc->isOutputActive()) {
++	// The storage may still become the call's formal output. Truncating it to a
++	// piece the prototype model cannot justify would leave return value recovery
++	// with nothing to bind, so the call would be recovered as void and this
++	// Varnode would remain as a read of storage that is never written.
++	// A piece is justified precisely when it contains the least significant byte
++	// of \b vn.  minMaxUse() indexes bytes by significance (lsb=0), and
++	// ParamEntry::justifiedContain computes this same significance offset for
++	// either endianness, so no endian test is needed here.
++	if (minByte != 0) return 0;
++      }
++    }
+     new_ind = data.newIndirectCreation(targ_op,smalladdr2,newSize,possibleout);
+     small2 = new_ind->getOut();
+   }
+diff --git a/Ghidra/Features/Decompiler/src/decompile/datatests/retvalhighhalf.xml b/Ghidra/Features/Decompiler/src/decompile/datatests/retvalhighhalf.xml
+new file mode 100644
+index 0000000000..f5e9c58a15
+--- /dev/null
++++ b/Ghidra/Features/Decompiler/src/decompile/datatests/retvalhighhalf.xml
+@@ -0,0 +1,33 @@
++<decompilertest>
++<binaryimage arch="x86:LE:64:default:gcc">
++  <!--
++      seed_hi_only (0x1129):  call make_value ; shr rax,32 ; mov rax,rdx
++                              xor with a global dword ; ret
++      main         (0x114a):  call seed_hi_only ; mov eax,<global> ; ret
++      make_value   (0x115b):  64-bit LCG over a static ; returns 8 bytes in RAX
++
++      The caller consumes ONLY the high 32 bits of make_value's 64-bit return
++      value.  No prototype is supplied for make_value: return value recovery in
++      the caller must deduce the output from the read of RAX after the CALL.
++      The read is real (the machine code performs SHR RAX,32 and stores the
++      result), so the call must not be recovered as void, and no variable may
++      be read without ever being written.
++  -->
++<bytechunk space="ram" offset="0x1129" readonly="true">
++554889e5e82900000048c1e8204889c28b05a52f000031d089059d2f0000905dc3
++554889e5e8d6ffffff8b058b2f00005dc3
++554889e5488b05aa2e000048ba2d7f954c2df45158480fafc24883c001488905912e0000488b058a2e00005dc3
++</bytechunk>
++</binaryimage>
++<script>
++  <com>map fun r0x1129 seed_hi_only</com>
++  <com>map fun r0x115b make_value</com>
++  <com>lo fu seed_hi_only</com>
++  <com>decompile</com>
++  <com>print C</com>
++  <com>quit</com>
++</script>
++<stringmatch name="Return high half #1" min="1" max="1">= make_value\(\)</stringmatch>
++<stringmatch name="Return high half #2" min="0" max="0">extraout</stringmatch>
++<stringmatch name="Return high half #3" min="1" max="1">&gt;&gt; 0x20</stringmatch>
++</decompilertest>
+diff --git a/Ghidra/Features/Decompiler/src/decompile/datatests/retvalhighhalf_be.xml b/Ghidra/Features/Decompiler/src/decompile/datatests/retvalhighhalf_be.xml
+new file mode 100644
+index 0000000000..2ec4943fcb
+--- /dev/null
++++ b/Ghidra/Features/Decompiler/src/decompile/datatests/retvalhighhalf_be.xml
+@@ -0,0 +1,37 @@
++<decompilertest>
++<binaryimage arch="PowerPC:BE:64:default:default">
++  <!--
++      seed_hi_only (0x1000):  mflr r0 ; std r0,16(r1) ; stdu r1,-32(r1)
++                              bl make_value ; srdi r3,r3,32
++                              lis r4,0x10 ; stw r3,0(r4)
++                              addi r1,r1,32 ; ld r0,16(r1) ; mtlr r0 ; blr
++      make_value   (0x1100):  li r3,1 ; blr
++
++      Big-endian mirror of retvalhighhalf.xml: the caller consumes ONLY the
++      high 32 bits (most significant, LOWEST addressed bytes of r3) of
++      make_value's 64-bit return value.  No prototype is supplied for
++      make_value.  The piece is NOT justified in r3 (its least significant
++      byte does not reach r3's least significant byte), so truncating the
++      indirect creation must be refused, the full 8-byte return must bind,
++      and the call must not become void.
++  -->
++<bytechunk space="ram" offset="0x1000" readonly="true">
++7c0802a6f8010010f821ffe1480000f5786300223c80001090640000
++38210020e80100107c0803a64e800020
++</bytechunk>
++<bytechunk space="ram" offset="0x1100" readonly="true">
++386000014e800020
++</bytechunk>
++</binaryimage>
++<script>
++  <com>map fun r0x1000 seed_hi_only</com>
++  <com>map fun r0x1100 make_value</com>
++  <com>lo fu seed_hi_only</com>
++  <com>decompile</com>
++  <com>print C</com>
++  <com>quit</com>
++</script>
++<stringmatch name="Return high half BE #1" min="1" max="1">= make_value\(\)</stringmatch>
++<stringmatch name="Return high half BE #2" min="0" max="0">extraout</stringmatch>
++<stringmatch name="Return high half BE #3" min="1" max="1">&gt;&gt; 0x20</stringmatch>
++</decompilertest>
+-- 
+2.45.1
+

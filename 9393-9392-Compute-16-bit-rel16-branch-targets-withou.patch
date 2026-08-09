@@ -1,0 +1,49 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Erik Berg <github@slipsprogrammor.no>
+Date: Sun, 12 Jul 2026 02:07:19 +0200
+Subject: [PATCH] 9393: 9392: Compute 16-bit rel16 branch targets without
+ 64KB-page wrap
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+rel16 anchored the 16-bit IP wraparound to the linear 64KB page of
+inst_next — correct only when the code segment starts on a page
+boundary. Real-mode MZ segments are arbitrary paragraphs, so any
+JMP/CALL/Jcc rel16 whose flow crosses a page boundary resolved 0x10000
+away. On a real-world MZ executable whose C library segment (1d1d,
+linear 0x1D1D2-0x20470) crosses 0x20000, every backward branch from the
+segment's tail resolved into the data segment, baking 181 bogus labels
+and 2 bogus functions there, spreading garbage disassembly, and
+severing the real control flow (e.g. 1d1d:2f5b JMP -0x1a49 -> 2b5a:3145
+instead of 1d1d:1515).
+
+Add an addrsize=0 variant computing plain inst_next+simm16 — exact for
+every in-segment branch (target offset in [0,0xFFFF]), and the same
+model rel8 has always used. 32/64-bit rel16 (66-prefix EIP truncation)
+keeps the page-anchored formula.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+---
+ Ghidra/Processors/x86/data/languages/ia.sinc | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/Ghidra/Processors/x86/data/languages/ia.sinc b/Ghidra/Processors/x86/data/languages/ia.sinc
+index 56464a2eb0..fee4bd3638 100644
+--- a/Ghidra/Processors/x86/data/languages/ia.sinc
++++ b/Ghidra/Processors/x86/data/languages/ia.sinc
+@@ -1156,6 +1156,11 @@ EffectiveAddress: addr64    is                   addrsize=2 & addr64    { export
+ @endif
+ 
+ rel8: reloc is simm8        [ reloc=inst_next+simm8; ] { export *[ram]:$(SIZE) reloc; }
++# In 16-bit mode IP stays within the code segment, whose base is an arbitrary
++# paragraph — anchoring the wrap to the linear 64KB page (below) sends any branch
++# crossing a page boundary into the wrong segment. Plain addition is exact for
++# every in-segment branch (offset result in [0,0xFFFF]), matching rel8 above.
++rel16: reloc is addrsize=0 & simm16 [ reloc=inst_next+simm16; ] { export *[ram]:$(SIZE) reloc; }
+ rel16: reloc is simm16      [ reloc=((inst_next >> 16) << 16) | ((inst_next + simm16) & 0xFFFF); ] { export *[ram]:$(SIZE) reloc; }
+ rel32: reloc is simm32      [ reloc=inst_next+simm32; ] { export *[ram]:$(SIZE) reloc; }
+ 
+-- 
+2.45.1
+
