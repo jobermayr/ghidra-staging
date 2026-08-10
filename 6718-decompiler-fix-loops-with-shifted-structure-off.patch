@@ -16,18 +16,20 @@ possible infinite decompilation issue fix
 fix infinite hang
 
 shifted structure offset: more aggressive propagation of offset-iterator down into the loop body
+
+resolve merge conflicts with master
 ---
  .../src/decompile/cpp/blockaction.cc          |    1 +
  .../src/decompile/cpp/funcdata_op.cc          |   26 +-
  .../cpp/include/ghidra/ruleaction.hh          |   47 +
- .../src/decompile/cpp/ruleaction.cc           | 1257 ++++++++++++++++-
- 4 files changed, 1289 insertions(+), 42 deletions(-)
+ .../src/decompile/cpp/ruleaction.cc           | 1251 ++++++++++++++++-
+ 4 files changed, 1285 insertions(+), 40 deletions(-)
 
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/blockaction.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/blockaction.cc
-index e472dfec92..364343c91d 100644
+index 60c8565c70..c7f9e2af6c 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/blockaction.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/blockaction.cc
-@@ -2076,6 +2076,7 @@ void ConditionalJoin::setupMultiequals(void)
+@@ -2081,6 +2081,7 @@ void ConditionalJoin::setupMultiequals(void)
      Varnode *outvn = data.newUniqueOut(vn1->getSize(),multi);
      data.opSetInput(multi,vn1,0);
      data.opSetInput(multi,vn2,1);
@@ -89,7 +91,7 @@ index 87c1a13c20..95bcc5ace1 100644
    opSetInput(op,newvn,1);
    opSetInput(op,invn,0);
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/ruleaction.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/ruleaction.hh
-index 01bc9afbf9..52802f229f 100644
+index 99e7d55e42..460fb096e2 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/ruleaction.hh
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/ruleaction.hh
 @@ -47,6 +47,7 @@ class AddTreeState {
@@ -100,7 +102,7 @@ index 01bc9afbf9..52802f229f 100644
    const TypePointerRel *pRelType;	///< A copy of \b ct, if it is a relative pointer
    int4 ptrsize;			///< Size of the pointer
    int4 size;			///< Size of data-type being pointed to (in address units) or 0 for open ended pointer
-@@ -61,13 +62,16 @@ class AddTreeState {
+@@ -61,12 +62,15 @@ class AddTreeState {
    PcodeOp *distributeOp;	///< A CPUI_INT_MULT op that needs to be distributed
    uint8 multsum;		///< Sum of multiple constants
    uint8 nonmultsum;		///< Sum of non-multiple constants
@@ -111,13 +113,12 @@ index 01bc9afbf9..52802f229f 100644
    bool valid;			///< Set to \b true if the whole expression can be transformed
    bool isDegenerate;		///< Set to \b true if pointer to unitsize or smaller
 +  bool inspectedMultiequals;
-   bool hasMatchingSubType(int8 off,uint4 arrayHint,int8 *newoff) const;
    bool checkMultTerm(Varnode *vn,PcodeOp *op,uint8 treeCoeff);	///< Accumulate details of INT_MULT term and continue traversal if appropriate
 +  bool checkMultTermPiece(Varnode *vn,PcodeOp *op,uint8 treeCoeff,uintb constval,Varnode *vnterm);
    bool checkTerm(Varnode *vn,uint8 treeCoeff);			///< Accumulate details of given term and continue tree traversal
    bool spanAddTree(PcodeOp *op,uint8 treeCoeff);		///< Walk the given sub-tree accumulating details
    void calcSubtype(void);		///< Calculate final sub-type offset
-@@ -77,10 +81,53 @@ class AddTreeState {
+@@ -76,10 +80,53 @@ class AddTreeState {
    bool buildDegenerate(void);		///< Transform ADD into degenerate PTRADD
    void buildTree(void);			///< Build the transformed ADD tree
    void clear(void);			///< Reset for a new ADD tree traversal
@@ -172,7 +173,7 @@ index 01bc9afbf9..52802f229f 100644
  
  class RuleEarlyRemoval : public Rule {
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc
-index 00524c3dee..25da6292d0 100644
+index b854a9abb4..ccc77196dd 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc
 @@ -6095,6 +6095,7 @@ void AddTreeState::clear(void)
@@ -200,34 +201,8 @@ index 00524c3dee..25da6292d0 100644
 +  inspectedMultiequals = false;
  }
  
- /// \brief Given an offset into the base data-type and array hints find sub-component being referenced
-@@ -6175,8 +6180,10 @@ AddTreeState::AddTreeState(Funcdata &d,PcodeOp *op,int4 slot)
- bool AddTreeState::hasMatchingSubType(int8 off,uint4 arrayHint,int8 *newoff) const
- 
- {
--  if (arrayHint == 0)
--    return (baseType->getSubType(off,newoff) != (Datatype *)0);
-+  if (arrayHint == 0 && (off >= 0 || baseType->getMetatype() == TYPE_SPACEBASE)) {
-+    lastMatchedType = baseType->getSubType(off,newoff);
-+    return (lastMatchedType != (Datatype *)0);
-+  }
- 
-   int8 elSizeBefore;
-   int8 offBefore;
-@@ -6184,8 +6191,10 @@ bool AddTreeState::hasMatchingSubType(int8 off,uint4 arrayHint,int8 *newoff) con
-   int8 elSizeAfter;
-   int8 offAfter;
-   int8 typeAfter = baseType->nearestArrayedComponentForward(off, 128, &offAfter, &elSizeAfter);
--  if (typeBefore < 0 && typeAfter < 0)
--    return (baseType->getSubType(off,newoff) != (Datatype *)0);
-+  if (typeBefore < 0 && typeAfter < 0) {
-+    lastMatchedType = baseType->getSubType(off,newoff);
-+    return lastMatchedType != (Datatype *)0;
-+  }
-   if (typeBefore < 0) {
-     *newoff = offAfter;		// Only array is after
-     return true;
-@@ -6233,46 +6242,50 @@ bool AddTreeState::checkMultTerm(Varnode *vn,PcodeOp *op,uint8 treeCoeff)
+ /// Examine a CPUI_INT_MULT element in the middle of the add tree. Determine if we treat
+@@ -6175,46 +6180,50 @@ bool AddTreeState::checkMultTerm(Varnode *vn,PcodeOp *op,uint8 treeCoeff)
  {
    Varnode *vnconst = op->getIn(1);
    Varnode *vnterm = op->getIn(0);
@@ -306,7 +281,7 @@ index 00524c3dee..25da6292d0 100644
  /// If the given Varnode is a constant or multiplicative term, update
  /// totals. If the Varnode is additive, traverse its sub-terms.
  /// \param vn is the given Varnode term
-@@ -6315,6 +6328,16 @@ bool AddTreeState::checkTerm(Varnode *vn,uint8 treeCoeff)
+@@ -6257,6 +6266,16 @@ bool AddTreeState::checkTerm(Varnode *vn,uint8 treeCoeff)
      }
      if (def->code() == CPUI_INT_MULT)	// Check for constant coeff indicating size
        return checkMultTerm(vn, def, treeCoeff);
@@ -323,7 +298,7 @@ index 00524c3dee..25da6292d0 100644
    }
    else if (vn->isFree()) {
      valid = false;
-@@ -6360,6 +6383,265 @@ bool AddTreeState::spanAddTree(PcodeOp *op,uint8 treeCoeff)
+@@ -6302,6 +6321,265 @@ bool AddTreeState::spanAddTree(PcodeOp *op,uint8 treeCoeff)
    return false;		// At least one of the sides contains multiples
  }
  
@@ -589,7 +564,33 @@ index 00524c3dee..25da6292d0 100644
  /// Make final calcultions to determine if a pointer to a sub data-type of the base
  /// data-type is being calculated, which will result in a CPUI_PTRSUB being generated.
  void AddTreeState::calcSubtype(void)
-@@ -6530,6 +6812,152 @@ Varnode *AddTreeState::buildExtra(void)
+@@ -6345,8 +6623,10 @@ void AddTreeState::calcSubtype(void)
+     bool foundSymbol = false;
+     if (biggestNonMultCoeff != 0)
+       foundSymbol = baseType->nearestArrayedComponent(offsetbytes, biggestNonMultCoeff, &extra);
+-    if (!foundSymbol)
+-      foundSymbol = (baseType->getSubType(offsetbytes,&extra) != (Datatype *)0);
++    if (!foundSymbol) {
++      lastMatchedType = baseType->getSubType(offsetbytes,&extra);
++      foundSymbol = (lastMatchedType != (Datatype *)0);
++    }
+     if (!foundSymbol && biggestNonMultCoeff == 0)
+       foundSymbol = baseType->nearestArrayedComponent(offsetbytes, 1, &extra);
+     if (!foundSymbol) {
+@@ -6366,8 +6646,10 @@ void AddTreeState::calcSubtype(void)
+     bool foundField = false;
+     if (biggestNonMultCoeff != 0)
+       foundField = baseType->nearestArrayedComponent(offsetbytes, biggestNonMultCoeff, &extra);
+-    if (!foundField)
+-      foundField = (baseType->getSubType(offsetbytes,&extra) != (Datatype *)0);
++    if (!foundField) {
++      lastMatchedType = baseType->getSubType(offsetbytes,&extra);
++      foundField = (lastMatchedType != (Datatype *)0);
++    }
+     if (!foundField) {
+       if (offsetbytes < 0 || offsetbytes >= baseType->getSize()) {	// Compare as bytes! not address units
+ 	valid = false; // Out of structure's bounds
+@@ -6484,6 +6766,152 @@ Varnode *AddTreeState::buildExtra(void)
    return resNode;
  }
  
@@ -742,7 +743,7 @@ index 00524c3dee..25da6292d0 100644
  /// The base data-type being pointed to is unit sized (or smaller).  Everything is a multiple, so an ADD
  /// is always converted into a PTRADD.
  /// \return \b true if the degenerate transform was applied
-@@ -6542,6 +6970,8 @@ bool AddTreeState::buildDegenerate(void)
+@@ -6496,6 +6924,8 @@ bool AddTreeState::buildDegenerate(void)
      return false;	// Don't transform at all
    if (baseOp->getOut()->getTypeDefFacing()->getMetatype() != TYPE_PTR)	// Make sure pointer propagates thru INT_ADD
      return false;
@@ -751,7 +752,7 @@ index 00524c3dee..25da6292d0 100644
    vector<Varnode *> newparams;
    int4 slot = baseOp->getSlot(ptr);
    newparams.push_back( ptr );
-@@ -6552,6 +6982,593 @@ bool AddTreeState::buildDegenerate(void)
+@@ -6506,6 +6936,593 @@ bool AddTreeState::buildDegenerate(void)
    return true;
  }
  
@@ -1345,7 +1346,7 @@ index 00524c3dee..25da6292d0 100644
  /// \return \b true if a transform was applied
  bool AddTreeState::apply(void)
  
-@@ -6559,14 +7576,61 @@ bool AddTreeState::apply(void)
+@@ -6513,14 +7530,61 @@ bool AddTreeState::apply(void)
    if (isDegenerate)
      return buildDegenerate();
    spanAddTree(baseOp,1);
@@ -1407,7 +1408,7 @@ index 00524c3dee..25da6292d0 100644
    while(valid && distributeOp != (PcodeOp *)0) {
      if (!data.distributeIntMultAdd(distributeOp)) {
        valid = false;
-@@ -6596,6 +7660,59 @@ bool AddTreeState::apply(void)
+@@ -6550,6 +7614,59 @@ bool AddTreeState::apply(void)
    return true;
  }
  
@@ -1467,7 +1468,7 @@ index 00524c3dee..25da6292d0 100644
  /// The original ADD tree has been successfully split into \e multiple and
  /// \e non-multiple pieces.  Rewrite the tree as a pointer expression, putting
  /// any \e multiple pieces into a PTRADD operation, creating a PTRSUB if a sub
-@@ -6636,8 +7753,9 @@ void AddTreeState::buildTree(void)
+@@ -6590,8 +7707,9 @@ void AddTreeState::buildTree(void)
    }
  
    // Add back in any remaining terms
@@ -1478,7 +1479,7 @@ index 00524c3dee..25da6292d0 100644
  
    if (newop == (PcodeOp *)0) {
      // This should never happen
-@@ -6762,7 +7880,52 @@ int4 RulePtrArith::applyOp(PcodeOp *op,Funcdata &data)
+@@ -6716,7 +7834,52 @@ int4 RulePtrArith::applyOp(PcodeOp *op,Funcdata &data)
      ct = op->getIn(slot)->getTypeReadFacing(op);
      if (ct->getMetatype() == TYPE_PTR) break;
    }
@@ -1532,7 +1533,7 @@ index 00524c3dee..25da6292d0 100644
    if (evaluatePointerExpression(op, slot) != 2) return 0;
    if (!verifyPreferredPointer(op, slot)) return 0;
  
-@@ -7072,7 +8235,7 @@ int8 RulePtrsubUndo::getConstOffsetBack(Varnode *vn,int8 &multiplier,int4 maxLev
+@@ -7026,7 +8189,7 @@ int8 RulePtrsubUndo::getConstOffsetBack(Varnode *vn,int8 &multiplier,int4 maxLev
    multiplier = 0;
    int8 submultiplier;
    if (vn->isConstant())
@@ -1541,22 +1542,7 @@ index 00524c3dee..25da6292d0 100644
    if (!vn->isWritten())
      return 0;
    maxLevel -= 1;
-@@ -7082,10 +8245,12 @@ int8 RulePtrsubUndo::getConstOffsetBack(Varnode *vn,int8 &multiplier,int4 maxLev
-   OpCode opc = op->code();
-   int8 retval = 0;
-   if (opc == CPUI_INT_ADD) {
--    retval += getConstOffsetBack(op->getIn(0),submultiplier,maxLevel);
-+    Varnode *opIn0 = op->getIn(0);
-+    retval += getConstOffsetBack(opIn0,submultiplier,maxLevel);
-     if (submultiplier > multiplier)
-       multiplier = submultiplier;
--    retval += getConstOffsetBack(op->getIn(1), submultiplier, maxLevel);
-+    Varnode *opIn1 = op->getIn(1);
-+    retval += getConstOffsetBack(opIn1, submultiplier, maxLevel);
-     if (submultiplier > multiplier)
-       multiplier = submultiplier;
-   }
-@@ -7093,8 +8258,22 @@ int8 RulePtrsubUndo::getConstOffsetBack(Varnode *vn,int8 &multiplier,int4 maxLev
+@@ -7047,8 +8210,22 @@ int8 RulePtrsubUndo::getConstOffsetBack(Varnode *vn,int8 &multiplier,int4 maxLev
      Varnode *cvn = op->getIn(1);
      if (!cvn->isConstant()) return 0;
      multiplier = cvn->getOffset();
