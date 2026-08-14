@@ -20,7 +20,7 @@ improved enum propagation: handle (char)enum < '\0' and -1 < (char)enum; partial
  8 files changed, 525 insertions(+), 63 deletions(-)
 
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
-index fc9b321ed9..6ef880f0f1 100644
+index 164748085d..f0babea5bf 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
 @@ -2828,9 +2828,12 @@ int4 ActionSetCasts::castInput(PcodeOp *op,int4 slot,Funcdata &data,CastStrategy
@@ -48,7 +48,7 @@ index fc9b321ed9..6ef880f0f1 100644
    if (ct->needsResolution()) {
      data.forceFacingType(ct, -1, newop, -1);
    }
-@@ -6139,6 +6142,7 @@ void ActionDatabase::universalAction(Architecture *conf)
+@@ -6140,6 +6143,7 @@ void ActionDatabase::universalAction(Architecture *conf)
    act->addAction( new ActionMapGlobals("fixateglobals") );
    act->addAction( new ActionDynamicSymbols("dynamic") );
    act->addAction( new ActionNameVars("merge") );
@@ -57,10 +57,10 @@ index fc9b321ed9..6ef880f0f1 100644
    act->addAction( new ActionFinalStructure("blockrecovery") );
    act->addAction( new ActionPrototypeWarnings("protorecovery") );
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/ruleaction.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/ruleaction.hh
-index 6713c83236..99e7d55e42 100644
+index e66001b2b2..1d58b6c622 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/ruleaction.hh
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/ruleaction.hh
-@@ -1640,5 +1640,17 @@ public:
+@@ -1651,5 +1651,17 @@ public:
    virtual int4 applyOp(PcodeOp *op,Funcdata &data);
  };
  
@@ -79,10 +79,10 @@ index 6713c83236..99e7d55e42 100644
  } // End namespace ghidra
  #endif
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/type.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/type.hh
-index e90c088453..50d051a53a 100644
+index 414367ec46..8ec587852b 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/type.hh
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/type.hh
-@@ -563,7 +563,7 @@ public:
+@@ -564,7 +564,7 @@ public:
    map<uintb,string>::const_iterator beginEnum(void) const { return namemap.begin(); }	///< Beginning of name map
    map<uintb,string>::const_iterator endEnum(void) const { return namemap.end(); }	///< End of name map
    virtual bool hasNamedValue(uintb val) const;			///< Does \b this have a (single) name for the given value
@@ -91,7 +91,7 @@ index e90c088453..50d051a53a 100644
    virtual int4 compare(const Datatype &op,int4 level) const;
    virtual int4 compareDependency(const Datatype &op) const;
    virtual Datatype *clone(void) const { return new TypeEnum(*this); }
-@@ -659,15 +659,15 @@ class TypePartialEnum : public TypeEnum {
+@@ -660,15 +660,15 @@ class TypePartialEnum : public TypeEnum {
    friend class TypeFactory;
    Datatype *stripped;		///< The \e undefined data-type to use if a formal data-type is required.
    TypeEnum *parent;		///< The enumeration data-type \b this is based on
@@ -162,10 +162,10 @@ index 1bae3161bb..4b31bbc232 100644
    else {
      push_integer(val,ct->getSize(),false,tag,vn,op,ct->getDisplayFormat());
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc
-index e05b9cb0a9..b854a9abb4 100644
+index 7143e95a27..7e2225c616 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc
-@@ -11313,4 +11313,379 @@ int4 RuleExpandLoad::applyOp(PcodeOp *op,Funcdata &data)
+@@ -11370,4 +11370,379 @@ int4 RuleExpandLoad::applyOp(PcodeOp *op,Funcdata &data)
    return 1;
  }
  
@@ -546,10 +546,10 @@ index e05b9cb0a9..b854a9abb4 100644
 +
  } // End namespace ghidra
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/type.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/type.cc
-index 6c885cd23f..d8cd6229a2 100644
+index bb1334a780..0705d85a23 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/type.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/type.cc
-@@ -1570,56 +1570,105 @@ bool TypeEnum::hasNamedValue(uintb val) const
+@@ -1593,56 +1593,105 @@ bool TypeEnum::hasNamedValue(uintb val) const
  /// The representation is returned as a list of names that must logically ORed and possibly complemented.
  /// If no representation is possible, no names will be returned.
  /// \param val is the value to find the representation for
@@ -693,7 +693,7 @@ index 6c885cd23f..d8cd6229a2 100644
  }
  
  int4 TypeEnum::compare(const Datatype &op,int4 level) const
-@@ -2775,16 +2824,24 @@ void TypePartialEnum::printRaw(ostream &s) const
+@@ -2798,16 +2847,24 @@ void TypePartialEnum::printRaw(ostream &s) const
  bool TypePartialEnum::hasNamedValue(uintb val) const
  
  {
@@ -723,7 +723,7 @@ index 6c885cd23f..d8cd6229a2 100644
  }
  
  int4 TypePartialEnum::compare(const Datatype &op,int4 level) const
-@@ -4585,7 +4642,7 @@ TypeEnum *TypeFactory::getTypeEnum(const string &n)
+@@ -4608,7 +4665,7 @@ TypeEnum *TypeFactory::getTypeEnum(const string &n)
  
  /// Create a data-type representing storage of part of an \e enumeration.
  /// \param contain is the parent \e enumeration data-type that we are taking a part of.
@@ -732,7 +732,7 @@ index 6c885cd23f..d8cd6229a2 100644
  /// \param sz is the number of bytes in the partial data-type
  /// \return the TypePartialEnum object
  TypePartialEnum *TypeFactory::getTypePartialEnum(TypeEnum *contain,int4 off,int4 sz)
-@@ -4741,7 +4798,7 @@ Datatype *TypeFactory::getExactPiece(Datatype *ct,int4 offset,int4 size)
+@@ -4764,7 +4821,7 @@ Datatype *TypeFactory::getExactPiece(Datatype *ct,int4 offset,int4 size)
        return getTypePartialUnion(partial->getParentUnion(),lastOff + partial->getOffset(), size);
      }
      else if (lastType->isEnumType() && !lastType->hasStripped())
