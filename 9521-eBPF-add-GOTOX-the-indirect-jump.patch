@@ -1,0 +1,85 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: UnsleptArch <sirinotomer@gmail.com>
+Date: Tue, 18 Aug 2026 13:07:27 -0400
+Subject: [PATCH] 9521: eBPF: add GOTOX, the indirect jump
+
+Opcode 0x0d (BPF_JA | BPF_X | BPF_JMP) had no constructor, so gotox
+decoded as a bad instruction. The spec already covers the other three
+corners of the group: JA (0x05), CALL (0x85) and CALLX (0x8d). This adds
+the fourth, mirroring the existing CALLX constructor with goto in place
+of call.
+
+Verified against llvm-mc over all 256 opcodes: no existing decode
+changes, sleigh warning count unchanged, and 0d02000000000000 goes from
+BAD to GOTOX R2, matching "gotox r2".
+
+Adds eBPFAssemblyTest with the GOTOX case and a CALLX case; reverting
+the .sinc change fails only the GOTOX one.
+---
+ .../assembler/sleigh/eBPFAssemblyTest.java    | 37 +++++++++++++++++++
+ .../Processors/eBPF/data/languages/eBPF.sinc  |  5 +++
+ 2 files changed, 42 insertions(+)
+ create mode 100644 Ghidra/Framework/SoftwareModeling/src/test/java/ghidra/app/plugin/assembler/sleigh/eBPFAssemblyTest.java
+
+diff --git a/Ghidra/Framework/SoftwareModeling/src/test/java/ghidra/app/plugin/assembler/sleigh/eBPFAssemblyTest.java b/Ghidra/Framework/SoftwareModeling/src/test/java/ghidra/app/plugin/assembler/sleigh/eBPFAssemblyTest.java
+new file mode 100644
+index 0000000000..415daf116f
+--- /dev/null
++++ b/Ghidra/Framework/SoftwareModeling/src/test/java/ghidra/app/plugin/assembler/sleigh/eBPFAssemblyTest.java
+@@ -0,0 +1,37 @@
++/* ###
++ * IP: GHIDRA
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package ghidra.app.plugin.assembler.sleigh;
++
++import org.junit.Test;
++
++import ghidra.program.model.lang.LanguageID;
++
++public class eBPFAssemblyTest extends AbstractAssemblyTest {
++	@Override
++	protected LanguageID getLanguageID() {
++		return new LanguageID("eBPF:LE:64:default");
++	}
++
++	@Test
++	public void testAssemble_GOTOX_R2() {
++		assertOneCompatRestExact("GOTOX R2", "0d:02:00:00:00:00:00:00");
++	}
++
++	@Test
++	public void testAssemble_CALLX_R2() {
++		assertOneCompatRestExact("CALLX R2", "8d:02:00:00:00:00:00:00");
++	}
++}
+diff --git a/Ghidra/Processors/eBPF/data/languages/eBPF.sinc b/Ghidra/Processors/eBPF/data/languages/eBPF.sinc
+index d005ea1916..96ec2b64fc 100644
+--- a/Ghidra/Processors/eBPF/data/languages/eBPF.sinc
++++ b/Ghidra/Processors/eBPF/data/languages/eBPF.sinc
+@@ -462,6 +462,11 @@ cond: "SLE" is op_alu_jmp_opcode=0xd & op_insn_class=0x6 & DST4 & SRC4 { local c
+     if (cond) goto joff;
+ }
+ 
++# Indirect jump, the BPF_X form of JA. Same relationship to JA that CALLX has to CALL.
++:GOTOX dst is op_alu_jmp_opcode=0x0 & op_alu_jmp_source=1 & op_insn_class=0x5 & src=0 & imm=0 & dst {
++    goto [dst];
++}
++
+ 
+ SysCall:  imm is imm { export *[syscall]:1 imm; }
+ 
+-- 
+2.45.1
+

@@ -1,0 +1,78 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: UnsleptArch <sirinotomer@gmail.com>
+Date: Mon, 17 Aug 2026 19:43:16 -0400
+Subject: [PATCH] 9515: AARCH64: omit LSL extend when index shift amount is
+ omitted
+
+AARCH64: omit LSL extend when index shift amount is
+ omitted
+
+The load/store register-offset addressing mode printed a dangling
+"LSL " (or "LSL #0x0") when option=011 and S=0, e.g.
+
+    strb w2,[x0, x1, LSL ]
+
+The Arm ARM specifies that for the LSL option the extend specifier must
+be omitted when the shift amount is omitted, so the expected text is
+
+    strb w2,[x0, x1]
+
+addrExtendRegShift64 already had a constructor intended to cover this
+case, but it was constrained on aa_extreg_imm3=0. That field is bits
+(10,12), and every load/store register-offset encoding fixes bits 11:10
+to 0b10, so aa_extreg_imm3 can only ever be 2 (S=0) or 6 (S=1) and the
+constructor was unreachable. Constraining on the S bit (b_1212=0)
+instead makes it match.
+
+Display-only change. The p-code is unchanged apart from dropping a
+redundant COPY and INT_LEFT-by-zero, since the omitted shift is zero.
+
+Fixes #9042
+
+AARCH64: add assembly tests for register-offset LSL omission
+
+Covers both sides of the S bit: the S=0 form, which regressed to a
+dangling "LSL " before the addrExtendRegShift64 fix, and the S=1 form,
+which keeps its explicit shift.
+---
+ .../assembler/sleigh/AARCH64BEAssemblyTest.java      | 12 ++++++++++++
+ .../AARCH64/data/languages/AARCH64instructions.sinc  |  2 +-
+ 2 files changed, 13 insertions(+), 1 deletion(-)
+
+diff --git a/Ghidra/Framework/SoftwareModeling/src/test/java/ghidra/app/plugin/assembler/sleigh/AARCH64BEAssemblyTest.java b/Ghidra/Framework/SoftwareModeling/src/test/java/ghidra/app/plugin/assembler/sleigh/AARCH64BEAssemblyTest.java
+index a5680eea98..48f9f5f3d9 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/test/java/ghidra/app/plugin/assembler/sleigh/AARCH64BEAssemblyTest.java
++++ b/Ghidra/Framework/SoftwareModeling/src/test/java/ghidra/app/plugin/assembler/sleigh/AARCH64BEAssemblyTest.java
+@@ -127,4 +127,16 @@ public class AARCH64BEAssemblyTest extends AbstractAssemblyTest {
+ 		// This one's really stalling up the solver :(
+ 		assertOneCompatRestExact("mov w0,#0x0", "00:00:80:52");
+ 	}
++
++	@Test
++	public void testAssemble_strb_w2_mx0_x1m() {
++		// GitHub #9042: with option=LSL and S=0 the extend specifier is omitted
++		assertOneCompatRestExact("strb w2,[x0, x1]", "02:68:21:38");
++	}
++
++	@Test
++	public void testAssemble_ldr_x2_mx0_x1_LSL_0x3m() {
++		// The S=1 form still prints and assembles with the explicit shift
++		assertOneCompatRestExact("ldr x2,[x0, x1, LSL #0x3]", "02:78:61:f8");
++	}
+ }
+diff --git a/Ghidra/Processors/AARCH64/data/languages/AARCH64instructions.sinc b/Ghidra/Processors/AARCH64/data/languages/AARCH64instructions.sinc
+index 7bc48b0a2e..090fc68f0d 100644
+--- a/Ghidra/Processors/AARCH64/data/languages/AARCH64instructions.sinc
++++ b/Ghidra/Processors/AARCH64/data/languages/AARCH64instructions.sinc
+@@ -2608,7 +2608,7 @@ addrExtendRegShift64: ExtendReg64^addrRegShift64 is aa_extreg_option=2 & aa_extr
+ addrExtendRegShift64: ExtendReg64^addrRegShift64 is aa_extreg_option=3 & aa_extreg_imm3 & addrRegShift64 & ExtendReg64 { tmp:8 = ExtendReg64; tmp = tmp << addrRegShift64; export tmp; }
+ addrExtendRegShift64: ExtendReg64^addrRegShift64 is aa_extreg_option=6 & aa_extreg_imm3 & addrRegShift64 & ExtendReg64 { tmp:8 = ExtendReg64; tmp = tmp << addrRegShift64; export tmp; }
+ addrExtendRegShift64: ExtendReg64^addrRegShift64 is aa_extreg_option=7 & aa_extreg_imm3 & addrRegShift64 & ExtendReg64 { tmp:8 = ExtendReg64; tmp = tmp << addrRegShift64; export tmp; }
+-addrExtendRegShift64: Rm_GPR64 is Rm_GPR64 & aa_extreg_option=3 & aa_extreg_imm3=0 & ExtendReg64 { export Rm_GPR64; }
++addrExtendRegShift64: Rm_GPR64 is Rm_GPR64 & aa_extreg_option=3 & b_1212=0 & ExtendReg64 { export Rm_GPR64; }
+ addrExtendRegShift64: Rm_GPR64 is Rm_GPR64 & aa_extreg_option=7 & aa_extreg_imm3=0 & ExtendReg64 { export Rm_GPR64; }
+ 
+ # unsigned offset
+-- 
+2.45.1
+

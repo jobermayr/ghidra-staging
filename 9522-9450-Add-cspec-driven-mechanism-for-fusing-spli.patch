@@ -1,0 +1,597 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Jonathan Brophy <professor_jonny@hotmail.com>
+Date: Tue, 18 Aug 2026 06:59:52 +1200
+Subject: [PATCH] 9522: #9450: Add cspec-driven mechanism for fusing split
+ call-argument pairs into one far pointer
+
+9450: Add cspec-driven mechanism for fusing split
+ call-arguments into one pointer
+
+Adds a general, opt-in mechanism for fusing two adjacent stack
+call-arguments (e.g. a page/bank byte and an offset word, each
+pushed as independent immediates) into a single joined far-pointer
+value at decompile time, driven by a new cspec schema element.
+
+Addresses the case where two pieces of a far pointer are never
+combined by any p-code operation visible in the caller -- only the
+callee's own (opaque) calling convention associates them. This is
+distinct from #817/#841, which cover far pointers already expressed
+as a single CONCAT/ZEXT-shaped idiom within one instruction.
+
+Two existing mechanisms were checked and confirmed unable to handle
+this case:
+- SegmentOp::unify() / ActionSegmentize only inspects a single
+  CALLOTHER's own inputs, with no visibility into earlier
+  instructions' p-code.
+- ParamEntry::resolveJoin() requires each piece to already match an
+  independently-existing ParamEntry elsewhere in the cspec model;
+  a page-byte/offset-word pair with no independent meaning fails
+  this and the cspec refuses to load.
+
+fspec.hh / fspec.cc:
+- New <farpointerjoin hislot="N" joinsize="N"/> element, decoded as
+  a sibling of <returnsym> inside <prototype>. hislot is the 0-based
+  index (matching pentry declaration order) of the more-significant
+  piece; joinsize is the total byte size of the fused value, checked
+  against the sum of the two adjacent pentry sizes at decode time.
+- New FuncProto::FarPointerJoinSpec struct (public) and private
+  farPointerJoins vector member, threaded through FuncProto::copy()
+  (FuncCallSpecs::clone() inherits this via copy(), no separate edit
+  needed).
+- New public FuncProto::getFarPointerJoins() accessor.
+- Not threaded through PrototypePieces / getPieces() / setPieces() --
+  that struct has no join-spec field and is out of scope here.
+- Known gap: FuncProto::encode() does not round-trip farPointerJoins
+  (decode-only for now).
+
+coreaction.hh / coreaction.cc:
+- New ActionFarPointerJoin, modeled on ActionParamDouble::apply.
+  Unlike ActionParamDouble (which requires prior dataflow evidence
+  via SplitVarnode::inHandHi()/inHandLo()), this fires unconditionally
+  on any call site whose bound FuncProto declares a
+  <farpointerjoin>, since no such dataflow evidence exists for this
+  case. Builds a SplitVarnode from the two input Varnodes, calls
+  createJoinedWhole() to synthesize the merged Varnode (following
+  the existing double.cc precedent for "no prior arithmetic joins
+  these, just synthesize from fixed storage locations"), then folds
+  it into the call via the existing
+  checkInputJoin/opSetInput/opRemoveInput/doInputJoin sequence.
+- Registered in ActionDatabase::universalAction immediately after
+  ActionParamDouble("protorecovery") and before ActionSegmentize,
+  so it runs while isInputActive() is still true.
+
+Opt-in per prototype via cspec; architectures/prototypes that never
+declare <farpointerjoin> see no behavior change.
+
+Status: compiles clean (0 errors, no new warnings). Not yet exercised
+end-to-end against a real binary/cspec -- no functional smoke test
+has been run yet.
+
+Add C++ unit test for farpointerjoin decode/encode round-trip
+
+Adds funcproto_farpointerjoin_roundtrip to testfuncproto.cc, verifying
+FuncProto::decode/encode correctly preserve <farpointerjoin> via the
+built-in Toy architecture (no dependency on any out-of-tree processor
+module). Also includes the compiler_spec.rxg schema addition and the
+Java-side ElementId/AttributeId/PrototypeModel changes needed to
+recognize <farpointerjoin> when a cspec is validated/loaded.
+
+Fixes #9450
+---
+ .../src/decompile/cpp/coreaction.cc           | 43 +++++++++++++
+ .../Decompiler/src/decompile/cpp/fspec.cc     | 61 ++++++++++++++++++-
+ .../cpp/include/ghidra/coreaction.hh          | 22 ++++++-
+ .../src/decompile/cpp/include/ghidra/fspec.hh | 18 ++++++
+ .../src/decompile/unittests/testfuncproto.cc  | 57 +++++++++++++++++
+ .../data/languages/compiler_spec.rxg          | 15 +++++
+ .../program/model/lang/PrototypeModel.java    | 59 ++++++++++++++++++
+ .../program/model/pcode/AttributeId.java      | 10 ++-
+ .../ghidra/program/model/pcode/ElementId.java |  9 ++-
+ 9 files changed, 288 insertions(+), 6 deletions(-)
+
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
+index 35e3964e7e..88b2d432e4 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
+@@ -1920,6 +1920,48 @@ int4 ActionParamDouble::apply(Funcdata &data)
+   return 0;
+ }
+ 
++/// \brief Fuse declared far-pointer call-argument slot pairs
++///
++/// For each call site, checks the call's prototype for declared
++/// FarPointerJoinSpec entries (from <farpointerjoin> in the cspec) and
++/// unconditionally joins the two adjacent raw input Varnodes at hislot
++/// and hislot+1 into one Varnode, using SplitVarnode::createJoinedWhole
++/// to synthesize the whole (falling back to Architecture::constructJoinAddress
++/// when the pieces are not address-tied contiguous), then folds the join
++/// into the call's prototype via checkInputJoin/doInputJoin, the same
++/// machinery ActionParamDouble uses for its dataflow-detected joins.
++/// Unlike ActionParamDouble, no SplitVarnode/CONCAT evidence is required --
++/// the join is declared, not inferred.
++/// \param data is the function being analyzed
++/// \return 0 (always succeeds)
++int4 ActionFarPointerJoin::apply(Funcdata &data)
++
++{
++  for(int4 i=0;i<data.numCalls();++i) {
++    FuncCallSpecs *fc = data.getCallSpecs(i);
++    const vector<FuncProto::FarPointerJoinSpec> &joins( fc->getFarPointerJoins() );
++    if (joins.empty()) continue;
++    PcodeOp *op = fc->getOp();
++    for(int4 k=0;k<joins.size();++k) {
++      int4 j = joins[k].hislot;	// hislot is the most significant (hi) piece by convention
++      if (j < 1 || j+1 >= op->numInput()) continue;	// slot pair must be a valid, in-range pair of true inputs
++      Varnode *hivn = op->getIn(j);
++      Varnode *lovn = op->getIn(j+1);
++      SplitVarnode whole(lovn,hivn);
++      if (!whole.hasBothPieces()) continue;	// one piece folded to a constant zero; not a real pair to join here
++      whole.createJoinedWhole(data);
++      bool isslothi = true;
++      if (fc->checkInputJoin(j,isslothi,hivn,lovn)) {
++	data.opSetInput(op,whole.getWhole(),j);
++	data.opRemoveInput(op,j+1);
++	fc->doInputJoin(j,isslothi);
++	count += 1;
++      }
++    }
++  }
++  return 0;
++}
++
+ int4 ActionActiveParam::apply(Funcdata &data)
+ 
+ {
+@@ -6050,6 +6092,7 @@ void ActionDatabase::universalAction(Architecture *conf)
+       actmainloop->addAction( new ActionVarnodeProps("base") );
+       actmainloop->addAction( new ActionHeritage("base") );
+       actmainloop->addAction( new ActionParamDouble("protorecovery") );
++      actmainloop->addAction( new ActionFarPointerJoin("protorecovery") );
+       actmainloop->addAction( new ActionSegmentize("base"));
+       actmainloop->addAction( new ActionInternalStorage("base") );
+       actmainloop->addAction( new ActionForceGoto("blockrecovery") );
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.cc
+index d8dfb7d8ce..5168afb5ef 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.cc
+@@ -51,6 +51,9 @@ ElementId ELEM_RETPARAM = ElementId("retparam",171);
+ ElementId ELEM_RETURNSYM = ElementId("returnsym",172);
+ ElementId ELEM_UNAFFECTED = ElementId("unaffected",173);
+ ElementId ELEM_INTERNAL_STORAGE = ElementId("internal_storage",286);
++ElementId ELEM_FARPOINTERJOIN = ElementId("farpointerjoin",292);
++AttributeId ATTRIB_HISLOT = AttributeId("hislot",160);
++AttributeId ATTRIB_JOINSIZE = AttributeId("joinsize",161);
+ 
+ /// \brief Find a ParamEntry matching the given storage Varnode
+ ///
+@@ -802,7 +805,7 @@ void ParamListStandard::assignMapRtoL(const PrototypePieces &proto,TypeFactory &
+   if (res.size() == 2) {	// Check for hidden parameters defined by the output list
+     Datatype *dt = res.back().type;
+     if ((res.back().flags & ParameterPieces::hiddenretparm) != 0) {
+-      // Need to pull from registers marked as hiddenret 
++      // Need to pull from registers marked as hiddenret
+       if (assignAddressFallback(TYPECLASS_HIDDENRET,dt,false,status,res.back()) == AssignAction::fail) {
+         throw ParamUnassignedError("Cannot assign parameter address for " + res.back().type->getName());
+       }
+@@ -813,7 +816,7 @@ void ParamListStandard::assignMapRtoL(const PrototypePieces &proto,TypeFactory &
+         throw ParamUnassignedError("Cannot assign parameter address for " + res.back().type->getName());
+ 	  }
+ 	}
+-	
++
+     res.back().flags |= ParameterPieces::hiddenretparm;
+   }
+   for(int4 i=0;i<proto.intypes.size();++i) {
+@@ -2773,6 +2776,20 @@ void ProtoModel::decode(Decoder &decoder)
+       }
+       decoder.closeElement(subId);
+     }
++    else if (subId == ELEM_FARPOINTERJOIN) {
++      // farpointerjoin is a per-FuncProto override (see FuncProto::decode),
++      // not a ProtoModel-level concept -- ProtoModel has no field for it.
++      // Parse and discard here so ProtoModel::decode tolerates the element
++      // when it appears in a <prototype> block at this (model-definition)
++      // level, matching how likelytrash/internal_storage etc. are genuine
++      // ProtoModel fields but farpointerjoin intentionally is not one.
++      decoder.openElement();
++      while(decoder.peekElement() != 0) {
++	uint4 skipId = decoder.openElement();
++	decoder.closeElementSkipping(skipId);
++      }
++      decoder.closeElement(subId);
++    }
+     else if (subId == ELEM_INTERNAL_STORAGE) {
+       decoder.openElement();
+       while(decoder.peekElement() != 0) {
+@@ -3777,6 +3794,25 @@ void FuncProto::encodeLikelyTrash(Encoder &encoder) const
+   encoder.closeElement(ELEM_LIKELYTRASH);
+ }
+ 
++
++/// Encode each declared FarPointerJoinSpec in \e farPointerJoins as its own
++/// <farpointerjoin> element with hislot/joinsize attributes, matching exactly
++/// what decode() expects to read back. farPointerJoins has no ProtoModel-level
++/// default to diff against (unlike likelytrash/effectlist), so every declared
++/// entry is always encoded in full.
++/// \param encoder is the stream encoder
++void FuncProto::encodeFarPointerJoins(Encoder &encoder) const
++
++{
++  for(int4 i=0;i<farPointerJoins.size();++i) {
++    const FarPointerJoinSpec &spec(farPointerJoins[i]);
++    encoder.openElement(ELEM_FARPOINTERJOIN);
++    encoder.writeSignedInteger(ATTRIB_HISLOT,spec.hislot);
++    encoder.writeSignedInteger(ATTRIB_JOINSIZE,spec.joinsize);
++    encoder.closeElement(ELEM_FARPOINTERJOIN);
++  }
++}
++
+ /// EffectRecords read into \e effectlist by decode() override the list from ProtoModel.
+ /// If this list is not empty, set up \e effectlist as a complete override containing
+ /// all EffectRecords from ProtoModel plus all the overrides.
+@@ -3930,6 +3966,7 @@ void FuncProto::copy(const FuncProto &op2)
+     store = (ProtoStore *)0;
+   effectlist = op2.effectlist;
+   likelytrash = op2.likelytrash;
++  farPointerJoins = op2.farPointerJoins;
+   injectid = op2.injectid;
+ }
+ 
+@@ -4725,6 +4762,8 @@ void FuncProto::encode(Encoder &encoder) const
+   encoder.closeElement(ELEM_RETURNSYM);
+   encodeEffect(encoder);
+   encodeLikelyTrash(encoder);
++
++  encodeFarPointerJoins(encoder);
+   if (injectid >= 0) {
+     Architecture *glb = model->getArch();
+     encoder.openElement(ELEM_INJECT);
+@@ -4890,6 +4929,24 @@ void FuncProto::decode(Decoder &decoder,Architecture *glb)
+     else if (subId == ELEM_INTERNALLIST) {
+       store->decode(decoder,model);
+     }
++    else if (subId == ELEM_FARPOINTERJOIN) {
++      decoder.openElement();
++      FarPointerJoinSpec spec;
++      spec.hislot = -1;
++      spec.joinsize = -1;
++      for(;;) {
++	uint4 attribId = decoder.getNextAttributeId();
++	if (attribId == 0) break;
++	if (attribId == ATTRIB_HISLOT)
++	  spec.hislot = decoder.readSignedInteger();
++	else if (attribId == ATTRIB_JOINSIZE)
++	  spec.joinsize = decoder.readSignedInteger();
++      }
++      decoder.closeElement(subId);
++      if (spec.hislot < 0 || spec.joinsize <= 0)
++	throw LowlevelError("<farpointerjoin> requires hislot and joinsize attributes");
++      farPointerJoins.push_back(spec);
++    }
+   }
+   decoder.closeElement(elemId);
+   decodeEffect();
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/coreaction.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/coreaction.hh
+index 75f89e09cd..879cd3b1ca 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/coreaction.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/coreaction.hh
+@@ -369,7 +369,7 @@ public:
+     if (!grouplist.contains(getGroup())) return (Action *)0;
+     return new ActionMergeRequired(getGroup());
+   }
+-  virtual int4 apply(Funcdata &data) { 
++  virtual int4 apply(Funcdata &data) {
+     data.getMerge().mergeAddrTied(); data.getMerge().groupPartials(); data.getMerge().mergeMarker(); return 0; }
+ };
+ 
+@@ -414,7 +414,7 @@ public:
+     if (!grouplist.contains(getGroup())) return (Action *)0;
+     return new ActionMergeType(getGroup());
+   }
+-  virtual int4 apply(Funcdata &data) { 
++  virtual int4 apply(Funcdata &data) {
+     data.getMerge().mergeByDatatype(data.beginLoc(),data.endLoc()); return 0; }
+ };
+ 
+@@ -754,6 +754,24 @@ public:
+   virtual int4 apply(Funcdata &data);
+ };
+ 
++/// \brief Fuse call-argument slot pairs declared via <farpointerjoin> in the cspec
++///
++/// Unlike ActionParamDouble's dataflow-detected joins, this action acts purely
++/// on FuncProto::farPointerJoins declarations: for each declared (hislot,joinsize)
++/// pair on a call's prototype, unconditionally join the two adjacent raw input
++/// Varnodes at that call site into one Varnode, using the same
++/// checkInputJoin/doInputJoin machinery ActionParamDouble uses for its
++/// dataflow-detected joins.
++class ActionFarPointerJoin : public Action {
++public:
++  ActionFarPointerJoin(const string &g) : Action(0, "farpointerjoin",g) {}	///< Constructor
++  virtual Action *clone(const ActionGroupList &grouplist) const {
++    if (!grouplist.contains(getGroup())) return (Action *)0;
++    return new ActionFarPointerJoin(getGroup());
++  }
++  virtual int4 apply(Funcdata &data);
++};
++
+ /// \brief Determine active parameters to sub-functions
+ ///
+ /// This is the final stage of the parameter recovery process, when
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/fspec.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/fspec.hh
+index ddb3f3be38..b2f27ab2a3 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/fspec.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/fspec.hh
+@@ -1368,17 +1368,34 @@ class FuncProto {
+     is_override = 0x1000,	///< Set if \b this prototype is created to override a single call site
+     auto_killedbycall = 0x2000	///< Potential output storage should always be considered \e killed \e by \e call
+   };
++public:
++  /// \brief A declared far-pointer call-argument join for this prototype
++  ///
++  /// Declares that two adjacent input parameter slots (hislot and hislot+1)
++  /// should always be fused into one joined value at call sites, even
++  /// without dataflow evidence that they are related.
++  struct FarPointerJoinSpec {
++    int4 hislot;    ///< 0-based index of the most significant piece,
++                    ///< matching input <pentry> declaration order
++    int4 joinsize;  ///< Total byte size of the fused value (validated
++                    ///< against the sum of the two adjacent parameter
++                    ///< sizes once decode() completes)
++  };
++private:
+   ProtoModel *model;		///< Model of for \b this prototype
+   ProtoStore *store;		///< Storage interface for parameters
+   int4 extrapop;		///< Extra bytes popped from stack
+   uint4 flags;			///< Boolean properties of the function prototype
+   vector<EffectRecord> effectlist;	///< Side-effects associated with non-parameter storage locations
+   vector<VarnodeData> likelytrash;	///< Locations that may contain \e trash values
++  vector<FarPointerJoinSpec> farPointerJoins;	///< Declared far-pointer call-argument joins for this prototype
+   int4 injectid;		///< (If non-negative) id of p-code snippet that should replace this function
+   int4 returnBytesConsumed;	///< Number of bytes of return value that are consumed by callers (0 = all bytes)
+   void updateThisPointer(void);	///< Make sure any "this" parameter is properly marked
+   void encodeEffect(Encoder &encoder) const;		///< Encode any overriding EffectRecords to stream
+   void encodeLikelyTrash(Encoder &encoder) const;	///< Encode any overriding likelytrash registers to stream
++
++  void encodeFarPointerJoins(Encoder &encoder) const;	///< Encode any declared far-pointer call-argument joins to stream
+   void decodeEffect(void);	///< Merge in any EffectRecord overrides
+   void decodeLikelyTrash(void);	///< Merge in any \e likelytrash overrides
+ protected:
+@@ -1394,6 +1411,7 @@ public:
+   void copyFlowEffects(const FuncProto &op2);	 			///< Copy properties that affect data-flow
+   void getPieces(PrototypePieces &pieces) const;			///< Get the raw pieces of the prototype
+   void setPieces(const PrototypePieces &pieces);			///< Set \b this prototype based on raw pieces
++  const vector<FarPointerJoinSpec> &getFarPointerJoins(void) const { return farPointerJoins; }	///< Get declared far-pointer call-argument joins
+   void setScope(Scope *s,const Address &startpoint);			///< Set a backing symbol Scope for \b this
+   void setInternal(ProtoModel *m,Datatype *vt);				///< Set internal backing storage for \b this
+   void setModel(ProtoModel *m);						///< Set the prototype model for \b this
+diff --git a/Ghidra/Features/Decompiler/src/decompile/unittests/testfuncproto.cc b/Ghidra/Features/Decompiler/src/decompile/unittests/testfuncproto.cc
+index 501d1e996a..65b1e07889 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/unittests/testfuncproto.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/unittests/testfuncproto.cc
+@@ -679,4 +679,61 @@ TEST(funcproto_recovermixedmeta)
+   ASSERT(register_used(paramActive.getTrial(5),"r10"))
+ }
+ 
++TEST(funcproto_farpointerjoin_roundtrip)
++
++{
++  // Direct decode()/encode() round-trip of a <farpointerjoin> declared inside a real
++  // <prototype> block, exercising both FuncProto::decode (issue #9450) and the new
++  // FuncProto::encodeFarPointerJoins path, without depending on any out-of-tree
++  // processor module. __model1 supplies register pentries r12/r11/r10/r9/r8, matching
++  // the shape of the real H8/539F __stdcall_far_2arg prototype (byte pentry + word
++  // pentry fused into one 3-byte far pointer at hislot=0).
++  FuncProtoTestEnvironment::build();
++  const char *prototext =
++      "<prototype model=\"__model1\" extrapop=\"unknown\">"
++      "<returnsym>"
++        "<register name=\"r12\"/>"
++        "<void/>"
++      "</returnsym>"
++      "<farpointerjoin hislot=\"0\" joinsize=\"3\"/>"
++    "</prototype>";
++  istringstream s(prototext);
++  DocumentStorage store;
++  Document *doc = store.parseDocument(s);
++  XmlDecode decoder(glb,doc->getRoot());
++
++  FuncProto proto;
++  proto.setInternal(glb->defaultfp,glb->types->getTypeVoid());
++  proto.decode(decoder,glb);
++
++  const vector<FuncProto::FarPointerJoinSpec> &joins(proto.getFarPointerJoins());
++  ASSERT_EQUALS(joins.size(),1);
++  ASSERT_EQUALS(joins[0].hislot,0);
++  ASSERT_EQUALS(joins[0].joinsize,3);
++
++  // Now push the decoded prototype back out and confirm the element re-appears,
++  // exercising FuncProto::encodeFarPointerJoins directly (previously untested).
++  ostringstream outStream;
++  XmlEncode encoder(outStream);
++  proto.encode(encoder);
++  string encoded = outStream.str();
++  ASSERT(encoded.find("<farpointerjoin") != string::npos);
++  ASSERT(encoded.find("hislot=\"0x0\"") != string::npos || encoded.find("hislot=\"0\"") != string::npos);
++  ASSERT(encoded.find("joinsize=\"0x3\"") != string::npos || encoded.find("joinsize=\"3\"") != string::npos);
++
++  // Round-trip a second time: decode the re-encoded XML and confirm the spec survives
++  // unchanged, catching any asymmetry between encode() and decode() ordering/format.
++  istringstream s2(encoded);
++  DocumentStorage store2;
++  Document *doc2 = store2.parseDocument(s2);
++  XmlDecode decoder2(glb,doc2->getRoot());
++  FuncProto proto2;
++  proto2.setInternal(glb->defaultfp,glb->types->getTypeVoid());
++  proto2.decode(decoder2,glb);
++  const vector<FuncProto::FarPointerJoinSpec> &joins2(proto2.getFarPointerJoins());
++  ASSERT_EQUALS(joins2.size(),1);
++  ASSERT_EQUALS(joins2[0].hislot,0);
++  ASSERT_EQUALS(joins2[0].joinsize,3);
++}
++
+ } // End namespace ghidra
+diff --git a/Ghidra/Framework/SoftwareModeling/data/languages/compiler_spec.rxg b/Ghidra/Framework/SoftwareModeling/data/languages/compiler_spec.rxg
+index fbc5feab88..44aea12bf6 100644
+--- a/Ghidra/Framework/SoftwareModeling/data/languages/compiler_spec.rxg
++++ b/Ghidra/Framework/SoftwareModeling/data/languages/compiler_spec.rxg
+@@ -556,6 +556,21 @@
+         </zeroOrMore>
+       </element>
+ 
++      <!--
++          farpointerjoin declares that two adjacent input pentries (identified
++          by hislot, the 0-based index of the more-significant piece) should be
++          fused by the decompiler into a single joined pointer value of total
++          size joinsize bytes, for calling conventions where two independently-
++          bound stack arguments are combined only by the callee's own opaque
++          convention, with no caller-side dataflow to detect the join.
++      -->
++      <optional>
++        <element name="farpointerjoin">
++          <attribute name="hislot"/>
++          <attribute name="joinsize"/>
++        </element>
++      </optional>
++
+       <!--
+           returnaddress describes where the return address is stored upon entry to
+           a function with this prototype.
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/PrototypeModel.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/PrototypeModel.java
+index 891061d8f4..fd73099c35 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/PrototypeModel.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/PrototypeModel.java
+@@ -20,6 +20,7 @@ import static ghidra.program.model.pcode.ElementId.*;
+ 
+ import java.io.IOException;
+ import java.util.ArrayList;
++import java.util.List;
+ 
+ import ghidra.program.database.SpecExtension;
+ import ghidra.program.model.address.*;
+@@ -53,6 +54,26 @@ public class PrototypeModel {
+ 	private Varnode[] internalstorage;	// Registers holding internal compiler constants
+ 	private PrototypeModel compatModel;	// The model this is an alias of
+ 	private AddressSet localRange;	// Range on the stack considered for local storage
++
++	/**
++	 * A declared far-pointer call-argument join for this prototype.
++	 * Declares that two adjacent input parameter slots (hislot and hislot+1)
++	 * should always be fused into one joined value at call sites, even
++	 * without dataflow evidence that they are related.
++	 * Mirrors FuncProto::FarPointerJoinSpec on the C++ side (fspec.hh).
++	 */
++	public static class FarPointerJoinSpec {
++		public int hislot;    // 0-based index of the most significant piece,
++		                       // matching input <pentry> declaration order
++		public int joinsize;  // Total byte size of the fused value
++
++		public FarPointerJoinSpec(int hislot, int joinsize) {
++			this.hislot = hislot;
++			this.joinsize = joinsize;
++		}
++	}
++
++	private ArrayList<FarPointerJoinSpec> farPointerJoins = new ArrayList<>();	// Declared far-pointer call-argument joins
+ 	private AddressSet paramRange;	// Range on the stack considered for parameter storage
+ 	private InputListType inputListType = InputListType.STANDARD;
+ 	private boolean hasThis;		// Convention has a this (auto-parameter)
+@@ -624,6 +645,13 @@ public class PrototypeModel {
+ 			encodeAddressSet(encoder, paramRange);
+ 			encoder.closeElement(ELEM_PARAMRANGE);
+ 		}
++
++		for (FarPointerJoinSpec spec : farPointerJoins) {
++			encoder.openElement(ELEM_FARPOINTERJOIN);
++			encoder.writeSignedInteger(ATTRIB_HISLOT, spec.hislot);
++			encoder.writeSignedInteger(ATTRIB_JOINSIZE, spec.joinsize);
++			encoder.closeElement(ELEM_FARPOINTERJOIN);
++		}
+ 		encoder.closeElement(ELEM_PROTOTYPE);
+ 	}
+ 
+@@ -800,6 +828,26 @@ public class PrototypeModel {
+ 			else if (elName.equals(ELEM_PARAMRANGE.name())) {
+ 				paramRange = readAddressSet(parser, cspec);
+ 			}
++
++			else if (elName.equals(ELEM_FARPOINTERJOIN.name())) {
++				XmlElement farptrEl = parser.start();
++				int hislot = -1;
++				int joinsize = -1;
++				String hislotAttr = farptrEl.getAttribute(ATTRIB_HISLOT.name());
++				if (hislotAttr != null) {
++					hislot = SpecXmlUtils.decodeInt(hislotAttr);
++				}
++				String joinsizeAttr = farptrEl.getAttribute(ATTRIB_JOINSIZE.name());
++				if (joinsizeAttr != null) {
++					joinsize = SpecXmlUtils.decodeInt(joinsizeAttr);
++				}
++				parser.end(farptrEl);
++				if (hislot < 0 || joinsize <= 0) {
++					throw new XmlParseException(
++						"<farpointerjoin> requires hislot and joinsize attributes");
++				}
++				farPointerJoins.add(new FarPointerJoinSpec(hislot, joinsize));
++			}
+ 			else {
+ 				subel = parser.start();
+ 				parser.discardSubTree(subel);
+@@ -821,6 +869,17 @@ public class PrototypeModel {
+ 		return inputParams.possibleParamWithSlot(loc, size, res);
+ 	}
+ 
++
++	/**
++	 * Get the far-pointer call-argument joins declared for this prototype
++	 * (via &lt;farpointerjoin&gt; elements in the cspec). Mirrors
++	 * FuncProto::getFarPointerJoins() on the C++ side.
++	 * @return the list of declared joins (empty if none declared)
++	 */
++	public List<FarPointerJoinSpec> getFarPointerJoins() {
++		return farPointerJoins;
++	}
++
+ 	/**
+ 	 * Determine if the given address range is possible return value storage for this model.
+ 	 * If it is, "true" is returned, and additional information about the storage
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/AttributeId.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/AttributeId.java
+index 36de366c55..2d796909fc 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/AttributeId.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/AttributeId.java
+@@ -260,5 +260,13 @@ public record AttributeId(String name, int id) {
+ 	// edge
+ 	public static final AttributeId ATTRIB_EDGE_LABEL = new AttributeId("edgelabel", 160);
+ 
+-	public static final AttributeId ATTRIB_UNKNOWN = new AttributeId("XMLunknown", 161);
++	// far-pointer call-argument fusion (H8/539F segmented-memory support)
++	// NOTE: the C++ side (fspec.cc) originally registered these as ids 130/131,
++	// which collide with ATTRIB_VECTOR_LANE_SIZES/ATTRIB_LABEL. 160/161 are the
++	// next free ids on this (Java) side; fspec.cc must be updated to match
++	// before this is used over the packed binary decompiler-communication protocol.
++	public static final AttributeId ATTRIB_HISLOT = new AttributeId("hislot", 161);
++	public static final AttributeId ATTRIB_JOINSIZE = new AttributeId("joinsize", 162);
++
++	public static final AttributeId ATTRIB_UNKNOWN = new AttributeId("XMLunknown", 163);
+ }
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/ElementId.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/ElementId.java
+index dcc8304071..f0080f168c 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/ElementId.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/ElementId.java
+@@ -464,5 +464,12 @@ public record ElementId(String name, int id) {
+ 	// option to allow comments to align with code
+ 	public static final ElementId ELEM_COMMENTINDENTALIGN = new ElementId("commentindentalign", 291);
+ 
+-	public static final ElementId ELEM_UNKNOWN = new ElementId("XMLunknown", 292);
++	// far-pointer call-argument fusion (H8/539F segmented-memory support)
++	// NOTE: the C++ side (fspec.cc) originally registered this element as id 287,
++	// which collides with ELEM_EXTRA_STACK above. 292 is the next free id on
++	// this (Java) side; fspec.cc must be updated to match before this is used
++	// over the packed binary decompiler-communication protocol.
++	public static final ElementId ELEM_FARPOINTERJOIN = new ElementId("farpointerjoin", 292);
++	
++	public static final ElementId ELEM_UNKNOWN = new ElementId("XMLunknown", 293);
+ }
+-- 
+2.45.1
+

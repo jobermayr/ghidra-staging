@@ -3,16 +3,176 @@ From: apocalypse9949 <dchittibabu641@gmail.com>
 Date: Wed, 27 May 2026 13:02:46 +0530
 Subject: [PATCH] 9228: Optimize AssemblyPatternBlock fromString method
 
+Optimize AssemblyPatternBlock fromString method
+
+Co-authored-by: apocalypse9949 <125962989+apocalypse9949@users.noreply.github.com>
+
+Address review of fromString optimization.
+
+Refactor convertHexStringToMaskedValue to return via a long[] and parse in-place with start/end indexes, preserving x vs X masked-bit syntax.
+
 Co-authored-by: apocalypse9949 <125962989+apocalypse9949@users.noreply.github.com>
 ---
- .../sleigh/sem/AssemblyPatternBlock.java      | 29 ++++++++++++++-----
- 1 file changed, 22 insertions(+), 7 deletions(-)
+ .../java/ghidra/util/NumericUtilities.java    | 32 ++++++++++---------
+ .../AbstractAssemblyResolutionFactory.java    |  5 +--
+ .../sleigh/sem/AssemblyPatternBlock.java      | 25 ++++++++-------
+ 3 files changed, 31 insertions(+), 31 deletions(-)
 
+diff --git a/Ghidra/Framework/Generic/src/main/java/ghidra/util/NumericUtilities.java b/Ghidra/Framework/Generic/src/main/java/ghidra/util/NumericUtilities.java
+index 3050d5933b..d9f7bd1cc5 100644
+--- a/Ghidra/Framework/Generic/src/main/java/ghidra/util/NumericUtilities.java
++++ b/Ghidra/Framework/Generic/src/main/java/ghidra/util/NumericUtilities.java
+@@ -17,7 +17,6 @@ package ghidra.util;
+ 
+ import java.math.BigInteger;
+ import java.util.*;
+-import java.util.concurrent.atomic.AtomicLong;
+ import java.util.function.BiFunction;
+ import java.util.function.Function;
+ import java.util.stream.Stream;
+@@ -474,7 +473,7 @@ public final class NumericUtilities {
+ 	 * @return the string representation
+ 	 *
+ 	 * @see #convertMaskToHexString(long, int, boolean, int, String)
+-	 * @see #convertHexStringToMaskedValue(AtomicLong, AtomicLong, String, int, int, String)
++	 * @see #convertHexStringToMaskedValue(long[], String, int, int, int, int, String)
+ 	 */
+ 	public static String convertMaskedValueToHexString(long msk, long val, int n, boolean truncate,
+ 			int spaceevery, String spacer) {
+@@ -543,7 +542,7 @@ public final class NumericUtilities {
+ 	 * @return the string representation
+ 	 *
+ 	 * @see #convertMaskedValueToHexString(long, long, int, boolean, int, String)
+-	 * @see #convertHexStringToMaskedValue(AtomicLong, AtomicLong, String, int, int, String)
++	 * @see #convertHexStringToMaskedValue(long[], String, int, int, int, int, String)
+ 	 */
+ 	public static String convertMaskToHexString(long msk, int n, boolean truncate, int spaceevery,
+ 			String spacer) {
+@@ -591,10 +590,10 @@ public final class NumericUtilities {
+ 
+ 	/**
+ 	 * The reverse of {@link #convertMaskedValueToHexString(long, long, int, boolean, int, String)}
+-	 *
+-	 * @param msk an object to receive the resulting mask
+-	 * @param val an object to receive the resulting value
++	 * @param out an array to receive the resulting mask and value (out[0]=mask, out[1]=val)
+ 	 * @param hex the input string to parse
++	 * @param start the start index in the string
++	 * @param end the end index in the string
+ 	 * @param n the number of nibbles to parse (they are stored right aligned in the result)
+ 	 * @param spaceevery how many nibbles are expected between spacers
+ 	 * @param spacer the spacer
+@@ -602,13 +601,13 @@ public final class NumericUtilities {
+ 	 * @see #convertMaskedValueToHexString(long, long, int, boolean, int, String)
+ 	 * @see #convertMaskToHexString(long, int, boolean, int, String)
+ 	 */
+-	public static void convertHexStringToMaskedValue(AtomicLong msk, AtomicLong val, String hex,
++	public static void convertHexStringToMaskedValue(long[] out, String hex, int start, int end,
+ 			int n, int spaceevery, String spacer) {
+ 		long lmsk = 0;
+ 		long lval = 0;
+-		int pos = 0;
++		int pos = start;
+ 		int i = 0;
+-		while (pos < hex.length() && i < n) {
++		while (pos < end && i < n) {
+ 			lmsk <<= 4;
+ 			lval <<= 4;
+ 			if (i != 0 && spaceevery != 0 && i % spaceevery == 0) {
+@@ -628,7 +627,10 @@ public final class NumericUtilities {
+ 					continue;
+ 				}
+ 				// Try defined
+-				long nibble = Long.parseLong(hex.substring(pos, pos + 1), 16);
++				int nibble = Character.digit(c, 16);
++				if (nibble < 0) {
++					throw new NumberFormatException("Invalid hex character '" + c + "' at " + pos);
++				}
+ 				lmsk |= 0x0fL;
+ 				lval |= nibble;
+ 				i++;
+@@ -642,7 +644,7 @@ public final class NumericUtilities {
+ 					pos++;
+ 					lmsk <<= 1;
+ 					lval <<= 1;
+-					if (pos > hex.length()) {
++					if (pos >= end) {
+ 						throw new NumberFormatException("Missing one or more bits at " + pos);
+ 					}
+ 					c = hex.charAt(pos);
+@@ -660,7 +662,7 @@ public final class NumericUtilities {
+ 					throw new NumberFormatException("Illegal character '" + c + "' at " + pos);
+ 				}
+ 				pos++;
+-				if (pos > hex.length() || hex.charAt(pos) != ']') {
++				if (pos >= end || hex.charAt(pos) != ']') {
+ 					throw new NumberFormatException("Missing closing bracket after bits at " + pos);
+ 				}
+ 				pos++;
+@@ -669,14 +671,14 @@ public final class NumericUtilities {
+ 			}
+ 			throw new NumberFormatException("Illegal character '" + c + "' at " + pos);
+ 		}
+-		if (pos < hex.length()) {
++		if (pos < end) {
+ 			throw new NumberFormatException("Gratuitous characters starting at " + pos);
+ 		}
+ 		if (i < n) {
+ 			throw new NumberFormatException("Too few characters for " + n + " nibbles. Got " + i);
+ 		}
+-		msk.set(lmsk);
+-		val.set(lval);
++		out[0] = lmsk;
++		out[1] = lval;
+ 	}
+ 
+ 	/**
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/assembler/sleigh/sem/AbstractAssemblyResolutionFactory.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/assembler/sleigh/sem/AbstractAssemblyResolutionFactory.java
+index e42bf06539..f8a2cffc9c 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/assembler/sleigh/sem/AbstractAssemblyResolutionFactory.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/assembler/sleigh/sem/AbstractAssemblyResolutionFactory.java
+@@ -16,7 +16,6 @@
+ package ghidra.app.plugin.assembler.sleigh.sem;
+ 
+ import java.util.*;
+-import java.util.concurrent.atomic.AtomicLong;
+ 
+ import ghidra.app.plugin.assembler.sleigh.expr.*;
+ import ghidra.app.plugin.processors.sleigh.Constructor;
+@@ -426,9 +425,7 @@ public abstract class AbstractAssemblyResolutionFactory< //
+ 	 * This was used primarily in testing, to specify expected results.
+ 	 * 
+ 	 * @param str the string representation: "{@code ins:[pattern],ctx:[pattern]}"
+-	 * @see ghidra.util.NumericUtilities#convertHexStringToMaskedValue(AtomicLong, AtomicLong,
+-	 *      String, int, int, String) NumericUtilities.convertHexStringToMaskedValue(AtomicLong,
+-	 *      AtomicLong, String, int, int, String)
++	 * @see ghidra.util.NumericUtilities#convertHexStringToMaskedValue(long[], String, int, int, int, int, String)
+ 	 * @param description a description of the resolution
+ 	 * @param children any children involved in the resolution
+ 	 * @return the decoded resolution
 diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/assembler/sleigh/sem/AssemblyPatternBlock.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/assembler/sleigh/sem/AssemblyPatternBlock.java
-index 517e5679fe..7541f54c3f 100644
+index 517e5679fe..73c28024c9 100644
 --- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/assembler/sleigh/sem/AssemblyPatternBlock.java
 +++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/assembler/sleigh/sem/AssemblyPatternBlock.java
-@@ -140,17 +140,32 @@ public class AssemblyPatternBlock implements Comparable<AssemblyPatternBlock> {
+@@ -19,7 +19,6 @@ import java.math.BigInteger;
+ import java.nio.ByteBuffer;
+ import java.util.Arrays;
+ import java.util.Iterator;
+-import java.util.concurrent.atomic.AtomicLong;
+ 
+ import ghidra.app.plugin.assembler.sleigh.expr.MaskedLong;
+ import ghidra.app.plugin.assembler.sleigh.expr.SolverException;
+@@ -108,8 +107,7 @@ public class AssemblyPatternBlock implements Comparable<AssemblyPatternBlock> {
+ 	/**
+ 	 * Convert a string representation to a pattern block
+ 	 * 
+-	 * @see NumericUtilities#convertHexStringToMaskedValue(AtomicLong, AtomicLong, String, int, int,
+-	 *      String)
++	 * @see NumericUtilities#convertHexStringToMaskedValue(long[], String, int, int, int, int, String)
+ 	 * @param str the string to convert
+ 	 * @return the resulting pattern block
+ 	 */
+@@ -140,17 +138,20 @@ public class AssemblyPatternBlock implements Comparable<AssemblyPatternBlock> {
  		}
  
  		// Convert the bytes
@@ -21,33 +181,23 @@ index 517e5679fe..7541f54c3f 100644
  		byte[] vals = new byte[length];
 -		AtomicLong msk = new AtomicLong();
 -		AtomicLong val = new AtomicLong();
- 		int i = 0;
+-		int i = 0;
 -		for (String hex : str.substring(pos).split(":")) {
 -			NumericUtilities.convertHexStringToMaskedValue(msk, val, hex, 2, 0, null);
 -			mask[i] = (byte) msk.get();
 -			vals[i] = (byte) val.get();
+-			i++;
++		long[] out = new long[2];
++
 +		int p = pos;
-+		while (p < str.length()) {
++		for (int i = 0; i < length; i++) {
 +			int newpos = str.indexOf(':', p);
 +			if (newpos == -1) {
 +				newpos = str.length();
 +			}
-+			byte m = 0;
-+			byte v = 0;
-+			for (int j = p; j < newpos; j++) {
-+				char c = str.charAt(j);
-+				m <<= 4;
-+				v <<= 4;
-+				if (c == 'X' || c == 'x') {
-+					continue;
-+				}
-+				int nibble = Character.digit(c, 16);
-+				m |= 0x0f;
-+				v |= nibble;
-+			}
-+			mask[i] = m;
-+			vals[i] = v;
- 			i++;
++			NumericUtilities.convertHexStringToMaskedValue(out, str, p, newpos, 2, 0, null);
++			mask[i] = (byte) out[0];
++			vals[i] = (byte) out[1];
 +			p = newpos + 1;
  		}
  
