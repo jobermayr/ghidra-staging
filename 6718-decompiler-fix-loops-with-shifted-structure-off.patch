@@ -18,12 +18,14 @@ fix infinite hang
 shifted structure offset: more aggressive propagation of offset-iterator down into the loop body
 
 resolve merge conflicts with master
+
+shifted structure offset: fix crash due to slot>=numInputs
 ---
  .../src/decompile/cpp/blockaction.cc          |    1 +
  .../src/decompile/cpp/funcdata_op.cc          |   26 +-
  .../cpp/include/ghidra/ruleaction.hh          |   47 +
- .../src/decompile/cpp/ruleaction.cc           | 1251 ++++++++++++++++-
- 4 files changed, 1285 insertions(+), 40 deletions(-)
+ .../src/decompile/cpp/ruleaction.cc           | 1255 ++++++++++++++++-
+ 4 files changed, 1289 insertions(+), 40 deletions(-)
 
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/blockaction.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/blockaction.cc
 index 60c8565c70..c7f9e2af6c 100644
@@ -173,7 +175,7 @@ index 1d58b6c622..d2a3910f9e 100644
  
  class RuleEarlyRemoval : public Rule {
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc
-index 7e2225c616..1d5408c013 100644
+index 7e2225c616..8986b27a25 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc
 @@ -6095,6 +6095,7 @@ void AddTreeState::clear(void)
@@ -752,7 +754,7 @@ index 7e2225c616..1d5408c013 100644
    vector<Varnode *> newparams;
    int4 slot = baseOp->getSlot(ptr);
    newparams.push_back( ptr );
-@@ -6506,6 +6936,593 @@ bool AddTreeState::buildDegenerate(void)
+@@ -6506,6 +6936,597 @@ bool AddTreeState::buildDegenerate(void)
    return true;
  }
  
@@ -989,36 +991,40 @@ index 7e2225c616..1d5408c013 100644
 +      return false;
 +    }
 +  }
-+  Varnode *baseOpOut = op->getOut();
-+  PcodeOp *baseOpOutLoneDescend = baseOpOut->loneDescend();
-+  while (baseOpOutLoneDescend && baseOpOutLoneDescend->code() == CPUI_INDIRECT) {
-+    baseOpOutLoneDescend = baseOpOutLoneDescend->getOut()->loneDescend();
++  Varnode *currentVn = op->getOut();
++  PcodeOp *currentOp = currentVn->loneDescend();
++  if (currentOp == (PcodeOp *)0) return false;
++  int currentOpSlot = currentOp->getSlot(currentVn);
++
++  while (currentOp->code() == CPUI_INDIRECT) {
++    currentVn = currentOp->getOut();
++    currentOp = currentVn->loneDescend();
++    if (currentOp == (PcodeOp *)0) return false;
++    currentOpSlot = currentOp->getSlot(currentVn);
 +  }
-+  if (!baseOpOutLoneDescend) return false;
 +  if (!(
-+    baseOpOutLoneDescend->code() == CPUI_MULTIEQUAL && baseOpOutLoneDescend->numInput() == 2
++    currentOp->code() == CPUI_MULTIEQUAL && currentOp->numInput() == 2
 +  )) {
-+    bool foundMultiEq = false;
-+    while (baseOpOutLoneDescend->code() == CPUI_INT_ADD) {
-+      int slot = baseOpOutLoneDescend->getSlot(baseOpOut);
-+      Varnode *other = baseOpOutLoneDescend->getIn(1 - slot);
++    while (currentOp->code() == CPUI_INT_ADD) {
++      Varnode *other = currentOp->getIn(1 - currentOpSlot);
 +      if (!other->isWritten()) return false;
 +      PcodeOp *def = other->getDef();
 +      if (def->code() == CPUI_MULTIEQUAL && def->numInput() == 2) {
-+        baseOpOutLoneDescend = def;
-+        baseOpOut = def->getIn(0);
-+        foundMultiEq = true;
-+        break;
++        currentOp = def;
++        currentOpSlot = 0;
++        currentVn = def->getIn(0);
++        if (!currentVn->isWritten()) return false;
++        return tryPropagateAddedConst(currentVn->getDef(), true);
 +      } else {
-+        baseOpOut = baseOpOutLoneDescend->getOut();
-+        baseOpOutLoneDescend = baseOpOut->loneDescend();
-+        if (!baseOpOutLoneDescend) break;
++        currentVn = currentOp->getOut();
++        currentOp = currentVn->loneDescend();
++        if (!currentOp) return false;
++        currentOpSlot = currentOp->getSlot(currentVn);
 +      }
 +    }
-+    if (!foundMultiEq) return false;
-+    return tryPropagateAddedConst(baseOpOut->getDef(), true);
++    return false;
 +  }
-+  return tryPropagateAddedConstFromMultiEq(baseOpOutLoneDescend, baseOpOutLoneDescend->getSlot(baseOpOut), ignoreCounterIncrementCheck);
++  return tryPropagateAddedConstFromMultiEq(currentOp, currentOpSlot, ignoreCounterIncrementCheck);
 +}
 +
 +bool AddTreeState::noOneActuallyWroteVarSinceMultiEqHelper(Varnode *vn, Varnode *start, set<PcodeOp *>& scouted)
@@ -1346,7 +1352,7 @@ index 7e2225c616..1d5408c013 100644
  /// \return \b true if a transform was applied
  bool AddTreeState::apply(void)
  
-@@ -6513,14 +7530,61 @@ bool AddTreeState::apply(void)
+@@ -6513,14 +7534,61 @@ bool AddTreeState::apply(void)
    if (isDegenerate)
      return buildDegenerate();
    spanAddTree(baseOp,1);
@@ -1408,7 +1414,7 @@ index 7e2225c616..1d5408c013 100644
    while(valid && distributeOp != (PcodeOp *)0) {
      if (!data.distributeIntMultAdd(distributeOp)) {
        valid = false;
-@@ -6550,6 +7614,59 @@ bool AddTreeState::apply(void)
+@@ -6550,6 +7618,59 @@ bool AddTreeState::apply(void)
    return true;
  }
  
@@ -1468,7 +1474,7 @@ index 7e2225c616..1d5408c013 100644
  /// The original ADD tree has been successfully split into \e multiple and
  /// \e non-multiple pieces.  Rewrite the tree as a pointer expression, putting
  /// any \e multiple pieces into a PTRADD operation, creating a PTRSUB if a sub
-@@ -6590,8 +7707,9 @@ void AddTreeState::buildTree(void)
+@@ -6590,8 +7711,9 @@ void AddTreeState::buildTree(void)
    }
  
    // Add back in any remaining terms
@@ -1479,7 +1485,7 @@ index 7e2225c616..1d5408c013 100644
  
    if (newop == (PcodeOp *)0) {
      // This should never happen
-@@ -6716,7 +7834,52 @@ int4 RulePtrArith::applyOp(PcodeOp *op,Funcdata &data)
+@@ -6716,7 +7838,52 @@ int4 RulePtrArith::applyOp(PcodeOp *op,Funcdata &data)
      ct = op->getIn(slot)->getTypeReadFacing(op);
      if (ct->getMetatype() == TYPE_PTR) break;
    }
@@ -1533,7 +1539,7 @@ index 7e2225c616..1d5408c013 100644
    if (evaluatePointerExpression(op, slot) != 2) return 0;
    if (!verifyPreferredPointer(op, slot)) return 0;
  
-@@ -7026,7 +8189,7 @@ int8 RulePtrsubUndo::getConstOffsetBack(Varnode *vn,int8 &multiplier,int4 maxLev
+@@ -7026,7 +8193,7 @@ int8 RulePtrsubUndo::getConstOffsetBack(Varnode *vn,int8 &multiplier,int4 maxLev
    multiplier = 0;
    int8 submultiplier;
    if (vn->isConstant())
@@ -1542,7 +1548,7 @@ index 7e2225c616..1d5408c013 100644
    if (!vn->isWritten())
      return 0;
    maxLevel -= 1;
-@@ -7047,8 +8210,22 @@ int8 RulePtrsubUndo::getConstOffsetBack(Varnode *vn,int8 &multiplier,int4 maxLev
+@@ -7047,8 +8214,22 @@ int8 RulePtrsubUndo::getConstOffsetBack(Varnode *vn,int8 &multiplier,int4 maxLev
      Varnode *cvn = op->getIn(1);
      if (!cvn->isConstant()) return 0;
      multiplier = cvn->getOffset();

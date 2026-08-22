@@ -1,0 +1,175 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Sylvester Kaczmarek
+ <16242628+sylvesterkaczmarek@users.noreply.github.com>
+Date: Thu, 20 Aug 2026 17:06:00 +0100
+Subject: [PATCH] 9528: #8831 Parse calling conventions in
+ FunctionSignatureParser
+
+Fix parsing of function calling conventions
+---
+ .../util/parser/FunctionSignatureParser.java  | 42 +++++++++-
+ ...nSignatureParserCallingConventionTest.java | 78 +++++++++++++++++++
+ 2 files changed, 119 insertions(+), 1 deletion(-)
+ create mode 100644 Ghidra/Features/Base/src/test.slow/java/ghidra/app/util/parser/FunctionSignatureParserCallingConventionTest.java
+
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/parser/FunctionSignatureParser.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/parser/FunctionSignatureParser.java
+index 969bd676f4..dd27bdfc20 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/parser/FunctionSignatureParser.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/parser/FunctionSignatureParser.java
+@@ -29,6 +29,7 @@ import ghidra.program.model.listing.FunctionSignature;
+ import ghidra.util.data.DataTypeParser;
+ import ghidra.util.data.DataTypeParser.AllowedDataTypes;
+ import ghidra.util.exception.CancelledException;
++import ghidra.util.exception.InvalidInputException;
+ import ghidra.util.task.TaskMonitor;
+ 
+ /**
+@@ -125,6 +126,15 @@ public class FunctionSignatureParser {
+ 		FunctionDefinitionDataType function =
+ 			new FunctionDefinitionDataType(name, destDataTypeManager);
+ 
++		String callingConvention = extractCallingConvention(signatureText);
++		if (callingConvention != null) {
++			try {
++				function.setCallingConvention(callingConvention);
++			}
++			catch (InvalidInputException e) {
++				throw new ParseException("Invalid calling convention: " + callingConvention);
++			}
++		}
+ 		function.setReturnType(extractReturnType(signatureText));
+ 		function.setArguments(extractArguments(signatureText));
+ 		function.setVarArgs(hasVarArgs(signatureText));
+@@ -280,7 +290,14 @@ public class FunctionSignatureParser {
+ 		if (split.length < 2) {
+ 			throw new ParseException("Can't find return type");
+ 		}
+-		String returnTypeName = StringUtils.join(split, " ", 0, split.length - 1);
++		int endIndex = split.length - 1;
++		if (extractCallingConvention(signatureText) != null) {
++			--endIndex;
++		}
++		if (endIndex == 0) {
++			throw new ParseException("Can't find return type");
++		}
++		String returnTypeName = StringUtils.join(split, " ", 0, endIndex);
+ 
+ 		// remove any c keywords from the return type name
+ 		returnTypeName = returnTypeName.replaceAll("\\b((static)|(inline)|(const)|(volatile)|(restrict)|(struct)|(union))\\b", "");
+@@ -292,6 +309,29 @@ public class FunctionSignatureParser {
+ 		return dt;
+ 	}
+ 
++	private String extractCallingConvention(String signatureText) throws ParseException {
++		int parenIndex = signatureText.indexOf('(');
++		if (parenIndex < 0) {
++			throw new ParseException("Can't find calling convention");
++		}
++		String[] split = StringUtils.split(signatureText.substring(0, parenIndex));
++		if (split.length < 3) {
++			return null;
++		}
++
++		String candidate = split[split.length - 2];
++		GenericCallingConvention genericConvention =
++			GenericCallingConvention.getGenericCallingConvention(candidate);
++		if (genericConvention != GenericCallingConvention.unknown) {
++			return genericConvention.getDeclarationName();
++		}
++		if (destDataTypeManager != null &&
++			destDataTypeManager.getKnownCallingConventionNames().contains(candidate)) {
++			return candidate;
++		}
++		return null;
++	}
++
+ 	private DataType resolveDataType(String dataTypeName) throws CancelledException {
+ 		if (dtMap.containsKey(dataTypeName)) {
+ 			return dtMap.get(dataTypeName);
+diff --git a/Ghidra/Features/Base/src/test.slow/java/ghidra/app/util/parser/FunctionSignatureParserCallingConventionTest.java b/Ghidra/Features/Base/src/test.slow/java/ghidra/app/util/parser/FunctionSignatureParserCallingConventionTest.java
+new file mode 100644
+index 0000000000..5ef4247763
+--- /dev/null
++++ b/Ghidra/Features/Base/src/test.slow/java/ghidra/app/util/parser/FunctionSignatureParserCallingConventionTest.java
+@@ -0,0 +1,78 @@
++/* ###
++ * IP: GHIDRA
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package ghidra.app.util.parser;
++
++import static org.junit.Assert.*;
++
++import java.util.List;
++
++import org.junit.Before;
++import org.junit.Test;
++
++import ghidra.program.database.ProgramBuilder;
++import ghidra.program.database.ProgramDB;
++import ghidra.program.model.data.FunctionDefinitionDataType;
++import ghidra.program.model.data.GenericCallingConvention;
++import ghidra.test.AbstractGhidraHeadedIntegrationTest;
++import ghidra.test.ToyProgramBuilder;
++
++public class FunctionSignatureParserCallingConventionTest
++		extends AbstractGhidraHeadedIntegrationTest {
++
++	private ProgramDB program;
++	private FunctionSignatureParser parser;
++
++	@Before
++	public void setUp() throws Exception {
++		ProgramBuilder builder = new ToyProgramBuilder("test", false);
++		program = builder.getProgram();
++		parser = new FunctionSignatureParser(program.getDataTypeManager(), null);
++	}
++
++	@Test
++	public void testParseCdeclPointerSignature() throws Exception {
++		FunctionDefinitionDataType function =
++			parser.parse(null, "void * __cdecl test(void * arg0)");
++
++		assertEquals("test", function.getName());
++		assertEquals("__cdecl", function.getCallingConventionName());
++		assertEquals("void * __cdecl test(void * arg0)", function.getPrototypeString(true));
++	}
++
++	@Test
++	public void testParseGenericCallingConventions() throws Exception {
++		List<GenericCallingConvention> conventions = List.of(GenericCallingConvention.cdecl,
++			GenericCallingConvention.stdcall, GenericCallingConvention.fastcall,
++			GenericCallingConvention.thiscall, GenericCallingConvention.vectorcall);
++
++		for (GenericCallingConvention convention : conventions) {
++			String declarationName = convention.getDeclarationName();
++			FunctionDefinitionDataType function =
++				parser.parse(null, "int " + declarationName + " test(int arg0)");
++
++			assertEquals(declarationName, function.getCallingConventionName());
++			assertEquals("int " + declarationName + " test(int arg0)",
++				function.getPrototypeString(true));
++		}
++	}
++
++	@Test
++	public void testParseWithoutCallingConvention() throws Exception {
++		FunctionDefinitionDataType function = parser.parse(null, "int test(int arg0)");
++
++		assertEquals("int test(int arg0)", function.getPrototypeString());
++	}
++}
+-- 
+2.45.1
+

@@ -1,0 +1,70 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Sylvester Kaczmarek
+ <16242628+sylvesterkaczmarek@users.noreply.github.com>
+Date: Thu, 20 Aug 2026 16:16:26 +0100
+Subject: [PATCH] 9527: #9511 Preserve consume masks for big-endian register
+ splits
+
+Fix big-endian splitflow consume-mask transfer
+---
+ .../Decompiler/src/decompile/cpp/transform.cc |  3 ++-
+ .../src/decompile/datatests/splitflowbe.xml   | 26 +++++++++++++++++++
+ 2 files changed, 28 insertions(+), 1 deletion(-)
+ create mode 100644 Ghidra/Features/Decompiler/src/decompile/datatests/splitflowbe.xml
+
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/transform.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/transform.cc
+index c648f8f076..8d936d68f5 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/transform.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/transform.cc
+@@ -197,6 +197,7 @@ void TransformVar::createReplacement(Funcdata *fd)
+       if ((bytePos & 7) != 0)
+ 	throw LowlevelError("Varnode piece is not byte aligned");
+       bytePos >>= 3;
++      int4 significanceOffset = bytePos;
+       if (vn->getSpace()->isBigEndian())
+ 	bytePos = vn->getSize() - bytePos - byteSize;
+       Address addr = vn->getAddr() + bytePos;
+@@ -205,7 +206,7 @@ void TransformVar::createReplacement(Funcdata *fd)
+ 	replacement = fd->newVarnode(byteSize,addr);
+       else
+ 	replacement = fd->newVarnodeOut(byteSize, addr, def->replacement);
+-      fd->transferVarnodeProperties(vn,replacement,bytePos);
++      fd->transferVarnodeProperties(vn,replacement,significanceOffset);
+       break;
+     }
+     case TransformVar::constant_iop:
+diff --git a/Ghidra/Features/Decompiler/src/decompile/datatests/splitflowbe.xml b/Ghidra/Features/Decompiler/src/decompile/datatests/splitflowbe.xml
+new file mode 100644
+index 0000000000..183e6245e0
+--- /dev/null
++++ b/Ghidra/Features/Decompiler/src/decompile/datatests/splitflowbe.xml
+@@ -0,0 +1,26 @@
++<decompilertest>
++<binaryimage arch="6809:BE:16:default">
++<!--
++  A split of the big-endian D register must preserve the consume mask of the
++  significant A byte.  If A inherits B's mask, the count becomes zero and
++  the reachable store at 0x0410 is removed.
++-->
++<bytechunk space="ram" offset="0x400">
++cc0000f610004cf7100126f781072303b7100239
++</bytechunk>
++<bytechunk space="ram" offset="0x1000">
++000000
++</bytechunk>
++<symbol space="ram" offset="0x400" name="splitflow_be"/>
++<symbol space="ram" offset="0x1000" name="loop_input"/>
++<symbol space="ram" offset="0x1001" name="loop_output"/>
++<symbol space="ram" offset="0x1002" name="count_output"/>
++</binaryimage>
++<script>
++  <com>lo fu splitflow_be</com>
++  <com>decompile</com>
++  <com>print C</com>
++  <com>quit</com>
++</script>
++<stringmatch name="Big-endian splitflow keeps live high byte" min="1" max="1">count_output</stringmatch>
++</decompilertest>
+-- 
+2.45.1
+
