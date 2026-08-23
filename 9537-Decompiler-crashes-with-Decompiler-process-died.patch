@@ -1,0 +1,45 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Obermayr <johannesobermayr@gmx.de>
+Date: Sun, 23 Aug 2026 12:48:46 +0200
+Subject: [PATCH] 9537: Decompiler crashes with "Decompiler process died"
+
+---
+ .../src/decompile/cpp/funcdata_varnode.cc       | 17 ++++++++++++-----
+ 1 file changed, 12 insertions(+), 5 deletions(-)
+
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/funcdata_varnode.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/funcdata_varnode.cc
+index e613fdfe7f..ae6a15016b 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/funcdata_varnode.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/funcdata_varnode.cc
+@@ -286,16 +286,23 @@ Varnode *Funcdata::cloneVarnode(const Varnode *vn)
+ void Funcdata::destroyVarnode(Varnode *vn)
+ 
+ {
+-  list<PcodeOp *>::const_iterator iter;
+-
+-  for(iter=vn->beginDescend();iter!=vn->endDescend();++iter) {
+-    PcodeOp *op = *iter;
++  while (!vn->hasNoDescend()) {
++    PcodeOp *op = *vn->beginDescend();
+ #ifdef OPACTION_DEBUG
+     if (opactdbg_active)
+       debugModCheck(op);
+ #endif
+-    op->clearInput(op->getSlot(vn));
++    int4 slot = op->getSlot(vn);
++    if (slot >= 0) {
++      if (op->code() == CPUI_CALLOTHER && slot == 2) {
++        opSetInput(op, newConstant(vn->getSize(), 0), slot);
++      }
++      else {
++        opRemoveInput(op, slot);
++      }
++    }
+   }
++
+   if (vn->def != (PcodeOp *)0) {
+     vn->def->setOutput((Varnode *)0);
+     vn->def = (PcodeOp *)0;
+-- 
+2.45.1
+
