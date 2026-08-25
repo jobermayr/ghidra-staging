@@ -15,18 +15,16 @@ underlying computed value is correct -- a display-only bug. Two
 related shapes are fixed:
 
 Self-referential: a register reassigned to a value computed from
-itself (e.g. the H8 "link"/"unlk" idiom's "SP = SP - 2", pcode-
+itself (e.g. a "SP = SP - 2" stack-adjustment idiom, pcode-
 lowered to INT_ADD(CAST(SP), 0xfffe)).
 Cross-register: a second register derived from a different base
-register (e.g. the H8 "link FP,#-2" prologue idiom's
+register (e.g. a frame-pointer setup idiom such as
 "FP = SP - 2", where FP itself is subsequently consumed by a
-SEGMENTOP). FP has no independent hardware meaning on this target
--- the H8/300 GCC ABI's -fomit-frame-pointer option documents FP
-as eliminable "in favor of the stack pointer", and this project's
-own H8 .cspec declares only SP as <stackpointer>, with FP listed
-in <unaffected> alongside ordinary general registers -- so
-resolving FP's SEGMENTOP-consumed value back to "SP - 2" is the
-ABI-correct decompilation, not an approximation.
+SEGMENTOP). On targets where the frame pointer has no independent
+hardware meaning and is purely a software convention derived from
+the stack pointer, resolving FP's SEGMENTOP-consumed value back
+to "SP - 2" is the ABI-correct decompilation, not an
+approximation.
 
 Root cause: the affected Varnode is isImplied()==true but
 isAnnotation()==false. PrintLanguage::recurse() checks isImplied()
@@ -102,43 +100,43 @@ lookup-or-create via the Scope API, but never touches vn->getHigh().
 
 datatests/register0x0e_segmentop_fix.xml:
 
-New decompilertest, loading a real byte excerpt from
-init_copy_const_block_via_memcpy_banked (the original 1-site repro
-case) and asserting zero occurrences of "register0x0e"-style
-placeholder text and exactly one occurrence of "SP - 2" in the
-decompiled output.
+New decompilertest covering the self-referential shape, loading a
+real byte excerpt from a repro function and asserting zero
+occurrences of "register0x0e"-style placeholder text and exactly
+one occurrence of "SP - 2" in the decompiled output.
+
+datatests/register0x0e_crossregister_fix.xml:
+
+New decompilertest covering the cross-register shape, loading a
+real byte excerpt from a repro function containing both a write
+and a subsequent read through a frame-pointer-derived stack slot,
+and asserting zero occurrences of "register0x0e"-style placeholder
+text and exactly two occurrences of "SP - 2" in the decompiled
+output.
 
 Status: fix compiles clean (0 errors, no new warnings) and was
 verified multiple ways:
 
-Live end-to-end via the Ghidra GUI/decompiler against the original
-two reported functions (init_copy_const_block_via_memcpy_banked,
-1 self-referential site, and eeprom_backup_table_write_dispatch,
-27 self-referential sites) -- both now print "SP - 2"-style
-expressions with zero occurrences of "register0x0e" or
-"__undefined" placeholder text.
-Live end-to-end against a cross-register repro site found during
-whole-ROM regression testing (status_word_bit3_conditional_update_
-via_table, H8 "link FP,#-2" prologue idiom, both a write and a
-read through the FP-derived stack slot) -- both sites now print
-"SP - 2"-style expressions with zero occurrences of "register0x0e".
-Whole-ROM regression pass against a real production ROM export
-(RVR_1998_x3 4g63t 21000011 md352553): "register0x0e" occurrence
-count confirmed down to 1 -- a single unrelated, out-of-scope call-
-argument shape (a raw register read used directly as a function
-argument, with no arithmetic feeding it) that this fix does not
-target and is tracked separately.
-The new datatests/register0x0e_segmentop_fix.xml, run through a
-locally-built ghidra_test data-test runner (test.cc + libdecomp.cc
-testfunction.cc, linked against the same fixed sources, using the
--sleighpath flag to point at this project's H8 SLEIGH spec) --
-both assertions pass: "Total tests applied = 2, Total passing
-tests = 2".
+Live end-to-end via the Ghidra GUI/decompiler against real repro
+functions covering both shapes -- one self-referential repro (1
+affected site) and one cross-register repro (both a write and a
+read through the same frame-pointer-derived stack slot) -- all
+sites now print "SP - 2"-style expressions with zero occurrences
+of "register0x0e" or "__undefined" placeholder text.
+Whole-ROM regression pass against a real production binary:
+"register0x0e" occurrence count confirmed down to a single
+unrelated, out-of-scope call-argument shape (a raw register read
+used directly as a function argument, with no arithmetic feeding
+it) that this fix does not target and is tracked separately.
+Both new datatests, run through a locally-built native data-test
+runner (test.cc + libdecomp.cc + testfunction.cc, linked against
+the same fixed sources) -- all assertions pass: "Total tests
+applied = 4, Total passing tests = 4".
 
 Fixes NationalSecurityAgency#9540
 ---
- .../Decompiler/certification.manifest         |   1 +
- .../src/decompile/cpp/coreaction.cc           |   3 +-
+ .../Decompiler/certification.manifest         |   2 +
+ .../src/decompile/cpp/coreaction.cc           |   2 +-
  .../src/decompile/cpp/funcdata_varnode.cc     |  76 ++++++++++++
  .../cpp/include/ghidra/coreaction.hh          |   2 +-
  .../decompile/cpp/include/ghidra/funcdata.hh  |   4 +-
@@ -148,24 +146,25 @@ Fixes NationalSecurityAgency#9540
  .../src/decompile/cpp/printlanguage.cc        |  87 +++++++++++++-
  .../register0x0e_crossregister_fix.xml        |  53 +++++++++
  .../datatests/register0x0e_segmentop_fix.xml  |  38 ++++++
- 11 files changed, 387 insertions(+), 7 deletions(-)
+ 11 files changed, 388 insertions(+), 6 deletions(-)
  create mode 100644 Ghidra/Features/Decompiler/src/decompile/datatests/register0x0e_crossregister_fix.xml
  create mode 100644 Ghidra/Features/Decompiler/src/decompile/datatests/register0x0e_segmentop_fix.xml
 
 diff --git a/Ghidra/Features/Decompiler/certification.manifest b/Ghidra/Features/Decompiler/certification.manifest
-index 45ad3d1a61..cdd0205c1a 100644
+index 45ad3d1a61..c8d9b85f0c 100644
 --- a/Ghidra/Features/Decompiler/certification.manifest
 +++ b/Ghidra/Features/Decompiler/certification.manifest
-@@ -92,6 +92,7 @@ src/decompile/datatests/pointersub.xml||GHIDRA||||END|
+@@ -92,6 +92,8 @@ src/decompile/datatests/pointersub.xml||GHIDRA||||END|
  src/decompile/datatests/promotecompare.xml||GHIDRA||||END|
  src/decompile/datatests/ptrtoarray.xml||GHIDRA||||END|
  src/decompile/datatests/readvolatile.xml||GHIDRA||||END|
++src/decompile/datatests/register0x0e_crossregister_fix.xml||GHIDRA||||END|
 +src/decompile/datatests/register0x0e_segmentop_fix.xml||GHIDRA||||END|
  src/decompile/datatests/retpassthrough.xml||GHIDRA||||END|
  src/decompile/datatests/retspecial.xml||GHIDRA||||END|
  src/decompile/datatests/retstruct.xml||GHIDRA||||END|
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
-index 88b2d432e4..8de88b8879 100644
+index 88b2d432e4..815324649b 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
 @@ -1,4 +1,4 @@
@@ -174,14 +173,6 @@ index 88b2d432e4..8de88b8879 100644
   * IP: GHIDRA
   *
   * Licensed under the Apache License, Version 2.0 (the "License");
-@@ -19,6 +19,7 @@
- #include "ghidra/subflow.hh"
- #include "ghidra/constseq.hh"
- #include "ghidra/bitfield.hh"
-+#include <iostream>
- 
- namespace ghidra {
- 
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/funcdata_varnode.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/funcdata_varnode.cc
 index ae6a15016b..b70cc6f28c 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/funcdata_varnode.cc
@@ -340,7 +331,7 @@ index 2ac92145bf..19482ae6f2 100644
    ///
    /// \param sym is the given Symbol
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/printc.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/printc.cc
-index 92ea6d9b6a..2796552d3b 100644
+index 92ea6d9b6a..b4db3b4b7e 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/printc.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/printc.cc
 @@ -1,4 +1,4 @@
@@ -349,20 +340,13 @@ index 92ea6d9b6a..2796552d3b 100644
   * IP: GHIDRA
   *
   * Licensed under the Apache License, Version 2.0 (the "License");
-@@ -1898,7 +1898,6 @@ void PrintC::pushConstant(uintb val,const Datatype *ct,tagtype tag,
-   pushMod();
-   if (!isSet(force_dec))
-     setMod(force_hex);
--  push_integer(val,ct->getSize(),false,tag,vn,op,displayFormat);
-   popMod();
- }
- 
-@@ -1945,6 +1944,113 @@ bool PrintC::pushEquate(uintb val,int4 sz,const EquateSymbol *sym,const Varnode
+@@ -1945,6 +1945,114 @@ bool PrintC::pushEquate(uintb val,int4 sz,const EquateSymbol *sym,const Varnode
    return false;
  }
  
 +/// \brief Push a self-referential register-arithmetic Varnode as a binary
-+/// expression using the base regis  // Detect that shapester0x0e-style annotation fallback.
++/// expression using the base register's real name, falling back to the
++/// register0x0e-style annotation fallback if no Symbol can be found.
 +///
 +/// Looks up an existing Symbol for the register's storage address, keyed
 +/// at the CONSUMING op's address as usepoint (matching pushAnnotation's
@@ -588,7 +572,7 @@ index de195bdad6..10bde1a635 100644
        }
 diff --git a/Ghidra/Features/Decompiler/src/decompile/datatests/register0x0e_crossregister_fix.xml b/Ghidra/Features/Decompiler/src/decompile/datatests/register0x0e_crossregister_fix.xml
 new file mode 100644
-index 0000000000..de961cb265
+index 0000000000..d91cbea818
 --- /dev/null
 +++ b/Ghidra/Features/Decompiler/src/decompile/datatests/register0x0e_crossregister_fix.xml
 @@ -0,0 +1,53 @@
@@ -600,18 +584,18 @@ index 0000000000..de961cb265
 +   H8 "link FP,#-2" prologue idiom (pcode-lowered to FP = INT_ADD(CAST(SP),
 +   0xfffe)), then FP itself is later used as a SEGMENTOP's third input for
 +   a far-pointer memory access. This is distinct from the plain
-+   self-referential case (see register0x0e_segmentop_fix.xml) -- here the
++   self-referential case (see register0x0e_segmentop_fix.xml)  here the
 +   Varnode consuming the SEGMENTOP (FP) is NOT the same storage location as
 +   the arithmetic's base operand (SP), so isSelfReferentialRegisterArithmetic
 +   correctly declines it, and a separate isCrossRegisterArithmetic helper is
 +   required to still resolve it to a real expression ("SP - 2") instead of
 +   falling through to the "register0x0e" placeholder fallback.
 +
-+   FP has no independent hardware meaning on this target -- the H8/300 GCC
++   FP has no independent hardware meaning on this target  the H8/300 GCC
 +   ABI's -fomit-frame-pointer option documents FP as eliminable "in favor
 +   of the stack pointer", and this project's own H8 .cspec declares only
 +   SP as <stackpointer>, with FP listed in <unaffected> alongside ordinary
-+   general registers -- so resolving FP's SEGMENTOP-consumed value back to
++   general registers  so resolving FP's SEGMENTOP-consumed value back to
 +   "SP - 2" is the ABI-correct decompilation, not an approximation.
 +
 +   This exact function (status_word_bit3_conditional_update_via_table) is
@@ -645,7 +629,6 @@ index 0000000000..de961cb265
 +<stringmatch name="No register0x0e placeholder text" min="0" max="0">register0x[0-9a-f]+</stringmatch>
 +<stringmatch name="FP-derived write and read sites both print as SP - 2" min="2" max="2">SP - 2</stringmatch>
 +</decompilertest>
-\ No newline at end of file
 diff --git a/Ghidra/Features/Decompiler/src/decompile/datatests/register0x0e_segmentop_fix.xml b/Ghidra/Features/Decompiler/src/decompile/datatests/register0x0e_segmentop_fix.xml
 new file mode 100644
 index 0000000000..091c23c1d7
