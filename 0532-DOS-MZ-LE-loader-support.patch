@@ -5,16 +5,17 @@ Subject: [PATCH] 0532: DOS MZ LE loader support
 
 see: https://github.com/oshogbo/ghidra-lx-loader
 ---
- Ghidra/Features/Base/certification.manifest   |   7 +
- .../ghidra/app/util/bin/format/lx/LX.java     | 252 ++++++++++++++++++
- .../util/bin/format/lx/LXFixupPageTable.java  |  46 ++++
- .../bin/format/lx/LXFixupRecordTable.java     | 169 ++++++++++++
- .../app/util/bin/format/lx/LXHeader.java      | 243 +++++++++++++++++
- .../app/util/bin/format/lx/LXLoader.java      | 166 ++++++++++++
- .../util/bin/format/lx/LXObjectPageTable.java |  66 +++++
- .../app/util/bin/format/lx/LXObjectTable.java |  91 +++++++
- .../util/bin/format/lx/LinearExecutable.java  |  36 ---
- 9 files changed, 1040 insertions(+), 36 deletions(-)
+ Ghidra/Features/Base/certification.manifest   |   8 +-
+ .../ghidra/app/util/bin/format/lx/LX.java     | 503 ++++++++++++++++++
+ .../util/bin/format/lx/LXFixupPageTable.java  |  46 ++
+ .../bin/format/lx/LXFixupRecordTable.java     | 271 ++++++++++
+ .../app/util/bin/format/lx/LXHeader.java      | 253 +++++++++
+ .../app/util/bin/format/lx/LXLoader.java      | 191 +++++++
+ .../util/bin/format/lx/LXObjectPageTable.java |  79 +++
+ .../app/util/bin/format/lx/LXObjectTable.java |  92 ++++
+ .../util/bin/format/lx/LinearExecutable.java  |  36 --
+ .../app/util/bin/format/lx/package.html       |   5 -
+ 10 files changed, 1442 insertions(+), 42 deletions(-)
  create mode 100644 Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/lx/LX.java
  create mode 100644 Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/lx/LXFixupPageTable.java
  create mode 100644 Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/lx/LXFixupRecordTable.java
@@ -23,15 +24,17 @@ see: https://github.com/oshogbo/ghidra-lx-loader
  create mode 100644 Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/lx/LXObjectPageTable.java
  create mode 100644 Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/lx/LXObjectTable.java
  delete mode 100644 Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/lx/LinearExecutable.java
+ delete mode 100644 Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/lx/package.html
 
 diff --git a/Ghidra/Features/Base/certification.manifest b/Ghidra/Features/Base/certification.manifest
-index 382b7f966f..f89da915a7 100644
+index 382b7f966f..736c43ba1f 100644
 --- a/Ghidra/Features/Base/certification.manifest
 +++ b/Ghidra/Features/Base/certification.manifest
-@@ -782,6 +782,13 @@ src/main/java/ghidra/app/events/package.html||GHIDRA||reviewed||END|
+@@ -782,7 +782,13 @@ src/main/java/ghidra/app/events/package.html||GHIDRA||reviewed||END|
  src/main/java/ghidra/app/plugin/core/disassembler/package.html||GHIDRA||reviewed||END|
  src/main/java/ghidra/app/services/package.html||GHIDRA||reviewed||END|
  src/main/java/ghidra/app/util/bin/format/elf/package.html||GHIDRA||||END|
+-src/main/java/ghidra/app/util/bin/format/lx/package.html||GHIDRA||||END|
 +src/main/java/ghidra/app/util/bin/format/lx/LX.java||GHIDRA||||END|
 +src/main/java/ghidra/app/util/bin/format/lx/LXFixupPageTable.java||GHIDRA||||END|
 +src/main/java/ghidra/app/util/bin/format/lx/LXFixupRecordTable.java||GHIDRA||||END|
@@ -39,15 +42,15 @@ index 382b7f966f..f89da915a7 100644
 +src/main/java/ghidra/app/util/bin/format/lx/LXLoader.java||GHIDRA||||END|
 +src/main/java/ghidra/app/util/bin/format/lx/LXObjectPageTable.java||GHIDRA||||END|
 +src/main/java/ghidra/app/util/bin/format/lx/LXObjectTable.java||GHIDRA||||END|
- src/main/java/ghidra/app/util/bin/format/lx/package.html||GHIDRA||||END|
  src/main/java/ghidra/app/util/bin/format/macos/asd/package.html||GHIDRA||||END|
  src/main/java/ghidra/app/util/bin/format/macos/cfm/package.html||GHIDRA||||END|
+ src/main/java/ghidra/app/util/bin/format/macos/rm/package.html||GHIDRA||||END|
 diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/lx/LX.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/lx/LX.java
 new file mode 100644
-index 0000000000..ad349ca0b0
+index 0000000000..fda9f6d377
 --- /dev/null
 +++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/lx/LX.java
-@@ -0,0 +1,252 @@
+@@ -0,0 +1,503 @@
 +/*-
 + * Copyright 2019 Mariusz Zaborski <oshogbo@FreeBSD.org>
 + *
@@ -68,8 +71,11 @@ index 0000000000..ad349ca0b0
 +
 +import java.io.IOException;
 +import java.util.Iterator;
++import java.util.LinkedHashMap;
++import java.util.Map;
 +
 +import ghidra.app.util.bin.BinaryReader;
++import ghidra.util.Msg;
 +
 +public class LX {
 +	private long base_addr;
@@ -77,6 +83,10 @@ index 0000000000..ad349ca0b0
 +	private LXObjectTable []object_table;
 +	private LXObjectPageTable []object_page_table;
 +	private LXFixupPageTable []fixup_page_table;
++	private String []import_module_names;
++	/* Import slot address keyed by label, insertion ordered. */
++	private LinkedHashMap<String, Long> import_slots = new LinkedHashMap<String, Long>();
++	private long import_base;
 +
 +	protected LXObjectTable[] loadObjectTable(BinaryReader reader) throws IOException {
 +		/*
@@ -159,6 +169,159 @@ index 0000000000..ad349ca0b0
 +		}
 +	}
 +
++	private long pageAlign(long addr) {
++		return ((addr + header.page_size - 1) / header.page_size) * header.page_size;
++	}
++
++	protected void assignBaseAddresses() {
++		/*
++		 * Objects with a zero reloc_base_addr (every object of a
++		 * VxD-style module, resource objects of OS/2 executables)
++		 * rely on the loader to place them, as does an object whose
++		 * header base collides with another object: internal fixups
++		 * carry an (object number, offset) pair, so any consistent
++		 * assignment works. Move only those objects, page aligned,
++		 * past the end of every placed object; objects with sane
++		 * header bases stay where the linker put them.
++		 */
++		boolean []move = new boolean[object_table.length];
++		long next_free = 0x10000;
++
++		for (int i = 0; i < object_table.length; i++) {
++			LXObjectTable a = object_table[i];
++
++			move[i] = a.reloc_base_addr == 0;
++			for (int j = 0; j < i && !move[i]; j++) {
++				LXObjectTable b = object_table[j];
++
++				if (move[j])
++					continue;
++				if (a.reloc_base_addr < b.reloc_base_addr + b.virtual_size &&
++				    b.reloc_base_addr < a.reloc_base_addr + a.virtual_size)
++					move[i] = true;
++			}
++			if (!move[i])
++				next_free = Math.max(next_free,
++				    pageAlign(a.reloc_base_addr + a.virtual_size));
++		}
++
++		for (int i = 0; i < object_table.length; i++) {
++			if (!move[i])
++				continue;
++
++			Msg.info(this, String.format(
++			    "Object %d has no usable base address, placing it at 0x%x",
++			    i + 1, next_free));
++			object_table[i].reloc_base_addr = next_free;
++			next_free = pageAlign(next_free + object_table[i].virtual_size);
++		}
++	}
++
++	protected String[] loadImportModuleNameTable(BinaryReader reader) throws IOException {
++		/*
++		 * [Doc] docs/lxexe.txt "Import Module Name Table":
++		 * public long import_module_name_table_offset;	70h
++		 * public long import_module_name_entry_count;	74h
++		 *
++		 * Length-prefixed strings, back to back, case sensitive,
++		 * not null terminated. Fixup records index them 1-based.
++		 */
++		String []names = new String[(int)header.import_module_name_entry_count];
++
++		reader.setPointerIndex(base_addr + header.import_module_name_table_offset);
++		for (int i = 0; i < names.length; i++) {
++			int len = reader.readNextUnsignedByte();
++			names[i] = reader.readNextAsciiString(len);
++		}
++
++		return names;
++	}
++
++	private String importModuleName(long i) {
++		if (i >= 0 && i < import_module_names.length)
++			return import_module_names[(int)i];
++		return "module" + (i + 1);
++	}
++
++	private String readImportProcedureName(BinaryReader reader, long offset) throws IOException {
++		/*
++		 * [Doc] docs/lxexe.txt "Import Procedure Name Table":
++		 * public long import_procedure_name_table_offset;	78h
++		 *
++		 * Length-prefixed strings; fixup records reference them by
++		 * byte offset into the table. Strings are limited to 127
++		 * characters: bit 7 of LEN is an "Overload bit" reserved
++		 * for parameter type checking, not part of the length.
++		 */
++		reader.setPointerIndex(base_addr +
++		    header.import_procedure_name_table_offset + offset);
++		int len = reader.readNextUnsignedByte() & 0x7F;
++		return reader.readNextAsciiString(len);
++	}
++
++	protected void assignImportSlots(BinaryReader reader) throws IOException {
++		/*
++		 * Give every unique import target a 4-byte slot in a
++		 * synthetic block placed past the last object, so fixup
++		 * sites have a concrete address to point at; the loader
++		 * labels each slot with the module and procedure.
++		 */
++		LXObjectTable ot;
++		Iterator<LXFixupRecordTable> itr;
++		LXFixupRecordTable frt;
++		String label;
++
++		import_base = 0x10000;
++		for (int i = 0; i < object_table.length; i++) {
++			ot = object_table[i];
++			import_base = Math.max(import_base,
++			    pageAlign(ot.reloc_base_addr + ot.virtual_size));
++		}
++
++		for (int i = 0; i < object_table.length; i++) {
++			itr = object_table[i].fixupTableIterator();
++			while (itr.hasNext()) {
++				frt = itr.next();
++
++				switch (frt.getTargetType()) {
++				case 0x01: /* Imported by ordinal. */
++					label = importModuleName(frt.module) +
++					    "_Ord" + frt.import_ordinal;
++					break;
++				case 0x02: /* Imported by name. */
++					label = importModuleName(frt.module) + "_" +
++					    readImportProcedureName(reader, frt.name_offset);
++					break;
++				default:
++					continue;
++				}
++				label = label.replaceAll("[^A-Za-z0-9_]", "_");
++
++				if (!import_slots.containsKey(label)) {
++					import_slots.put(label,
++					    import_base + import_slots.size() * 4L);
++				}
++				frt.import_addr = import_slots.get(label);
++			}
++		}
++	}
++
++	public boolean hasImports() {
++		return !import_slots.isEmpty();
++	}
++
++	public long getImportBlockBase() {
++		return import_base;
++	}
++
++	public long getImportBlockSize() {
++		return import_slots.size() * 4L;
++	}
++
++	public Map<String, Long> getImportSlots() {
++		return import_slots;
++	}
++
 +	public LX(BinaryReader reader, long base_addr, long exeoffset) throws IOException {
 +		this.base_addr = base_addr;
 +		reader.setPointerIndex(base_addr);
@@ -171,9 +334,12 @@ index 0000000000..ad349ca0b0
 +		header.data_pages_offset += exeoffset;
 +
 +		object_table = loadObjectTable(reader);
++		assignBaseAddresses();
 +		object_page_table = loadObjectPageTable(reader);
 +		fixup_page_table = loadFixupPageTable(reader);
 +		loadFixupRecordTable(reader);
++		import_module_names = loadImportModuleNameTable(reader);
++		assignImportSlots(reader);
 +	}
 +
 +	public LXHeader getHeader() {
@@ -198,16 +364,36 @@ index 0000000000..ad349ca0b0
 +		if (header.isLe())
 +			return (opt.page_num-1) * header.page_size + header.data_pages_offset;
 +
-+		return (opt.page_data_offset + opt.data_size - 1) *
-+				header.page_size + header.data_pages_offset;
++		/*
++		 * [Doc] docs/lxexe.txt "Object Page Table", PAGE DATA OFFSET:
++		 * "This field, when bit shifted left by the PAGE OFFSET
++		 * SHIFT from the module header, specifies the offset from
++		 * the beginning of the Preload Page section" - i.e. the
++		 * data pages offset (80h).
++		 */
++		return (opt.page_data_offset << header.page_offset_shift) +
++				header.data_pages_offset;
 +	}
 +
 +	private long getPageFileSize(LXObjectTable ohdr, int oi, long datapos) {
 +		assert(oi + 1 <= header.module_of_pages);
 +
-+		if (oi + 1 == header.module_of_pages)
-+			return Math.min(ohdr.virtual_size - datapos, header.page_offset_shift);
-+		return Math.min(ohdr.virtual_size - datapos, header.page_size);
++		/*
++		 * [Doc]
++		 * Header offset 2Ch is "bytes on last page" for LE
++		 * (docs/exe_vxd.h: e32_lastpagesize), but "page offset
++		 * shift" for LX (docs/exeflat.h: the page_shift union
++		 * member); an LX page instead carries its own data size in
++		 * the page table entry and the rest of the page is
++		 * zero-filled (docs/lxexe.txt "Preload Pages").
++		 */
++		if (header.isLe()) {
++			if (oi + 1 == header.module_of_pages)
++				return Math.min(ohdr.virtual_size - datapos, header.page_offset_shift);
++			return Math.min(ohdr.virtual_size - datapos, header.page_size);
++		}
++		return Math.min(ohdr.virtual_size - datapos,
++				getLXObjectPageTable(oi).data_size);
 +	}
 +
 +	private int getPageEndIndex(LXObjectTable ohdr) {
@@ -240,26 +426,59 @@ index 0000000000..ad349ca0b0
 +				continue;
 +			}
 +
-+			memAddr = getLXObjectTable((int)frt.object).reloc_base_addr + frt.trgoff;
++			switch (frt.getTargetType()) {
++			case 0x00: /* Internal reference. */
++				memAddr = getLXObjectTable((int)frt.object).reloc_base_addr +
++				    frt.trgoff;
++				break;
++			case 0x01: /* Imported by ordinal. */
++			case 0x02: /* Imported by name. */
++				/* Slot assigned by assignImportSlots(). */
++				memAddr = frt.import_addr;
++				break;
++			default: /* 0x03, internal via entry table. */
++				Msg.warn(this, "Entry table fixup not supported, skipping");
++				continue;
++			}
++			memAddr += frt.additive;
 +
 +			for (int i = 0; i < frt.getDSTOffsetCount(); i++) {
-+				if (data.length < frt.getDSTOffset(i)) {
-+					/* XXX: What supposed should I do? */
-+					/*
-+					 * [DOC]
-+					 * Note that for fixups that  cross page  boundaries, a
-+					 * separate  fixup  record is  specified for each page.
-+					 * An offset is still used for the 2nd  page but it now
-+					 * becomes a negative offset since the fixup originated
-+					 * on  the  preceding page.  (For  example, if only the
-+					 * last one byte of a 32-bit address is on the page  to
-+					 * be fixed up, then the offset would  have  a value of
-+					 * -3.)
-+					 */
++				/*
++				 * [Doc] docs/lxexe.txt, note under SRCOFF:
++				 * A fixup that crosses a page boundary gets a
++				 * separate record for each page; the second
++				 * page's offset is negative, back into the
++				 * preceding page. Both records write the same
++				 * value at the same object offset, and object
++				 * data is contiguous here, so applying them is
++				 * idempotent; only writes that would leave the
++				 * object entirely (first or last page of the
++				 * object) are skipped.
++				 */
++				int width = frt.getSourceType() == 0x03 ||
++				    frt.getSourceType() == 0x05 ? 2 : 4;
++
++				if (frt.getDSTOffset(i) < 0 ||
++				    frt.getDSTOffset(i) + width > data.length) {
 +					continue;
 +				}
 +
 +				switch (frt.getSourceType()) {
++				case 0x03:
++					/*
++					 * 16:16 Pointer — 32 bits on disk: 16-bit offset at +0,
++					 * 16-bit selector at +2. Open Watcom's DOS/32A loader
++					 * (fix_1616ptr in contrib/extender/dos32a/src/dos32a/
++					 * loader.asm) writes both halves:
++					 *   mov gs:[edi+0], ax   ; offset
++					 *   mov gs:[edi+2], dx   ; selector (from object table)
++					 * Ghidra analyzes as x86:LE:32 (flat), so the selector
++					 * has no meaningful analog; we write the offset only
++					 * and leave +2 alone — same compromise the existing
++					 * 0x06 (16:32) handler makes with its selector half.
++					 */
++					emitU16(data, frt.getDSTOffset(i), memAddr);
++					break;
 +				case 0x05: /* 16-bit */
 +					emitU16(data, frt.getDSTOffset(i), memAddr);
 +					break;
@@ -271,7 +490,15 @@ index 0000000000..ad349ca0b0
 +					emitU32(data, frt.getDSTOffset(i), memAddr);
 +					break;
 +				case 0x08: /* 32-bit Self-relative offset fixup */
-+					emitU32(data, frt.getDSTOffset(i), frt.getDSTOffset(i) + frt.trgoff);
++					/*
++					 * The stored value is relative to the end of
++					 * the 32-bit source field: target - (site + 4).
++					 * Open Watcom's DOS/32A loader agrees
++					 * (fix_relofs32 in loader.asm: subtracts the
++					 * site address and 4 from the target).
++					 */
++					emitU32(data, frt.getDSTOffset(i),
++					    memAddr - (ot.reloc_base_addr + frt.getDSTOffset(i) + 4));
 +					break;
 +				}
 +			}
@@ -283,17 +510,44 @@ index 0000000000..ad349ca0b0
 +		int page_end_i = getPageEndIndex(ot);
 +		int datapos = 0;
 +
++		/* Page FLAGS: docs/lxexe.txt "Object Page Table". */
 +		for (int oi = (int)ot.page_table_index; oi < page_end_i; oi++) {
-+			int rsize = (int)getPageFileSize(ot, oi, datapos);
-+			byte []xdata = reader.readByteArray(getPageFileOffset(oi), rsize);
++			switch (getLXObjectPageTable(oi).flags) {
++			case 0x00: /* Legal Physical Page. */
++				int rsize = (int)getPageFileSize(ot, oi, datapos);
++				byte []xdata = reader.readByteArray(getPageFileOffset(oi), rsize);
 +
-+			System.arraycopy(xdata, 0, data, datapos, rsize);
-+			datapos += rsize;
++				System.arraycopy(xdata, 0, data, datapos, rsize);
++				break;
++			case 0x02: /* Invalid Page. */
++			case 0x03: /* Zero Filled Page. */
++				break;
++			default:
++				Msg.warn(this, String.format(
++				    "Unsupported page flags 0x%x, leaving page %d zeroed",
++				    getLXObjectPageTable(oi).flags, oi + 1));
++				break;
++			}
++
++			/*
++			 * A page occupies page_size bytes in memory no matter
++			 * how many bytes the file provides for it.
++			 */
++			datapos += (int)Math.min(ot.virtual_size - datapos, header.page_size);
 +		}
 +
 +		applyFixups(ot, data);
 +
 +		return data;
++	}
++
++	public boolean hasEIP() {
++		/*
++		 * eip_object is -1 when the EIP object number in the header
++		 * is 0: "A zero value for a library module indicates that no
++		 * library entry routine exists" (docs/lxexe.txt, EIP OBJECT #).
++		 */
++		return header.eip_object >= 0 && header.eip_object < object_table.length;
 +	}
 +
 +	public long getEIPAddress() {
@@ -355,10 +609,10 @@ index 0000000000..9dfcf2a827
 \ No newline at end of file
 diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/lx/LXFixupRecordTable.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/lx/LXFixupRecordTable.java
 new file mode 100644
-index 0000000000..2e64d98b3e
+index 0000000000..88cf00b831
 --- /dev/null
 +++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/lx/LXFixupRecordTable.java
-@@ -0,0 +1,169 @@
+@@ -0,0 +1,271 @@
 +/*-
 + * Copyright 2019 Mariusz Zaborski <oshogbo@FreeBSD.org>
 + *
@@ -383,6 +637,9 @@ index 0000000000..2e64d98b3e
 +
 +public class LXFixupRecordTable {
 +	/*
++	 * [Doc] docs/lxexe.txt "Fixup Record Table",
++	 * IBM LX spec Rev 10 (docs/*.pdf) 3.13, figure 3-17:
++	 *
 +	 *         +-----+-----+-----+-----+
 +	 *     00h | SRC |FLAGS|SRCOFF/CNT*|
 +	 *	   +-----+-----+-----+-----+-----+-----+
@@ -395,8 +652,14 @@ index 0000000000..2e64d98b3e
 +	public byte src;
 +	public byte flags;
 +	public int srcoff_count;
-+	public long object;
++	public long object;		/* Internal reference: 0-based object number. */
 +	public long trgoff;
++	public long module;		/* Imports: 0-based import module name table index. */
++	public long import_ordinal;	/* Import by ordinal: imported procedure ordinal. */
++	public long name_offset;	/* Import by name: import procedure name table offset. */
++	public long entry_ordinal;	/* Internal via entry table: 1-based entry ordinal. */
++	public long additive;		/* Additive value, 0 when absent. */
++	public long import_addr;	/* Import slot address, assigned by LX. */
 +
 +	/* My private one.*/
 +	private long size = 4;
@@ -415,28 +678,41 @@ index 0000000000..2e64d98b3e
 +	 * contains the number of source offsets.
 +	 */
 +	if ((src & 0x20) == 0x20) {
-+		srcoff_count = reader.readNextByte();
++		srcoff_count = reader.readNextUnsignedByte();
 +		size += 1;
 +	} else {
-+		srcoff_count = reader.readNextUnsignedShort();
++		/*
++		 * [Doc]
++		 * Source offsets are SIGNED (exe_vxd.h: short r32_soff):
++		 * a fixup crossing a page boundary gets a second record on
++		 * the next page with a negative offset back into the
++		 * preceding page (docs/lxexe.txt, note under SRCOFF).
++		 */
++		srcoff_count = reader.readNextShort();
 +		size += 2;
 +	}
 +
 +	/*
-+	 * Source type.
-+	 * Supporting:
-+	 * 05h = 16-bit Offset fixup (16-bits).
-+	 * 06h = 16:32 Pointer fixup (48-bits).
-+         * 07h = 32-bit Offset fixup (32-bits).
-+         * 08h = 32-bit Self-relative offset fixup
-+         * 20h = Source List Flag.
-+         *
-+         * XXX:
-+         * 02h = 16-bit Selector fixup (16-bits).
-+         * 10h = Fixup to Alias Flag.
++	 * Source type. Full table (docs/lxexe.txt "Fixup Record Table",
++	 * SRC; cross-checked against Open Watcom's DOS/32A loader
++	 * fix_tab in contrib/extender/dos32a/src/dos32a/loader.asm):
++	 *   00h = Byte fixup (8-bits)            -- not yet supported
++	 *   01h = (invalid / reserved)
++	 *   02h = 16-bit Selector fixup (16-bits)
++	 *   03h = 16:16 Pointer fixup (32-bits)
++	 *   04h = (invalid / reserved)
++	 *   05h = 16-bit Offset fixup (16-bits)
++	 *   06h = 16:32 Pointer fixup (48-bits)
++	 *   07h = 32-bit Offset fixup (32-bits)
++	 *   08h = 32-bit Self-relative offset fixup
++	 *   20h = Source List flag (modifies SRCOFF encoding, see above)
++	 *
++	 * XXX:
++	 *   10h = Fixup to Alias flag (not yet handled).
 +		 */
 +	switch (getSourceType()) {
 +	case 0x02:
++	case 0x03:
 +	case 0x05:
 +	case 0x06:
 +	case 0x07:
@@ -447,10 +723,26 @@ index 0000000000..2e64d98b3e
 +	}
 +
 +	/*
-+	 * Supported flags 0x10 and 0x40.
++	 * [Doc] docs/lxexe.txt "Fixup Record Table", FLAGS;
++	 * record layouts per target type in IBM LX spec Rev 10
++	 * 3.13.1-3.13.4 (figures 3-18 to 3-21).
++	 *
++	 * Target Flags:
++	 *   03h = Target type mask:
++	 *         00h = Internal reference.
++	 *         01h = Imported reference by ordinal.
++	 *         02h = Imported reference by name.
++	 *         03h = Internal reference via entry table.
++	 *   04h = Additive Fixup Flag.
++	 *   08h = Internal Chaining Fixup Flag  -- not supported.
++	 *   10h = 32-bit Target Offset Flag.
++	 *   20h = 32-bit Additive Fixup Flag.
++	 *   40h = 16-bit Object Number/Module Ordinal Flag.
++	 *   80h = 8-bit Ordinal Flag.
 +	 */
-+	if ((flags & ~0x50) != 0) {
-+		throw new UnknownError("Unsupported target flags: " + flags);
++	if ((flags & 0x08) != 0) {
++		throw new UnknownError(String.format("Unsupported target flags: 0x%02x",
++		    flags & 0xFF));
 +	}
 +
 +	/*
@@ -458,38 +750,98 @@ index 0000000000..2e64d98b3e
 +	 * 40h = 16-bit Object Number/Module Ordinal Flag.
 +	 * When  set,  the   object  number  or  module
 +	 * ordinal number  is 16-bits, otherwise  it is
-+	 * 8-bits.
++	 * 8-bits. Both are 1-based.
 +	 */
++	long ord;
 +        if ((flags & 0x40) == 0x40) {
-+		object = reader.readNextUnsignedShort();
++		ord = reader.readNextUnsignedShort();
 +		size += 2;
 +        } else {
-+		object = reader.readNextByte();
++		ord = reader.readNextUnsignedByte();
 +		size += 1;
 +        }
-+        object -= 1;
 +
-+        /*
-+         * [Doc] [Target offset.]
-+         * It  is  not  present  when  the
-+         * Source Type  specifies a 16-bit Selector fixup (02h).
-+         */
-+        if (getSourceType() == 0x2) {
-+		return;
++        switch (getTargetType()) {
++        case 0x00: /* Internal reference. */
++		object = ord - 1;
++
++	        /*
++	         * [Doc] [Target offset.]
++	         * It  is  not  present  when  the
++	         * Source Type  specifies a 16-bit Selector fixup (02h).
++	         *
++	         * 10h = 32-bit Target Offset Flag.
++	         * When  set, the  target  offset  is  32-bits,
++	         * otherwise it is 16-bits.
++	         */
++	        if (getSourceType() != 0x2) {
++			if ((flags & 0x10) == 0x10) {
++				trgoff = reader.readNextUnsignedInt();
++				size += 4;
++			} else {
++				trgoff = reader.readNextUnsignedShort();
++				size += 2;
++			}
++	        }
++	        break;
++        case 0x01: /* Imported reference by ordinal. */
++		module = ord - 1;
++
++		/*
++		 * [Doc]
++		 * 80h = 8-bit Ordinal Flag.
++		 * When set,  the ordinal number is 8-bits; otherwise
++		 * it is 16-bits, or 32-bits when the 32-bit Target
++		 * Offset Flag (10h) is set.
++		 */
++		if ((flags & 0x80) == 0x80) {
++			import_ordinal = reader.readNextUnsignedByte();
++			size += 1;
++		} else if ((flags & 0x10) == 0x10) {
++			import_ordinal = reader.readNextUnsignedInt();
++			size += 4;
++		} else {
++			import_ordinal = reader.readNextUnsignedShort();
++			size += 2;
++		}
++		break;
++        case 0x02: /* Imported reference by name. */
++		module = ord - 1;
++
++		/*
++		 * [Doc]
++		 * Offset into the import procedure name table;
++		 * 32-bits when the 32-bit Target Offset Flag (10h)
++		 * is set, otherwise 16-bits.
++		 */
++		if ((flags & 0x10) == 0x10) {
++			name_offset = reader.readNextUnsignedInt();
++			size += 4;
++		} else {
++			name_offset = reader.readNextUnsignedShort();
++			size += 2;
++		}
++		break;
++        case 0x03: /* Internal reference via entry table. */
++		entry_ordinal = ord;
++		break;
 +        }
 +
 +        /*
 +         * [Doc]
-+	 * 10h = 32-bit Target Offset Flag.
-+         * When  set, the  target  offset  is  32-bits,
-+         * otherwise it is 16-bits.
++         * 04h = Additive Fixup Flag.
++         * When set, an additive value trails the target data;
++         * 32-bits when the 32-bit Additive Flag (20h) is set,
++         * otherwise 16-bits.
 +         */
-+        if ((flags & 0x10) == 0x10) {
-+		trgoff = reader.readNextUnsignedInt();
-+		size += 4;
-+        } else {
-+		trgoff = reader.readNextUnsignedShort();
-+		size += 2;
++        if ((flags & 0x04) == 0x04) {
++		if ((flags & 0x20) == 0x20) {
++			additive = reader.readNextUnsignedInt();
++			size += 4;
++		} else {
++			additive = reader.readNextUnsignedShort();
++			size += 2;
++		}
 +        }
 +
 +        /*
@@ -503,7 +855,7 @@ index 0000000000..2e64d98b3e
 +        if ((src & 0x20) == 0x20) {
 +            this.dstOffset = new int[srcoff_count];
 +            for (int i = 0; i < srcoff_count; i++) {
-+                int offset = reader.readNextUnsignedShort();
++                int offset = reader.readNextShort(); /* Signed, see SRCOFF above. */
 +                this.dstOffset[i] = (int)offsetBase + offset;
 +            }
 +        } else {
@@ -520,6 +872,10 @@ index 0000000000..2e64d98b3e
 +	return src & 0xF;
 +    }
 +
++    public int getTargetType() {
++	return flags & 0x3;
++    }
++
 +    public int getDSTOffsetCount() {
 +	return dstOffset.length;
 +    }
@@ -530,10 +886,10 @@ index 0000000000..2e64d98b3e
 +}
 diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/lx/LXHeader.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/lx/LXHeader.java
 new file mode 100644
-index 0000000000..51e4e724ab
+index 0000000000..efa921fb40
 --- /dev/null
 +++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/lx/LXHeader.java
-@@ -0,0 +1,243 @@
+@@ -0,0 +1,253 @@
 +/*-
 + * Copyright 2019 Mariusz Zaborski <oshogbo@FreeBSD.org>
 + *
@@ -560,7 +916,9 @@ index 0000000000..51e4e724ab
 +import ghidra.program.model.data.StructureDataType;
 +
 +/*
-+ * [Doc]
++ * [Doc] docs/lxexe.txt "LX Header", IBM LX spec Rev 10 figure 3-7;
++ * the LE (VxD) variant is docs/exe_vxd.h struct e32_exe.
++ *
 + *         +-----+-----+-----+-----+-----+-----+-----+-----+
 + *     00h | "L"   "X" |B-ORD|W-ORD|     FORMAT LEVEL      |
 + *         +-----+-----+-----+-----+-----+-----+-----+-----+
@@ -624,8 +982,9 @@ index 0000000000..51e4e724ab
 +	public long esp;					/* 24h */
 +	public long page_size;					/* 28h */
 +	/*
-+	 * ? bytes on the last page?
-+	 * http://faydoc.tripod.com/formats/exe-LE.htm
++	 * LE: bytes on the last page (docs/exe_vxd.h: e32_lastpagesize);
++	 * LX: left shift applied to the page table's page data offsets
++	 * (docs/exeflat.h: page_shift).
 +	 */
 +	public long page_offset_shift;				/* 2Ch */
 +	public long fixup_section_size	;			/* 30h */
@@ -687,6 +1046,13 @@ index 0000000000..51e4e724ab
 +		module_version = reader.readNextUnsignedInt();
 +		module_flag = reader.readNextUnsignedInt();
 +		module_of_pages = reader.readNextUnsignedInt();
++		/*
++		 * [Doc]
++		 * The object number is a 1-based index into the object table.
++		 * A value of zero means the module has no entry point (e.g.
++		 * VxDs and most DLLs), so after the -1 bias "no entry point"
++		 * is stored as -1.
++		 */
 +		eip_object = reader.readNextUnsignedInt() - 1;
 +		eip = reader.readNextUnsignedInt();
 +		esp_object = reader.readNextUnsignedInt();
@@ -779,10 +1145,10 @@ index 0000000000..51e4e724ab
 +}
 diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/lx/LXLoader.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/lx/LXLoader.java
 new file mode 100644
-index 0000000000..6151fe0cab
+index 0000000000..107e7c5c0e
 --- /dev/null
 +++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/lx/LXLoader.java
-@@ -0,0 +1,166 @@
+@@ -0,0 +1,191 @@
 +/*-
 + * Copyright 2019 Mariusz Zaborski <oshogbo@FreeBSD.org>
 + *
@@ -809,6 +1175,7 @@ index 0000000000..6151fe0cab
 +import ghidra.app.util.importer.MessageLog;
 +import ghidra.app.util.opinion.AbstractLibrarySupportLoader;
 +import ghidra.app.util.opinion.LoadSpec;
++import ghidra.app.util.opinion.Loader.ImporterSettings;
 +import ghidra.program.flatapi.FlatProgramAPI;
 +import ghidra.program.model.lang.LanguageCompilerSpecPair;
 +import ghidra.program.model.listing.Program;
@@ -931,9 +1298,6 @@ index 0000000000..6151fe0cab
 +			MemoryBlock block;
 +			byte []data;
 +
-+			if (!lx.getHeader().isLe() && !ohdr.objectHasPreloadPages())
-+				continue;
-+
 +			data = lx.readObjectData(reader, ohdr);
 +
 +			try {
@@ -944,17 +1308,44 @@ index 0000000000..6151fe0cab
 +			}
 +		}
 +
-+		api.addEntryPoint(api.toAddr(lx.getEIPAddress()));
-+		api.disassemble(api.toAddr(lx.getEIPAddress()));
-+		api.createFunction(api.toAddr(lx.getEIPAddress()), "_entry");
++		/*
++		 * Give import fixup targets a home: one labeled 4-byte slot
++		 * per imported procedure, in a synthetic block past the last
++		 * object.
++		 */
++		if (lx.hasImports()) {
++			try {
++				MemoryBlock block = api.createMemoryBlock("imports",
++				    api.toAddr(lx.getImportBlockBase()),
++				    new byte[(int)lx.getImportBlockSize()], false);
++				block.setRead(true);
++				block.setWrite(false);
++				block.setExecute(false);
++
++				for (Map.Entry<String, Long> slot : lx.getImportSlots().entrySet()) {
++					api.createLabel(api.toAddr(slot.getValue()), slot.getKey(), true);
++				}
++			} catch (Exception e) {
++				Msg.error(this, e.getMessage());
++			}
++		}
++
++		/* VxDs and most DLLs have no EIP entry point (EIP object # is 0). */
++		if (lx.hasEIP()) {
++			api.addEntryPoint(api.toAddr(lx.getEIPAddress()));
++			api.disassemble(api.toAddr(lx.getEIPAddress()));
++			api.createFunction(api.toAddr(lx.getEIPAddress()), "_entry");
++		} else {
++			Msg.info(this, "Module has no entry point (EIP object is 0), skipping entry point creation");
++		}
 +	}
 +}
 diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/lx/LXObjectPageTable.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/lx/LXObjectPageTable.java
 new file mode 100644
-index 0000000000..da65bc149d
+index 0000000000..ce8a10ea52
 --- /dev/null
 +++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/lx/LXObjectPageTable.java
-@@ -0,0 +1,66 @@
+@@ -0,0 +1,79 @@
 +/*-
 + * Copyright 2019 Mariusz Zaborski <oshogbo@FreeBSD.org>
 + *
@@ -978,19 +1369,31 @@ index 0000000000..da65bc149d
 +import ghidra.app.util.bin.BinaryReader;
 +
 +/*
-+ * [Doc]
-+ * XXX: WTF???? This doesn't seem right.
++ * [Doc] docs/lxexe.txt "Object Page Table" (LX),
++ * docs/exeflat.h lx_map_entry/le_map_entry,
++ * docs/exe_vxd.h o32_map and GETPAGEIDX (LE).
++ *
++ * LX object page table entry (8 bytes):
 + *        63                     32 31       16 15         0
 + *         +-----+-----+-----+-----+-----+-----+-----+-----+
 + *     00h |    PAGE DATA OFFSET   | DATA SIZE |   FLAGS   |
 + *         +-----+-----+-----+-----+-----+-----+-----+-----+
-+ * More reliable looks:
-+ *        32                      16           8           0
-+ *         +-----+-----+-----+-----+-----+-----+-----+-----+
-+ *     00h |    PAGE DATA OFFSET   | DATA SIZE |   FLAGS   |
-+ *         +-----+-----+-----+-----+-----+-----+-----+-----+
 + *
++ * PAGE DATA OFFSET is relative to the data pages offset and is
++ * left-shifted by the header's page offset shift; DATA SIZE is the
++ * number of bytes present in the file (the rest of the page is
++ * zero-filled).
 + *
++ * LE object page table entry (4 bytes): a 24-bit big-endian page
++ * number followed by a flags byte; pages are stored consecutively,
++ * page_size each.
++ *
++ * FLAGS:
++ *   00h = Legal Physical Page in the module.
++ *   01h = Iterated Data Page.
++ *   02h = Invalid Page.
++ *   03h = Zero Filled Page.
++ *   04h = Range of pages.
 + */
 +public class LXObjectPageTable {
 +	// LX format
@@ -1010,11 +1413,12 @@ index 0000000000..da65bc149d
 +			page_num |= reader.readNextUnsignedByte();
 +			page_num = page_num << 8;
 +			page_num |= reader.readNextUnsignedByte();
++			flags = reader.readNextUnsignedByte();
 +		} else {
-+			page_data_offset = reader.readNextShort();
-+			data_size = reader.readNextUnsignedByte();
++			page_data_offset = reader.readNextUnsignedInt();
++			data_size = reader.readNextUnsignedShort();
++			flags = reader.readNextUnsignedShort();
 +		}
-+		flags = reader.readNextUnsignedByte();
 +
 +		if (flags > 4) {
 +			throw new UnknownError("Wrong flags" + Integer.toString(flags));
@@ -1023,10 +1427,10 @@ index 0000000000..da65bc149d
 +}
 diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/lx/LXObjectTable.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/lx/LXObjectTable.java
 new file mode 100644
-index 0000000000..4269f36383
+index 0000000000..91debf1321
 --- /dev/null
 +++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/lx/LXObjectTable.java
-@@ -0,0 +1,91 @@
+@@ -0,0 +1,92 @@
 +/*-
 + * Copyright 2019 Mariusz Zaborski <oshogbo@FreeBSD.org>
 + *
@@ -1053,7 +1457,8 @@ index 0000000000..4269f36383
 +import ghidra.program.model.mem.MemoryBlock;
 +
 +/*
-+ * [Doc]
++ * [Doc] docs/lxexe.txt "Object Table" (flag bits under OBJECT FLAGS):
++ *
 + *         +-----+-----+-----+-----+-----+-----+-----+-----+
 + *     00h |     VIRTUAL SIZE      |    RELOC BASE ADDR    |
 + *         +-----+-----+-----+-----+-----+-----+-----+-----+
@@ -1160,6 +1565,17 @@ index 9aa17702b3..0000000000
 -        throw new NotYetImplementedException();
 -    }
 -}
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/lx/package.html b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/lx/package.html
+deleted file mode 100644
+index b6f2124b60..0000000000
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/lx/package.html
++++ /dev/null
+@@ -1,5 +0,0 @@
+-<html>
+-<body>
+-Classes for parsing LX headers.
+-</body>
+-</html>
 -- 
 2.45.1
 

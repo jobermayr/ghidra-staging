@@ -1,0 +1,311 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: axd1x8a <sign@axd1x8a.me>
+Date: Fri, 28 Aug 2026 11:37:25 +0300
+Subject: [PATCH] 9555: Speed up Structure Editor Apply on cross-referenced
+ type graphs
+
+---
+ .../CompositeViewerDataTypeManager.java       | 13 +++
+ .../compositeeditor/StructureEditorModel.java | 17 +++-
+ .../database/data/DataTypeManagerDB.java      | 84 ++++++++++++++-----
+ .../database/data/FunctionDefinitionDB.java   |  5 ++
+ .../database/data/ParentChildDBAdapterV0.java |  6 +-
+ .../program/database/data/StructureDB.java    |  5 ++
+ .../ghidra/program/database/data/UnionDB.java |  5 ++
+ 7 files changed, 110 insertions(+), 25 deletions(-)
+
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/compositeeditor/CompositeViewerDataTypeManager.java b/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/compositeeditor/CompositeViewerDataTypeManager.java
+index 5d691e6fe1..3946176713 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/compositeeditor/CompositeViewerDataTypeManager.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/compositeeditor/CompositeViewerDataTypeManager.java
+@@ -550,6 +550,19 @@ public class CompositeViewerDataTypeManager<T extends Composite> extends StandAl
+ 		return originalId != null ? originalDTM.getDataType(originalId) : null;
+ 	}
+ 
++	/**
++	 * Same as {@link #findOriginalDataTypeFromMyID(long)}, keyed by datatype instance instead of ID.
++	 *
++	 * @param viewDataType a datatype instance belonging to this manager
++	 * @return matching original-side datatype, or null
++	 */
++	public DataType findOriginalDataTypeFromViewDataType(DataType viewDataType) {
++		if (viewDataType.getDataTypeManager() != this || !(viewDataType instanceof DbObject)) {
++			return null;
++		}
++		return findOriginalDataTypeFromMyID(getID(viewDataType));
++	}
++
+ 	/**
+ 	 * Determine if the specified datatype which has previsouly been resolved to this datatype
+ 	 * manager originated from original composite's source (e.g., program).  
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/compositeeditor/StructureEditorModel.java b/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/compositeeditor/StructureEditorModel.java
+index 6f9c1c398f..56dc31b965 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/compositeeditor/StructureEditorModel.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/compositeeditor/StructureEditorModel.java
+@@ -1049,13 +1049,22 @@ class StructureEditorModel extends CompEditorModel<Structure> {
+ 
+ 	@Override
+ 	protected void replaceOriginalComponents() {
+-		if (originalComposite != null) {
+-			originalComposite.replaceWith(viewComposite);
+-		}
+-		else {
++		if (originalComposite == null) {
+ 			throw new RuntimeException("ERROR: Couldn't replace structure components in " +
+ 				getOriginalDataTypeName() + ".");
+ 		}
++		if (originalDTM instanceof ghidra.program.database.data.DataTypeManagerDB origDtmDB) {
++			try (AutoCloseable hintScope =
++				origDtmDB.withResolveIdentityHint(viewDTM::findOriginalDataTypeFromViewDataType)) {
++				originalComposite.replaceWith(viewComposite);
++			}
++			catch (Exception e) {
++				throw new RuntimeException(e);
++			}
++		}
++		else {
++			originalComposite.replaceWith(viewComposite);
++		}
+ 	}
+ 
+ 	@Override
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/data/DataTypeManagerDB.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/data/DataTypeManagerDB.java
+index 63afc132a9..019bd40a4b 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/data/DataTypeManagerDB.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/data/DataTypeManagerDB.java
+@@ -179,6 +179,9 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
+ 	private IdentityHashMap<DataType, DataType> resolveCache;
+ 	private TreeSet<ResolvePair> resolveQueue; // Note: is TreeSet really needed?
+ 	private LinkedList<DataType> conflictQueue = new LinkedList<>();
++	private Map<Long, Long> pendingDataTypesUsed;
++
++	private java.util.function.Function<DataType, DataType> resolveIdentityHint;
+ 
+ 	private boolean isBulkRemoving;
+ 
+@@ -1227,6 +1230,13 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
+ 				return dataType;
+ 			}
+ 
++			if (resolveIdentityHint != null) {
++				DataType hinted = resolveIdentityHint.apply(dataType);
++				if (hinted != null && contains(hinted)) {
++					return hinted;
++				}
++			}
++
+ 			if (handler != null) {
+ 				currentHandler = handler;
+ 			}
+@@ -1957,7 +1967,12 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
+ 		}
+ 
+ 		// perform any necessary external use replacements
+-		replaceDataTypesUsed(dataTypeReplacementMap);
++		if (pendingDataTypesUsed != null) {
++			pendingDataTypesUsed.putAll(dataTypeReplacementMap);
++		}
++		else {
++			replaceDataTypesUsed(dataTypeReplacementMap);
++		}
+ 
+ 		// perform actual database updates (e.g., record updates, change notifications, etc.)
+ 		for (Pair<DataType, DataType> dataTypeReplacement : dataTypeReplacements) {
+@@ -4403,35 +4418,66 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
+ 	 */
+ 	private DataType processConflictQueue(DataType dataType) {
+ 
+-		while (!conflictQueue.isEmpty()) {
++		boolean isPendingDataTypesUsedOwner = pendingDataTypesUsed == null;
++		if (isPendingDataTypesUsedOwner) {
++			pendingDataTypesUsed = new HashMap<>();
++		}
++		try {
++			while (!conflictQueue.isEmpty()) {
+ 
+ 			// Process last conflict first (LIFO) to ensure conflicts with larger
+ 			// numbers are discarded first if applicable - although unlikely to occur
+ 			// during the same resolve-cycle.
+-			DataType dt = conflictQueue.removeLast();
++				DataType dt = conflictQueue.removeLast();
+ 
+-			List<DataType> relatedByName = findDataTypesSameLocation(dt);
+-			for (DataType candidate : relatedByName) {
+-				if (candidate != dt && DataTypeDB.isEquivalent(candidate, dt,
+-					DataTypeConflictHandler.DEFAULT_HANDLER)) {
+-					try {
+-						replace(dt, candidate);
+-						if (dt == dataType) {
+-							// switch final type
+-							dataType = candidate;
++				List<DataType> relatedByName = findDataTypesSameLocation(dt);
++				for (DataType candidate : relatedByName) {
++					if (candidate != dt && DataTypeDB.isEquivalent(candidate, dt,
++						DataTypeConflictHandler.DEFAULT_HANDLER)) {
++						try {
++							replace(dt, candidate);
++							if (dt == dataType) {
++								// switch final type
++								dataType = candidate;
++							}
++							break;
+ 						}
+-						break;
+-					}
+-					catch (DataTypeDependencyException e) {
+-						// ignore - try next if available
++						catch (DataTypeDependencyException e) {}
+ 					}
+ 				}
+-			}
+ 
++			}
++		}
++		finally {
++			if (isPendingDataTypesUsedOwner) {
++				Map<Long, Long> batch = pendingDataTypesUsed;
++				pendingDataTypesUsed = null;
++				if (!batch.isEmpty()) {
++					replaceDataTypesUsed(batch);
++				}
++			}
+ 		}
+ 		return dataType;
+ 	}
+ 
++	/**
++	 * Lets {@link #resolve(DataType, DataTypeConflictHandler)} skip equivalence resolution for a
++	 * foreign datatype when {@code hint} maps it to a datatype this manager already contains.
++	 *
++	 * @param hint foreign datatype -> already-contained equivalent, or null if unknown
++	 * @return closes the hint; use in a try-with-resources around the resolve/replaceWith call
++	 */
++	public AutoCloseable withResolveIdentityHint(java.util.function.Function<DataType, DataType> hint) {
++		if (hint == null) {
++			throw new IllegalArgumentException("hint must not be null");
++		}
++		if (resolveIdentityHint != null) {
++			throw new IllegalStateException("resolve identity hint already active");
++		}
++		resolveIdentityHint = hint;
++		return () -> resolveIdentityHint = null;
++	}
++
+ 	/**
+ 	 * Activate resolveCache and associated resolveQueue if not already active. If
+ 	 * this method returns true caller is responsible for flushing resolveQueue and
+@@ -4641,7 +4687,7 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
+ 	 * 
+ 	 * @return true if successful, false if already active
+ 	 */
+-	private boolean activateEquivalenceCache() {
++	boolean activateEquivalenceCache() {
+ 		EquivalenceCache cache = equivalenceCache.get();
+ 		if (cache == null) {
+ 			cache = new EquivalenceCache();
+@@ -4652,7 +4698,7 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
+ 		return false;
+ 	}
+ 
+-	private void clearEquivalenceCache() {
++	void clearEquivalenceCache() {
+ 		equivalenceCache.set(null);
+ 	}
+ 
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/data/FunctionDefinitionDB.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/data/FunctionDefinitionDB.java
+index eaadc08df3..b4dc7a45a2 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/data/FunctionDefinitionDB.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/data/FunctionDefinitionDB.java
+@@ -186,8 +186,10 @@ class FunctionDefinitionDB extends DataTypeDB implements FunctionDefinition {
+ 			throw new IllegalArgumentException();
+ 		}
+ 		boolean isResolveCacheOwner = false;
++		boolean isEquivalenceCacheOwner = false;
+ 		try (Closeable c = lock.write()) {
+ 			isResolveCacheOwner = dataMgr.activateResolveCache();
++			isEquivalenceCacheOwner = dataMgr.activateEquivalenceCache();
+ 			checkDeleted();
+ 			doReplaceWith(functionDefinition, true);
+ 		}
+@@ -198,6 +200,9 @@ class FunctionDefinitionDB extends DataTypeDB implements FunctionDefinition {
+ 			if (isResolveCacheOwner) {
+ 				dataMgr.processResolveQueue(true);
+ 			}
++			if (isEquivalenceCacheOwner) {
++				dataMgr.clearEquivalenceCache();
++			}
+ 		}
+ 	}
+ 
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/data/ParentChildDBAdapterV0.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/data/ParentChildDBAdapterV0.java
+index 5d80250222..b044a4ff87 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/data/ParentChildDBAdapterV0.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/data/ParentChildDBAdapterV0.java
+@@ -78,10 +78,12 @@ class ParentChildDBAdapterV0 extends ParentChildAdapter {
+ 	@Override
+ 	void removeRecord(long parentID, long childID) throws IOException {
+ 
+-		Field[] ids = table.findRecords(new LongField(childID), CHILD_COL);
++		// search by parent, not child: fan-in on a shared child can be far larger than a
++		// parent's own component count
++		Field[] ids = table.findRecords(new LongField(parentID), PARENT_COL);
+ 		for (Field id : ids) {
+ 			DBRecord rec = table.getRecord(id);
+-			if (rec.getLongValue(PARENT_COL) == parentID) {
++			if (rec.getLongValue(CHILD_COL) == childID) {
+ 				table.deleteRecord(id);
+ 				return;
+ 			}
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/data/StructureDB.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/data/StructureDB.java
+index 73c8456871..a31a008fc5 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/data/StructureDB.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/data/StructureDB.java
+@@ -1584,8 +1584,10 @@ class StructureDB extends CompositeDB implements StructureInternal {
+ 			throw new IllegalArgumentException();
+ 		}
+ 		boolean isResolveCacheOwner = false;
++		boolean isEquivalenceCacheOwner = false;
+ 		try (Closeable c = lock.write()) {
+ 			isResolveCacheOwner = dataMgr.activateResolveCache();
++			isEquivalenceCacheOwner = dataMgr.activateEquivalenceCache();
+ 			checkDeleted();
+ 			doReplaceWith((StructureInternal) dataType, true);
+ 		}
+@@ -1599,6 +1601,9 @@ class StructureDB extends CompositeDB implements StructureInternal {
+ 			if (isResolveCacheOwner) {
+ 				dataMgr.processResolveQueue(true);
+ 			}
++			if (isEquivalenceCacheOwner) {
++				dataMgr.clearEquivalenceCache();
++			}
+ 		}
+ 	}
+ 
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/data/UnionDB.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/data/UnionDB.java
+index 815b46c695..d1184df28b 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/data/UnionDB.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/data/UnionDB.java
+@@ -284,8 +284,10 @@ class UnionDB extends CompositeDB implements UnionInternal {
+ 			throw new IllegalArgumentException();
+ 		}
+ 		boolean isResolveCacheOwner = false;
++		boolean isEquivalenceCacheOwner = false;
+ 		try (Closeable c = lock.write()) {
+ 			isResolveCacheOwner = dataMgr.activateResolveCache();
++			isEquivalenceCacheOwner = dataMgr.activateEquivalenceCache();
+ 			checkDeleted();
+ 			doReplaceWith((UnionInternal) dataType, true);
+ 		}
+@@ -299,6 +301,9 @@ class UnionDB extends CompositeDB implements UnionInternal {
+ 			if (isResolveCacheOwner) {
+ 				dataMgr.processResolveQueue(true);
+ 			}
++			if (isEquivalenceCacheOwner) {
++				dataMgr.clearEquivalenceCache();
++			}
+ 		}
+ 	}
+ 
+-- 
+2.45.1
+
