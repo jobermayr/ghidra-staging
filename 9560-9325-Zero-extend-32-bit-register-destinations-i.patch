@@ -1,0 +1,85 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: qatcod <79017227+qatcod@users.noreply.github.com>
+Date: Mon, 31 Aug 2026 01:45:07 +0500
+Subject: [PATCH] 9560: #9325 Zero-extend 32-bit register destinations in
+ 64-bit mode
+
+Writing a 32-bit general purpose register in 64-bit mode clears the
+upper half of its 64-bit alias (Intel SDM Vol. 1, 3.4.1.1). Several
+constructors assign a 32-bit register without modelling that, so the
+old upper half stays live and the decompiler folds comparisons against
+it into constants.
+
+Affected: XADD, XCHG and CMPXCHG8B with a memory operand, LODSD,
+PEXTRW with an MMX source, and the VEX form of VMOVD.
+
+Each one now builds the existing check_*_dest subtable after the write,
+matching what the register-operand forms of the same instructions
+already do. The subtables are empty outside IA64, so 32-bit mode is
+unaffected.
+---
+ Ghidra/Processors/x86/data/languages/avx.sinc      | 3 ++-
+ Ghidra/Processors/x86/data/languages/ia.sinc       | 3 ++-
+ Ghidra/Processors/x86/data/languages/lockable.sinc | 4 +++-
+ 3 files changed, 7 insertions(+), 3 deletions(-)
+
+diff --git a/Ghidra/Processors/x86/data/languages/avx.sinc b/Ghidra/Processors/x86/data/languages/avx.sinc
+index 607489e390..5ac84af62e 100644
+--- a/Ghidra/Processors/x86/data/languages/avx.sinc
++++ b/Ghidra/Processors/x86/data/languages/avx.sinc
+@@ -1112,9 +1112,10 @@ define pcodeop vminss_avx ;
+ @endif
+ 
+ # MOVD/MOVQ 4-55 PAGE 1175 LINE 61362
+-:VMOVD rm32, XmmReg1 is $(VEX_NONE) & $(VEX_L128) & $(VEX_PRE_66) & $(VEX_0F) & $(VEX_W0); byte=0x7E; XmmReg1 ... & rm32
++:VMOVD rm32, XmmReg1 is $(VEX_NONE) & $(VEX_L128) & $(VEX_PRE_66) & $(VEX_0F) & $(VEX_W0); byte=0x7E; XmmReg1 ... & rm32 & check_rm32_dest
+ {
+ 	rm32 = XmmReg1 [0,32];
++	build check_rm32_dest;
+ }
+ 
+ # MOVD/MOVQ 4-55 PAGE 1175 LINE 61364
+diff --git a/Ghidra/Processors/x86/data/languages/ia.sinc b/Ghidra/Processors/x86/data/languages/ia.sinc
+index 581e312948..4e3436c6c9 100644
+--- a/Ghidra/Processors/x86/data/languages/ia.sinc
++++ b/Ghidra/Processors/x86/data/languages/ia.sinc
+@@ -10218,10 +10218,11 @@ define pcodeop _mm_cmpgt_pi32;
+     XmmReg1[96,32] = zext(XmmReg1[96,32] s> XmmReg2[96,32]) * 0xFFFFFFFF;
+ }
+ 
+-:PEXTRW        Reg32, mmxreg2, imm8 is vexMode=0 &  mandover=0 & byte=0x0F; byte=0xC5; xmmmod = 3 & Reg32 & mmxreg2; imm8
++:PEXTRW        Reg32, mmxreg2, imm8 is vexMode=0 &  mandover=0 & byte=0x0F; byte=0xC5; xmmmod = 3 & Reg32 & mmxreg2 & check_Reg32_dest; imm8
+ {
+     temp:8 = mmxreg2 >> ( (imm8 & 0x03) * 16 );
+     Reg32 = zext(temp:2);
++    build check_Reg32_dest;
+ }
+ 
+ :PEXTRW        Reg32, XmmReg2, imm8 is vexMode=0 &  $(PRE_66) & byte=0x0F; byte=0xC5; xmmmod = 3 & Reg32 & XmmReg2 & check_Reg32_dest; imm8
+diff --git a/Ghidra/Processors/x86/data/languages/lockable.sinc b/Ghidra/Processors/x86/data/languages/lockable.sinc
+index f47b9266b8..dabfe9bd2f 100644
+--- a/Ghidra/Processors/x86/data/languages/lockable.sinc
++++ b/Ghidra/Processors/x86/data/languages/lockable.sinc
+@@ -1210,9 +1210,10 @@ define pcodeop InterlockedExchangeAdd;
+     Reg16 = InterlockedExchangeAdd(Mem, Reg16);
+ }
+ 
+-:XADD^lockx_ Mem,Reg32	is vexMode=0 & lockx_ & opsize=1 & byte=0x0F; byte=0xC1; Mem & Reg32 ...
++:XADD^lockx_ Mem,Reg32	is vexMode=0 & lockx_ & opsize=1 & byte=0x0F; byte=0xC1; Mem & Reg32 ... & check_Reg32_dest ...
+ {
+     Reg32 = InterlockedExchangeAdd(Mem, Reg32);
++    build check_Reg32_dest;
+ }
+ 
+ @ifdef IA64
+@@ -1237,6 +1238,7 @@ define pcodeop InterlockedExchangeAdd64;
+ :XCHG^xacq_xrel_prefx^alwaysLock Mem,Reg32	is vexMode=0 & xacq_xrel_prefx & alwaysLock & opsize=1 & byte=0x87; Mem & Reg32 ... & check_Reg32_dest ...
+ {
+     Reg32 = InterlockedExchange(Mem, Reg32);
++    build check_Reg32_dest;
+ }
+ 
+ @ifdef IA64
+-- 
+2.45.1
+
