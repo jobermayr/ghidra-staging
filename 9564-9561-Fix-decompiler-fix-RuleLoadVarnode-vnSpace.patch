@@ -1,0 +1,232 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Jonathan Brophy <professor_jonny@hotmail.com>
+Date: Tue, 1 Sep 2026 13:25:50 +1200
+Subject: [PATCH] 9564: 9561: Fix decompiler: fix RuleLoadVarnode::vnSpacebase
+ to recursively unwrap SEGMENTOP nested in INT_ADD
+
+A stack access whose address is built as a SEGMENTOP-derived base plus
+an additional constant offset -- i.e. a SEGMENTOP nested inside an
+INT_ADD, rather than a SEGMENTOP as the direct pointer operand of a
+LOAD/STORE -- was not resolved by RuleLoadVarnode::vnSpacebase. The
+unresolved access fell through to generic alias analysis and was
+folded into a large open stack array (e.g. "auStack_102[128]") read
+back through pointer-cast arithmetic, instead of resolving as an
+individual, correctly-typed stack variable.
+
+vnSpacebase now recurses through a SEGMENTOP found among an INT_ADD's
+inputs, to arbitrary depth (bounded by a recursion-depth guard),
+mirroring the one-level unwrap checkSpacebase already performs when a
+SEGMENTOP is the direct LOAD/STORE operand. AddrSpace::wrapOffset is
+applied to the accumulated offset at each recursion level, since naive
+addition across multiple unwrap levels can produce a composite offset
+outside the address space's actual bit width.
+
+Adds nestedsegmentop.xml, a datatests regression covering both the
+merged-array symptom and correct parameter resolution.
+
+This bug is unrelated in cause to #9540/#9541 (a print-layer issue),
+but both involve SEGMENTOP handling, so this change was verified
+against #9541's own regression tests (register0x0e_crossregister_fix.xml,
+register0x0e_segmentop_fix.xml) to confirm no interaction -- no crash,
+both pass independent of whether #9541 is merged.
+
+Verified against a real H8 firmware image: the merged-array symptom
+was also independently present in one other function
+(sci1_meta_cmd_dispatch_c0_ff) and is resolved by this fix; across all
+741 functions in the image, no new occurrences of the symptom were
+introduced.
+
+Related: #9561
+---
+ .../Decompiler/certification.manifest         |  1 +
+ .../cpp/include/ghidra/ruleaction.hh          |  2 +-
+ .../src/decompile/cpp/ruleaction.cc           | 54 ++++++++++++++-----
+ .../Decompiler/src/decompile/cpp/varmap.cc    | 11 ++--
+ .../decompile/datatests/nestedsegmentop.xml   | 32 +++++++++++
+ 5 files changed, 81 insertions(+), 19 deletions(-)
+ create mode 100644 Ghidra/Features/Decompiler/src/decompile/datatests/nestedsegmentop.xml
+
+diff --git a/Ghidra/Features/Decompiler/certification.manifest b/Ghidra/Features/Decompiler/certification.manifest
+index afb8a7c747..41b3219c76 100644
+--- a/Ghidra/Features/Decompiler/certification.manifest
++++ b/Ghidra/Features/Decompiler/certification.manifest
+@@ -72,6 +72,7 @@ src/decompile/datatests/multiret.xml||GHIDRA||||END|
+ src/decompile/datatests/namespace.xml||GHIDRA||||END|
+ src/decompile/datatests/nan.xml||GHIDRA||||END|
+ src/decompile/datatests/nestedoffset.xml||GHIDRA||||END|
++src/decompile/datatests/nestedsegmentop.xml||GHIDRA||||END|
+ src/decompile/datatests/noforloop_alias.xml||GHIDRA||||END|
+ src/decompile/datatests/noforloop_globcall.xml||GHIDRA||||END|
+ src/decompile/datatests/noforloop_iterused.xml||GHIDRA||||END|
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/ruleaction.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/ruleaction.hh
+index f625158745..00c866fb26 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/ruleaction.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/ruleaction.hh
+@@ -854,7 +854,7 @@ public:
+ class RuleLoadVarnode : public Rule {
+   friend class RuleStoreVarnode;
+   static AddrSpace *correctSpacebase(Architecture *glb,Varnode *vn,AddrSpace *spc);
+-  static AddrSpace *vnSpacebase(Architecture *glb,Varnode *vn,uintb &val,AddrSpace *spc);
++  static AddrSpace *vnSpacebase(Architecture *glb,Varnode *vn,uintb &val,AddrSpace *spc,int4 depth=0);
+   static AddrSpace *checkSpacebase(Architecture *glb,PcodeOp *op,uintb &offoff);
+ public:
+   RuleLoadVarnode(const string &g) : Rule(g, 0, "loadvarnode") {}	///< Constructor
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc
+index 0125598007..97c147d6bc 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc
+@@ -4281,13 +4281,15 @@ AddrSpace *RuleLoadVarnode::correctSpacebase(Architecture *glb,Varnode *vn,AddrS
+ /// \param val is the reference for passing back the constant
+ /// \param spc is the space being loaded from
+ /// \return the associated space or NULL
+-AddrSpace *RuleLoadVarnode::vnSpacebase(Architecture *glb,Varnode *vn,uintb &val,AddrSpace *spc)
++AddrSpace *RuleLoadVarnode::vnSpacebase(Architecture *glb,Varnode *vn,uintb &val,AddrSpace *spc,int4 depth)
+ 
+ {
+   PcodeOp *op;
+   Varnode *vn1,*vn2;
+   AddrSpace *retspace;
+-  
++
++  if (depth > 8) return (AddrSpace *)0;
++
+   retspace = correctSpacebase(glb,vn,spc);
+   if (retspace != (AddrSpace *)0) {
+     val = 0;
+@@ -4325,19 +4327,47 @@ AddrSpace *RuleLoadVarnode::vnSpacebase(Architecture *glb,Varnode *vn,uintb &val
+     }
+     return retspace;
+   }
+-  retspace = correctSpacebase(glb,vn1,spc);
++
++  // Unwrap a SEGMENTOP among the INT_ADD's inputs, recursing into vnSpacebase
++  // itself (rather than only calling correctSpacebase directly) so a chain of
++  // arbitrary depth -- SEGMENTOP nested inside INT_ADD nested inside further
++  // INT_ADDs -- resolves correctly. checkSpacebase already does an equivalent
++  // one-level unwrap when a SEGMENTOP is the *direct* pointer operand of a
++  // LOAD/STORE; this mirrors that same unwrap for a SEGMENTOP found among an
++  // INT_ADD's inputs instead, and applies it recursively.
++  Varnode *unwrapped1 = vn1;
++  if (unwrapped1->isWritten() && (unwrapped1->getDef()->code()==CPUI_SEGMENTOP) &&
++      (unwrapped1->getDef()->numInput() >= 3)) {
++    Varnode *segbase1 = unwrapped1->getDef()->getIn(2);
++    if (!segbase1->isConstant()) unwrapped1 = segbase1;
++  }
++  Varnode *unwrapped2 = vn2;
++  if (unwrapped2->isWritten() && (unwrapped2->getDef()->code()==CPUI_SEGMENTOP) &&
++      (unwrapped2->getDef()->numInput() >= 3)) {
++    Varnode *segbase2 = unwrapped2->getDef()->getIn(2);
++    if (!segbase2->isConstant()) unwrapped2 = segbase2;
++  }
++
++  retspace = (unwrapped1 == vn1) ? correctSpacebase(glb,unwrapped1,spc) : vnSpacebase(glb,unwrapped1,val,spc,depth+1);
+   if (retspace != (AddrSpace *)0) {
+-      if (vn2->isConstant()) {
+-          val = vn2->getOffset();
+-          return retspace;
+-      }
++    uintb accum = (unwrapped1 == vn1) ? 0 : val;
++    if (vn2->isConstant()) {
++      // Wrap the accumulated offset to the space's actual bit width at each
++      // level. Naive unsigned addition across multiple unwrap levels can
++      // produce an out-of-range composite offset (e.g. 0x10006 in a
++      // 2-byte/16-bit stack space), corrupting downstream Varnode creation.
++      val = retspace->wrapOffset(accum + vn2->getOffset());
++      return retspace;
++    }
++    return (AddrSpace *)0;
+   }
+-  retspace = correctSpacebase(glb,vn2,spc);
++  retspace = (unwrapped2 == vn2) ? correctSpacebase(glb,unwrapped2,spc) : vnSpacebase(glb,unwrapped2,val,spc,depth+1);
+   if (retspace != (AddrSpace *)0) {
+-      if (vn1->isConstant()) {
+-          val = vn1->getOffset();
+-          return retspace;
+-      }
++    uintb accum = (unwrapped2 == vn2) ? 0 : val;
++    if (vn1->isConstant()) {
++      val = retspace->wrapOffset(accum + vn1->getOffset());
++      return retspace;
++    }
+   }
+   return (AddrSpace *)0;
+ }
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/varmap.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/varmap.cc
+index d2c9e01fa6..ef6bc40526 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/varmap.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/varmap.cc
+@@ -793,7 +793,7 @@ void AliasChecker::gatherInternal(void) const
+ /// For the given function and address space, gather all Varnodes that are pointers into the
+ /// address space.  The actual calculation can be deferred until the first time
+ /// hasLocalAlias() is called.
+-/// \param f is the given function
++/// \param f is the function being analyzed
+ /// \param spc is the given address space
+ /// \param defer is \b true is gathering is deferred
+ void AliasChecker::gather(const Funcdata *f,AddrSpace *spc,bool defer)
+@@ -812,10 +812,10 @@ void AliasChecker::gather(const Funcdata *f,AddrSpace *spc,bool defer)
+ }
+ 
+ /// This is gives a rough analysis of whether the given Varnode might be aliased by another pointer in
+-/// the function. If \b false is returned, the Varnode is not likely to have an alias. If \b true is returned,
+-/// the Varnode might have an alias.
++/// the function. If \b false is returned, the Varnode is not likely to have an alias. If \b true is
++/// returned, the Varnode may still have no aliases, but it is harder to rule out.
+ /// \param vn is the given Varnode
+-/// \return \b true if the Varnode might have a pointer alias
++/// \return \b true if the Varnode may have aliases
+ bool AliasChecker::hasLocalAlias(Varnode *vn) const
+ 
+ {
+@@ -839,8 +839,7 @@ void AliasChecker::sortAlias(void) const
+ 
+ /// \brief Gather result Varnodes for all \e sums that the given starting Varnode is involved in
+ ///
+-/// For every sum that involves \b startvn, collect the final result Varnode of the sum.
+-/// A sum is any expression involving only the additive operators
++/// For every sum that involves \b startvn, this method traces forward through additive
+ /// INT_ADD, INT_SUB, PTRADD, PTRSUB, and SEGMENTOP.  The routine traverses forward recursively
+ /// through all descendants of \b vn that are additive operations and collects all the roots
+ /// of the traversed trees.
+diff --git a/Ghidra/Features/Decompiler/src/decompile/datatests/nestedsegmentop.xml b/Ghidra/Features/Decompiler/src/decompile/datatests/nestedsegmentop.xml
+new file mode 100644
+index 0000000000..2568f7572c
+--- /dev/null
++++ b/Ghidra/Features/Decompiler/src/decompile/datatests/nestedsegmentop.xml
+@@ -0,0 +1,32 @@
++<decompilertest>
++<binaryimage arch="H8:BE:32:H8539F">
++<!--
++    A stack parameter accessed through a SEGMENTOP nested inside an
++    INT_ADD (a SEGMENTOP-derived base plus an additional constant offset)
++    previously failed to resolve through RuleLoadVarnode::vnSpacebase,
++    which only unwrapped a SEGMENTOP when it was the direct operand of a
++    LOAD/STORE. The unresolved access fell back to generic alias analysis
++    and was folded into a large open stack array (e.g. "auStack_102[128]")
++    accessed through pointer-cast arithmetic, rather than resolving as an
++    individual, correctly-typed stack variable.
++-->
++<bytechunk space="ram" offset="0x14000" readonly="true">
++17008806ee0820240358ffff0f1119
++</bytechunk>
++<symbol space="ram" offset="0x14000" name="sat_add_u16"/>
++</binaryimage>
++<script>
++  <com>option readonly on</com>
++  <com>parse line extern uint2 sat_add_u16(uint2 a,uint2 b);</com>
++  <com>lo fu sat_add_u16</com>
++  <com>decompile</com>
++  <com>print C</com>
++  <com>quit</com>
++</script>
++<stringmatch name="Canary function name" min="1" max="1">sat_add_u16</stringmatch>
++<stringmatch name="Canary param a" min="1" max="1">uint2 a</stringmatch>
++<stringmatch name="Canary param b" min="1" max="1">uint2 b</stringmatch>
++<stringmatch name="ABSENT merged stack array" min="0" max="0">auStack</stringmatch>
++<stringmatch name="PRESENT uint2 local" min="1" max="99">uint2 uVar1</stringmatch>
++<stringmatch name="PRESENT sum expression" min="1" max="99">uVar1 =</stringmatch>
++</decompilertest>
+\ No newline at end of file
+-- 
+2.45.1
+
