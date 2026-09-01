@@ -5,14 +5,14 @@ Subject: [PATCH] 5788: Simplify {CMPXCHG,DEC,INC,XADD}.LOCK in Decompiler
 
 ---
  Ghidra/Processors/x86/data/languages/ia.sinc  |   6 +-
- .../x86/data/languages/lockable.sinc          | 357 +++++++-----------
- 2 files changed, 148 insertions(+), 215 deletions(-)
+ .../x86/data/languages/lockable.sinc          | 354 +++++++-----------
+ 2 files changed, 147 insertions(+), 213 deletions(-)
 
 diff --git a/Ghidra/Processors/x86/data/languages/ia.sinc b/Ghidra/Processors/x86/data/languages/ia.sinc
-index 957e387097..06478cfeec 100644
+index a7522bebed..ced0b76b57 100644
 --- a/Ghidra/Processors/x86/data/languages/ia.sinc
 +++ b/Ghidra/Processors/x86/data/languages/ia.sinc
-@@ -1584,12 +1584,14 @@ xrelease: 	is epsilon { }
+@@ -1586,12 +1586,14 @@ xrelease: 	is epsilon { }
  
  #XCHG with a memory destination asserts a LOCK signal whether or not there is a LOCK prefix (f0) 
  #"alwaysLock" constructor will place "LOCK" in the disassembly if the prefix occurs 
@@ -30,7 +30,7 @@ index 957e387097..06478cfeec 100644
  #"unlock" constructor is used to pair every LOCK pcodeop with a matching UNLOCK pcodeop
  unlock:		is lockprefx=1 { UNLOCK(); }
 diff --git a/Ghidra/Processors/x86/data/languages/lockable.sinc b/Ghidra/Processors/x86/data/languages/lockable.sinc
-index 9f8e7c7baa..52a28a2ff0 100644
+index ebcbe976fe..5b6e3dd3f9 100644
 --- a/Ghidra/Processors/x86/data/languages/lockable.sinc
 +++ b/Ghidra/Processors/x86/data/languages/lockable.sinc
 @@ -109,6 +109,7 @@
@@ -129,7 +129,7 @@ index 9f8e7c7baa..52a28a2ff0 100644
  }
  @endif
  
-@@ -572,78 +580,33 @@
+@@ -572,74 +580,30 @@
  }
  @endif
  
@@ -173,7 +173,7 @@ index 9f8e7c7baa..52a28a2ff0 100644
  }
  
 -:CMPXCHG^lockx m32,Reg32    is vexMode=0 & lockx & unlock & opsize=1 & byte=0xf; byte=0xb1; m32 & Reg32 ... & check_EAX_dest ...
-+:CMPXCHG^lockx_ Mem,Reg32   is vexMode=0 & lockx_ & opsize=1 & byte=0xf; byte=0xb1; Mem & Reg32 ...
++:CMPXCHG^lockx_ Mem,Reg32   is vexMode=0 & lockx_ & opsize=1 & byte=0xf; byte=0xb1; Mem & Reg32 ... & check_EAX_dest ...
  {
 -    build lockx;
 -    #this instruction writes to either EAX or Rmr32
@@ -186,13 +186,13 @@ index 9f8e7c7baa..52a28a2ff0 100644
 -    resultflags(diff);
 -    if (ZF) goto <equal>;
 -    EAX = dest;
--    build check_EAX_dest;
++    EAX = InterlockedCompareExchange(Mem, Reg32, EAX);
+     build check_EAX_dest;
 -    goto <inst_end>;
 -<equal>
 -    m32 = Reg32;
 -<inst_end>
 -    build unlock;
-+    EAX = InterlockedCompareExchange(Mem, Reg32, EAX);
  }
  
  @ifdef IA64
@@ -216,12 +216,7 @@ index 9f8e7c7baa..52a28a2ff0 100644
  }
  @endif
  
--:CMPXCHG8B^lockx  m64        is vexMode=0 & lockx & unlock & byte=0xf; byte=0xc7; ( mod != 0b11 & reg_opcode=1 ) ... & m64 
-+:CMPXCHG8B^lockx  m64        is vexMode=0 & lockx & unlock & byte=0xf; byte=0xc7; ( mod != 0b11 & reg_opcode=1 ) ... & m64
- {
-     build lockx;
-     local dest = m64;
-@@ -674,87 +637,101 @@
+@@ -676,87 +640,101 @@
  }
  @endif
  
@@ -379,7 +374,7 @@ index 9f8e7c7baa..52a28a2ff0 100644
  }
  @endif
  
-@@ -1172,100 +1149,54 @@
+@@ -1174,101 +1152,55 @@
  }
  @endif
  
@@ -412,18 +407,19 @@ index 9f8e7c7baa..52a28a2ff0 100644
 +    Reg16 = InterlockedExchangeAdd(Mem, Reg16);
  }
  
--:XADD^lockx m32,Reg32	is vexMode=0 & lockx & unlock & opsize=1 & byte=0x0F; byte=0xC1; m32 & Reg32 ... 
-+:XADD^lockx_ Mem,Reg32	is vexMode=0 & lockx_ & opsize=1 & byte=0x0F; byte=0xC1; Mem & Reg32 ...
+-:XADD^lockx m32,Reg32	is vexMode=0 & lockx & unlock & opsize=1 & byte=0x0F; byte=0xC1; (check_Reg32_dest & Reg32) ... & m32
++:XADD^lockx_ Mem,Reg32	is vexMode=0 & lockx_ & opsize=1 & byte=0x0F; byte=0xC1; (check_Reg32_dest & Reg32) ... & Mem
  {
 -    build lockx;
 -    build m32;
 -    addflags(m32,Reg32);
 -    local tmp = m32 + Reg32;
 -    Reg32 = m32;
++    Reg32 = InterlockedExchangeAdd(Mem, Reg32);
+     build check_Reg32_dest;
 -    m32 = tmp;
 -    resultflags(tmp);
 -    build unlock; 
-+    Reg32 = InterlockedExchangeAdd(Mem, Reg32);
  }
  
  @ifdef IA64
