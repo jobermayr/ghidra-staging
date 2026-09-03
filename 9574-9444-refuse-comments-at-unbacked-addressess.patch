@@ -1,0 +1,242 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Spencer Little <slittle57@gmail.com>
+Date: Wed, 19 Aug 2026 13:46:02 -0700
+Subject: [PATCH] 9574: 9444: refuse comments at unbacked addressess
+
+9444: refuse comment at unbacked memory address
+
+9444: add LoadState and check in setComment
+---
+ .../database/program/DBTraceProgramView.java  | 12 ++++++++
+ .../opinion/AbstractLibrarySupportLoader.java |  3 ++
+ .../ghidra/program/database/ProgramDB.java    | 15 ++++++++++
+ .../program/database/code/CodeManager.java    |  9 +++++-
+ .../ghidra/program/model/listing/Program.java | 30 +++++++++++++++++++
+ .../ghidra/program/model/StubProgram.java     | 11 +++++++
+ 6 files changed, 79 insertions(+), 1 deletion(-)
+
+diff --git a/Ghidra/Debug/Framework-TraceModeling/src/main/java/ghidra/trace/database/program/DBTraceProgramView.java b/Ghidra/Debug/Framework-TraceModeling/src/main/java/ghidra/trace/database/program/DBTraceProgramView.java
+index 721a5808e8..b125f95243 100644
+--- a/Ghidra/Debug/Framework-TraceModeling/src/main/java/ghidra/trace/database/program/DBTraceProgramView.java
++++ b/Ghidra/Debug/Framework-TraceModeling/src/main/java/ghidra/trace/database/program/DBTraceProgramView.java
+@@ -845,6 +845,18 @@ public class DBTraceProgramView implements TraceProgramView {
+ 		trace.setExecutablePath(path);
+ 	}
+ 
++	@Override
++	public LoadState getLoadState() {
++		// TODO: not yet implemented
++		throw new UnsupportedOperationException();
++	}
++
++	@Override
++	public void setLoadState(LoadState state) {
++		// TODO: not yet implemented
++		throw new UnsupportedOperationException();
++	}
++
+ 	@Override
+ 	public String getExecutableFormat() {
+ 		return "Trace";
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/opinion/AbstractLibrarySupportLoader.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/opinion/AbstractLibrarySupportLoader.java
+index 7fc793b184..6bb76ff529 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/opinion/AbstractLibrarySupportLoader.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/opinion/AbstractLibrarySupportLoader.java
+@@ -37,6 +37,7 @@ import ghidra.plugin.importer.ImporterPlugin;
+ import ghidra.program.model.lang.*;
+ import ghidra.program.model.listing.Library;
+ import ghidra.program.model.listing.Program;
++import ghidra.program.model.listing.Program.LoadState;
+ import ghidra.program.model.symbol.ExternalManager;
+ import ghidra.util.StringUtilities;
+ import ghidra.util.exception.CancelledException;
+@@ -928,12 +929,14 @@ public abstract class AbstractLibrarySupportLoader extends AbstractProgramLoader
+ 		Program program = createProgram(settings);
+ 
+ 		int transactionID = program.startTransaction("Loading");
++		program.setLoadState(LoadState.LOADING);
+ 		boolean success = false;
+ 		try {
+ 			log.appendMsg("Loading %s...".formatted(settings.provider().getFSRL()));
+ 			load(program, settings);
+ 			createDefaultMemoryBlocks(program, settings);
+ 			libraryNameList.addAll(getLibraryNames(settings.provider(), program));
++			program.setLoadState(LoadState.LOADED);
+ 			success = true;
+ 			return program;
+ 		}
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/ProgramDB.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/ProgramDB.java
+index 3e72db1ee3..e9491641da 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/ProgramDB.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/ProgramDB.java
+@@ -202,6 +202,7 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
+ 	private static final int NUM_MANAGERS = 15;
+ 
+ 	private ManagerDB[] managers = new ManagerDB[NUM_MANAGERS];
++	private LoadState loadState;
+ 	private OldFunctionManager oldFunctionMgr;
+ 	private MemoryMapDB memoryManager;
+ 	private GlobalNamespace globalNamespace;
+@@ -253,6 +254,7 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
+ 				"unsupported compilerSpec: " + compilerSpec.getClass().getName());
+ 		}
+ 
++		this.setLoadState(LoadState.INDETERMINATE);
+ 		this.language = language;
+ 		this.compilerSpec = ProgramCompilerSpec.getProgramCompilerSpec(this, compilerSpec);
+ 
+@@ -317,6 +319,7 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
+ 			throws IOException, VersionException, LanguageNotFoundException, CancelledException {
+ 
+ 		super(dbh, "Untitled", 500, consumer);
++		this.setLoadState(LoadState.INDETERMINATE);
+ 
+ 		if (monitor == null) {
+ 			monitor = TaskMonitor.DUMMY;
+@@ -329,6 +332,7 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
+ 		boolean success = false;
+ 		try {
+ 			int id = startTransaction("create program");
++			this.setLoadState(LoadState.LOADING);
+ 			recordChanges = false;
+ 			changeable = (openMode != OpenMode.IMMUTABLE);
+ 
+@@ -414,6 +418,7 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
+ 			registerCompilerSpecOptions();
+ 			getCodeManager().activateContextLocking();
+ 			success = true;
++			this.setLoadState(LoadState.LOADED);
+ 		}
+ 		finally {
+ 			dbh.closeScratchPad();
+@@ -693,6 +698,16 @@ public class ProgramDB extends DomainObjectAdapterDB implements Program, ChangeM
+ 		pl.setString(EXECUTABLE_PATH, path);
+ 	}
+ 
++	@Override
++	public LoadState getLoadState() {
++		return loadState;
++	}
++
++	@Override
++	public void setLoadState(LoadState state) {
++		loadState = state;
++	}
++
+ 	@Override
+ 	public String getExecutableFormat() {
+ 		String format = null;
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/code/CodeManager.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/code/CodeManager.java
+index 8fe643dccd..18ccde4551 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/code/CodeManager.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/code/CodeManager.java
+@@ -34,6 +34,7 @@ import ghidra.program.model.data.*;
+ import ghidra.program.model.lang.*;
+ import ghidra.program.model.lang.InstructionError.InstructionErrorType;
+ import ghidra.program.model.listing.*;
++import ghidra.program.model.listing.Program.LoadState;
+ import ghidra.program.model.mem.*;
+ import ghidra.program.model.symbol.*;
+ import ghidra.program.model.util.*;
+@@ -2965,14 +2966,20 @@ public class CodeManager implements ErrorHandler, ManagerDB {
+ 	 * @param commentType either EOL_COMMENT, PRE_COMMENT, POST_COMMENT, PLATE_COMMENT, or 
+ 	 * REPEATABLE_COMMENT
+ 	 * @param comment comment to set at the address
+-	 * @throws IllegalArgumentException if type is not one of the types of comments supported
++	 * @throws IllegalArgumentException if type is not one of the types of comments supported or
++	 * address does not exist in memory.
+ 	 */
+ 	public void setComment(Address address, CommentType commentType, String comment) {
+ 		try (Closeable c = lock.write()) {
++			if (program.getMemory().getBlock(address) == null && program.getLoadState() == LoadState.LOADED) {
++				throw new IllegalArgumentException("Cannot set comment: address not in known memory region." +
++						"\nAddress must exist in memory prior to comment creation.");
++			}
+ 			CodeUnit cu = getCodeUnitAt(address);
+ 			if (cu != null) {
+ 				cu.setComment(commentType, comment);
+ 				return;
++
+ 			}
+ 			long addr = addrMap.getKey(address, true);
+ 
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/listing/Program.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/listing/Program.java
+index 16edac4401..8867e5690f 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/listing/Program.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/listing/Program.java
+@@ -87,6 +87,17 @@ public interface Program extends DataTypeManagerDomainObject, ProgramArchitectur
+ 	/** Name of cold entry point addresses property map **/
+ 	public static final String COLD_ENTRY_MAP_NAME = "ColdEntries";
+ 
++	public enum LoadState {
++		/** Load state is not known **/
++		INDETERMINATE,
++
++		/** Program is fully loaded **/
++		LOADED,
++
++		/** Program is in the process of being loaded **/
++		LOADING
++	}
++
+ 	/**
+ 	 * Get the listing object.
+ 	 * @return the Listing interface to the listing object.
+@@ -252,6 +263,25 @@ public interface Program extends DataTypeManagerDomainObject, ProgramArchitectur
+ 	 */
+ 	public void setExecutablePath(String path);
+ 
++	/**
++	 * Gets programs LoadState, an Enum which indicates whether the Program has been fully
++	 * constructed or not.
++	 *
++	 * @return loadState  the current loadState
++	 */
++	public LoadState getLoadState();
++
++	/**
++	 * Sets programs LoadState, an Enum which indicates whether the Program has been fully
++	 * constructed or not.
++	 *
++	 * NOTE: the current implementation of loadState (where / how it's set) is approximate,
++	 * further review is recommended if relying on loadState for a critical use case
++	 *
++	 * @param state - the updated LoadState
++	 */
++	public void setLoadState(LoadState state);
++
+ 	/**
+ 	 * Returns a value corresponding to the original file format.
+ 	 * @return original file format used to load program or null if unknown
+diff --git a/Ghidra/Framework/SoftwareModeling/src/test/java/ghidra/program/model/StubProgram.java b/Ghidra/Framework/SoftwareModeling/src/test/java/ghidra/program/model/StubProgram.java
+index 82b6581e90..c46c20b804 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/test/java/ghidra/program/model/StubProgram.java
++++ b/Ghidra/Framework/SoftwareModeling/src/test/java/ghidra/program/model/StubProgram.java
+@@ -32,6 +32,7 @@ import ghidra.program.model.address.*;
+ import ghidra.program.model.data.CategoryPath;
+ import ghidra.program.model.lang.*;
+ import ghidra.program.model.listing.*;
++import ghidra.program.model.listing.Program.LoadState;
+ import ghidra.program.model.mem.Memory;
+ import ghidra.program.model.pcode.Varnode;
+ import ghidra.program.model.reloc.RelocationTable;
+@@ -425,6 +426,16 @@ public class StubProgram implements Program {
+ 		throw new UnsupportedOperationException();
+ 	}
+ 
++	@Override
++	public LoadState getLoadState() {
++		throw new UnsupportedOperationException();
++	}
++
++	@Override
++	public void setLoadState(LoadState state) {
++		throw new UnsupportedOperationException();
++	}
++
+ 	@Override
+ 	public String getExecutableFormat() {
+ 		throw new UnsupportedOperationException();
+-- 
+2.45.1
+

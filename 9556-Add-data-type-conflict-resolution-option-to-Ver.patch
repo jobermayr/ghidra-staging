@@ -4,16 +4,24 @@ Date: Fri, 28 Aug 2026 12:04:55 +0300
 Subject: [PATCH] 9556: Add data type conflict resolution option to Version
  Tracking settings
 
+Add data type conflict resolution option to Version
+ Tracking settings
+
+Fix VT conflict resolution options mutating data before
+ validation
+
+Remove unsound `REPLACE_EXISTING` conflict handler option for VT
 ---
- .../vt/api/markuptype/DataTypeMarkupType.java | 12 +++++++++
- .../matchtable/ApplyMarkupPropertyEditor.java | 25 +++++++++++++++++++
- .../matchtable/VTMatchTableProvider.java      |  5 ++++
- .../vt/gui/util/VTMatchApplyChoices.java      | 17 +++++++++++++
- .../feature/vt/gui/util/VTOptionDefines.java  |  4 +++
- 5 files changed, 63 insertions(+)
+ .../vt/api/markuptype/DataTypeMarkupType.java | 23 ++++++++---
+ .../matchtable/ApplyMarkupPropertyEditor.java | 25 +++++++++++
+ .../matchtable/VTMatchTableProvider.java      |  5 +++
+ .../vt/gui/util/VTMatchApplyChoices.java      | 16 ++++++++
+ .../feature/vt/gui/util/VTOptionDefines.java  |  4 ++
+ .../markupitem/DataTypeMarkupItemTest.java    | 41 +++++++++++++++++++
+ 6 files changed, 109 insertions(+), 5 deletions(-)
 
 diff --git a/Ghidra/Features/VersionTracking/src/main/java/ghidra/feature/vt/api/markuptype/DataTypeMarkupType.java b/Ghidra/Features/VersionTracking/src/main/java/ghidra/feature/vt/api/markuptype/DataTypeMarkupType.java
-index d7248e4c6a..9b7c9d706f 100644
+index d7248e4c6a..abc891b8c6 100644
 --- a/Ghidra/Features/VersionTracking/src/main/java/ghidra/feature/vt/api/markuptype/DataTypeMarkupType.java
 +++ b/Ghidra/Features/VersionTracking/src/main/java/ghidra/feature/vt/api/markuptype/DataTypeMarkupType.java
 @@ -25,6 +25,7 @@ import ghidra.feature.vt.api.stringable.DataTypeStringable;
@@ -24,7 +32,37 @@ index d7248e4c6a..9b7c9d706f 100644
  import ghidra.feature.vt.gui.util.VTMatchApplyChoices.ReplaceDataChoices;
  import ghidra.feature.vt.gui.util.VTOptionDefines;
  import ghidra.framework.options.Options;
-@@ -334,6 +335,17 @@ public class DataTypeMarkupType extends VTMarkupType {
+@@ -206,7 +207,8 @@ public class DataTypeMarkupType extends VTMarkupType {
+ 	}
+ 
+ 	private boolean setDataType(Program program, Address startAddress, DataType dataType,
+-			int dataLength, VTMatchApplyChoices.ReplaceDataChoices replaceChoice)
++			int dataLength, VTMatchApplyChoices.ReplaceDataChoices replaceChoice,
++			DataTypeConflictHandler conflictHandler)
+ 			throws CodeUnitInsertionException, VersionTrackingApplyException {
+ 
+ 		Listing listing = program.getListing();
+@@ -260,15 +262,17 @@ public class DataTypeMarkupType extends VTMarkupType {
+ 		}
+ 
+ 		if (replaceFirstOnly && hasOtherDefinedData) {
+-			// Just return since we are only replacing first data and this has some defined 
++			// Just return since we are only replacing first data and this has some defined
+ 			// data that would be overwritten following the first data in the destination.
+ 			return false;
+ 		}
+ 
++		DataType resolvedDataType = program.getDataTypeManager().resolve(dataType, conflictHandler);
++
+ 		listing.clearCodeUnits(startAddress, endAddress, false);
+ 
+ 		try {
+-			listing.createData(startAddress, dataType, dataLength);
++			listing.createData(startAddress, resolvedDataType, dataLength);
+ 		}
+ 		catch (CodeUnitInsertionException e) {
+ 			tryToRestoreOriginalData(listing, startAddress, originalDataType, originalDataLength);
+@@ -334,9 +338,17 @@ public class DataTypeMarkupType extends VTMarkupType {
  			sourceDataLength = sourceData.getLength();
  		}
  
@@ -33,15 +71,26 @@ index d7248e4c6a..9b7c9d706f 100644
 +			VTOptionDefines.DEFAULT_OPTION_FOR_DATA_TYPE_CONFLICT_HANDLER);
 +		DataTypeConflictHandler conflictHandler = switch (conflictChoice) {
 +			case USE_EXISTING -> DataTypeConflictHandler.KEEP_HANDLER;
-+			case REPLACE_EXISTING -> DataTypeConflictHandler.REPLACE_HANDLER;
-+			default -> DataTypeConflictHandler.DEFAULT_HANDLER;
++			case RENAME_AND_ADD -> DataTypeConflictHandler.DEFAULT_HANDLER;
 +		};
-+		sourceDataType =
-+			destinationProgram.getDataTypeManager().resolve(sourceDataType, conflictHandler);
 +
  		try {
  			return setDataType(destinationProgram, destinationAddress, sourceDataType,
- 				sourceDataLength, replaceChoice);
+-				sourceDataLength, replaceChoice);
++				sourceDataLength, replaceChoice, conflictHandler);
+ 		}
+ 		catch (CodeUnitInsertionException e) {
+ 			throw new VersionTrackingApplyException(getApplyFailedMessage(sourceAddress,
+@@ -404,7 +416,8 @@ public class DataTypeMarkupType extends VTMarkupType {
+ 
+ 		try {
+ 			setDataType(destinationProgram, destinationAddress, originalDataType,
+-				originalDataLength, VTMatchApplyChoices.ReplaceDataChoices.REPLACE_ALL_DATA);
++				originalDataLength, VTMatchApplyChoices.ReplaceDataChoices.REPLACE_ALL_DATA,
++				DataTypeConflictHandler.DEFAULT_HANDLER);
+ 		}
+ 		catch (CodeUnitInsertionException e) {
+ 			throw new VersionTrackingApplyException("Couldn't unapply data type markup @ " +
 diff --git a/Ghidra/Features/VersionTracking/src/main/java/ghidra/feature/vt/gui/provider/matchtable/ApplyMarkupPropertyEditor.java b/Ghidra/Features/VersionTracking/src/main/java/ghidra/feature/vt/gui/provider/matchtable/ApplyMarkupPropertyEditor.java
 index e48653a8e6..f2a058f677 100644
 --- a/Ghidra/Features/VersionTracking/src/main/java/ghidra/feature/vt/gui/provider/matchtable/ApplyMarkupPropertyEditor.java
@@ -144,17 +193,16 @@ index 56d2fd7557..a59926c8a4 100644
  			"The default apply action <b>for labels</b> when performing bulk apply operations");
  
 diff --git a/Ghidra/Features/VersionTracking/src/main/java/ghidra/feature/vt/gui/util/VTMatchApplyChoices.java b/Ghidra/Features/VersionTracking/src/main/java/ghidra/feature/vt/gui/util/VTMatchApplyChoices.java
-index 9888902210..37a25a2ef1 100644
+index 9888902210..3ec5905cca 100644
 --- a/Ghidra/Features/VersionTracking/src/main/java/ghidra/feature/vt/gui/util/VTMatchApplyChoices.java
 +++ b/Ghidra/Features/VersionTracking/src/main/java/ghidra/feature/vt/gui/util/VTMatchApplyChoices.java
-@@ -239,4 +239,21 @@ public class VTMatchApplyChoices {
+@@ -239,4 +239,20 @@ public class VTMatchApplyChoices {
  		}
  	}
  
 +	public static enum DataTypeConflictChoices {
 +		USE_EXISTING("Use Existing Data Type"),
-+		RENAME_AND_ADD("Rename New Data Type"),
-+		REPLACE_EXISTING("Replace Existing Data Type");
++		RENAME_AND_ADD("Rename New Data Type");
 +
 +		private String optionDisplayString;
 +
@@ -191,6 +239,86 @@ index 7cf9c9238a..41e293751d 100644
  	public static final String FUNCTION_SIGNATURE = APPLY_MARKUP_OPTIONS_NAME +
  		".Function Signature";
  	public static final String CALLING_CONVENTION = APPLY_MARKUP_OPTIONS_NAME +
+diff --git a/Ghidra/Features/VersionTracking/src/test.slow/java/ghidra/feature/vt/api/markupitem/DataTypeMarkupItemTest.java b/Ghidra/Features/VersionTracking/src/test.slow/java/ghidra/feature/vt/api/markupitem/DataTypeMarkupItemTest.java
+index 921199ff38..88c3c0c824 100644
+--- a/Ghidra/Features/VersionTracking/src/test.slow/java/ghidra/feature/vt/api/markupitem/DataTypeMarkupItemTest.java
++++ b/Ghidra/Features/VersionTracking/src/test.slow/java/ghidra/feature/vt/api/markupitem/DataTypeMarkupItemTest.java
+@@ -25,6 +25,7 @@ import org.junit.Test;
+ 
+ import ghidra.feature.vt.api.main.*;
+ import ghidra.feature.vt.api.markuptype.DataTypeMarkupType;
++import ghidra.feature.vt.gui.util.VTMatchApplyChoices.DataTypeConflictChoices;
+ import ghidra.feature.vt.gui.util.VTMatchApplyChoices.ReplaceDataChoices;
+ import ghidra.feature.vt.gui.util.VTOptionDefines;
+ import ghidra.framework.options.ToolOptions;
+@@ -305,6 +306,38 @@ public class DataTypeMarkupItemTest extends AbstractVTMarkupItemTest {
+ 		doTestFindAndApplyMarkupItem_NoEffect(validator);
+ 	}
+ 
++	@Test
++	public void testRejectedApplyDoesNotMutateDestinationDataTypeManager() throws Exception {
++
++		Address sourceAddress = addr("0x010074e6", sourceProgram); // LoadCursorW
++		StructureDataType sourceDataType = new StructureDataType("RejectedApplyStruct", 0);
++		sourceDataType.add(new DWordDataType());
++		Data sourceData =
++			setDataType(sourceProgram, sourceAddress, sourceDataType, sourceDataType.getLength());
++
++		Address destinationAddress = addr("0x010074e6", destinationProgram); // LoadCursorW
++		StringDataType destinationDataType = new StringDataType();
++		Data destinationData =
++			setDataType(destinationProgram, destinationAddress, destinationDataType, 4); // Get "Load".
++		setDataType(destinationProgram, destinationAddress.add(4), destinationDataType, 6); // Get "Cursor".
++
++		DataTypeManager destinationDTM = destinationProgram.getDataTypeManager();
++		assertNull("Test setup invalid - destination should not already have this data type",
++			destinationDTM.getDataType(sourceDataType.getCategoryPath(),
++				sourceDataType.getName()));
++
++		DataTypeValidator validator = new DataTypeValidator(sourceData, destinationData,
++			ReplaceDataChoices.REPLACE_UNDEFINED_DATA_ONLY);
++		validator.setConflictChoice(DataTypeConflictChoices.RENAME_AND_ADD);
++		doTestFindAndApplyMarkupItem_NoEffect(validator);
++
++		assertNull(
++			"Rejected apply must not add the source data type to the destination data type " +
++				"manager",
++			destinationDTM.getDataType(sourceDataType.getCategoryPath(),
++				sourceDataType.getName()));
++	}
++
+ 	@Test
+ 	public void testReplaceUndefinedOnlyWithLargerWhenBlockedByInstruction() throws Exception {
+ 
+@@ -494,6 +527,7 @@ public class DataTypeMarkupItemTest extends AbstractVTMarkupItemTest {
+ 		private int sourceLength;
+ 		private int originalDestinationLength;
+ 		private ReplaceDataChoices dataTypeChoice;
++		private DataTypeConflictChoices conflictChoice;
+ 
+ 		DataTypeValidator(Data sourceData, Data destinationData,
+ 				ReplaceDataChoices dataTypeChoice) {
+@@ -510,6 +544,10 @@ public class DataTypeMarkupItemTest extends AbstractVTMarkupItemTest {
+ 			this.originalDestinationLength = destinationData.getLength();
+ 		}
+ 
++		void setConflictChoice(DataTypeConflictChoices conflictChoice) {
++			this.conflictChoice = conflictChoice;
++		}
++
+ 		@Override
+ 		protected Address getDestinationApplyAddress() {
+ 			return getDestinationMatchAddress();
+@@ -571,6 +609,9 @@ public class DataTypeMarkupItemTest extends AbstractVTMarkupItemTest {
+ 		public ToolOptions getOptions() {
+ 			ToolOptions vtOptions = super.getOptions();
+ 			vtOptions.setEnum(VTOptionDefines.DATA_MATCH_DATA_TYPE, dataTypeChoice);
++			if (conflictChoice != null) {
++				vtOptions.setEnum(VTOptionDefines.DATA_TYPE_CONFLICT_HANDLER, conflictChoice);
++			}
+ 
+ 			return vtOptions;
+ 		}
 -- 
 2.45.1
 

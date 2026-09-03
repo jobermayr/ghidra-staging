@@ -1,0 +1,106 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: unslept <sirinotomer@gmail.com>
+Date: Tue, 1 Sep 2026 21:37:47 -0400
+Subject: [PATCH] 9570: MCS96: fix subtractFlags macro double-reading its
+ operands
+
+subtractFlags(op1, op2, res) referenced op1/op2 twice each in its body.
+SLEIGH macro arguments are textual substitution, not values bound once,
+and on MCS-96 a register operand like PORT01 is a named location
+directly in the RAM space (see MCS96.sinc's "define RAM offset=...
+[ ... PORT01 ... ]" block), not a separate register space. So every
+reference to the parameter re-emits a fresh memory read. Normal CSE
+hides the redundancy; it becomes visible once the region is marked
+volatile, since volatile correctly refuses to merge the reads. That's
+the actual bug behind #6186's report.
+
+Fixed by caching each parameter into a local once at the top of the
+macro, the same pattern DEC/DECB already use a few lines above for the
+identical reason.
+
+subtractFlags has 13 call sites (CMP, CMPB, CMPL, DEC, DECB, NEG, NEGB,
+both SUB forms, both SUBB forms, SUBC, SUBCB), so the fix goes in the
+one shared place rather than copy-pasted 13 times.
+
+Split out of #9547 at ABratovic's suggestion, since this is an
+unrelated SLEIGH bug bundled in alongside the decompiler print/analysis
+fixes there.
+---
+ .../Decompiler/certification.manifest         |  1 +
+ .../decompile/datatests/volatilemcs96dup.xml  | 32 +++++++++++++++++++
+ .../MCS96/data/languages/MCS96.sinc           |  6 ++--
+ 3 files changed, 37 insertions(+), 2 deletions(-)
+ create mode 100644 Ghidra/Features/Decompiler/src/decompile/datatests/volatilemcs96dup.xml
+
+diff --git a/Ghidra/Features/Decompiler/certification.manifest b/Ghidra/Features/Decompiler/certification.manifest
+index aea614c4d2..41b3219c76 100644
+--- a/Ghidra/Features/Decompiler/certification.manifest
++++ b/Ghidra/Features/Decompiler/certification.manifest
+@@ -126,6 +126,7 @@ src/decompile/datatests/varcross.xml||GHIDRA||||END|
+ src/decompile/datatests/varnode_no_descend.xml||GHIDRA||||END|
+ src/decompile/datatests/volatilelabelfold.xml||GHIDRA||||END|
+ src/decompile/datatests/volatilemapglobal.xml||GHIDRA||||END|
++src/decompile/datatests/volatilemcs96dup.xml||GHIDRA||||END|
+ src/decompile/datatests/wayoffarray.xml||GHIDRA||||END|
+ src/decompile/datatests/wraprange.xml||GHIDRA||||END|
+ src/decompile/zlib/README.txt||GHIDRA||||END|
+diff --git a/Ghidra/Features/Decompiler/src/decompile/datatests/volatilemcs96dup.xml b/Ghidra/Features/Decompiler/src/decompile/datatests/volatilemcs96dup.xml
+new file mode 100644
+index 0000000000..63b8c2332f
+--- /dev/null
++++ b/Ghidra/Features/Decompiler/src/decompile/datatests/volatilemcs96dup.xml
+@@ -0,0 +1,32 @@
++<decompilertest>
++<binaryimage arch="MCS96:LE:16:default">
++<!--
++   Covers #6186: the subtractFlags macro (MCS96.sinc) referencing its
++   op1/op2 parameters twice each inside the macro body. On MCS-96 a
++   register operand like PORT01 is a named location in the RAM space
++   (see MCS96.sinc's "define RAM offset=... [ ... PORT01 ... ]" block),
++   so passing one as a macro argument re-emits a fresh read at every
++   point the parameter name appears in the macro's body; normally
++   invisible because plain CSE folds the redundant reads back together,
++   but visible once the region is marked volatile (CSE correctly refuses
++   to merge volatile reads). Before the fix this function decompiled with
++   three back-to-back "xVar1 = PORT01;" reads for a single CMP
++   instruction; after it, two (the CMP constructor's own read to compute
++   the comparison result, plus one from the macro's now-single cached
++   read of its argument). Confirmed by hand-building this exact repro
++   and diffing the raw p-code before and after reverting the fix.
++-->
++<bytechunk space="RAM" offset="0x2000">
++8934120ed301fdf0
++</bytechunk>
++<symbol space="RAM" offset="0x2000" name="cmptest"/>
++</binaryimage>
++<script>
++  <com>volatile [RAM,0xe,2]</com>
++  <com>lo fu cmptest</com>
++  <com>decompile</com>
++  <com>print C</com>
++  <com>quit</com>
++</script>
++<stringmatch name="Volatile MCS96 Duplication #1" min="2" max="2">xVar1 = PORT01;</stringmatch>
++</decompilertest>
+diff --git a/Ghidra/Processors/MCS96/data/languages/MCS96.sinc b/Ghidra/Processors/MCS96/data/languages/MCS96.sinc
+index 2ac6ab0650..008f410179 100644
+--- a/Ghidra/Processors/MCS96/data/languages/MCS96.sinc
++++ b/Ghidra/Processors/MCS96/data/languages/MCS96.sinc
+@@ -431,10 +431,12 @@ macro additionFlags(op1, op2, res) {
+ }
+ 
+ macro subtractFlags(op1, op2, res) {
++	local subOp1 = op1;	# op1/op2 may denote a memory-mapped register read; cache each
++	local subOp2 = op2;	# once so referencing them twice below doesn't duplicate the access
+ 	$(N) = (res s< 0);
+ 	$(Z) = (res == 0);
+-	$(C) = (op1 < op2) == 0;
+-	$(V) = sborrow(op1, op2);
++	$(C) = (subOp1 < subOp2) == 0;
++	$(V) = sborrow(subOp1, subOp2);
+ 	$(VT) = $(VT) | $(V);
+ }
+ 
+-- 
+2.45.1
+

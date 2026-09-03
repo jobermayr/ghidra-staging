@@ -4,6 +4,9 @@ Date: Tue, 1 Sep 2026 11:14:42 -0500
 Subject: [PATCH] 9565: #8794: x86-64: decode AMD XOP prefix (0x8F) and
  VPROT{B,W,D,Q}
 
+#8794: x86-64: decode AMD XOP prefix (0x8F) and
+ VPROT{B,W,D,Q}
+
 Adds xop.sinc (included from x86.slaspec alongside the other ISA-extension
 files, matching avx512_bmm.sinc/sha.sinc precedent): 64-bit XOP 3-byte
 prefix decode (maps 8/9, modeled on the VEX 3-byte prefix constructors in
@@ -23,11 +26,25 @@ Verified: both x86.sla and x86-64.sla recompile cleanly; the repro bytes
 decode and decompile to real rotates (e.g. imm=3 -> b << 3 | b >> 5 per
 byte lane), and the 26 XOP sites in a real-world binary's bundled OpenSSL
 now decompile instead of aborting.
+
+#9565: constrain XOP VPROT imm8 form to W=0, encoded vvvv=1111
+
+The fixed-count VPROT{B,W,D,Q} encodings (XOP map 8, 0xC0..0xC3) reserve
+XOP.W=0 and vvvv=1111; W=1 or vvvv!=1111 are #UD. Constrain rexWprefix=0
+and vexVVVV=0 (prefix stores vvvv inverted, so encoded-1111 == vexVVVV 0)
+in all four constructors.
+
+Verified by headless disassembly of crafted encodings:
+  8f e8 78 c2 ec 0e  -> VPROTD XMM5,XMM4,0xe  (decodes)
+  8f e8 f8 c2 ec 0e  (W=1)      -> no instruction
+  8f e8 08 c2 ec 0e  (vvvv=0000) -> no instruction
+Matches binutils i386-opc.tbl: vprot<xop>, 0xc0|<xop:opc>, XOP,
+Modrm|Vex128|SpaceXOP08|VexW0|NoSuf (no SrcVVVV operand).
 ---
  Ghidra/Processors/x86/certification.manifest  |   1 +
  .../Processors/x86/data/languages/x86.slaspec |   1 +
- Ghidra/Processors/x86/data/languages/xop.sinc | 100 ++++++++++++++++++
- 3 files changed, 102 insertions(+)
+ Ghidra/Processors/x86/data/languages/xop.sinc | 103 ++++++++++++++++++
+ 3 files changed, 105 insertions(+)
  create mode 100644 Ghidra/Processors/x86/data/languages/xop.sinc
 
 diff --git a/Ghidra/Processors/x86/certification.manifest b/Ghidra/Processors/x86/certification.manifest
@@ -55,10 +72,10 @@ index 21750e901f..b91331511b 100644
  }
 diff --git a/Ghidra/Processors/x86/data/languages/xop.sinc b/Ghidra/Processors/x86/data/languages/xop.sinc
 new file mode 100644
-index 0000000000..2d3a378f23
+index 0000000000..a146e63c8b
 --- /dev/null
 +++ b/Ghidra/Processors/x86/data/languages/xop.sinc
-@@ -0,0 +1,100 @@
+@@ -0,0 +1,103 @@
 +# ---------------------------------------------------------------------------
 +# AMD XOP (eXtended Operations) support — 0x8F prefix, maps 8 and 9.
 +#
@@ -91,9 +108,12 @@ index 0000000000..2d3a378f23
 +
 +# VPROT{B,W,D,Q} by imm8 (XOP map 8, opcodes 0xC0..0xC3): rotate each lane of
 +# src left by (imm8 mod lane-width), into dest (upper bits of the ZMM alias
-+# zeroed, AVX-style). Note: p-code shifts by >= the operand bit-width yield 0,
-+# so the kk=0 case degenerates to (a << 0) | 0 = a with no masking needed.
-+:VPROTB XmmReg1, XmmReg2_m128, imm8 is $(XOP_M8) & vexMode=1 & vexL=0; byte=0xC0; (XmmReg1 & ZmmReg1) ... & XmmReg2_m128; imm8
++# zeroed, AVX-style). The immediate-count form requires XOP.W=0 and an encoded
++# vvvv of 1111b (both reserved); W=1 or vvvv!=1111 encodings are #UD. (The
++# prefix stores vvvv inverted, so encoded-1111 constrains vexVVVV=0.)
++# Note: p-code shifts by >= the operand bit-width yield 0, so the kk=0 case
++# degenerates to (a << 0) | 0 = a with no masking needed.
++:VPROTB XmmReg1, XmmReg2_m128, imm8 is $(XOP_M8) & vexMode=1 & vexL=0 & rexWprefix=0 & vexVVVV=0; byte=0xC0; (XmmReg1 & ZmmReg1) ... & XmmReg2_m128; imm8
 +{
 +	local tmp:16;
 +	local srcA:16 = XmmReg2_m128;
@@ -118,7 +138,7 @@ index 0000000000..2d3a378f23
 +	ZmmReg1 = zext(tmp);
 +}
 +
-+:VPROTW XmmReg1, XmmReg2_m128, imm8 is $(XOP_M8) & vexMode=1 & vexL=0; byte=0xC1; (XmmReg1 & ZmmReg1) ... & XmmReg2_m128; imm8
++:VPROTW XmmReg1, XmmReg2_m128, imm8 is $(XOP_M8) & vexMode=1 & vexL=0 & rexWprefix=0 & vexVVVV=0; byte=0xC1; (XmmReg1 & ZmmReg1) ... & XmmReg2_m128; imm8
 +{
 +	local tmp:16;
 +	local srcA:16 = XmmReg2_m128;
@@ -135,7 +155,7 @@ index 0000000000..2d3a378f23
 +	ZmmReg1 = zext(tmp);
 +}
 +
-+:VPROTD XmmReg1, XmmReg2_m128, imm8 is $(XOP_M8) & vexMode=1 & vexL=0; byte=0xC2; (XmmReg1 & ZmmReg1) ... & XmmReg2_m128; imm8
++:VPROTD XmmReg1, XmmReg2_m128, imm8 is $(XOP_M8) & vexMode=1 & vexL=0 & rexWprefix=0 & vexVVVV=0; byte=0xC2; (XmmReg1 & ZmmReg1) ... & XmmReg2_m128; imm8
 +{
 +	local tmp:16;
 +	local srcA:16 = XmmReg2_m128;
@@ -148,7 +168,7 @@ index 0000000000..2d3a378f23
 +	ZmmReg1 = zext(tmp);
 +}
 +
-+:VPROTQ XmmReg1, XmmReg2_m128, imm8 is $(XOP_M8) & vexMode=1 & vexL=0; byte=0xC3; (XmmReg1 & ZmmReg1) ... & XmmReg2_m128; imm8
++:VPROTQ XmmReg1, XmmReg2_m128, imm8 is $(XOP_M8) & vexMode=1 & vexL=0 & rexWprefix=0 & vexVVVV=0; byte=0xC3; (XmmReg1 & ZmmReg1) ... & XmmReg2_m128; imm8
 +{
 +	local tmp:16;
 +	local srcA:16 = XmmReg2_m128;

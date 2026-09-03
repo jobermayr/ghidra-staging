@@ -1,0 +1,80 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: unslept <sirinotomer@gmail.com>
+Date: Wed, 2 Sep 2026 17:25:57 -0400
+Subject: [PATCH] 9578: MCS96: fix SUBB breg, oper8 never writing its result
+ back
+
+The 2-op form of SUBB computed the subtraction into a local and passed
+that local into subtractFlags for the carry/overflow bits, but never
+assigned it back to breg. Every other in-place arithmetic constructor
+in the file (SUB, ADD, ADDB, DEC, DECB, ...) writes its result back to
+the destination register; this one silently dropped it, so the
+instruction's whole effect besides the flags was lost.
+
+Found while auditing MCS96.sinc for a related but separate bug
+(subtractFlags/additionFlags callers double-reading volatile operands,
+see #9570). Split out on its own since it's an unrelated bug.
+---
+ .../datatests/mcs96subbwriteback.xml          | 27 +++++++++++++++++++
+ .../Processors/MCS96/certification.manifest   |  1 +
+ .../MCS96/data/languages/MCS96.sinc           |  1 +
+ 3 files changed, 29 insertions(+)
+ create mode 100644 Ghidra/Features/Decompiler/src/decompile/datatests/mcs96subbwriteback.xml
+
+diff --git a/Ghidra/Features/Decompiler/src/decompile/datatests/mcs96subbwriteback.xml b/Ghidra/Features/Decompiler/src/decompile/datatests/mcs96subbwriteback.xml
+new file mode 100644
+index 0000000000..18b4f6bbc9
+--- /dev/null
++++ b/Ghidra/Features/Decompiler/src/decompile/datatests/mcs96subbwriteback.xml
+@@ -0,0 +1,27 @@
++<decompilertest>
++<binaryimage arch="MCS96:LE:16:default">
++<!--
++   The 2-op form of SUBB (SUBB breg, oper8) computed its subtraction into a
++   local and fed that local into subtractFlags for the flag bits, but never
++   wrote the result back to breg. Every other arithmetic constructor in
++   MCS96.sinc (SUB, ADD, ADDB, DEC, DECB, ...) writes its result back;
++   this one silently dropped it, so the destination register was left
++   unmodified by an instruction whose whole purpose is to modify it.
++
++   782005f0 is SUBB HSI_timehi, R20 (op6=0x1e, oper8=R20, breg=HSI_timehi)
++   followed by RET (0xf0). Before the fix this decompiled to just
++   "return;", with the subtraction computed and its result discarded.
++-->
++<bytechunk space="RAM" offset="0x2000">
++782005f0
++</bytechunk>
++<symbol space="RAM" offset="0x2000" name="subbtest"/>
++</binaryimage>
++<script>
++  <com>lo fu subbtest</com>
++  <com>decompile</com>
++  <com>print C</com>
++  <com>quit</com>
++</script>
++<stringmatch name="SUBB writeback #1" min="1" max="1">HSI_timehi = HSI_timehi - R20;</stringmatch>
++</decompilertest>
+diff --git a/Ghidra/Processors/MCS96/certification.manifest b/Ghidra/Processors/MCS96/certification.manifest
+index 45bfd41927..b513ef5d48 100644
+--- a/Ghidra/Processors/MCS96/certification.manifest
++++ b/Ghidra/Processors/MCS96/certification.manifest
+@@ -8,3 +8,4 @@ data/languages/MCS96.pspec||GHIDRA||||END|
+ data/languages/MCS96.sinc||GHIDRA||||END|
+ data/languages/MCS96.slaspec||GHIDRA||||END|
+ data/manuals/MCS96.idx||GHIDRA||||END|
++src/decompile/datatests/mcs96subbwriteback.xml||GHIDRA||||END|
+diff --git a/Ghidra/Processors/MCS96/data/languages/MCS96.sinc b/Ghidra/Processors/MCS96/data/languages/MCS96.sinc
+index e7bfedc1a8..b3c23f44b0 100644
+--- a/Ghidra/Processors/MCS96/data/languages/MCS96.sinc
++++ b/Ghidra/Processors/MCS96/data/languages/MCS96.sinc
+@@ -1244,6 +1244,7 @@ cc: "E"    is cond=15 { tmp:1 = ($(Z) == 1); export tmp; }
+ :SUBB breg, oper8                   is op6=0x1e ... & oper8; breg {
+ 	local tmp = breg - oper8;
+ 	subtractFlags(breg, oper8, tmp);
++	breg = tmp;
+ }
+ 
+ :SUBB dbreg, breg, oper8            is op6=0x16 ... & oper8; breg; dbreg {
+-- 
+2.45.1
+
