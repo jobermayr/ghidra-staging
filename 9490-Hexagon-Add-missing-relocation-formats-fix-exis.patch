@@ -12,15 +12,15 @@ Formatting, use unsigned shifts for divides
 
 Fix HEXAGON_B32_PCREL_X shift on upper half of immext
 
-Start refactoring to masks
+Migrate from switch to masks for instruction-specific relocations
 
-Convert more relocations to use masks
+Drop handling of GPREL relocations, as we shouldn't assume the value of GP to be 0
 ---
- .../Hexagon_ElfRelocationHandler.java         | 395 ++++++++++++++++--
- 1 file changed, 362 insertions(+), 33 deletions(-)
+ .../Hexagon_ElfRelocationHandler.java         | 299 +++++++++++++++---
+ 1 file changed, 248 insertions(+), 51 deletions(-)
 
 diff --git a/Ghidra/Processors/Hexagon/src/main/java/ghidra/app/util/bin/format/elf/relocation/Hexagon_ElfRelocationHandler.java b/Ghidra/Processors/Hexagon/src/main/java/ghidra/app/util/bin/format/elf/relocation/Hexagon_ElfRelocationHandler.java
-index 6da16e9e51..db43eaf600 100644
+index 6da16e9e51..eabf102d1d 100644
 --- a/Ghidra/Processors/Hexagon/src/main/java/ghidra/app/util/bin/format/elf/relocation/Hexagon_ElfRelocationHandler.java
 +++ b/Ghidra/Processors/Hexagon/src/main/java/ghidra/app/util/bin/format/elf/relocation/Hexagon_ElfRelocationHandler.java
 @@ -15,6 +15,9 @@
@@ -33,7 +33,7 @@ index 6da16e9e51..db43eaf600 100644
  import ghidra.app.util.bin.format.elf.*;
  import ghidra.app.util.importer.MessageLog;
  import ghidra.program.model.address.Address;
-@@ -44,6 +47,107 @@ public class Hexagon_ElfRelocationHandler
+@@ -44,6 +47,141 @@ public class Hexagon_ElfRelocationHandler
  		return Hexagon_ElfRelocationType.R_HEXAGON_RELATIVE.typeId;
  	}
  
@@ -125,6 +125,13 @@ index 6da16e9e51..db43eaf600 100644
 +		new InstructionMask(0xdf000000, 0x006020e0),
 +	};
 +
++	private Optional<Integer> findMaskR6Common(int ins) {
++		return Stream.of(r6Masks)
++				.filter(i -> i.compareMask() == (ins & 0xFF000000))
++				.map(i -> i.valueMask())
++				.findAny();
++	}
++
 +	/*
 +	 * Find the mask for R_HEX_6_X type relocations
 +	 */
@@ -132,148 +139,106 @@ index 6da16e9e51..db43eaf600 100644
 +		if (isDuplex(ins)) {
 +			return Optional.of(0x03F00000);
 +		}
-+		return Stream.of(r6Masks)
-+			.filter(i -> i.compareMask() == (ins & 0xFF000000))
-+			.map(i -> i.valueMask())
-+			.findAny();
++		return findMaskR6Common(ins);
++	}
++
++	/*
++	 * Find the mask for R_HEX_16_X type relocations
++	 */
++	private Optional<Integer> findMaskR16(int ins) {
++		if (isDuplex(ins)) {
++			return Optional.of(0x03F00000);
++		}
++		int maskedIns = ins & ~(0b11 << 14);
++
++		switch((0xff000000 & maskedIns)) {
++		case 0x48000000:
++			return Optional.of(0x061f20ff);
++		case 0x49000000:
++			return Optional.of(0x061f3fe0);
++		case 0x78000000:
++			return Optional.of(0x00df3fe0);
++		case 0xb0000000:
++			return Optional.of(0x0fe03fe0);
++		}
++		switch((0xff802000 & maskedIns)) {
++		case 0x74000000:
++		case 0x74002000:
++		case 0x74800000:
++		case 0x74802000:
++			return Optional.of(0x00001fe0);
++		}
++
++		  return findMaskR6Common(maskedIns);
 +	}
 +
  	@Override
  	protected RelocationResult relocate(ElfRelocationContext<?> elfRelocationContext,
  			ElfRelocation relocation, Hexagon_ElfRelocationType type, Address relocationAddress,
-@@ -100,8 +204,6 @@ public class Hexagon_ElfRelocationHandler
+@@ -85,27 +223,30 @@ public class Hexagon_ElfRelocationHandler
+ 		}
+ 
+ 		int value = (int) (symbolValue + addend);
++		int pcRelativeValue = (int) (Integer.toUnsignedLong(value) - Integer.toUnsignedLong((int) offset));
+ 		int memValue = memory.getInt(relocationAddress);
+ 
+ 		switch (type) {
+ 			case R_HEXAGON_B22_PCREL:
+-				int dist =
+-					(int) (Integer.toUnsignedLong(value) - Integer.toUnsignedLong((int) offset));
+-				if ((dist < -0x00800000) || (dist >= 0x00800000)) {
++				if ((pcRelativeValue < -0x00800000) || (pcRelativeValue >= 0x00800000)) {
+ 					return RelocationResult.FAILURE;
+ 				}
+ 				memValue &= ~0x01ff3ffe;
+-				dist = dist >>> 2;
++				int dist = pcRelativeValue >>> 2;
+ 				memValue |= 0x00003ffe & (dist << 1);
  				memValue |= 0x01ff0000 & (dist << 3);
  				memory.setInt(relocationAddress, memValue);
  				break;
 -
 -//				break;
- //			case R_HEXAGON_B15_PCREL:
- //				break;
- //			case R_HEXAGON_B7_PCREL:
-@@ -136,14 +238,114 @@ public class Hexagon_ElfRelocationHandler
- 				byteLength = 1;
- 				break;
+-//			case R_HEXAGON_B15_PCREL:
+-//				break;
+-//			case R_HEXAGON_B7_PCREL:
+-//				break;
++			case R_HEXAGON_B15_PCREL:
++				int mask = 0x00DF20FE;
++				memValue |= applyMask(mask, pcRelativeValue >> 2);
++				memory.setInt(relocationAddress, memValue);
++				break;
++			case R_HEXAGON_B7_PCREL:
++				mask = 0x00001F18;
++				memValue |= applyMask(mask, pcRelativeValue >> 2);
++				memory.setInt(relocationAddress, memValue);
++				break;
  
--//			case R_HEXAGON_GPREL16_0:
--//				break;
--//			case R_HEXAGON_GPREL16_1:
--//				break;
--//			case R_HEXAGON_GPREL16_2:
--//				break;
--//			case R_HEXAGON_GPREL16_3:
--//				break;
-+			case R_HEXAGON_GPREL16_0:
-+				if(
-+					// Rd=memb(gp+#u16:0)
-+					((((memValue >> 27) & 0b11111) == 0b01001) && (((memValue >> 21) & 0b1111) == 0b1000)) ||
-+					// Rd=memub(gp+#u16:0)
-+					((((memValue >> 27) & 0b11111) == 0b01001) && (((memValue >> 21) & 0b1111) == 0b1001))
-+				) {
-+					memValue &= ~0x61F3FE0;
-+					memValue |= (value & 0x1FF) << 5;
-+					memValue |= ((value >> 9) & 0x1F) << 16;
-+					memValue |= ((value >> 14) & 0x3) << 25;
-+					memory.setInt(relocationAddress, memValue);
-+				} else if (
-+					// memb(gp+#u16:0)=Rt
-+					((((memValue >> 27) & 0b11111) == 0b01001) && (((memValue >> 21) & 0b1111) == 0b0000)) ||
-+					// memb(gp+#u16:0)=Nt.new
-+					((((memValue >> 27) & 0b11111) == 0b01001) && (((memValue >> 21) & 0b1111) == 0b0101) && (((memValue >> 11) & 0b11) == 0b00))
-+				) {
-+					memValue &= ~0x61f20ff;
-+					memValue |= (value & 0xFF);
-+					memValue |= ((value >> 8) & 1) << 13;
-+					memValue |= ((value >> 9) & 0x1F) << 16;
-+					memValue |= ((value >> 14) & 0x3) << 25;
-+					memory.setInt(relocationAddress, memValue);
-+				}
-+				else {
-+					markAsUnhandled(program, relocationAddress, type, symbolIndex, symbolName, log);
-+					return RelocationResult.UNSUPPORTED;
-+				}
-+				break;
-+			case R_HEXAGON_GPREL16_1:
-+				value >>>= 1;
-+				if(
-+					// Rd=memh(gp+#u16:1)
-+					((((memValue >> 27) & 0b11111) == 0b01001) && (((memValue >> 21) & 0b1111) == 0b1010)) ||
-+					// Rd=memuh(gp+#u16:1)
-+					((((memValue >> 27) & 0b11111) == 0b01001) && (((memValue >> 21) & 0b1111) == 0b1011))
-+				) {
-+					memValue &= ~0x61F3FE0;
-+					memValue |= (value & 0x1FF) << 5;
-+					memValue |= ((value >> 9) & 0x1F) << 16;
-+					memValue |= ((value >> 14) & 0x3) << 25;
-+					memory.setInt(relocationAddress, memValue);
-+				} else if (
-+					// memh(gp+#u16:1)=Rt
-+					((((memValue >> 27) & 0b11111) == 0b01001) && (((memValue >> 21) & 0b1111) == 0b0010)) ||
-+					// memh(gp+#u16:1)=Rt.H
-+					((((memValue >> 27) & 0b11111) == 0b01001) && (((memValue >> 21) & 0b1111) == 0b0011)) ||
-+					// memh(gp+#u16:1)=Nt.new
-+					((((memValue >> 27) & 0b11111) == 0b01001) && (((memValue >> 21) & 0b1111) == 0b0101) && (((memValue >> 11) & 0b11) == 0b01))
-+				) {
-+					memValue &= ~0x61f20ff;
-+					memValue |= (value & 0xFF);
-+					memValue |= ((value >> 8) & 1) << 13;
-+					memValue |= ((value >> 9) & 0x1F) << 16;
-+					memValue |= ((value >> 14) & 0x3) << 25;
-+					memory.setInt(relocationAddress, memValue);
-+				}
-+				else {
-+					markAsUnhandled(program, relocationAddress, type, symbolIndex, symbolName, log);
-+					return RelocationResult.UNSUPPORTED;
-+				}
-+				break;
-+			case R_HEXAGON_GPREL16_2:
-+				value >>>= 2;
-+				if(
-+					// Rd=memw(gp+#u16:2)
-+					(((memValue >> 27) & 0b11111) == 0b01001) && (((memValue >> 21) & 0b1111) == 0b1100)
-+				) {
-+					memValue &= ~0x61F3FE0;
-+					memValue |= (value & 0x1FF) << 5;
-+					memValue |= ((value >> 9) & 0x1F) << 16;
-+					memValue |= ((value >> 14) & 0x3) << 25;
-+					memory.setInt(relocationAddress, memValue);
-+				} else if (
-+					// memw(gp+#u16:2)=Rt
-+					((((memValue >> 27) & 0b11111) == 0b01001) && (((memValue >> 21) & 0b1111) == 0b0100)) ||
-+					// memw(gp+#u16:2)=Nt.new
-+					((((memValue >> 27) & 0b11111) == 0b01001) && (((memValue >> 21) & 0b1111) == 0b0101) && (((memValue >> 11) & 0b11) == 0b10))
-+				) {
-+					memValue &= ~0x61f20ff;
-+					memValue |= (value & 0xFF);
-+					memValue |= ((value >> 8) & 1) << 13;
-+					memValue |= ((value >> 9) & 0x1F) << 16;
-+					memValue |= ((value >> 14) & 0x3) << 25;
-+					memory.setInt(relocationAddress, memValue);
-+				}
-+				else {
-+					markAsUnhandled(program, relocationAddress, type, symbolIndex, symbolName, log);
-+					return RelocationResult.UNSUPPORTED;
-+				}
-+				break;
-+			case R_HEXAGON_GPREL16_3:
-+				value >>>= 3;
-+				if(
-+					// Rdd=memd(gp+#u16:3)
-+					((((memValue >> 27) & 0b11111) == 0b01001) && (((memValue >> 21) & 0b1111) == 0b1110))
-+				) {
-+					memValue &= ~0x61F3FE0;
-+					memValue |= (value & 0x1FF) << 5;
-+					memValue |= ((value >> 9) & 0x1F) << 16;
-+					memValue |= ((value >> 14) & 0x3) << 25;
-+					memory.setInt(relocationAddress, memValue);
-+				} else {
-+					markAsUnhandled(program, relocationAddress, type, symbolIndex, symbolName, log);
-+					return RelocationResult.UNSUPPORTED;
-+				}
-+				break;
+ 			case R_HEXAGON_HI16:
+ 				value = (value >> 16) & 0xffff;
+@@ -146,53 +287,111 @@ public class Hexagon_ElfRelocationHandler
+ //				break;
  //			case R_HEXAGON_HL16:
  //				break;
- //			case R_HEXAGON_B13_PCREL:
-@@ -157,38 +359,165 @@ public class Hexagon_ElfRelocationHandler
+-//			case R_HEXAGON_B13_PCREL:
+-//				break;
+-//			case R_HEXAGON_B9_PCREL:
+-//				break;
++			case R_HEXAGON_B13_PCREL:
++				mask = 0x00202FFE;
++				memValue |= applyMask(mask, pcRelativeValue >> 2);
++				memory.setInt(relocationAddress, memValue);
++				break;
++			case R_HEXAGON_B9_PCREL:
++				mask = 0x003000FE;
++				memValue |= applyMask(mask, pcRelativeValue >> 2);
++				memory.setInt(relocationAddress, memValue);
++				break;
+ 			case R_HEXAGON_B32_PCREL_X:
+ 				// (S + A - P) >> 6
+-				dist = (int) (Integer.toUnsignedLong(value) - Integer.toUnsignedLong((int) offset));
+-				dist = dist >>> 6;
++				dist = pcRelativeValue >>> 6;
  				memValue &= ~0x0fff3fff;
  				memValue |= dist & 0x3fff;
  				dist = dist >>> 14;
@@ -284,61 +249,16 @@ index 6da16e9e51..db43eaf600 100644
  				break;
 -//			case R_HEXAGON_32_6_X:
 -//				break;
-+			case R_HEXAGON_32_6_X:
-+				// This relocation is used to handle extended immediates
-+				int c = (value >>> 6);
-+				memValue &= ~0x0fff3fff;
-+				memValue |= (c & 0x3FFF);
-+				memValue |= ((c >> 14) & 0xFFF) << 16;
-+				memory.setInt(relocationAddress, memValue);
-+				break;
- //			case R_HEXAGON_B22_PCREL_X:
- //				break;
+-//			case R_HEXAGON_B22_PCREL_X:
+-//				break;
 -//			case R_HEXAGON_B15_PCREL_X:
 -//				break;
-+			case R_HEXAGON_B15_PCREL_X:
-+				dist = (int) (Integer.toUnsignedLong(value) - Integer.toUnsignedLong((int) offset)) & 0x3f;
-+				dist >>>= 6;
-+				if(
-+					// if(pu) call #r15:2
-+					((((memValue >> 24) & 0b11111111) == 0b01011101) && (((memValue >> 21) & 1) == 0) && (((memValue >> 11) & 1) == 0)) ||
-+					// if(!pu) call #r15:2
-+					((((memValue >> 24) & 0b11111111) == 0b01011101) && (((memValue >> 21) & 1) == 1) && (((memValue >> 11) & 1) == 0))
-+				) {
-+					memValue &= ~0xDF20FE;
-+					memValue |= (dist & 0x7F) << 1;
-+					memValue |= ((dist >> 7) & 1) << 13;
-+					memValue |= ((dist >> 8) & 0x1F) << 16;
-+					memValue |= ((dist >> 13) & 0x3) << 22;
-+					memory.setInt(relocationAddress, memValue);
-+				} else {
-+					markAsUnhandled(program, relocationAddress, type, symbolIndex, symbolName, log);
-+					return RelocationResult.UNSUPPORTED;
-+				}
-+				break;
- //			case R_HEXAGON_B13_PCREL_X:
- //				break;
+-//			case R_HEXAGON_B13_PCREL_X:
+-//				break;
 -//			case R_HEXAGON_B9_PCREL_X:
 -//				break;
-+			case R_HEXAGON_B9_PCREL_X:
-+				dist = (int) (Integer.toUnsignedLong(value) - Integer.toUnsignedLong((int) offset)) & 0x3F;
-+				if(
-+					// Rd=u6 ; jump #r9:2
-+					(((memValue >> 24) & 0b11111111) == 0b00010110) ||
-+					// Rd=Rs ; jump #r9:2
-+					(((memValue >> 24) & 0b11111111) == 0b00010111)
-+				) {
-+					memValue &= ~0x3000FE;
-+					memValue |= (dist & 0x7F) << 1;
-+					memValue |= ((dist >> 7) & 0x3) << 20;
-+					memory.setInt(relocationAddress, memValue);
-+				} else {
-+					markAsUnhandled(program, relocationAddress, type, symbolIndex, symbolName, log);
-+					return RelocationResult.UNSUPPORTED;
-+				}
-+				break;
- //			case R_HEXAGON_B7_PCREL_X:
- //				break;
+-//			case R_HEXAGON_B7_PCREL_X:
+-//				break;
 -//			case R_HEXAGON_16_X:
 -//				break;
 -//			case R_HEXAGON_12_X:
@@ -355,72 +275,52 @@ index 6da16e9e51..db43eaf600 100644
 -//				break;
 -//			case R_HEXAGON_6_X:
 -//				break;
+-
++			case R_HEXAGON_32_6_X:
++				// This relocation is used to handle extended immediate values
++				int c = (value >>> 6);
++				memValue &= ~0x0fff3fff;
++				memValue |= (c & 0x3FFF);
++				memValue |= ((c >> 14) & 0xFFF) << 16;
++				memory.setInt(relocationAddress, memValue);
++				break;
++			case R_HEXAGON_B22_PCREL_X:
++				mask = 0x01FF3FFE;
++				memValue |= applyMask(mask, pcRelativeValue & 0x3F);
++				memory.setInt(relocationAddress, memValue);
++				break;
++			case R_HEXAGON_B15_PCREL_X:
++				mask = 0x00DF20FE;
++				memValue |= applyMask(mask, pcRelativeValue & 0x3F);
++				memory.setInt(relocationAddress, memValue);
++				break;
++			case R_HEXAGON_B13_PCREL_X:
++				mask = 0x00202FFE;
++				memValue |= applyMask(mask, pcRelativeValue & 0x3F);
++				memory.setInt(relocationAddress, memValue);
++				break;
++			case R_HEXAGON_B9_PCREL_X:
++				mask = 0x003000FE;
++				memValue |= applyMask(mask, pcRelativeValue & 0x3F);
++				memory.setInt(relocationAddress, memValue);
++				break;
++			case R_HEXAGON_B7_PCREL_X:
++				mask = 0x00001F18;
++				memValue |= applyMask(mask, pcRelativeValue & 0x3F);
++				memory.setInt(relocationAddress, memValue);
++				break;
 +			case R_HEXAGON_16_X:
-+				//Rd=#s16
-+				if(((memValue >> 24) & 0b11111111) == 0b01111000) {
-+					memValue &= ~0xDF3FF0;
-+					memValue |= (value & 0x1FF) << 5;
-+					memValue |= ((value >> 9) & 0x1F) << 16;
-+					memValue |= ((value >> 14) & 0x3) << 22;
-+					memory.setInt(relocationAddress, memValue);
-+				} else if (
-+					// Rd=memb(gp+#u16:0)
-+					((((memValue >> 27) & 0b11111) == 0b01001) && (((memValue >> 21) & 0b1111) == 0b1000)) ||
-+					// Rd=memh(gp+#u16:1)
-+					((((memValue >> 27) & 0b11111) == 0b01001) && (((memValue >> 21) & 0b1111) == 0b1010)) ||
-+					// Rd=memw(gp+#u16:2)
-+					((((memValue >> 27) & 0b11111) == 0b01001) && (((memValue >> 21) & 0b1111) == 0b1100)) ||
-+					// Rdd=memd(gp+#u16:3)
-+					((((memValue >> 27) & 0b11111) == 0b01001) && (((memValue >> 21) & 0b1111) == 0b1110)) ||
-+					// Rd=memub(gp+#u16:0)
-+					((((memValue >> 27) & 0b11111) == 0b01001) && (((memValue >> 21) & 0b1111) == 0b1001)) ||
-+					// Rd=memuh(gp+#u16:1)
-+					((((memValue >> 27) & 0b11111) == 0b01001) && (((memValue >> 21) & 0b1111) == 0b1011))
-+				) {
-+					memValue &= ~0x61F3F70;
-+					memValue |= (value & 0x1FF) << 5;
-+					memValue |= ((value >> 9) & 0x1F) << 16;
-+					memValue |= ((value >> 14) & 0x3) << 25;
-+					memory.setInt(relocationAddress, memValue);
-+				} else if (
-+					// memb(gp+#u16:0)=Rt
-+					((((memValue >> 27) & 0b11111) == 0b01001) && (((memValue >> 21) & 0b1111) == 0b0000)) ||
-+					// memh(gp+#u16:1)=Rt
-+					((((memValue >> 27) & 0b11111) == 0b01001) && (((memValue >> 21) & 0b1111) == 0b0010)) ||
-+					// memh(gp+#u16:1)=Rt.h
-+					((((memValue >> 27) & 0b11111) == 0b01001) && (((memValue >> 21) & 0b1111) == 0b0011)) ||
-+					// memw(gp+#u16:2)=Rt
-+					((((memValue >> 27) & 0b11111) == 0b01001) && (((memValue >> 21) & 0b1111) == 0b0100)) ||
-+					// memd(gp+#u16:3)=Rtt
-+					((((memValue >> 27) & 0b11111) == 0b01001) && (((memValue >> 21) & 0b1111) == 0b0110))
-+				) {
-+					memValue &= ~0x61f20ff;
-+					memValue |= (value & 0xFF);
-+					memValue |= ((value >> 8) & 1) << 13;
-+					memValue |= ((value >> 9) & 0x1F) << 16;
-+					memValue |= ((value >> 14) & 0x3) << 25;
-+					memory.setInt(relocationAddress, memValue);
-+				} else if (
-+					// memb(gp+#u16:0)=Nt.new
-+					((((memValue >> 27) & 0b11111) == 0b01001) && (((memValue >> 21) & 0b1111) == 0b0101) && (((memValue >> 11) & 0b11) == 0b00)) ||
-+					// memh(gp+#u16:1)=Nt.new
-+					((((memValue >> 27) & 0b11111) == 0b01001) && (((memValue >> 21) & 0b1111) == 0b0101) && (((memValue >> 11) & 0b11) == 0b01)) ||
-+					// memw(gp+#u16:2)=Nt.new
-+					((((memValue >> 27) & 0b11111) == 0b01001) && (((memValue >> 21) & 0b1111) == 0b0101) && (((memValue >> 11) & 0b11) == 0b10))
-+				) {
-+					memValue &= ~0x61f20ff;
-+					memValue |= (value & 0xFF);
-+					memValue |= ((value >> 8) & 1) << 13;
-+					memValue |= ((value >> 9) & 0x1F) << 16;
-+					memValue |= ((value >> 14) & 0x3) << 25;
-+					memory.setInt(relocationAddress, memValue);
-+				} else {
++				Optional<Integer> r6Mask = findMaskR16(memValue);
++				if(r6Mask.isEmpty()) {
 +					markAsUnhandled(program, relocationAddress, type, symbolIndex, symbolName, log);
 +					return RelocationResult.UNSUPPORTED;
 +				}
++				mask = r6Mask.get();
++				memValue |= applyMask(mask, value & 0x3F);
++				memory.setInt(relocationAddress, memValue);
 +				break;
 +			case R_HEXAGON_12_X:
-+				int mask = 0x000F1FE0;
++				mask = 0x000F1FE0;
 +				memValue |= applyMask(mask, value & 0x3F);
 +				memory.setInt(relocationAddress, memValue);
 +				break;
@@ -450,7 +350,7 @@ index 6da16e9e51..db43eaf600 100644
 +				memory.setInt(relocationAddress, memValue);
 +				break;
 +			case R_HEXAGON_6_X:
-+				Optional<Integer> r6Mask = findMaskR6(memValue);
++				r6Mask = findMaskR6(memValue);
 +				if(r6Mask.isEmpty()) {
 +					markAsUnhandled(program, relocationAddress, type, symbolIndex, symbolName, log);
 +					return RelocationResult.UNSUPPORTED;
@@ -459,9 +359,24 @@ index 6da16e9e51..db43eaf600 100644
 +				memValue |= applyMask(mask, value & 0x3F);
 +				memory.setInt(relocationAddress, memValue);
 +				break;
- 
  			case R_HEXAGON_32_PCREL:
- 				dist = (int) (Integer.toUnsignedLong(value) - Integer.toUnsignedLong((int) offset));
+-				dist = (int) (Integer.toUnsignedLong(value) - Integer.toUnsignedLong((int) offset));
+-				memory.setInt(relocationAddress, dist);
++				memory.setInt(relocationAddress, pcRelativeValue);
+ 				break;
+ 
+ 			case R_HEXAGON_GLOB_DAT:
+@@ -221,9 +420,7 @@ public class Hexagon_ElfRelocationHandler
+ 				int opcode = memValue >> 16;
+ 				// bitmap depends on instruction opcode
+ 				if (opcode == 0x6a49) { // add Rd5,PacketPC,Uimm32_0712x
+-					dist = (int) (Integer.toUnsignedLong(value) -
+-						Integer.toUnsignedLong((int) offset));
+-					dist = dist & 0x3f;
++					dist = pcRelativeValue & 0x3f;
+ 					memValue &= ~(0x3f << 7);
+ 					memValue |= (dist << 7);
+ 					memory.setInt(relocationAddress, memValue);
 -- 
 2.45.1
 
