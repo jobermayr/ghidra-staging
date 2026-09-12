@@ -4,46 +4,34 @@ Date: Tue, 1 Sep 2026 13:25:50 +1200
 Subject: [PATCH] 9564: 9561: Fix decompiler: fix RuleLoadVarnode::vnSpacebase
  to recursively unwrap SEGMENTOP nested in INT_ADD
 
-A stack access whose address is built as a SEGMENTOP-derived base plus
-an additional constant offset -- i.e. a SEGMENTOP nested inside an
-INT_ADD, rather than a SEGMENTOP as the direct pointer operand of a
-LOAD/STORE -- was not resolved by RuleLoadVarnode::vnSpacebase. The
-unresolved access fell through to generic alias analysis and was
-folded into a large open stack array (e.g. "auStack_102[128]") read
-back through pointer-cast arithmetic, instead of resolving as an
-individual, correctly-typed stack variable.
+A stack access whose address is built as a SEGMENTOP-derived base plus an additional constant offset -- i.e. a SEGMENTOP nested inside an INT_ADD, rather than a SEGMENTOP as the direct pointer operand of a LOAD/STORE -- was not resolved by RuleLoadVarnode::vnSpacebase. The unresolved access fell through to generic alias analysis and was folded into a large open stack array (e.g. "auStack_102[128]") read back through pointer-cast arithmetic, instead of resolving as an individual, correctly-typed stack variable.
 
-vnSpacebase now recurses through a SEGMENTOP found among an INT_ADD's
-inputs, to arbitrary depth (bounded by a recursion-depth guard),
-mirroring the one-level unwrap checkSpacebase already performs when a
-SEGMENTOP is the direct LOAD/STORE operand. AddrSpace::wrapOffset is
-applied to the accumulated offset at each recursion level, since naive
-addition across multiple unwrap levels can produce a composite offset
-outside the address space's actual bit width.
+vnSpacebase now recurses through a SEGMENTOP found among an INT_ADD's inputs, to arbitrary depth (bounded by a recursion-depth guard), mirroring the one-level unwrap checkSpacebase already performs when a SEGMENTOP is the direct LOAD/STORE operand. AddrSpace::wrapOffset is applied to the accumulated offset at each recursion level, since naive addition across multiple unwrap levels can produce a composite offset outside the address space's actual bit width.
 
-Adds nestedsegmentop.xml, a datatests regression covering both the
-merged-array symptom and correct parameter resolution.
+Adds nestedsegmentop.xml, a datatests regression covering both the merged-array symptom and correct parameter resolution.
 
-This bug is unrelated in cause to #9540/#9541 (a print-layer issue),
-but both involve SEGMENTOP handling, so this change was verified
-against #9541's own regression tests (register0x0e_crossregister_fix.xml,
-register0x0e_segmentop_fix.xml) to confirm no interaction -- no crash,
-both pass independent of whether #9541 is merged.
+This bug is unrelated in cause to #9540/#9541 (a print-layer issue), but both involve SEGMENTOP handling, so this change was verified against #9541's own regression tests (register0x0e_crossregister_fix.xml, register0x0e_segmentop_fix.xml) to confirm no interaction -- no crash, both pass independent of whether #9541 is merged.
 
-Verified against a real H8 firmware image: the merged-array symptom
-was also independently present in one other function
-(sci1_meta_cmd_dispatch_c0_ff) and is resolved by this fix; across all
-741 functions in the image, no new occurrences of the symptom were
-introduced.
+Verified against a real H8 firmware image: the merged-array symptom was also independently present in one other function (sci1_meta_cmd_dispatch_c0_ff) and is resolved by this fix; across all 741 functions in the image, no new occurrences of the symptom were introduced.
+
+Also fixes an unrelated decompiler crash surfaced while validating the above: decompiling a separate function in the same image (a shared-parameter divxu.w helper) threw LowlevelError: Unable to force merge of op at .... Root cause: CoverBlock::getUIndex()'s CPUI_INDIRECT case derives its ordering value from the op encoding the INDIRECT's indirect-cause, via PcodeOp::getOpFromConst(op->getIn(1)->getAddr())->getSeqNum().getOrder(), with no liveness check on the decoded op. When that op had already been removed from the function, this silently returned a stale order value left over from before removal, corrupting the Cover/Merge ordering comparison and producing a false ordering-inversion that no amount of trimming could resolve, since the comparison itself -- not the trim's insertion point -- was wrong. Confirmed via targeted instrumentation that the two Varnodes in question were correctly ordered in the actual instruction list; only the stale getOrder() value used for comparison was wrong.
+
+Fix mirrors the isDead() guard already present at the two analogous call sites in Merge::trimOpOutput/Funcdata::opInsertAfter for this same stale-IOP-pointer hazard (both predate this PR): when the decoded op is dead, getUIndex now falls back to the INDIRECT's own order instead of trusting the stale value.
+
+Verified: the previously-crashing function now decompiles cleanly. Spot-checked a broad, representative sample of the resulting full-binary re-decompile (741 functions) for regressions; no cases found where previously-correct output became incorrect. Most of the diff volume from this second fix reflects previously-corrupted stack/parameter recognition (in functions unrelated to the vnSpacebase fix above) now resolving correctly, since getUIndex is used broadly across all CPUI_INDIRECT cover computations in the binary, not just at the one crash site.
+
+Related: #9561
 
 Related: #9561
 ---
  .../Decompiler/certification.manifest         |  1 +
+ .../Decompiler/src/decompile/cpp/cover.cc     | 13 ++++-
  .../cpp/include/ghidra/ruleaction.hh          |  2 +-
+ .../Decompiler/src/decompile/cpp/merge.cc     | 13 ++++-
  .../src/decompile/cpp/ruleaction.cc           | 54 ++++++++++++++-----
  .../Decompiler/src/decompile/cpp/varmap.cc    | 11 ++--
  .../decompile/datatests/nestedsegmentop.xml   | 32 +++++++++++
- 5 files changed, 81 insertions(+), 19 deletions(-)
+ 7 files changed, 103 insertions(+), 23 deletions(-)
  create mode 100644 Ghidra/Features/Decompiler/src/decompile/datatests/nestedsegmentop.xml
 
 diff --git a/Ghidra/Features/Decompiler/certification.manifest b/Ghidra/Features/Decompiler/certification.manifest
@@ -58,11 +46,36 @@ index 369d7f02b3..aea614c4d2 100644
  src/decompile/datatests/noforloop_alias.xml||GHIDRA||||END|
  src/decompile/datatests/noforloop_globcall.xml||GHIDRA||||END|
  src/decompile/datatests/noforloop_iterused.xml||GHIDRA||||END|
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/cover.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/cover.cc
+index 197bcd69b4..31147a6c77 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/cover.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/cover.cc
+@@ -41,9 +41,18 @@ uintm CoverBlock::getUIndex(const PcodeOp *op)
+   if (op->isMarker()) {
+     if (op->code() == CPUI_MULTIEQUAL) // MULTIEQUALs are considered very beginning
+       return (uintm)0;
+-    else if (op->code() == CPUI_INDIRECT) // INDIRECTs are considered to be at
++    else if (op->code() == CPUI_INDIRECT) { // INDIRECTs are considered to be at
+ 				// the location of the op they are indirect for
+-      return PcodeOp::getOpFromConst(op->getIn(1)->getAddr())->getSeqNum().getOrder();
++      PcodeOp *targOp = PcodeOp::getOpFromConst(op->getIn(1)->getAddr());
++      // If the op the INDIRECT is indirect for has already been removed from the
++      // function, its stored order is stale and no longer reflects any real
++      // position. Fall back to the INDIRECT's own order rather than corrupting
++      // the Cover comparison with a meaningless value (see opInsertAfter/
++      // trimOpOutput for the analogous guard on this same stale-pointer hazard).
++      if (targOp->isDead())
++	return op->getSeqNum().getOrder();
++      return targOp->getSeqNum().getOrder();
++    }
+   }
+   return op->getSeqNum().getOrder();
+ }
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/ruleaction.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/ruleaction.hh
-index cca4a3d9f4..d060d6ff26 100644
+index d90023aa08..1802081432 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/ruleaction.hh
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/ruleaction.hh
-@@ -854,7 +854,7 @@ public:
+@@ -848,7 +848,7 @@ public:
  class RuleLoadVarnode : public Rule {
    friend class RuleStoreVarnode;
    static AddrSpace *correctSpacebase(Architecture *glb,Varnode *vn,AddrSpace *spc);
@@ -71,11 +84,35 @@ index cca4a3d9f4..d060d6ff26 100644
    static AddrSpace *checkSpacebase(Architecture *glb,PcodeOp *op,uintb &offoff);
  public:
    RuleLoadVarnode(const string &g) : Rule(g, 0, "loadvarnode") {}	///< Constructor
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/merge.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/merge.cc
+index eccdc38f38..23b6c3ece7 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/merge.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/merge.cc
+@@ -664,8 +664,17 @@ void Merge::trimOpOutput(PcodeOp *op)
+   Varnode *uniq,*vn;
+   PcodeOp *afterop;
+   
+-  if (op->code() == CPUI_INDIRECT)
+-    afterop = PcodeOp::getOpFromConst(op->getIn(1)->getAddr()); // Insert copyop AFTER source of indirect
++  // A CPUI_INDIRECT's second input can be an IOP-space reference encoding
++  // the address of the PcodeOp that produced the indirect effect. That
++  // PcodeOp may have since been deleted or replaced by an earlier
++  // simplification pass without this INDIRECT being updated, leaving a
++  // stale/dangling reference. Validate liveness with isDead() before using
++  // the decoded pointer as an insertion point -- opInsertAfter() otherwise
++  // dereferences it unconditionally, which can crash on a stale reference.
++  if (op->code() == CPUI_INDIRECT && op->numInput() > 1 && op->getIn(1)->getSpace()->getType() == IPTR_IOP) {
++    PcodeOp *indirectSource = PcodeOp::getOpFromConst(op->getIn(1)->getAddr());
++    afterop = indirectSource->isDead() ? op : indirectSource; // Insert copyop AFTER source of indirect, unless stale
++  }
+   else
+     afterop = op;
+   vn = op->getOut();
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc
-index a46c4e2ba0..e3298e03d7 100644
+index bf346c5b22..1fc9088d9d 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc
-@@ -4281,13 +4281,15 @@ AddrSpace *RuleLoadVarnode::correctSpacebase(Architecture *glb,Varnode *vn,AddrS
+@@ -4279,13 +4279,15 @@ AddrSpace *RuleLoadVarnode::correctSpacebase(Architecture *glb,Varnode *vn,AddrS
  /// \param val is the reference for passing back the constant
  /// \param spc is the space being loaded from
  /// \return the associated space or NULL
@@ -93,7 +130,7 @@ index a46c4e2ba0..e3298e03d7 100644
    retspace = correctSpacebase(glb,vn,spc);
    if (retspace != (AddrSpace *)0) {
      val = 0;
-@@ -4325,19 +4327,47 @@ AddrSpace *RuleLoadVarnode::vnSpacebase(Architecture *glb,Varnode *vn,uintb &val
+@@ -4323,19 +4325,47 @@ AddrSpace *RuleLoadVarnode::vnSpacebase(Architecture *glb,Varnode *vn,uintb &val
      }
      return retspace;
    }
