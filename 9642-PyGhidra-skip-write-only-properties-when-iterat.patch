@@ -1,0 +1,97 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Bortlesboat <169967362+Bortlesboat@users.noreply.github.com>
+Date: Tue, 15 Sep 2026 13:17:23 -0400
+Subject: [PATCH] 9642: PyGhidra: skip write-only properties when iterating
+ script globals
+
+---
+ .../src/main/py/src/pyghidra/script.py        | 12 +++++-
+ .../PyGhidra/src/main/py/tests/test_core.py   | 42 +++++++++++++++++++
+ 2 files changed, 52 insertions(+), 2 deletions(-)
+
+diff --git a/Ghidra/Features/PyGhidra/src/main/py/src/pyghidra/script.py b/Ghidra/Features/PyGhidra/src/main/py/src/pyghidra/script.py
+index f8d26a5b6e..df6204ff8c 100644
+--- a/Ghidra/Features/PyGhidra/src/main/py/src/pyghidra/script.py
++++ b/Ghidra/Features/PyGhidra/src/main/py/src/pyghidra/script.py
+@@ -63,7 +63,9 @@ class _StaticMap(dict):
+         return res if res is not _NO_ATTRIBUTE else default
+ 
+     def __iter__(self):
+-        yield from self.script
++        # Completions include write-only properties, even though they cannot be read.
++        yield from dict.__iter__(self.script)
++        yield from dir(self.script._script)
+ 
+     def keys(self):
+         return KeysView(self)
+@@ -228,7 +230,13 @@ class PyGhidraScript(dict):
+ 
+     def __iter__(self):
+         yield from super().__iter__()
+-        yield from dir(self._script)
++        for name in dir(self._script):
++            attr = inspect.getattr_static(self._script, name, _NO_ATTRIBUTE)
++            # JPype bean properties can have setters without getters. _JavaProperty
++            # has its own __get__, so only filter ordinary property descriptors.
++            if type(attr) is property and attr.fget is None:
++                continue
++            yield name
+ 
+     def get_static(self, key):
+         res = self.get(key, _NO_ATTRIBUTE)
+diff --git a/Ghidra/Features/PyGhidra/src/main/py/tests/test_core.py b/Ghidra/Features/PyGhidra/src/main/py/tests/test_core.py
+index d374462f99..7bf8348317 100644
+--- a/Ghidra/Features/PyGhidra/src/main/py/tests/test_core.py
++++ b/Ghidra/Features/PyGhidra/src/main/py/tests/test_core.py
+@@ -180,6 +180,48 @@ def test_import_from_main(capsys, shared_datadir: Path):
+     assert captured.out.rstrip() == EXE_NAME
+ 
+ 
++def test_script_globals_iteration():
++    pyghidra.start()
++    from pyghidra.core import _setup_script
++
++    script = _setup_script(None, None)
++    script["user_variable"] = 42
++    names = list(script)
++    for name in ("potentialPropertiesFileLocations", "propertiesFile", "referencePrimary"):
++        assert name not in names
++        with pytest.raises(KeyError):
++            script[name]
++
++    for name in ("user_variable", "currentProgram", "currentAddress", "monitor", "getCurrentProgram"):
++        assert name in names
++    assert script["user_variable"] == 42
++    assert script["currentProgram"] is None
++    assert script["currentAddress"] is None
++    assert script["monitor"] is not None
++    assert callable(script["getCurrentProgram"])
++
++
++def test_script_static_view_includes_write_only_properties():
++    pyghidra.start()
++    from pyghidra.script import PyGhidraScript
++
++    view = PyGhidraScript().get_static_view()
++    for name in ("potentialPropertiesFileLocations", "propertiesFile", "referencePrimary"):
++        assert name in list(view)
++        assert isinstance(view[name], property)
++
++
++def test_script_write_only_property_assignment():
++    pyghidra.start()
++    from java.util import ArrayList
++    from pyghidra.script import PyGhidraScript
++
++    script = PyGhidraScript()
++    locations = ArrayList()
++    script["potentialPropertiesFileLocations"] = locations
++    assert script["potentialPropertiesFileLocs"] == locations
++
++
+ def test_import_ghidra_base_java_packages():
+ 
+     def get_runtime_top_level_java_packages(launcher) -> set:
+-- 
+2.45.1
+

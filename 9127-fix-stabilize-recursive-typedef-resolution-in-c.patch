@@ -10,10 +10,10 @@ Subject: [PATCH] 9127: fix: stabilize recursive typedef resolution in
  2 files changed, 92 insertions(+), 8 deletions(-)
 
 diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/compositeeditor/CompositeViewerDataTypeManager.java b/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/compositeeditor/CompositeViewerDataTypeManager.java
-index a8575c90ea..5d691e6fe1 100644
+index d3c187f6d9..143f92467f 100644
 --- a/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/compositeeditor/CompositeViewerDataTypeManager.java
 +++ b/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/compositeeditor/CompositeViewerDataTypeManager.java
-@@ -17,12 +17,14 @@ package ghidra.app.plugin.core.compositeeditor;
+@@ -17,6 +17,7 @@ package ghidra.app.plugin.core.compositeeditor;
  
  import java.io.IOException;
  import java.util.Iterator;
@@ -21,22 +21,23 @@ index a8575c90ea..5d691e6fe1 100644
  import java.util.TreeSet;
  
  import javax.help.UnsupportedOperationException;
- 
- import db.util.ErrorHandler;
+@@ -27,6 +28,7 @@ import ghidra.framework.data.OpenMode;
+ import ghidra.framework.model.RuntimeIOException;
  import ghidra.program.database.DbObject;
+ import ghidra.program.database.data.ArchiveDataTypeManagerDB;
 +import ghidra.program.database.data.DataTypeUtilities;
  import ghidra.program.model.data.*;
  import ghidra.program.model.lang.ProgramArchitecture;
- import ghidra.util.Swing;
-@@ -66,6 +68,7 @@ public class CompositeViewerDataTypeManager<T extends Composite> extends StandAl
- 	// datatype IDs to be checked as orphaned.
+ import ghidra.util.Lock;
+@@ -70,6 +72,7 @@ public class CompositeViewerDataTypeManager<T extends Composite> extends Archive
  	// NOTE: Orphan removal can only be done when this DTM actively manages the viewComposite
  	private TreeSet<Long> orphanIds = new TreeSet<>();
+ 	private int transactionCount;
 +	private final Set<Long> resolvingOriginalIds = new TreeSet<>();
  
- 	/**
- 	 * Creates a data type manager that the composite editor will use internally for managing 
-@@ -230,13 +233,90 @@ public class CompositeViewerDataTypeManager<T extends Composite> extends StandAl
+ 	public static <T extends Composite> CompositeViewerDataTypeManager<T> createNonUndoableInstance(
+ 			DataTypeManager originalDTM) {
+@@ -231,13 +234,90 @@ public class CompositeViewerDataTypeManager<T extends Composite> extends Archive
  			// DataTypeManager instance.
  			return viewComposite;
  		}
@@ -134,7 +135,7 @@ index a8575c90ea..5d691e6fe1 100644
  
  	@Override
 diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/data/TypedefDB.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/data/TypedefDB.java
-index 62a5e04c8e..7e2e3dea44 100644
+index dee75f2bd7..4bbd21f40c 100644
 --- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/data/TypedefDB.java
 +++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/data/TypedefDB.java
 @@ -240,6 +240,12 @@ class TypedefDB extends DataTypeDB implements TypeDef {

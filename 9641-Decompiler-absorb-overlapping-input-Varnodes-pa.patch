@@ -1,0 +1,108 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=EA=B9=80=EC=84=B1=EC=A3=BC?= <freexxx9206@naver.com>
+Date: Tue, 15 Sep 2026 21:38:04 +0900
+Subject: [PATCH] 9641: Decompiler: absorb overlapping input Varnodes past a
+ container's end
+
+ActionUnjustifiedParams grows an unjustified stack input's container by
+scanning backward for overlapping input Varnodes that start before the
+container. An input Varnode that starts inside the container and extends
+past its end was never absorbed, so Funcdata::adjustInputVarnodes() would
+throw "Cannot properly adjust input varnodes" on the resulting partial
+overlap. Add a matching forward scan that grows the container to include
+any trailing input Varnode overlap, mirroring the existing backward-scan
+logic.
+
+Adds a minimized MC68000 regression test (inputoverlap.xml) reproducing
+the reported crash, registered in certification.manifest. Verified with
+the native decompiler test suite: 204/204 unit tests (one pre-existing,
+unrelated floating-point precision failure on this platform aside) and
+736/736 datatests, including this new one, both with and without the
+fix (confirming the new test fails with the original code and passes
+with the fix).
+
+Fixes #9218
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+---
+ .../Decompiler/certification.manifest         |  1 +
+ .../src/decompile/cpp/coreaction.cc           | 14 +++++++++
+ .../src/decompile/datatests/inputoverlap.xml  | 29 +++++++++++++++++++
+ 3 files changed, 44 insertions(+)
+ create mode 100644 Ghidra/Features/Decompiler/src/decompile/datatests/inputoverlap.xml
+
+diff --git a/Ghidra/Features/Decompiler/certification.manifest b/Ghidra/Features/Decompiler/certification.manifest
+index a4bb93e79f..55204da4e3 100644
+--- a/Ghidra/Features/Decompiler/certification.manifest
++++ b/Ghidra/Features/Decompiler/certification.manifest
+@@ -60,6 +60,7 @@ src/decompile/datatests/indproto.xml||GHIDRA||||END|
+ src/decompile/datatests/injectoverride.xml||GHIDRA||||END|
+ src/decompile/datatests/inline.xml||GHIDRA||||END|
+ src/decompile/datatests/inlinetarget.xml||GHIDRA||||END|
++src/decompile/datatests/inputoverlap.xml||GHIDRA||||END|
+ src/decompile/datatests/loadwidth.xml||GHIDRA||||END|
+ src/decompile/datatests/longdouble.xml||GHIDRA||||END|
+ src/decompile/datatests/loopcomment.xml||GHIDRA||||END|
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
+index ce582dd4a4..5738f6b770 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
+@@ -5393,6 +5393,20 @@ int4 ActionUnjustifiedParams::apply(Funcdata &data)
+ 	  vdata.size = endpoint - vdata.offset;
+ 	}
+       }
++      // Also absorb input Varnodes that overlap the container and extend past its end.
++      VarnodeDefSet::const_iterator fiter = iter;
++      while(fiter != enditer) {
++	Varnode *fvn = *fiter;
++	++fiter;
++	if (fvn->getSpace() != vdata.space) continue;
++	uintb endpoint = vdata.offset + vdata.size;
++	if (fvn->getOffset() >= endpoint) break;
++	uintb fendpoint = fvn->getOffset() + fvn->getSize();
++	if (fendpoint > endpoint) {
++	  overlaps = true;
++	  vdata.size = fendpoint - vdata.offset;
++	}
++      }
+       if (!overlaps) break;	// Found no additional overlaps, go with current justified container
+       // If there were overlaps, container may no longer be justified
+       newcontainer = proto.unjustifiedInputParam(vdata.getAddr(),vdata.size,vdata);
+diff --git a/Ghidra/Features/Decompiler/src/decompile/datatests/inputoverlap.xml b/Ghidra/Features/Decompiler/src/decompile/datatests/inputoverlap.xml
+new file mode 100644
+index 0000000000..7dfe99f8ad
+--- /dev/null
++++ b/Ghidra/Features/Decompiler/src/decompile/datatests/inputoverlap.xml
+@@ -0,0 +1,29 @@
++<decompilertest>
++<!--
++  An unjustified 2-byte stack input shares its 4-byte parameter container with
++  a second input that starts inside the container and extends past its end.
++  ActionUnjustifiedParams must include the full overlapping input before
++  adjusting the parameter Varnodes.
++
++  This is the minimized MC68000 reproducer from #9218.  With the overlap
++  closure fixed, both stack inputs are rebuilt as SUBPIECEs of one enclosing
++  input instead of aborting in Funcdata::adjustInputVarnodes().
++-->
++<binaryimage arch="68000:BE:32:default:default">
++<bytechunk space="ram" offset="0x1000" readonly="true">
++4e560000226e000a0c6e000100086f0e
++2069000410280001b015670265ea4e5e
++4e75
++</bytechunk>
++<symbol space="ram" offset="0x1000" name="adjust_input_overlap"/>
++</binaryimage>
++<script>
++  <com>lo fu adjust_input_overlap</com>
++  <com>dec</com>
++  <com>print C</com>
++  <com>quit</com>
++</script>
++<stringmatch name="Overlapping input parameter decompiles" min="1" max="1">adjust_input_overlap\(</stringmatch>
++<stringmatch name="Overlapping inputs are subpieces of one enclosing input" min="1" max="10">\._2_4_</stringmatch>
++<stringmatch name="No input adjustment error" min="0" max="0">Cannot properly adjust input varnodes</stringmatch>
++</decompilertest>
+-- 
+2.45.1
+

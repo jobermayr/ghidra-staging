@@ -19,10 +19,10 @@ Make resolveIdentityHint thread-local
  8 files changed, 180 insertions(+), 25 deletions(-)
 
 diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/compositeeditor/CompositeViewerDataTypeManager.java b/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/compositeeditor/CompositeViewerDataTypeManager.java
-index 5d691e6fe1..3946176713 100644
+index 143f92467f..a784f89217 100644
 --- a/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/compositeeditor/CompositeViewerDataTypeManager.java
 +++ b/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/compositeeditor/CompositeViewerDataTypeManager.java
-@@ -550,6 +550,19 @@ public class CompositeViewerDataTypeManager<T extends Composite> extends StandAl
+@@ -555,6 +555,19 @@ public class CompositeViewerDataTypeManager<T extends Composite> extends Archive
  		return originalId != null ? originalDTM.getDataType(originalId) : null;
  	}
  
@@ -74,7 +74,7 @@ index 6f9c1c398f..56dc31b965 100644
  
  	@Override
 diff --git a/Ghidra/Features/Base/src/test.slow/java/ghidra/program/database/data/DataManagerTest.java b/Ghidra/Features/Base/src/test.slow/java/ghidra/program/database/data/DataManagerTest.java
-index 1c81a4e210..ae24a7e704 100644
+index 9453b17de8..e23486ffb7 100644
 --- a/Ghidra/Features/Base/src/test.slow/java/ghidra/program/database/data/DataManagerTest.java
 +++ b/Ghidra/Features/Base/src/test.slow/java/ghidra/program/database/data/DataManagerTest.java
 @@ -18,6 +18,8 @@ package ghidra.program.database.data;
@@ -86,7 +86,7 @@ index 1c81a4e210..ae24a7e704 100644
  
  import org.junit.*;
  
-@@ -507,6 +509,72 @@ public class DataManagerTest extends AbstractGhidraHeadedIntegrationTest {
+@@ -503,6 +505,72 @@ public class DataManagerTest extends AbstractGhidraHeadedIntegrationTest {
  		dtm.close();
  	}
  
@@ -160,12 +160,12 @@ index 1c81a4e210..ae24a7e704 100644
  	public void testDoubleReplace() throws Exception {
  		Structure struct = new StructureDataType("test", 0);
 diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/data/DataTypeManagerDB.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/data/DataTypeManagerDB.java
-index 63afc132a9..41ce2ff9da 100644
+index f7837d746d..6abdc3c8b5 100644
 --- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/data/DataTypeManagerDB.java
 +++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/data/DataTypeManagerDB.java
-@@ -179,6 +179,10 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
+@@ -178,6 +178,10 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
  	private IdentityHashMap<DataType, DataType> resolveCache;
- 	private TreeSet<ResolvePair> resolveQueue; // Note: is TreeSet really needed?
+ 	private TreeSet<ResolvedDt> resolveQueue; // Note: is TreeSet really needed?
  	private LinkedList<DataType> conflictQueue = new LinkedList<>();
 +	private Map<Long, Long> pendingDataTypesUsed;
 +
@@ -174,7 +174,7 @@ index 63afc132a9..41ce2ff9da 100644
  
  	private boolean isBulkRemoving;
  
-@@ -1227,6 +1231,14 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
+@@ -1081,6 +1085,14 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
  				return dataType;
  			}
  
@@ -189,7 +189,7 @@ index 63afc132a9..41ce2ff9da 100644
  			if (handler != null) {
  				currentHandler = handler;
  			}
-@@ -1957,7 +1969,12 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
+@@ -1811,7 +1823,12 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
  		}
  
  		// perform any necessary external use replacements
@@ -203,7 +203,7 @@ index 63afc132a9..41ce2ff9da 100644
  
  		// perform actual database updates (e.g., record updates, change notifications, etc.)
  		for (Pair<DataType, DataType> dataTypeReplacement : dataTypeReplacements) {
-@@ -4403,35 +4420,66 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
+@@ -4247,35 +4264,66 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
  	 */
  	private DataType processConflictQueue(DataType dataType) {
  
@@ -286,7 +286,7 @@ index 63afc132a9..41ce2ff9da 100644
  	/**
  	 * Activate resolveCache and associated resolveQueue if not already active. If
  	 * this method returns true caller is responsible for flushing resolveQueue and
-@@ -4641,7 +4689,7 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
+@@ -4485,7 +4533,7 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
  	 * 
  	 * @return true if successful, false if already active
  	 */
@@ -295,7 +295,7 @@ index 63afc132a9..41ce2ff9da 100644
  		EquivalenceCache cache = equivalenceCache.get();
  		if (cache == null) {
  			cache = new EquivalenceCache();
-@@ -4652,7 +4700,7 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
+@@ -4496,7 +4544,7 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
  		return false;
  	}
  
