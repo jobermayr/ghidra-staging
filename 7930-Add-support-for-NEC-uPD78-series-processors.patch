@@ -30,6 +30,12 @@ Correct half-carry mask in macros in uPD78 processor spec
 Resolve issue with incorrect ONI decoding in uPD78 processor spec
 
 Add new pcodeop for STOP instruction in uPD78 processor spec
+
+Resolve issue with incorrect rotate behaviour in DRLL and DRLR in uPD78 processor spec
+
+Simplify 'Skip if/no flag' and 'Skip if/no interrupt' instruction constructors in uPD78 processor spec
+
+Remove redundant 'flag_' subtable from uPD78 processor spec
 ---
  Ghidra/Processors/upd78/Module.manifest       |    0
  Ghidra/Processors/upd78/build.gradle          |   20 +
@@ -37,8 +43,8 @@ Add new pcodeop for STOP instruction in uPD78 processor spec
  .../upd78/data/languages/upd78.cspec          |   31 +
  .../upd78/data/languages/upd78.ldefs          |   15 +
  .../upd78/data/languages/upd78.pspec          |   28 +
- .../upd78/data/languages/upd78.slaspec        | 1556 +++++++++++++++++
- 7 files changed, 1655 insertions(+)
+ .../upd78/data/languages/upd78.slaspec        | 1548 +++++++++++++++++
+ 7 files changed, 1647 insertions(+)
  create mode 100644 Ghidra/Processors/upd78/Module.manifest
  create mode 100644 Ghidra/Processors/upd78/build.gradle
  create mode 100644 Ghidra/Processors/upd78/certification.manifest
@@ -181,10 +187,10 @@ index 0000000000..8327afeee1
 +</processor_spec>
 diff --git a/Ghidra/Processors/upd78/data/languages/upd78.slaspec b/Ghidra/Processors/upd78/data/languages/upd78.slaspec
 new file mode 100644
-index 0000000000..f9023521fa
+index 0000000000..1859649751
 --- /dev/null
 +++ b/Ghidra/Processors/upd78/data/languages/upd78.slaspec
-@@ -0,0 +1,1556 @@
+@@ -0,0 +1,1548 @@
 +# sleigh specification file for NEC uPD78 series
 +
 +
@@ -595,8 +601,6 @@ index 0000000000..f9023521fa
 +flag: "CY" is f_0_2 = 0x2 { f:1 = $(CY_flag); export f; }
 +flag: "HC" is f_0_2 = 0x3 { f:1 = $(HC_flag); export f; }
 +flag: "Z"  is f_0_2 = 0x4 { f:1 = $(Z_flag); export f; }
-+
-+flag_: flag is op0_7 = 0x48; f_0_2 != 0 & flag { export flag; }
 +
 +# Interrupt request flags
 +irf: NMI    is irf_0_4 = 0x0 & NMI  { export NMI; }
@@ -1546,8 +1550,8 @@ index 0000000000..f9023521fa
 +}
 +
 +:RLR r2_48 is r2_48 & ... op2_7 = 0x0c {
-+    local nextCY = r2_48 & 1;
-+    r2_48 = (r2_48 >> 1) | (nextCY << 7);
++    local nextCY:1 = r2_48 & 1;
++    r2_48 = (r2_48 >> 1) | ($(CY_flag) << 7);
 +    $(CY_flag) = nextCY;
 +}
 +
@@ -1574,27 +1578,25 @@ index 0000000000..f9023521fa
 +}
 +
 +:DRLL EA is op0_7 = 0x48; op0_7 = 0xb4 & EA {
-+    local nextCY:2 = EA >> 15;
-+    EA = (EA << 1) | nextCY;
-+    $(CY_flag) = nextCY:1;
++    local nextCY:1 = EA[15,1];
++    EA = (EA << 1) | zext($(CY_flag));
++    $(CY_flag) = nextCY;
 +}
 +
 +:DRLR EA is op0_7 = 0x48; op0_7 = 0xb0 & EA {
-+    local nextCY:2 = EA & 1;
-+    EA = (EA >> 1) | (nextCY << 15);
-+    $(CY_flag) = nextCY:1;
++    local nextCY:1 = EA[0,1];
++    EA = (EA >> 1) | (zext($(CY_flag)) << 15);
++    $(CY_flag) = nextCY;
 +}
 +
 +:DSLL EA is op0_7 = 0x48; op0_7 = 0xa4 & EA {
-+    local nextCY:2 = EA >> 15;
++    $(CY_flag) = EA[15,1];
 +    EA = EA << 1;
-+    $(CY_flag) = nextCY:1;
 +}
 +
 +:DSLR EA is op0_7 = 0x48; op0_7 = 0xa0 & EA {
-+    local nextCY:2 = EA & 1;
++    $(CY_flag) = EA[0,1];
 +    EA = EA >> 1;
-+    $(CY_flag) = nextCY:1;
 +}
 +
 +################################################################
@@ -1698,24 +1700,20 @@ index 0000000000..f9023521fa
 +    $(SK_flag) = 1;
 +}
 +
-+:SK flag_ is flag_ & ... op3_7 = 0x1 [ possibleSkip = 1; globalset(inst_next,possibleSkip); ] {
-+    if flag_ == 0 goto inst_next;
-+    $(SK_flag) = 1;
++:SK flag is op0_7 = 0x48; op3_7 = 0x1 & flag [ possibleSkip = 1; globalset(inst_next,possibleSkip); ] {
++    $(SK_flag) = flag;
 +}
 +
-+:SKN flag_ is flag_ & ... op3_7 = 0x3 [ possibleSkip = 1; globalset(inst_next,possibleSkip); ] {
-+    if flag_ == 1 goto inst_next;
-+    $(SK_flag) = 1;
++:SKN flag is op0_7 = 0x48; op3_7 = 0x3 & flag [ possibleSkip = 1; globalset(inst_next,possibleSkip); ] {
++    $(SK_flag) = !flag;
 +}
 +
 +:SKIT irf is op0_7 = 0x48; op5_7 = 0x2 & irf [ possibleSkip = 1; globalset(inst_next,possibleSkip); ] {
-+    if irf == 0 goto inst_next;
-+    $(SK_flag) = 1;
++    $(SK_flag) = irf != 0;
 +}
 +
 +:SKNIT irf is op0_7 = 0x48; op5_7 = 0x3 & irf [ possibleSkip = 1; globalset(inst_next,possibleSkip); ] {
-+    if irf == 1 goto inst_next;
-+    $(SK_flag) = 1;
++    $(SK_flag) = irf == 0;
 +}
 +
 +

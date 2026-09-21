@@ -1,0 +1,269 @@
+From bc1de51b4f875c25e2aef2b2606a146f78b27561 Mon Sep 17 00:00:00 2001
+From: Chris Bongaarts <cab@bongalow.net>
+Date: Sat, 19 Sep 2026 15:45:46 -0500
+Subject: [PATCH 1/2] 9656: Fix 6502 arithmetic flags and zero-page pointer wrapping
+
+Fix 6502 arithmetic flags and zero-page pointer wrapping
+
+Compute ADC carry-out across both the operand and carry-in additions, and
+derive signed overflow independently from the unsigned carry. Apply the same
+correction to the 65C02 zero-page-indirect ADC constructor.
+
+The subtraction flag helper currently assigns borrow to C; invert that result
+because 6502 C means no borrow. Read both bytes of (zp,X) and (zp),Y pointers
+from zero page so a pointer at $ff takes its high byte from $00, not $0100.
+---
+ .../6502/data/languages/6502.slaspec          | 21 +++++++++++++------
+ .../6502/data/languages/65c02.slaspec         |  7 +++++--
+ 2 files changed, 20 insertions(+), 8 deletions(-)
+
+diff --git a/Ghidra/Processors/6502/data/languages/6502.slaspec b/Ghidra/Processors/6502/data/languages/6502.slaspec
+index 3c8d765bc33..ad739750776 100644
+--- a/Ghidra/Processors/6502/data/languages/6502.slaspec
++++ b/Ghidra/Processors/6502/data/languages/6502.slaspec
+@@ -66,7 +66,14 @@ macro subtraction_flags1(register, operand, result) {
+ 	V = ( ((register & ~operand & ~result) | (complement_register & operand & result)) & 0b10000000 ) != 0;
+ 	N = (result s< 0);
+ 	Z = (result == 0);
+-	C = ( ((complement_register & operand) | (operand & result) | (result & complement_register)) & 0b10000000 ) != 0;
++	C = ( ((complement_register & operand) | (operand & result) | (result & complement_register)) & 0b10000000 ) == 0;
++}
++
++macro readZpPointer(ptr, zp) {
++	local lo:2 = zext(zp);
++	local zp1:1 = zp + 1;
++	local hi:2 = zext(zp1);
++	ptr = zext(*:1 lo) | (zext(*:1 hi) << 8);
+ }
+ 
+ 
+@@ -92,9 +99,9 @@ OP1: imm16,X    is bbb=7 & X; imm16		{ tmp:2 = imm16 + zext(X); export *:1 tmp;
+ # Absolute Indexed Y
+ OP1: imm16,Y    is bbb=6 & Y; imm16		{ tmp:2 = imm16 + zext(Y); export *:1 tmp; }
+ # Indirect X
+-OP1: (imm8,X)   is bbb=0 & X; imm8		{ addr:2 = zext(imm8 + X); tmp:2 = *:2 addr; export *:1 tmp; }
++OP1: (imm8,X)   is bbb=0 & X; imm8		{ local zp:1 = imm8 + X; tmp:2 = 0; readZpPointer(tmp, zp); export *:1 tmp; }
+ # Indirect Y
+-OP1: (imm8),Y   is bbb=4 & Y; imm8		{ addr:2 = imm8; tmp:2 = *:2 addr; tmp = tmp + zext(Y); export *:1 tmp; }
++OP1: (imm8),Y   is bbb=4 & Y; imm8		{ local zp:1 = imm8; tmp:2 = 0; readZpPointer(tmp, zp); tmp = tmp + zext(Y); export *:1 tmp; }
+ 
+ # Immediate
+ OP2: "#"imm8    is bbb=0; imm8			{ tmp:1 = imm8; export tmp; }
+@@ -128,13 +135,15 @@ ADDRI:  (imm16)   is imm16    { tmp:2 = imm16; export *:2 tmp; }
+ {
+ 	local op1 = OP1;
+ 	local tmpC = C;
++	local oldA = A;
+ 	
+ 	C = carry(A, op1);
+-	
+-	A = A + op1 + tmpC;
++	A = A + op1;
++	C = C || carry(A, tmpC);
++	A = A + tmpC;
+ 
+ 	resultFlags(A);
+-	V = C;
++	V = ((oldA ^ A) & (op1 ^ A) & 0x80) != 0;
+ }
+ 
+ :AND OP1     is (cc=1 & aaa=1) ... & OP1
+diff --git a/Ghidra/Processors/6502/data/languages/65c02.slaspec b/Ghidra/Processors/6502/data/languages/65c02.slaspec
+index adb21eee565..a766e391a7f 100644
+--- a/Ghidra/Processors/6502/data/languages/65c02.slaspec
++++ b/Ghidra/Processors/6502/data/languages/65c02.slaspec
+@@ -33,11 +33,14 @@ ADDRIX: (imm16,X) is X; imm16     { addr:2 = imm16 + zext(X); tmp:2 = *:2 addr;
+ {
+     local op1 = ZIOP;
+     local tmpC = C;
++    local oldA = A;
+ 
+     C = carry(A, op1);
+-    A = A + op1 + tmpC;
++    A = A + op1;
++    C = C || carry(A, tmpC);
++    A = A + tmpC;
+     resultFlags(A);
+-    V = C;
++    V = ((oldA ^ A) & (op1 ^ A) & 0x80) != 0;
+ }
+ 
+ :AND ZIOP                      is (cc=2 & aaa=1) ... & ZIOP
+
+From 6770d33829b4661905e7f6f8640fa81bc7818b9b Mon Sep 17 00:00:00 2001
+From: Chris Bongaarts <cab@bongalow.net>
+Date: Sun, 20 Sep 2026 16:59:12 -0500
+Subject: [PATCH 2/2] Add 6502 emulator regression tests for ADC/SBC flags and
+ zero-page pointer wrap
+
+Six cases built on AbstractEmulationEquivalenceTest, so each runs through
+both the legacy Emulate and the new PcodeEmulator: ADC carry-out arising
+solely from the carry-in, ADC signed overflow with carry clear, SBC carry
+in both polarities, and (zp),Y / (zp,X) with the pointer at $ff. The
+zero-page cases seed memory from code so the wrong (non-wrapping) target
+is distinguishable from the right one.
+
+Wires javaTestProject into the 6502 module, following the tricore module.
+
+All six fail against the previous 6502.slaspec on the exact register each
+targets (C, V or A) and pass with this change, on both JDK 21/12.1.3 and
+JDK 25/master.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01MDF2MSLrw5Z3N1HJRNyAWU
+---
+ Ghidra/Processors/6502/build.gradle           |   7 +
+ .../M6502FlagsAndPointerWrapTest.java         | 123 ++++++++++++++++++
+ 2 files changed, 130 insertions(+)
+ create mode 100644 Ghidra/Processors/6502/src/test/java/ghidra/program/emulation/M6502FlagsAndPointerWrapTest.java
+
+diff --git a/Ghidra/Processors/6502/build.gradle b/Ghidra/Processors/6502/build.gradle
+index 1e81b0c56d3..cbbd8eef13e 100644
+--- a/Ghidra/Processors/6502/build.gradle
++++ b/Ghidra/Processors/6502/build.gradle
+@@ -14,9 +14,16 @@
+  * limitations under the License.
+  */
+ apply from: "$rootProject.projectDir/gradle/distributableGhidraModule.gradle"
++apply from: "$rootProject.projectDir/gradle/javaProject.gradle"
++apply from: "$rootProject.projectDir/gradle/jacocoProject.gradle"
++apply from: "$rootProject.projectDir/gradle/javaTestProject.gradle"
+ apply from: "$rootProject.projectDir/gradle/processorProject.gradle"
+ apply plugin: 'eclipse'
+ 
+ eclipse.project.name = 'Processors 6502'
+ 
++dependencies {
++	api project(':Base')
+ 
++	testImplementation project(path: ':Emulation', configuration: 'testArtifacts')
++}
+diff --git a/Ghidra/Processors/6502/src/test/java/ghidra/program/emulation/M6502FlagsAndPointerWrapTest.java b/Ghidra/Processors/6502/src/test/java/ghidra/program/emulation/M6502FlagsAndPointerWrapTest.java
+new file mode 100644
+index 00000000000..14a125faf22
+--- /dev/null
++++ b/Ghidra/Processors/6502/src/test/java/ghidra/program/emulation/M6502FlagsAndPointerWrapTest.java
+@@ -0,0 +1,123 @@
++/* ###
++ * IP: GHIDRA
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package ghidra.program.emulation;
++
++import java.util.*;
++
++import org.junit.Before;
++import org.junit.Test;
++
++import ghidra.app.plugin.processors.sleigh.SleighLanguage;
++import ghidra.pcode.exec.AbstractEmulationEquivalenceTest;
++import ghidra.program.model.lang.LanguageID;
++import ghidra.program.util.DefaultLanguageService;
++
++/**
++ * Regression guards for 6502 semantics that were previously wrong: ADC losing a carry-out that
++ * arises solely from the carry-in, ADC setting V to the unsigned carry rather than signed
++ * overflow, SBC reporting C with inverted polarity, and the (zp,X) / (zp),Y pointer fetch not
++ * wrapping within zero page when the pointer sits at $FF. The expected values match the
++ * hardware-derived SingleStepTests/65x02 suite.
++ */
++public class M6502FlagsAndPointerWrapTest extends AbstractEmulationEquivalenceTest {
++	static final LanguageID LANG_ID_6502 = new LanguageID("6502:LE:16:default");
++
++	static SleighLanguage M6502;
++
++	@Before
++	public void setup6502() throws Exception {
++		if (M6502 == null) {
++			M6502 = (SleighLanguage) DefaultLanguageService.getLanguageService()
++					.getLanguage(LANG_ID_6502);
++		}
++	}
++
++	@Override
++	protected long getEntryOffset() {
++		return 0x0200; // 16-bit address space; keep clear of zero page and the stack
++	}
++
++	/**
++	 * Assemble {@code lines} at the entry, execute all of them, and assert {@code regs}. PC is
++	 * asserted automatically as the address following the last assembled instruction.
++	 */
++	private void run(List<String> lines, Map<String, String> regs) throws Exception {
++		Map<String, String> expected = new HashMap<>(regs);
++		doTestEquiv(M6502, Map.of(), buf -> {
++			for (String line : lines) {
++				buf.assemble(line);
++			}
++			expected.put("PC", Long.toHexString(buf.getNext().getOffset()));
++		}, lines.size(), expected);
++	}
++
++	/** $FF + $00 + C=1 must carry out, even though the carry arises only from the carry-in. */
++	@Test
++	public void testAdcCarryOutFromCarryInOnly() throws Exception {
++		run(List.of("LDA #0xff", "SEC", "ADC #0x00"),
++			Map.of("A", "0", "C", "1", "Z", "1", "N", "0", "V", "0"));
++	}
++
++	/** $50 + $50 overflows the signed byte range: V=1 while C=0. */
++	@Test
++	public void testAdcSignedOverflowIsNotCarry() throws Exception {
++		run(List.of("LDA #0x50", "CLC", "ADC #0x50"),
++			Map.of("A", "a0", "C", "0", "Z", "0", "N", "1", "V", "1"));
++	}
++
++	/** SBC leaves C=1 when no borrow occurred. */
++	@Test
++	public void testSbcCarrySetWhenNoBorrow() throws Exception {
++		run(List.of("LDA #0x05", "SEC", "SBC #0x03"),
++			Map.of("A", "2", "C", "1", "Z", "0", "N", "0", "V", "0"));
++	}
++
++	/** SBC clears C when a borrow occurred. */
++	@Test
++	public void testSbcCarryClearOnBorrow() throws Exception {
++		run(List.of("LDA #0x03", "SEC", "SBC #0x05"),
++			Map.of("A", "fe", "C", "0", "Z", "0", "N", "1", "V", "0"));
++	}
++
++	/**
++	 * Seeds a pointer at $FF whose high byte must come from $00 (zero-page wrap), never from
++	 * $0100. $00=$12 and $0100=$56 make the two candidate targets ($1234 vs $5634)
++	 * distinguishable; only the correct one holds $AA.
++	 */
++	private static final List<String> SEED_WRAPPED_POINTER = List.of(
++		"LDA #0x34", "STA 0xff",
++		"LDA #0x12", "STA 0x00",
++		"LDA #0x56", "STA 0x0100",
++		"LDA #0xaa", "STA 0x1234");
++
++	private static List<String> withSeed(String... lines) {
++		List<String> all = new ArrayList<>(SEED_WRAPPED_POINTER);
++		all.addAll(List.of(lines));
++		return all;
++	}
++
++	@Test
++	public void testIndirectYPointerWrapsWithinZeroPage() throws Exception {
++		run(withSeed("LDY #0x00", "LDA (0xff),Y"),
++			Map.of("A", "aa", "Y", "0", "Z", "0", "N", "1"));
++	}
++
++	@Test
++	public void testIndexedIndirectXPointerWrapsWithinZeroPage() throws Exception {
++		run(withSeed("LDX #0x01", "LDA (0xfe,X)"),
++			Map.of("A", "aa", "X", "1", "Z", "0", "N", "1"));
++	}
++}
