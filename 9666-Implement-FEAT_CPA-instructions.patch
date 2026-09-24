@@ -1,0 +1,108 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: CUB3D <callumthom11@gmail.com>
+Date: Mon, 21 Sep 2026 15:31:30 +0000
+Subject: [PATCH] 9666: Implement FEAT_CPA instructions
+
+---
+ .../AARCH64/data/languages/AARCH64base.sinc   | 28 ++++++++++++++
+ .../data/languages/AARCH64instructions.sinc   |  2 +
+ .../AARCH64/data/languages/AARCH64sve.sinc    | 37 +++++++++++++++++++
+ 3 files changed, 67 insertions(+)
+
+diff --git a/Ghidra/Processors/AARCH64/data/languages/AARCH64base.sinc b/Ghidra/Processors/AARCH64/data/languages/AARCH64base.sinc
+index 867a706e25..2272bb1d6d 100644
+--- a/Ghidra/Processors/AARCH64/data/languages/AARCH64base.sinc
++++ b/Ghidra/Processors/AARCH64/data/languages/AARCH64base.sinc
+@@ -8977,3 +8977,31 @@ is sf=1 & b_30=0 & S=0 & b_2428=0x1a & b_2123=0x6 & b_1015=0x1b & Rd_GPR64 & Rn_
+ 	local test = tmp <= tmp2;
+ 	Rd_GPR64 = (zext(test)*tmp) + (zext(!test)*(tmp2));
+ }
++
++# FEAT_CPA
++cpa_imm3_shift: is cpa_imm3=0 { export 0:8; }
++cpa_imm3_shift:, "lsl #"^cpa_imm3 is cpa_imm3 { export *[const]:8 cpa_imm3; }
++
++:addpt Rd_GPR64xsp, Rn_GPR64xsp, Rm_GPR64^cpa_imm3_shift
++is sf=1 & b_30=0 & S=0 & b_2428=0b11010 & b_2123=0x0 & Rm_GPR64 & b_1315=0x1 & cpa_imm3_shift & Rn_GPR64xsp & Rd_GPR64xsp
++{
++	Rd_GPR64xsp = Rn_GPR64xsp + (Rm_GPR64 << cpa_imm3_shift);
++}
++
++:subpt Rd_GPR64xsp, Rn_GPR64xsp, Rm_GPR64^cpa_imm3_shift
++is sf=1 & b_30=1 & S=0 & b_2428=0b11010 & b_2123=0x0 & Rm_GPR64 & b_1315=0x1 & cpa_imm3_shift & Rn_GPR64xsp & Rd_GPR64xsp
++{
++	Rd_GPR64xsp = Rn_GPR64xsp - (Rm_GPR64 << cpa_imm3_shift);
++}
++
++:maddpt Rd_GPR64, Rn_GPR64, Rm_GPR64, Ra_GPR64
++is sf=1 & b_30=0 & S=0 & b_2428=0b11011 & b_2123=0b011 & Rm_GPR64 & b_15=0 & Ra_GPR64 & Rn_GPR64 & Rd_GPR64
++{
++	Rd_GPR64 = Ra_GPR64 + (Rn_GPR64 * Rm_GPR64);
++}
++
++:msubpt Rd_GPR64, Rn_GPR64, Rm_GPR64, Ra_GPR64
++is sf=1 & b_30=0 & S=0 & b_2428=0b11011 & b_2123=0b011 & Rm_GPR64 & b_15=1 & Ra_GPR64 & Rn_GPR64 & Rd_GPR64
++{
++	Rd_GPR64 = Ra_GPR64 - (Rn_GPR64 * Rm_GPR64);
++}
+diff --git a/Ghidra/Processors/AARCH64/data/languages/AARCH64instructions.sinc b/Ghidra/Processors/AARCH64/data/languages/AARCH64instructions.sinc
+index 41ced30e4e..de99a269c8 100644
+--- a/Ghidra/Processors/AARCH64/data/languages/AARCH64instructions.sinc
++++ b/Ghidra/Processors/AARCH64/data/languages/AARCH64instructions.sinc
+@@ -1489,6 +1489,8 @@ define token instrAARCH64 (32) endian = little
+ 	simm19 = (5,23) signed
+ 	simm26 = (0,25) signed
+ 
++	cpa_imm3 = (10,12)
++
+ 	immlo = (29,30)
+ 	immhi = (5,23) signed
+ 
+diff --git a/Ghidra/Processors/AARCH64/data/languages/AARCH64sve.sinc b/Ghidra/Processors/AARCH64/data/languages/AARCH64sve.sinc
+index 958b46696b..440330ce15 100644
+--- a/Ghidra/Processors/AARCH64/data/languages/AARCH64sve.sinc
++++ b/Ghidra/Processors/AARCH64/data/languages/AARCH64sve.sinc
+@@ -7403,3 +7403,40 @@ is sve_b_2431=0b00000101 & sve_size_2223 & sve_b_21=1 & sve_zm_1620 & sve_b_1315
+ {
+ 	Zd.T = SVE_zip1(Zd.T, Zn.T, Zm.T);
+ }
++
++# FEAT_CPA
++:addpt Zd.T, Pg3_m, Zd.T_2, Zn.T
++is sve_b_2431=0b00000100 & sve_size_2223=0b11 & sve_b_1921=0b000 & sve_b_1718=0b10 & sve_b_16=0 & sve_b_1315=0b000 & sve_pg_1012 & sve_zm_0509 & sve_zdn_0004 & Zd.T & Zd.T_2 & Zn.T & Pg3_m
++{
++	Zd.T = SVE_add(Zd.T, Pg3_m, Zd.T_2, Zn.T);
++}
++
++:addpt Zd.T, Zn.T, Zm.T
++is sve_b_2431=0b00000100 & sve_size_2223=0b11 & sve_b_21=1 & sve_zm_1620 & sve_b_1315=0b000 & sve_b_1112=0b01 & sve_b_10=0 & sve_zn_0509 & sve_zd_0004 & Zm.T & Zd.T & Zn.T
++{
++	Zd.T = SVE_add(Zd.T, Zn.T, Zm.T);
++}
++
++:subpt Zd.T, Pg3_m, Zd.T_2, Zn.T
++is sve_b_2431=0b00000100 & sve_size_2223=0b11 & sve_b_1921=0b000 & sve_b_1718=0b10 & sve_b_16=1 & sve_b_1315=0b000 & sve_pg_1012 & sve_zm_0509 & sve_zdn_0004 & Zd.T & Zd.T_2 & Zn.T & Pg3_m
++{
++	Zd.T = SVE_sub(Zd.T, Pg3_m, Zd.T_2, Zn.T);
++}
++
++:subpt Zd.T, Zn.T, Zm.T
++is sve_b_2431=0b00000100 & sve_size_2223=0b11 & sve_b_21=1 & sve_zm_1620 & sve_b_1315=0b000 & sve_b_1112=0b01 & sve_b_10=1 & sve_zn_0509 & sve_zd_0004 & Zm.T & Zd.T & Zn.T
++{
++	Zd.T = SVE_sub(Zd.T, Zn.T, Zm.T);
++}
++
++:madpt Zd.T, Zm.T, Zn.T
++is sve_b_2431=0b01000100 & sve_size_2223=0b11 & sve_b_21=0 & sve_zm_1620 & sve_b_1415=0b11 & sve_b_13=0 & sve_pg_1012=0b110 & sve_za_0509 & sve_zdn_0004 & Zd.T & Zm.T & Zn.T
++{
++	Zd.T = SVE_mad(Zd.T, Zm.T, Zn.T);
++}
++
++:mlapt Zd.T, Zn.T, Zm.T
++is sve_b_2431=0b01000100 & sve_size_2223=0b11 & sve_b_21=0 & sve_zm_1620 & sve_b_1415=0b11 & sve_b_13=0 & sve_pg_1012=0b100 & sve_zn_0509 & sve_zda_0004 & Zd.T & Zm.T & Zn.T
++{
++	Zd.T = SVE_mla(Zd.T, Zn.T, Zm.T);
++}
+-- 
+2.45.1
+

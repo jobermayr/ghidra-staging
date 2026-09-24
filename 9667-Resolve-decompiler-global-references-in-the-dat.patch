@@ -1,0 +1,694 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Christopher Wrogg <christheyankee@gmail.com>
+Date: Tue, 22 Sep 2026 00:05:21 -0400
+Subject: [PATCH] 9667: Resolve decompiler global references in the data space
+ on Harvard architectures
+
+Resolve decompiler global references in the data space on
+ Harvard architectures
+
+Fixes improper reference calculation on word addressed systems with multiple data spaces
+---
+ .../app/decompiler/ClangVariableToken.java    |  10 +-
+ .../decompile/AbstractDecompilerTest.java     |  14 ++
+ .../DecompilerHarvardNavigationTest.java      | 110 ++++++++++++++
+ ...mpilerMultipleDataSpaceNavigationTest.java | 140 ++++++++++++++++++
+ .../decompile/DecompilerNavigationTest.java   |   5 -
+ ...DecompilerWordAddressedNavigationTest.java | 122 +++++++++++++++
+ .../program/model/pcode/HighConstant.java     |   4 +-
+ .../model/pcode/HighFunctionDBUtil.java       |  87 ++++++++++-
+ .../model/pcode/PcodeDataTypeManager.java     |  13 +-
+ 9 files changed, 485 insertions(+), 20 deletions(-)
+ create mode 100644 Ghidra/Features/Decompiler/src/test.slow/java/ghidra/app/plugin/core/decompile/DecompilerHarvardNavigationTest.java
+ create mode 100644 Ghidra/Features/Decompiler/src/test.slow/java/ghidra/app/plugin/core/decompile/DecompilerMultipleDataSpaceNavigationTest.java
+ create mode 100644 Ghidra/Features/Decompiler/src/test.slow/java/ghidra/app/plugin/core/decompile/DecompilerWordAddressedNavigationTest.java
+
+diff --git a/Ghidra/Features/Decompiler/src/main/java/ghidra/app/decompiler/ClangVariableToken.java b/Ghidra/Features/Decompiler/src/main/java/ghidra/app/decompiler/ClangVariableToken.java
+index 7c3f1b50bb..9e6922a016 100644
+--- a/Ghidra/Features/Decompiler/src/main/java/ghidra/app/decompiler/ClangVariableToken.java
++++ b/Ghidra/Features/Decompiler/src/main/java/ghidra/app/decompiler/ClangVariableToken.java
+@@ -16,7 +16,6 @@
+ package ghidra.app.decompiler;
+ 
+ import ghidra.program.model.address.Address;
+-import ghidra.program.model.address.AddressFactory;
+ import ghidra.program.model.data.AbstractIntegerDataType;
+ import ghidra.program.model.data.DataType;
+ import ghidra.program.model.pcode.*;
+@@ -136,7 +135,7 @@ public class ClangVariableToken extends ClangToken {
+ 			return null;
+ 		}
+ 		// Token may be from a variable reference, in which case we have to dig to find the actual symbol
+-		Address storageAddress = getStorageAddress(highFunction.getAddressFactory());
++		Address storageAddress = getStorageAddress(highFunction);
+ 		if (storageAddress == null) {
+ 			return null;
+ 		}
+@@ -166,17 +165,18 @@ public class ClangVariableToken extends ClangToken {
+ 	/**
+ 	 * Get the storage address of the variable, if any.
+ 	 * The variable may be directly referenced by this token, or indirectly referenced as a point.
+-	 * @param addrFactory is the factory used to construct the Address
++	 * @param highFunction is the decompiler results containing the token
+ 	 * @return the storage Address or null if there is no variable attached
+ 	 */
+-	private Address getStorageAddress(AddressFactory addrFactory) {
++	private Address getStorageAddress(HighFunction highFunction) {
+ 		Address storageAddress = null;
+ 		if (varnode != null) {
+ 			storageAddress = varnode.getAddress();
+ 		}
+ 		// op could be a PTRSUB, need to dig it out...
+ 		else {
+-			storageAddress = HighFunctionDBUtil.getSpacebaseReferenceAddress(addrFactory, op);
++			storageAddress = HighFunctionDBUtil.getSpacebaseReferenceAddress(
++				highFunction.getAddressFactory(), highFunction.getLanguage(), op);
+ 		}
+ 		return storageAddress;
+ 	}
+diff --git a/Ghidra/Features/Decompiler/src/test.slow/java/ghidra/app/plugin/core/decompile/AbstractDecompilerTest.java b/Ghidra/Features/Decompiler/src/test.slow/java/ghidra/app/plugin/core/decompile/AbstractDecompilerTest.java
+index 61d6cd920e..e88bee5e8d 100644
+--- a/Ghidra/Features/Decompiler/src/test.slow/java/ghidra/app/plugin/core/decompile/AbstractDecompilerTest.java
++++ b/Ghidra/Features/Decompiler/src/test.slow/java/ghidra/app/plugin/core/decompile/AbstractDecompilerTest.java
+@@ -29,6 +29,7 @@ import docking.widgets.fieldpanel.support.FieldLocation;
+ import ghidra.app.decompiler.ClangToken;
+ import ghidra.app.decompiler.component.ClangTextField;
+ import ghidra.app.decompiler.component.DecompilerPanel;
++import ghidra.program.model.address.Address;
+ import ghidra.program.model.listing.Function;
+ import ghidra.program.model.pcode.HighFunction;
+ import ghidra.test.AbstractProgramBasedTest;
+@@ -213,4 +214,17 @@ public abstract class AbstractDecompilerTest extends AbstractProgramBasedTest {
+ 		return provider.getController().getFunction();
+ 	}
+ 
++	protected String getDecompiledText() {
++		StringBuilder buffy = new StringBuilder();
++		for (Field field : provider.getDecompilerPanel().getFields()) {
++			buffy.append(field.getText()).append('\n');
++		}
++		return buffy.toString();
++	}
++
++	protected void assertListingAddress(Address expected) {
++		waitForCondition(() -> expected.equals(codeBrowser.getCurrentLocation().getAddress()),
++			() -> "The Listing is not at the expected address " + expected + "; it is at " +
++				codeBrowser.getCurrentLocation().getAddress());
++	}
+ }
+diff --git a/Ghidra/Features/Decompiler/src/test.slow/java/ghidra/app/plugin/core/decompile/DecompilerHarvardNavigationTest.java b/Ghidra/Features/Decompiler/src/test.slow/java/ghidra/app/plugin/core/decompile/DecompilerHarvardNavigationTest.java
+new file mode 100644
+index 0000000000..41f613d4a5
+--- /dev/null
++++ b/Ghidra/Features/Decompiler/src/test.slow/java/ghidra/app/plugin/core/decompile/DecompilerHarvardNavigationTest.java
+@@ -0,0 +1,110 @@
++/* ###
++ * IP: GHIDRA
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package ghidra.app.plugin.core.decompile;
++
++import static org.junit.Assert.*;
++
++import org.junit.Test;
++
++import ghidra.app.decompiler.component.ClangTextField;
++import ghidra.program.database.ProgramBuilder;
++import ghidra.program.model.address.*;
++import ghidra.program.model.data.*;
++import ghidra.program.model.listing.*;
++import ghidra.program.model.listing.Function.FunctionUpdateType;
++import ghidra.program.model.pcode.*;
++import ghidra.program.model.symbol.SourceType;
++
++/**
++ * Navigation from the decompiler on a Harvard architecture, where code and data live in different
++ * address spaces and a global's address is a constant relative to the data space.
++ */
++public class DecompilerHarvardNavigationTest extends AbstractDecompilerTest {
++
++	private static final String FILL = "code:0000";
++	private static final String CLEAR = "code:0006";
++	private static final String BUF = "mem:0101";
++
++	@Override
++	protected Program getProgram() throws Exception {
++		ProgramBuilder builder = new ProgramBuilder("avr", "avr8:LE:16:default", this);
++		builder.createMemory("code", FILL, 0x400); // large enough that code:0080 exists
++		builder.createMemory("sram", "mem:0100", 0x100);
++
++		// fill:  lds r24,0x101; ldi r24,lo8(0x101); ldi r25,hi8(0x101); rcall clear; ret
++		// clear: movw X,r25:r24; ldi r18,10; L: st X+,r1; subi r18,1; brne L; ret
++		builder.setBytes(FILL, "80 91 01 01 81 e0 91 e0 01 d0 08 95 " +
++			"dc 01 2a e0 1d 92 21 50 f1 f7 08 95", true);
++		builder.createFunction(FILL);
++		builder.createFunction(CLEAR);
++		return builder.getProgram();
++	}
++
++	@Test
++	public void testDoubleClickOnGlobalAddress_NavigatesToDataSpace() throws Exception {
++
++		// give clear() a pointer parameter so fill() decompiles to clear(&DAT_mem_0101). No
++		// program symbol exists at mem:0101, so the decompiler names the location itself
++		modifyProgram(p -> {
++			Function fill = p.getFunctionManager().getFunctionAt(addr(FILL));
++			fill.setName("fill", SourceType.USER_DEFINED);
++			Function clear = p.getFunctionManager().getFunctionAt(addr(CLEAR));
++			clear.setName("clear", SourceType.USER_DEFINED);
++			clear.setReturnType(VoidDataType.dataType, SourceType.USER_DEFINED);
++			clear.replaceParameters(FunctionUpdateType.DYNAMIC_STORAGE_ALL_PARAMS, true,
++				SourceType.USER_DEFINED,
++				new ParameterImpl("p", new PointerDataType(ByteDataType.dataType), p));
++		});
++
++		decompile(FILL);
++
++		// the decompiler names the location (DAT_ or UNK_ prefix, depending on its type)
++		ClangTextField line = getLineContaining("&");
++		assertNotNull("fill() did not decompile to a call taking &..._mem_0101:\n" +
++			getDecompiledText(), line);
++		int lineNumber = line.getLineNumber();
++		int column = line.getText().indexOf("_mem_0101") + 1;
++		setDecompilerLocation(lineNumber, column);
++		assertTrue(getCursorToken().getText().endsWith("_mem_0101"));
++
++		doubleClick();
++
++		// The constant 0x101 is an offset into the data space. Resolving it in the function's code
++		// space instead put the Listing at code:0080.1 (the code space is word addressed).
++		Address buf = program.getAddressFactory().getAddress(BUF);
++		assertNotNull(buf);
++		assertListingAddress(buf);
++	}
++
++	@Test
++	public void testSpacebaseReference_ResolvesInDataSpace() {
++
++		// &global is encoded as PTRSUB(<spacebase>, #offset); the offset is relative to the data
++		// space, which on this language is 'mem', not the default 'code' space
++		AddressFactory addrFactory = program.getAddressFactory();
++		AddressSpace constants = addrFactory.getConstantSpace();
++		Varnode spacebase = new Varnode(constants.getAddress(0), 2);
++		Varnode offset = new Varnode(constants.getAddress(0x101), 2);
++		PcodeOp ptrsub = new PcodeOp(addr(FILL), 0, PcodeOp.PTRSUB,
++			new Varnode[] { spacebase, offset });
++
++		Address addr = HighFunctionDBUtil.getSpacebaseReferenceAddress(addrFactory,
++			program.getLanguage(), ptrsub);
++
++		assertEquals(program.getAddressFactory().getAddress(BUF), addr);
++	}
++
++}
+diff --git a/Ghidra/Features/Decompiler/src/test.slow/java/ghidra/app/plugin/core/decompile/DecompilerMultipleDataSpaceNavigationTest.java b/Ghidra/Features/Decompiler/src/test.slow/java/ghidra/app/plugin/core/decompile/DecompilerMultipleDataSpaceNavigationTest.java
+new file mode 100644
+index 0000000000..8062e28588
+--- /dev/null
++++ b/Ghidra/Features/Decompiler/src/test.slow/java/ghidra/app/plugin/core/decompile/DecompilerMultipleDataSpaceNavigationTest.java
+@@ -0,0 +1,140 @@
++/* ###
++ * IP: GHIDRA
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package ghidra.app.plugin.core.decompile;
++
++import static org.junit.Assert.*;
++
++import java.util.Iterator;
++
++import org.junit.Test;
++
++import ghidra.app.decompiler.component.ClangTextField;
++import ghidra.program.database.ProgramBuilder;
++import ghidra.program.model.address.*;
++import ghidra.program.model.data.*;
++import ghidra.program.model.listing.*;
++import ghidra.program.model.listing.Function.FunctionUpdateType;
++import ghidra.program.model.pcode.*;
++import ghidra.program.model.symbol.SourceType;
++
++/**
++ * Navigation from the decompiler on a language with several data spaces whose default data space
++ * is the code space, so the space of a global's address can only come from the decompiler.
++ */
++public class DecompilerMultipleDataSpaceNavigationTest extends AbstractDecompilerTest {
++
++	private static final String FILL = "CODE:0000";
++	private static final String CLEAR = "CODE:0010";
++	private static final String BUF = "EXTMEM:0100";
++	private static final long BUF_OFFSET = 0x100;
++
++	@Override
++	protected Program getProgram() throws Exception {
++		ProgramBuilder builder = new ProgramBuilder("8051", ProgramBuilder._8051, this);
++		builder.createMemory("CODE", FILL, 0x400);
++		builder.createMemory("INTMEM", "INTMEM:20", 0xe0);
++		builder.createMemory("EXTMEM", "EXTMEM:0000", 0x1000);
++
++		// fill: mov DPTR,#0x100; movx A,@DPTR; lcall clear; ret        clear: ret
++		builder.setBytes(FILL, "90 01 00 e0 12 00 10 22", true);
++		builder.setBytes(CLEAR, "22", true);
++		builder.createFunction(FILL);
++		builder.createFunction(CLEAR);
++		return builder.getProgram();
++	}
++
++	@Test
++	public void testDoubleClickOnGlobalAddress_UsesSpaceOfGlobal() throws Exception {
++
++		// clear() takes a pointer into EXTMEM, so fill() decompiles to clear(&UNK_EXTMEM_0100).
++		// No program symbol exists there, so the decompiler names the location itself.
++		modifyProgram(p -> {
++			Function fill = p.getFunctionManager().getFunctionAt(addr(FILL));
++			fill.setName("fill", SourceType.USER_DEFINED);
++			Function clear = p.getFunctionManager().getFunctionAt(addr(CLEAR));
++			clear.setName("clear", SourceType.USER_DEFINED);
++			clear.setReturnType(VoidDataType.dataType, SourceType.USER_DEFINED);
++			AddressSpace extmem = p.getAddressFactory().getAddressSpace("EXTMEM");
++			DataType extmemPointer = new PointerTypedef(null, ByteDataType.dataType, 2,
++				p.getDataTypeManager(), extmem);
++			clear.replaceParameters(FunctionUpdateType.DYNAMIC_STORAGE_ALL_PARAMS, true,
++				SourceType.USER_DEFINED, new ParameterImpl("p", extmemPointer, p));
++		});
++
++		decompile(FILL);
++
++		ClangTextField line = getLineContaining("_EXTMEM_0100");
++		assertNotNull("fill() did not decompile to a call taking &..._EXTMEM_0100:\n" +
++			getDecompiledText(), line);
++		int lineNumber = line.getLineNumber();
++		int column = line.getText().indexOf("_EXTMEM_0100") + 1;
++		setDecompilerLocation(lineNumber, column);
++		assertTrue(getCursorToken().getText().endsWith("_EXTMEM_0100"));
++
++		doubleClick();
++
++		// The language's default data space is CODE, so only the space the decompiler attached
++		// to the reference can put the Listing in EXTMEM
++		Address buf = program.getAddressFactory().getAddress(BUF);
++		assertNotNull(buf);
++		assertListingAddress(buf);
++	}
++
++	@Test
++	public void testSpacebaseReference_UsesSpaceOfGlobal() throws Exception {
++
++		modifyProgram(p -> {
++			Function clear = p.getFunctionManager().getFunctionAt(addr(CLEAR));
++			clear.setReturnType(VoidDataType.dataType, SourceType.USER_DEFINED);
++			AddressSpace extmem = p.getAddressFactory().getAddressSpace("EXTMEM");
++			DataType extmemPointer = new PointerTypedef(null, ByteDataType.dataType, 2,
++				p.getDataTypeManager(), extmem);
++			clear.replaceParameters(FunctionUpdateType.DYNAMIC_STORAGE_ALL_PARAMS, true,
++				SourceType.USER_DEFINED, new ParameterImpl("p", extmemPointer, p));
++		});
++
++		decompile(FILL);
++
++		// the argument to clear() is PTRSUB(<spacebase>, #0x100), with the spacebase typed as a
++		// pointer into EXTMEM by the decompiler
++		PcodeOp ptrsub = findSpacebaseReference(BUF_OFFSET);
++		assertNotNull("No PTRSUB with offset 0x100 in\n" + getDecompiledText(), ptrsub);
++		AddressFactory addrFactory = program.getAddressFactory();
++		Address expected = addrFactory.getAddress(BUF);
++
++		// with and without a language: the typed space wins over any default
++		assertEquals(expected, HighFunctionDBUtil.getSpacebaseReferenceAddress(addrFactory,
++			program.getLanguage(), ptrsub));
++		assertEquals(expected, HighFunctionDBUtil.getSpacebaseReferenceAddress(addrFactory,
++			null, ptrsub));
++	}
++
++	private PcodeOp findSpacebaseReference(long offset) {
++		Iterator<PcodeOpAST> ops = getHighFunction().getPcodeOps();
++		while (ops.hasNext()) {
++			PcodeOp op = ops.next();
++			if (op.getOpcode() != PcodeOp.PTRSUB) {
++				continue;
++			}
++			Varnode base = op.getInput(0);
++			Varnode off = op.getInput(1);
++			if (base.isConstant() && off.isConstant() && off.getOffset() == offset) {
++				return op;
++			}
++		}
++		return null;
++	}
++}
+diff --git a/Ghidra/Features/Decompiler/src/test.slow/java/ghidra/app/plugin/core/decompile/DecompilerNavigationTest.java b/Ghidra/Features/Decompiler/src/test.slow/java/ghidra/app/plugin/core/decompile/DecompilerNavigationTest.java
+index c2687dddcf..32a3fd98ad 100644
+--- a/Ghidra/Features/Decompiler/src/test.slow/java/ghidra/app/plugin/core/decompile/DecompilerNavigationTest.java
++++ b/Ghidra/Features/Decompiler/src/test.slow/java/ghidra/app/plugin/core/decompile/DecompilerNavigationTest.java
+@@ -386,11 +386,6 @@ public class DecompilerNavigationTest extends AbstractDecompilerTest {
+ 		waitForSwing();
+ 	}
+ 
+-	private void assertListingAddress(Address expected) {
+-		waitForCondition(() -> expected.equals(codeBrowser.getCurrentLocation().getAddress()),
+-			"The Listing is not at the expected address");
+-	}
+-
+ 	private void assertExternalNavigationPerformed() {
+ 		// going to the 'external linkage' means we went to the thunk function and not the
+ 		// external program
+diff --git a/Ghidra/Features/Decompiler/src/test.slow/java/ghidra/app/plugin/core/decompile/DecompilerWordAddressedNavigationTest.java b/Ghidra/Features/Decompiler/src/test.slow/java/ghidra/app/plugin/core/decompile/DecompilerWordAddressedNavigationTest.java
+new file mode 100644
+index 0000000000..321cd5a54e
+--- /dev/null
++++ b/Ghidra/Features/Decompiler/src/test.slow/java/ghidra/app/plugin/core/decompile/DecompilerWordAddressedNavigationTest.java
+@@ -0,0 +1,122 @@
++/* ###
++ * IP: GHIDRA
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package ghidra.app.plugin.core.decompile;
++
++import static org.junit.Assert.*;
++
++import org.junit.Test;
++
++import ghidra.app.decompiler.component.ClangTextField;
++import ghidra.app.plugin.assembler.Assembler;
++import ghidra.app.plugin.assembler.Assemblers;
++import ghidra.program.database.ProgramBuilder;
++import ghidra.program.model.address.*;
++import ghidra.program.model.data.*;
++import ghidra.program.model.listing.*;
++import ghidra.program.model.listing.Function.FunctionUpdateType;
++import ghidra.program.model.pcode.*;
++import ghidra.program.model.symbol.SourceType;
++
++/**
++ * Navigation from the decompiler on a word-addressed language, where a global's address is a
++ * constant in words, not bytes.
++ */
++public class DecompilerWordAddressedNavigationTest extends AbstractDecompilerTest {
++
++	private static final String FILL = "0x0";
++	private static final String CLEAR = "0x10";
++	private static final long BUF = 0x100; // word offset
++
++	@Override
++	protected Program getProgram() throws Exception {
++		ProgramBuilder builder = new ProgramBuilder("toy", ProgramBuilder._TOY_WORDSIZE2_BE, this);
++		builder.createMemory("ram", FILL, 0x400); // bytes; word 0x100 is inside
++		Program p = builder.getProgram();
++
++		int tx = p.startTransaction("assemble");
++		try {
++			Assembler asm = Assemblers.getAssembler(p);
++			// fill:  r12 = &buf; r0 = buf; clear(r12)
++			asm.assemble(builder.addr(FILL), "imm r12,#0x100", "load r0,[r12]",
++				"call 0x00000010", "ret");
++			// clear: *r12 = 0
++			asm.assemble(builder.addr(CLEAR), "imm r0,#0x0", "store [r12],r0", "ret");
++		}
++		finally {
++			p.endTransaction(tx, true);
++		}
++		builder.createFunction(FILL);
++		builder.createFunction(CLEAR);
++		return p;
++	}
++
++	@Test
++	public void testDoubleClickOnGlobalAddress_UsesWordOffset() throws Exception {
++
++		// give clear() a pointer parameter so fill() decompiles to clear(&UNK_00000100). No
++		// program symbol exists there, so the decompiler names the location itself.
++		modifyProgram(p -> {
++			Function fill = p.getFunctionManager().getFunctionAt(addr(FILL));
++			fill.setName("fill", SourceType.USER_DEFINED);
++			Function clear = p.getFunctionManager().getFunctionAt(addr(CLEAR));
++			clear.setName("clear", SourceType.USER_DEFINED);
++			clear.setReturnType(VoidDataType.dataType, SourceType.USER_DEFINED);
++			clear.replaceParameters(FunctionUpdateType.DYNAMIC_STORAGE_ALL_PARAMS, true,
++				SourceType.USER_DEFINED,
++				new ParameterImpl("p", new PointerDataType(IntegerDataType.dataType), p));
++		});
++
++		decompile(FILL);
++
++		// the decompiler names the location (DAT_ or UNK_ prefix, depending on its type)
++		ClangTextField line = getLineContaining("&");
++		assertNotNull("fill() did not decompile to a call taking &..._00000100:\n" +
++			getDecompiledText(), line);
++		int lineNumber = line.getLineNumber();
++		int column = line.getText().indexOf("_00000100") + 1;
++		setDecompilerLocation(lineNumber, column);
++		assertTrue(getCursorToken().getText().endsWith("_00000100"));
++
++		doubleClick();
++
++		// The constant is a pointer value, in words. Treating it as a byte offset put the
++		// Listing at word 0x80 instead.
++		assertListingAddress(wordAddr(BUF));
++	}
++
++	@Test
++	public void testSpacebaseReference_WordAddressedSpace() {
++
++		AddressFactory addrFactory = program.getAddressFactory();
++		AddressSpace space = addrFactory.getDefaultAddressSpace();
++		assertEquals(2, space.getAddressableUnitSize());
++		AddressSpace constants = addrFactory.getConstantSpace();
++		Varnode spacebase = new Varnode(constants.getAddress(0), 4);
++		Varnode offset = new Varnode(constants.getAddress(BUF), 4);
++		PcodeOp ptrsub = new PcodeOp(addr(FILL), 0, PcodeOp.PTRSUB,
++			new Varnode[] { spacebase, offset });
++
++		Address addr = HighFunctionDBUtil.getSpacebaseReferenceAddress(addrFactory,
++			program.getLanguage(), ptrsub);
++
++		assertEquals(wordAddr(BUF), addr);
++	}
++
++	private Address wordAddr(long wordOffset) {
++		return program.getAddressFactory().getDefaultAddressSpace().getAddress(wordOffset, true);
++	}
++
++}
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/HighConstant.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/HighConstant.java
+index aa994cd738..3dfb7f5759 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/HighConstant.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/HighConstant.java
+@@ -111,8 +111,8 @@ public class HighConstant extends HighVariable {
+ 				symbol = globalMap.populateSymbol(symref, null, -1);
+ 				if (symbol == null) {
+ 					PcodeOp op = ((VarnodeAST) represent).getLoneDescend();
+-					Address addr = HighFunctionDBUtil
+-							.getSpacebaseReferenceAddress(program.getAddressFactory(), op);
++					Address addr = HighFunctionDBUtil.getSpacebaseReferenceAddress(
++						program.getAddressFactory(), function.getLanguage(), op);
+ 					if (addr != null) {
+ 						Data data = program.getListing().getDataAt(addr);
+ 						DataType dt = data == null ? DataType.DEFAULT : data.getDataType();
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/HighFunctionDBUtil.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/HighFunctionDBUtil.java
+index 6657ceddce..096d977ca8 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/HighFunctionDBUtil.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/HighFunctionDBUtil.java
+@@ -17,10 +17,10 @@ package ghidra.program.model.pcode;
+ 
+ import java.util.*;
+ 
++import ghidra.program.database.data.PointerTypedefInspector;
+ import ghidra.program.model.address.*;
+ import ghidra.program.model.data.*;
+-import ghidra.program.model.lang.PrototypeModel;
+-import ghidra.program.model.lang.Register;
++import ghidra.program.model.lang.*;
+ import ghidra.program.model.listing.*;
+ import ghidra.program.model.listing.Function.FunctionUpdateType;
+ import ghidra.program.model.symbol.*;
+@@ -825,13 +825,38 @@ public class HighFunctionDBUtil {
+ 
+ 	/**
+ 	 * Get the Address referred to by a spacebase reference. Address-of references are encoded in
+-	 * the p-code syntax tree as: {@code vn = PTRSUB(<spacebase>, #const)}.  This decodes the reference and
+-	 * returns the Address
++	 * the p-code syntax tree as: {@code vn = PTRSUB(<spacebase>, #const)}.  This decodes the
++	 * reference and returns the Address.
++	 * <p>
++	 * Equivalent to {@link #getSpacebaseReferenceAddress(AddressFactory, Language, PcodeOp)} with
++	 * a null language: the space comes from the spacebase's type if it has one, otherwise the
++	 * default address space is used.
+ 	 * @param addrFactory is the factory used to construct the Address
+ 	 * @param op is the PTRSUB op encoding the reference
+-	 * @return the recovered Address (or null if not correct form)
++	 * @return the recovered Address (or null if not correct form or out of range)
+ 	 */
+ 	public static Address getSpacebaseReferenceAddress(AddressFactory addrFactory, PcodeOp op) {
++		return getSpacebaseReferenceAddress(addrFactory, null, op);
++	}
++
++	/**
++	 * Get the Address referred to by a spacebase reference. Address-of references are encoded in
++	 * the p-code syntax tree as: {@code vn = PTRSUB(<spacebase>, #const)}.  This decodes the
++	 * reference and returns the Address.
++	 * <p>
++	 * The constant is a pointer value: an offset in addressable units, not bytes, which matters
++	 * on word-addressed spaces. The space is, in order of preference: the space the decompiler
++	 * bound to the spacebase's pointer type (see {@link PcodeDataTypeManager}); the language's
++	 * default data space, which on Harvard architectures (AVR8, PIC, ...) differs from the
++	 * default (code) space; the default address space.
++	 * @param addrFactory is the factory used to construct the Address
++	 * @param language is the language whose default data space applies when the spacebase carries
++	 *            no address space (may be null)
++	 * @param op is the PTRSUB op encoding the reference
++	 * @return the recovered Address (or null if not correct form or out of range)
++	 */
++	public static Address getSpacebaseReferenceAddress(AddressFactory addrFactory,
++			Language language, PcodeOp op) {
+ 		Address storageAddress = null;
+ 		if (op == null) {
+ 			return storageAddress;
+@@ -846,7 +871,13 @@ public class HighFunctionDBUtil {
+ 				}
+ 			}
+ 			else {
+-				AddressSpace space = addrFactory.getDefaultAddressSpace();
++				AddressSpace space = getSpacebaseSpace(addrFactory, vnode);
++				if (space == null) {
++					space = getDataSpace(addrFactory, language);
++				}
++				if (space == null) {
++					space = addrFactory.getDefaultAddressSpace();
++				}
+ 				if (space instanceof SegmentedAddressSpace) {
+ 					// Assume this is a "full" encoding of the offset
+ 					int innersize = space.getPointerSize();
+@@ -855,13 +886,55 @@ public class HighFunctionDBUtil {
+ 					storageAddress = ((SegmentedAddressSpace) space).getAddress(base, off);
+ 				}
+ 				else {
+-					storageAddress = space.getAddress(cnode.getOffset());
++					try {
++						storageAddress = space.getAddress(cnode.getOffset(), true);
++					}
++					catch (AddressOutOfBoundsException e) {
++						return null;
++					}
+ 				}
+ 			}
+ 		}
+ 		return storageAddress;
+ 	}
+ 
++	/**
++	 * Get the address space the decompiler bound to a spacebase pointer. The base of a global
++	 * reference is typed as a pointer into the space that holds the global, which the decoder
++	 * keeps as a pointer-typedef with an address space setting.
++	 * @param addrFactory is the program's address factory
++	 * @param spacebase is the base operand of the PTRSUB
++	 * @return the space, or null if the operand carries no such type
++	 */
++	private static AddressSpace getSpacebaseSpace(AddressFactory addrFactory, Varnode spacebase) {
++		HighVariable high = spacebase.getHigh();
++		if (high == null) {
++			return null;
++		}
++		if (high.getDataType() instanceof TypeDef typedef) {
++			return PointerTypedefInspector.getPointerAddressSpace(typedef, addrFactory);
++		}
++		return null;
++	}
++
++	/**
++	 * Get the language's default data space as an instance from the given factory (which may hold
++	 * overlays the language's own factory does not)
++	 * @param addrFactory is the program's address factory
++	 * @param language is the language (may be null)
++	 * @return the data space, or null if unknown
++	 */
++	private static AddressSpace getDataSpace(AddressFactory addrFactory, Language language) {
++		if (language == null) {
++			return null;
++		}
++		AddressSpace dataSpace = language.getDefaultDataSpace();
++		if (dataSpace == null) {
++			return null;
++		}
++		return addrFactory.getAddressSpace(dataSpace.getName());
++	}
++
+ 	/**
+ 	 * Write a union facet to the database (UnionFacetSymbol).  Parameters provide the
+ 	 * pieces for building the dynamic LocalVariable.  This method clears out any preexisting
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/PcodeDataTypeManager.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/PcodeDataTypeManager.java
+index e6e7ee9293..b2cf8e0019 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/PcodeDataTypeManager.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/PcodeDataTypeManager.java
+@@ -100,6 +100,7 @@ public class PcodeDataTypeManager {
+ 
+ 	private Program program;
+ 	private DataTypeManager progDataTypes;		// DataTypes from a particular program
++	private AddressSpace pendingSpacebase;
+ 	private DataTypeManager builtInDataTypes = BuiltInDataTypeManager.getDataTypeManager();
+ 	private DataOrganization dataOrganization;
+ 	private NameTransformer nameTransformer;
+@@ -251,10 +252,19 @@ public class PcodeDataTypeManager {
+ 		if (meta.equals("ptr")) {
+ 			int size = (int) decoder.readSignedInteger(ATTRIB_SIZE);
+ 			if (decoder.peekElement() != 0) {
++				pendingSpacebase = null;
+ 				DataType dt = decodeDataType(decoder);
++				AddressSpace spacebase = pendingSpacebase;
++				pendingSpacebase = null;
+ 				boolean useDefaultSize = (size == dataOrganization.getPointerSize() ||
+ 					size > PointerDataType.MAX_POINTER_SIZE_BYTES);
+-				restype = new PointerDataType(dt, useDefaultSize ? -1 : size, progDataTypes);
++				if (spacebase != null) {
++					restype = new PointerTypedef(null, dt, useDefaultSize ? -1 : size,
++						progDataTypes, spacebase);
++				}
++				else {
++					restype = new PointerDataType(dt, useDefaultSize ? -1 : size, progDataTypes);
++				}
+ 			}
+ 		}
+ 		else if (meta.equals("array")) {
+@@ -268,6 +278,7 @@ public class PcodeDataTypeManager {
+ 			}
+ 		}
+ 		else if (meta.equals("spacebase")) {		// Typically the type of "the whole stack"
++			pendingSpacebase = decoder.readSpace(ATTRIB_SPACE);
+ 			decoder.closeElementSkipping(el);  		// get rid of unused "addr" element
+ 			return voidDt;
+ 		}
+-- 
+2.45.1
+
