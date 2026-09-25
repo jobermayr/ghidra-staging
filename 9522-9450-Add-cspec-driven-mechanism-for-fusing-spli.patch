@@ -78,22 +78,23 @@ recognize <farpointerjoin> when a cspec is validated/loaded.
 
 Fixes #9450
 ---
- .../src/decompile/cpp/coreaction.cc           | 43 +++++++++++++
- .../Decompiler/src/decompile/cpp/fspec.cc     | 61 ++++++++++++++++++-
+ .../src/decompile/cpp/coreaction.cc           | 43 ++++++++++++++
+ .../Decompiler/src/decompile/cpp/fspec.cc     | 57 ++++++++++++++++++
  .../cpp/include/ghidra/coreaction.hh          | 22 ++++++-
  .../src/decompile/cpp/include/ghidra/fspec.hh | 18 ++++++
- .../src/decompile/unittests/testfuncproto.cc  | 57 +++++++++++++++++
+ .../Decompiler/src/decompile/cpp/marshal.cc   |  4 +-
+ .../src/decompile/unittests/testfuncproto.cc  | 57 ++++++++++++++++++
  .../data/languages/compiler_spec.rxg          | 15 +++++
- .../program/model/lang/PrototypeModel.java    | 59 ++++++++++++++++++
- .../program/model/pcode/AttributeId.java      | 10 ++-
+ .../program/model/lang/PrototypeModel.java    | 58 +++++++++++++++++++
+ .../program/model/pcode/AttributeId.java      | 10 +++-
  .../ghidra/program/model/pcode/ElementId.java |  9 ++-
- 9 files changed, 288 insertions(+), 6 deletions(-)
+ 10 files changed, 287 insertions(+), 6 deletions(-)
 
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
-index 9943df677e..a4701eb6bb 100644
+index 5d46e87c03..592fd13ceb 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
-@@ -1921,6 +1921,48 @@ int4 ActionParamDouble::apply(Funcdata &data)
+@@ -1924,6 +1924,48 @@ int4 ActionParamDouble::apply(Funcdata &data)
    return 0;
  }
  
@@ -142,7 +143,7 @@ index 9943df677e..a4701eb6bb 100644
  int4 ActionActiveParam::apply(Funcdata &data)
  
  {
-@@ -6051,6 +6093,7 @@ void ActionDatabase::universalAction(Architecture *conf)
+@@ -6033,6 +6075,7 @@ void ActionDatabase::universalAction(Architecture *conf)
        actmainloop->addAction( new ActionVarnodeProps("base") );
        actmainloop->addAction( new ActionHeritage("base") );
        actmainloop->addAction( new ActionParamDouble("protorecovery") );
@@ -151,38 +152,20 @@ index 9943df677e..a4701eb6bb 100644
        actmainloop->addAction( new ActionInternalStorage("base") );
        actmainloop->addAction( new ActionForceGoto("blockrecovery") );
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.cc
-index c69317d33b..90aa350f2b 100644
+index f1e6e9fcd9..00bd3c6ebd 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.cc
-@@ -51,6 +51,9 @@ ElementId ELEM_RETPARAM = ElementId("retparam",171);
- ElementId ELEM_RETURNSYM = ElementId("returnsym",172);
+@@ -51,6 +51,9 @@ ElementId ELEM_RETURNSYM = ElementId("returnsym",172);
  ElementId ELEM_UNAFFECTED = ElementId("unaffected",173);
  ElementId ELEM_INTERNAL_STORAGE = ElementId("internal_storage",286);
-+ElementId ELEM_FARPOINTERJOIN = ElementId("farpointerjoin",292);
-+AttributeId ATTRIB_HISLOT = AttributeId("hislot",160);
-+AttributeId ATTRIB_JOINSIZE = AttributeId("joinsize",161);
+ ElementId ELEM_SHARESTACK = ElementId("sharestack",291);
++ElementId ELEM_FARPOINTERJOIN = ElementId("farpointerjoin",293);
++AttributeId ATTRIB_HISLOT = AttributeId("hislot",162);
++AttributeId ATTRIB_JOINSIZE = AttributeId("joinsize",163);
  
  /// \brief Find a ParamEntry matching the given storage Varnode
  ///
-@@ -801,7 +804,7 @@ void ParamListStandard::assignMapRtoL(const PrototypePieces &proto,TypeFactory &
-   if (res.size() == 2) {	// Check for hidden parameters defined by the output list
-     Datatype *dt = res.back().type;
-     if ((res.back().flags & ParameterPieces::hiddenretparm) != 0) {
--      // Need to pull from registers marked as hiddenret 
-+      // Need to pull from registers marked as hiddenret
-       if (assignAddressFallback(TYPECLASS_HIDDENRET,dt,false,status,res.back()) == AssignAction::fail) {
-         throw ParamUnassignedError("Cannot assign parameter address for " + res.back().type->getName());
-       }
-@@ -812,7 +815,7 @@ void ParamListStandard::assignMapRtoL(const PrototypePieces &proto,TypeFactory &
-         throw ParamUnassignedError("Cannot assign parameter address for " + res.back().type->getName());
- 	  }
- 	}
--	
-+
-     res.back().flags |= ParameterPieces::hiddenretparm;
-   }
-   for(int4 i=0;i<proto.intypes.size();++i) {
-@@ -2782,6 +2785,20 @@ void ProtoModel::decode(Decoder &decoder)
+@@ -2687,6 +2690,20 @@ void ProtoModel::decode(Decoder &decoder)
        }
        decoder.closeElement(subId);
      }
@@ -203,7 +186,7 @@ index c69317d33b..90aa350f2b 100644
      else if (subId == ELEM_INTERNAL_STORAGE) {
        decoder.openElement();
        while(decoder.peekElement() != 0) {
-@@ -3786,6 +3803,25 @@ void FuncProto::encodeLikelyTrash(Encoder &encoder) const
+@@ -3697,6 +3714,25 @@ void FuncProto::encodeLikelyTrash(Encoder &encoder) const
    encoder.closeElement(ELEM_LIKELYTRASH);
  }
  
@@ -229,7 +212,7 @@ index c69317d33b..90aa350f2b 100644
  /// EffectRecords read into \e effectlist by decode() override the list from ProtoModel.
  /// If this list is not empty, set up \e effectlist as a complete override containing
  /// all EffectRecords from ProtoModel plus all the overrides.
-@@ -3939,6 +3975,7 @@ void FuncProto::copy(const FuncProto &op2)
+@@ -3850,6 +3886,7 @@ void FuncProto::copy(const FuncProto &op2)
      store = (ProtoStore *)0;
    effectlist = op2.effectlist;
    likelytrash = op2.likelytrash;
@@ -237,7 +220,7 @@ index c69317d33b..90aa350f2b 100644
    injectid = op2.injectid;
  }
  
-@@ -4734,6 +4771,8 @@ void FuncProto::encode(Encoder &encoder) const
+@@ -4650,6 +4687,8 @@ void FuncProto::encode(Encoder &encoder) const
    encoder.closeElement(ELEM_RETURNSYM);
    encodeEffect(encoder);
    encodeLikelyTrash(encoder);
@@ -246,7 +229,7 @@ index c69317d33b..90aa350f2b 100644
    if (injectid >= 0) {
      Architecture *glb = model->getArch();
      encoder.openElement(ELEM_INJECT);
-@@ -4899,6 +4938,24 @@ void FuncProto::decode(Decoder &decoder,Architecture *glb)
+@@ -4815,6 +4854,24 @@ void FuncProto::decode(Decoder &decoder,Architecture *glb)
      else if (subId == ELEM_INTERNALLIST) {
        store->decode(decoder,model);
      }
@@ -272,7 +255,7 @@ index c69317d33b..90aa350f2b 100644
    decoder.closeElement(elemId);
    decodeEffect();
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/coreaction.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/coreaction.hh
-index 75f89e09cd..879cd3b1ca 100644
+index a54744af72..354b0c96e5 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/coreaction.hh
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/coreaction.hh
 @@ -369,7 +369,7 @@ public:
@@ -319,10 +302,10 @@ index 75f89e09cd..879cd3b1ca 100644
  ///
  /// This is the final stage of the parameter recovery process, when
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/fspec.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/fspec.hh
-index 132163ae5e..4b8ed25580 100644
+index 7af628452f..f557511f3c 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/fspec.hh
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/fspec.hh
-@@ -1373,17 +1373,34 @@ class FuncProto {
+@@ -1383,17 +1383,34 @@ class FuncProto {
      is_override = 0x1000,	///< Set if \b this prototype is created to override a single call site
      auto_killedbycall = 0x2000	///< Potential output storage should always be considered \e killed \e by \e call
    };
@@ -357,7 +340,7 @@ index 132163ae5e..4b8ed25580 100644
    void decodeEffect(void);	///< Merge in any EffectRecord overrides
    void decodeLikelyTrash(void);	///< Merge in any \e likelytrash overrides
  protected:
-@@ -1399,6 +1416,7 @@ public:
+@@ -1409,6 +1426,7 @@ public:
    void copyFlowEffects(const FuncProto &op2);	 			///< Copy properties that affect data-flow
    void getPieces(PrototypePieces &pieces) const;			///< Get the raw pieces of the prototype
    void setPieces(const PrototypePieces &pieces);			///< Set \b this prototype based on raw pieces
@@ -365,6 +348,27 @@ index 132163ae5e..4b8ed25580 100644
    void setScope(Scope *s,const Address &startpoint);			///< Set a backing symbol Scope for \b this
    void setInternal(ProtoModel *m,Datatype *vt);				///< Set internal backing storage for \b this
    void setModel(ProtoModel *m);						///< Set the prototype model for \b this
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/marshal.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/marshal.cc
+index 0ad48e1996..81a8820296 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/marshal.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/marshal.cc
+@@ -1258,7 +1258,7 @@ AttributeId ATTRIB_RENAME = AttributeId("rename",27);
+ AttributeId ATTRIB_STORAGE = AttributeId("storage",149);
+ AttributeId ATTRIB_STACKSPILL = AttributeId("stackspill",150);
+ 
+-AttributeId ATTRIB_UNKNOWN = AttributeId("XMLunknown",162); // Number serves as next open index
++AttributeId ATTRIB_UNKNOWN = AttributeId("XMLunknown",164); // Number serves as next open index
+ 
+ 
+ ElementId ELEM_DATA = ElementId("data",1);
+@@ -1272,6 +1272,6 @@ ElementId ELEM_VAL = ElementId("val",8);
+ ElementId ELEM_VALUE = ElementId("value",9);
+ ElementId ELEM_VOID = ElementId("void",10);
+ 
+-ElementId ELEM_UNKNOWN = ElementId("XMLunknown",292); // Number serves as next open index
++ElementId ELEM_UNKNOWN = ElementId("XMLunknown",293); // Number serves as next open index
+ 
+ } // End namespace ghidra
 diff --git a/Ghidra/Features/Decompiler/src/decompile/unittests/testfuncproto.cc b/Ghidra/Features/Decompiler/src/decompile/unittests/testfuncproto.cc
 index 501d1e996a..65b1e07889 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/unittests/testfuncproto.cc
@@ -432,10 +436,10 @@ index 501d1e996a..65b1e07889 100644
 +
  } // End namespace ghidra
 diff --git a/Ghidra/Framework/SoftwareModeling/data/languages/compiler_spec.rxg b/Ghidra/Framework/SoftwareModeling/data/languages/compiler_spec.rxg
-index fbc5feab88..44aea12bf6 100644
+index 1b26bf05cc..951350ffcf 100644
 --- a/Ghidra/Framework/SoftwareModeling/data/languages/compiler_spec.rxg
 +++ b/Ghidra/Framework/SoftwareModeling/data/languages/compiler_spec.rxg
-@@ -556,6 +556,21 @@
+@@ -557,6 +557,21 @@
          </zeroOrMore>
        </element>
  
@@ -458,7 +462,7 @@ index fbc5feab88..44aea12bf6 100644
            returnaddress describes where the return address is stored upon entry to
            a function with this prototype.
 diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/PrototypeModel.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/PrototypeModel.java
-index 891061d8f4..fd73099c35 100644
+index 404cc126a7..fd2ba361db 100644
 --- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/PrototypeModel.java
 +++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/PrototypeModel.java
 @@ -20,6 +20,7 @@ import static ghidra.program.model.pcode.ElementId.*;
@@ -469,7 +473,7 @@ index 891061d8f4..fd73099c35 100644
  
  import ghidra.program.database.SpecExtension;
  import ghidra.program.model.address.*;
-@@ -53,6 +54,26 @@ public class PrototypeModel {
+@@ -55,6 +56,26 @@ public class PrototypeModel {
  	private Varnode[] internalstorage;	// Registers holding internal compiler constants
  	private PrototypeModel compatModel;	// The model this is an alias of
  	private AddressSet localRange;	// Range on the stack considered for local storage
@@ -496,7 +500,7 @@ index 891061d8f4..fd73099c35 100644
  	private AddressSet paramRange;	// Range on the stack considered for parameter storage
  	private InputListType inputListType = InputListType.STANDARD;
  	private boolean hasThis;		// Convention has a this (auto-parameter)
-@@ -624,6 +645,13 @@ public class PrototypeModel {
+@@ -586,6 +607,13 @@ public class PrototypeModel {
  			encodeAddressSet(encoder, paramRange);
  			encoder.closeElement(ELEM_PARAMRANGE);
  		}
@@ -510,11 +514,10 @@ index 891061d8f4..fd73099c35 100644
  		encoder.closeElement(ELEM_PROTOTYPE);
  	}
  
-@@ -800,6 +828,26 @@ public class PrototypeModel {
- 			else if (elName.equals(ELEM_PARAMRANGE.name())) {
- 				paramRange = readAddressSet(parser, cspec);
+@@ -766,6 +794,25 @@ public class PrototypeModel {
+ 				action.restoreXml(parser);
+ 				actions.add(action);
  			}
-+
 +			else if (elName.equals(ELEM_FARPOINTERJOIN.name())) {
 +				XmlElement farptrEl = parser.start();
 +				int hislot = -1;
@@ -537,7 +540,7 @@ index 891061d8f4..fd73099c35 100644
  			else {
  				subel = parser.start();
  				parser.discardSubTree(subel);
-@@ -821,6 +869,17 @@ public class PrototypeModel {
+@@ -789,6 +836,17 @@ public class PrototypeModel {
  		return inputParams.possibleParamWithSlot(loc, size, res);
  	}
  
@@ -556,41 +559,41 @@ index 891061d8f4..fd73099c35 100644
  	 * Determine if the given address range is possible return value storage for this model.
  	 * If it is, "true" is returned, and additional information about the storage
 diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/AttributeId.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/AttributeId.java
-index 36de366c55..2d796909fc 100644
+index d522b84578..b734737baf 100644
 --- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/AttributeId.java
 +++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/AttributeId.java
-@@ -260,5 +260,13 @@ public record AttributeId(String name, int id) {
+@@ -259,5 +259,13 @@ public record AttributeId(String name, int id) {
  	// edge
- 	public static final AttributeId ATTRIB_EDGE_LABEL = new AttributeId("edgelabel", 160);
+ 	public static final AttributeId ATTRIB_EDGE_LABEL = new AttributeId("edgelabel", 161);
  
--	public static final AttributeId ATTRIB_UNKNOWN = new AttributeId("XMLunknown", 161);
+-	public static final AttributeId ATTRIB_UNKNOWN = new AttributeId("XMLunknown", 162);
 +	// far-pointer call-argument fusion (H8/539F segmented-memory support)
 +	// NOTE: the C++ side (fspec.cc) originally registered these as ids 130/131,
 +	// which collide with ATTRIB_VECTOR_LANE_SIZES/ATTRIB_LABEL. 160/161 are the
 +	// next free ids on this (Java) side; fspec.cc must be updated to match
 +	// before this is used over the packed binary decompiler-communication protocol.
-+	public static final AttributeId ATTRIB_HISLOT = new AttributeId("hislot", 161);
-+	public static final AttributeId ATTRIB_JOINSIZE = new AttributeId("joinsize", 162);
++	public static final AttributeId ATTRIB_HISLOT = new AttributeId("hislot", 162);
++	public static final AttributeId ATTRIB_JOINSIZE = new AttributeId("joinsize", 163);
 +
-+	public static final AttributeId ATTRIB_UNKNOWN = new AttributeId("XMLunknown", 163);
++	public static final AttributeId ATTRIB_UNKNOWN = new AttributeId("XMLunknown", 164);
  }
 diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/ElementId.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/ElementId.java
-index dcc8304071..0f0436e89c 100644
+index f65ac144e5..167b71bf54 100644
 --- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/ElementId.java
 +++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/ElementId.java
-@@ -464,5 +464,12 @@ public record ElementId(String name, int id) {
+@@ -465,5 +465,12 @@ public record ElementId(String name, int id) {
  	// option to allow comments to align with code
- 	public static final ElementId ELEM_COMMENTINDENTALIGN = new ElementId("commentindentalign", 291);
+ 	public static final ElementId ELEM_COMMENTINDENTALIGN = new ElementId("commentindentalign", 292);
  
--	public static final ElementId ELEM_UNKNOWN = new ElementId("XMLunknown", 292);
+-	public static final ElementId ELEM_UNKNOWN = new ElementId("XMLunknown", 293);
 +	// far-pointer call-argument fusion (H8/539F segmented-memory support)
 +	// NOTE: the C++ side (fspec.cc) originally registered this element as id 287,
 +	// which collides with ELEM_EXTRA_STACK above. 292 is the next free id on
 +	// this (Java) side; fspec.cc must be updated to match before this is used
 +	// over the packed binary decompiler-communication protocol.
-+	public static final ElementId ELEM_FARPOINTERJOIN = new ElementId("farpointerjoin", 292);
++	public static final ElementId ELEM_FARPOINTERJOIN = new ElementId("farpointerjoin", 293);
 +
-+	public static final ElementId ELEM_UNKNOWN = new ElementId("XMLunknown", 293);
++	public static final ElementId ELEM_UNKNOWN = new ElementId("XMLunknown", 294);
  }
 -- 
 2.45.1
