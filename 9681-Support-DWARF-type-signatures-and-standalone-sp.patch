@@ -1,0 +1,1490 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Dhiru Kholia <dhiru@openwall.com>
+Date: Sat, 26 Sep 2026 11:41:35 +0530
+Subject: [PATCH] 9681: Support DWARF type signatures and standalone split
+ DWARF
+
+Read DW_FORM_ref_sig8 as an eight-byte type signature and resolve it
+through a signature-to-defining-DIE index. Parse DWARF 4 .debug_types
+with a virtual combined info stream and recognize DWARF 5 type and split
+unit headers. Follow DW_AT_signature from declarations to their type
+definitions so imported types and function references use the correct
+DIE.
+
+Find standalone .dwo files from skeleton names and compilation
+directories, match units by dwo ID, and import the split units into the
+program. Borrow address and line sections from the skeleton when needed.
+Handle ELF-compressed sections, GNU DWARF 4 indexed addresses and
+strings, and headerless offset tables. Report missing, invalid, or
+mismatched .dwo files without marking DWARF fully loaded.
+
+Type units may carry DW_AT_stmt_list for declaration file indexes but do
+not own executable line mappings. Skip them during source-map import to
+avoid replaying line programs for every type unit. Stream decoded rows
+into the final list, reuse file paths, and avoid reflection for standard
+line opcode names to reduce memory and CPU use.
+
+Add DWARF 4 type-unit and split fixtures, DWARF 5 split and compressed
+fixtures, their C++ source, and verified LLVM 23.1.2 reproduction
+commands. Certify the six binary fixtures in Base/certification.manifest.
+
+Verification: six focused DWARF tests, :Base:ip, and buildGhidra passed.
+A full headless import of an affected ELF completed and saved with Java
+27 and a 2 GB heap, adding 120,293 source-map entries.
+
+Scope: standalone .dwo files and type units in the current object or
+.dwo. .dwp packages and type references across separate .dwo files are
+not covered.
+---
+ Ghidra/Features/Base/certification.manifest   |   6 +
+ .../plugin/core/analysis/DWARFAnalyzer.java   |  70 ++++++-
+ .../util/bin/format/dwarf/DIEAggregate.java   |   9 +-
+ .../util/bin/format/dwarf/DIEContainer.java   | 151 +++++++++++++-
+ .../format/dwarf/DWARFAddressListHeader.java  |  12 ++
+ .../format/dwarf/DWARFCompilationUnit.java    | 122 +++++++++++-
+ .../format/dwarf/DWARFDataTypeImporter.java   |   6 +
+ .../util/bin/format/dwarf/DWARFImporter.java  |   9 +-
+ .../dwarf/DWARFStringOffsetTableHeader.java   |  12 ++
+ .../bin/format/dwarf/DWARFUnitHeader.java     |  21 +-
+ .../bin/format/dwarf/attribs/DWARFForm.java   |   6 +-
+ .../util/bin/format/dwarf/line/DWARFLine.java |  22 ++-
+ .../line/DWARFLineNumberStandardOpcodes.java  |  18 +-
+ .../ElfDWOSectionProvider.java                | 123 ++++++++++++
+ .../util/bin/format/dwarf/SplitDWARFTest.java | 184 ++++++++++++++++++
+ .../attribs/DWARFAttributeFactoryTest.java    |  17 ++
+ .../util/bin/format/dwarf/split/sample.cpp    |  23 +++
+ .../util/bin/format/dwarf/split/sample.dwo    | Bin 0 -> 1176 bytes
+ .../app/util/bin/format/dwarf/split/sample.o  | Bin 0 -> 2984 bytes
+ .../format/dwarf/split/sample_compressed.dwo  | Bin 0 -> 1208 bytes
+ .../util/bin/format/dwarf/split/split_v4.dwo  | Bin 0 -> 1176 bytes
+ .../util/bin/format/dwarf/split/split_v4.o    | Bin 0 -> 2576 bytes
+ .../util/bin/format/dwarf/split/type_sample.o | Bin 0 -> 2728 bytes
+ 23 files changed, 780 insertions(+), 31 deletions(-)
+ create mode 100644 Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/dwarf/sectionprovider/ElfDWOSectionProvider.java
+ create mode 100644 Ghidra/Features/Base/src/test/java/ghidra/app/util/bin/format/dwarf/SplitDWARFTest.java
+ create mode 100644 Ghidra/Features/Base/src/test/resources/ghidra/app/util/bin/format/dwarf/split/sample.cpp
+ create mode 100644 Ghidra/Features/Base/src/test/resources/ghidra/app/util/bin/format/dwarf/split/sample.dwo
+ create mode 100644 Ghidra/Features/Base/src/test/resources/ghidra/app/util/bin/format/dwarf/split/sample.o
+ create mode 100644 Ghidra/Features/Base/src/test/resources/ghidra/app/util/bin/format/dwarf/split/sample_compressed.dwo
+ create mode 100644 Ghidra/Features/Base/src/test/resources/ghidra/app/util/bin/format/dwarf/split/split_v4.dwo
+ create mode 100644 Ghidra/Features/Base/src/test/resources/ghidra/app/util/bin/format/dwarf/split/split_v4.o
+ create mode 100644 Ghidra/Features/Base/src/test/resources/ghidra/app/util/bin/format/dwarf/split/type_sample.o
+
+diff --git a/Ghidra/Features/Base/certification.manifest b/Ghidra/Features/Base/certification.manifest
+index 7d2efc7b71..66f1454b04 100755
+--- a/Ghidra/Features/Base/certification.manifest
++++ b/Ghidra/Features/Base/certification.manifest
+@@ -1154,6 +1154,12 @@ src/test/java/ghidra/app/util/bin/format/stabs/StabsFunctionTokenTest.java||GHID
+ src/test/java/ghidra/app/util/bin/format/stabs/StabsTypeDefTokenTest.java||GHIDRA||||END|
+ src/test/java/ghidra/app/util/bin/format/stabs/types/StabArrayTypeDescriptorTest.java||GHIDRA||||END|
+ src/test/resources/defaultTools/TestCodeBrowser.tool||GHIDRA||||END|
++src/test/resources/ghidra/app/util/bin/format/dwarf/split/sample.dwo||GHIDRA||||END|
++src/test/resources/ghidra/app/util/bin/format/dwarf/split/sample.o||GHIDRA||||END|
++src/test/resources/ghidra/app/util/bin/format/dwarf/split/sample_compressed.dwo||GHIDRA||||END|
++src/test/resources/ghidra/app/util/bin/format/dwarf/split/split_v4.dwo||GHIDRA||||END|
++src/test/resources/ghidra/app/util/bin/format/dwarf/split/split_v4.o||GHIDRA||||END|
++src/test/resources/ghidra/app/util/bin/format/dwarf/split/type_sample.o||GHIDRA||||END|
+ src/test/resources/ghidra/app/util/bin/format/stabs/full_c_stabs.txt||GHIDRA||||END|
+ src/test/resources/ghidra/app/util/bin/format/stabs/full_cpp_stabs.txt||GHIDRA||||END|
+ src/test/resources/ghidra/app/util/opinion/decompile_debug_test.xml||GHIDRA||||END|
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/analysis/DWARFAnalyzer.java b/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/analysis/DWARFAnalyzer.java
+index a5317cd208..ca21ee09c0 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/analysis/DWARFAnalyzer.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/analysis/DWARFAnalyzer.java
+@@ -15,10 +15,13 @@
+  */
+ package ghidra.app.plugin.core.analysis;
+ 
++import java.io.File;
+ import java.io.IOException;
++import java.util.Map;
+ 
+ import ghidra.app.services.*;
+ import ghidra.app.util.bin.format.dwarf.*;
++import ghidra.app.util.bin.format.dwarf.attribs.DWARFAttributeId;
+ import ghidra.app.util.bin.format.dwarf.sectionprovider.*;
+ import ghidra.app.util.importer.MessageLog;
+ import ghidra.framework.options.Options;
+@@ -100,6 +103,7 @@ public class DWARFAnalyzer extends AbstractAnalyzer {
+ 				extDFSI.importSymbols(log);
+ 			}
+ 
++			boolean splitComplete = true;
+ 			try (DWARFProgram prog = new DWARFProgram(program, importOptions, dsp)) {
+ 				if (prog.getRegisterMappings() == null && importOptions.isImportFuncs()) {
+ 					log.appendMsg("No DWARF to Ghidra register mappings found for this program's " +
+@@ -111,11 +115,44 @@ public class DWARFAnalyzer extends AbstractAnalyzer {
+ 				DWARFImporter importer = new DWARFImporter(prog, monitor);
+ 				DWARFImportSummary importResults = importer.performImport();
+ 				importResults.logSummaryResults();
++
++				Map<Long, DWARFCompilationUnit> skeletons =
++					prog.getDIEContainer().getSkeletonsByDwoId();
++				for (DWARFCompilationUnit skeleton : skeletons.values()) {
++					monitor.checkCancelled();
++					File dwoFile = findDWOFile(program, skeleton);
++					if (dwoFile == null) {
++						log.appendMsg("Unable to find split DWARF file for unit at 0x%x"
++								.formatted(skeleton.getStartOffset()));
++						splitComplete = false;
++						continue;
++					}
++					try (DWARFProgram dwoProgram = new DWARFProgram(program, importOptions,
++						new CompressedSectionProvider(new ElfDWOSectionProvider(dwoFile, dsp)))) {
++						dwoProgram.getDIEContainer().setSkeletonsByDwoId(Map.of(skeleton.getDwoId(), skeleton));
++						dwoProgram.init(monitor);
++						boolean matched = dwoProgram.getCompilationUnits()
++								.stream()
++								.anyMatch(cu -> !cu.isTypeUnit() &&
++									cu.getDwoId() == skeleton.getDwoId());
++						if (!matched) {
++							log.appendMsg("Split DWARF ID mismatch in " + dwoFile);
++							splitComplete = false;
++							continue;
++						}
++						new DWARFImporter(dwoProgram, monitor).performImport().logSummaryResults();
++					}
++					catch (IOException e) {
++						log.appendMsg("Failed to import split DWARF file " + dwoFile + ": " + e);
++						Msg.error(this, "Failed to import split DWARF file " + dwoFile, e);
++						splitComplete = false;
++					}
++				}
+ 			}
+ 			Options propList = program.getOptions(Program.PROGRAM_INFO);
+-			propList.setBoolean(DWARF_LOADED_OPTION_NAME, true);
++			propList.setBoolean(DWARF_LOADED_OPTION_NAME, splitComplete);
+ 			dsp.updateProgramInfo(program);
+-			return true;
++			return splitComplete;
+ 		}
+ 		catch (CancelledException ce) {
+ 			throw ce;
+@@ -131,6 +168,35 @@ public class DWARFAnalyzer extends AbstractAnalyzer {
+ 		return false;
+ 	}
+ 
++	private File findDWOFile(Program program, DWARFCompilationUnit skeleton) {
++		DIEAggregate root = skeleton.getCompUnitDIEA();
++		String name = root.getString(DWARFAttributeId.DW_AT_dwo_name,
++			root.getString(DWARFAttributeId.DW_AT_GNU_dwo_name, null));
++		if (name == null) {
++			return null;
++		}
++		File namedFile = new File(name);
++		if (namedFile.isAbsolute() && namedFile.isFile()) {
++			return namedFile;
++		}
++		String compDir = skeleton.getCompileDirectory();
++		if (compDir != null) {
++			File candidate = new File(compDir, name);
++			if (candidate.isFile()) {
++				return candidate;
++			}
++		}
++		String executablePath = program.getExecutablePath();
++		if (executablePath != null) {
++			File executable = new File(executablePath);
++			File candidate = new File(executable.getParentFile(), name);
++			if (candidate.isFile()) {
++				return candidate;
++			}
++		}
++		return namedFile.isFile() ? namedFile : null;
++	}
++
+ 	@Override
+ 	public boolean canAnalyze(Program program) {
+ 		return DWARFProgram.isDWARF(program);
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/dwarf/DIEAggregate.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/dwarf/DIEAggregate.java
+index 9f5025d5a9..0c9a614ad5 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/dwarf/DIEAggregate.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/dwarf/DIEAggregate.java
+@@ -484,7 +484,14 @@ public class DIEAggregate {
+ 	}
+ 
+ 	public DIEAggregate getTypeRef() {
+-		return getRef(DW_AT_type);
++		DIEAggregate type = getRef(DW_AT_type);
++		if (type != null && type.hasAttribute(DW_AT_signature)) {
++			DIEAggregate definition = type.getRef(DW_AT_signature);
++			if (definition != null) {
++				return definition;
++			}
++		}
++		return type;
+ 	}
+ 
+ 	/**
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/dwarf/DIEContainer.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/dwarf/DIEContainer.java
+index 7149331f65..dbe221cedb 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/dwarf/DIEContainer.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/dwarf/DIEContainer.java
+@@ -18,6 +18,7 @@ package ghidra.app.util.bin.format.dwarf;
+ import static ghidra.app.util.bin.format.dwarf.attribs.DWARFAttributeId.*;
+ import static ghidra.app.util.bin.format.dwarf.sectionprovider.DWARFSectionId.*;
+ 
++import java.io.File;
+ import java.io.IOException;
+ import java.io.PrintStream;
+ import java.nio.charset.Charset;
+@@ -67,6 +68,8 @@ public class DIEContainer implements Iterable<DebugInfoEntry> {
+ 	// the compunit for that DIE.
+ 	protected TreeMap<Integer, DWARFCompilationUnit> compUnitDieIndex = new TreeMap<>();
+ 	protected List<DWARFCompilationUnit> compUnits = new ArrayList<>();
++	protected Map<Long, Long> typeSignatureToDIEOffset = new HashMap<>();
++	protected Map<Long, DWARFCompilationUnit> skeletonsByDwoId = Map.of();
+ 
+ 	// Indirect tables, added with dwarf v5, provide an index -> offset lookup feature for 
+ 	// index values such as DW_FORM_addrx or DW_FORM_strx and other similar 'x' attribute values.
+@@ -103,6 +106,7 @@ public class DIEContainer implements Iterable<DebugInfoEntry> {
+ 	protected BinaryReader debugRanges;
+ 	protected BinaryReader debugRngLists; // v5+
+ 	protected BinaryReader debugInfoBR;
++	protected long debugInfoSectionSize;
+ 	protected BinaryReader debugLineBR;
+ 	protected BinaryReader debugAbbrBR;
+ 	protected BinaryReader debugAddr; // v5+
+@@ -117,6 +121,21 @@ public class DIEContainer implements Iterable<DebugInfoEntry> {
+ 		this.importSummary = dprog.getImportSummary();
+ 	}
+ 
++	public void setSkeletonsByDwoId(Map<Long, DWARFCompilationUnit> skeletonsByDwoId) {
++		this.skeletonsByDwoId = skeletonsByDwoId;
++	}
++
++	public Map<Long, DWARFCompilationUnit> getSkeletonsByDwoId() {
++		Map<Long, DWARFCompilationUnit> result = new HashMap<>();
++		for (DWARFCompilationUnit cu : compUnits) {
++			if (cu.getUnitType() == DWARFUnitType.DW_UT_skeleton ||
++				(cu.getDWARFVersion() <= 4 && cu.hasDWO())) {
++				result.put(cu.getDwoId(), cu);
++			}
++		}
++		return result;
++	}
++
+ 	/**
+ 	 * Fetches required sections and sets up variables.
+ 	 * 
+@@ -125,6 +144,14 @@ public class DIEContainer implements Iterable<DebugInfoEntry> {
+ 	 */
+ 	public void init(TaskMonitor monitor) throws IOException {
+ 		this.debugInfoBR = getReader(DEBUG_INFO, monitor);
++		BinaryReader originalInfoBR = debugInfoBR;
++		this.debugInfoSectionSize = debugInfoBR.length();
++		BinaryReader debugTypesBR = getReader(DEBUG_TYPES, monitor);
++		if (debugTypesBR != null && debugTypesBR.length() > 0) {
++			debugInfoBR = new BinaryReader(new CombinedInfoProvider(
++				debugInfoBR.getByteProvider(), debugTypesBR.getByteProvider()),
++				dprog.isLittleEndian());
++		}
+ 		this.debugAbbrBR = getReader(DEBUG_ABBREV, monitor);
+ 
+ 		this.debugLocation = getReader(DEBUG_LOC, monitor);
+@@ -156,7 +183,7 @@ public class DIEContainer implements Iterable<DebugInfoEntry> {
+ 		// debuginfo or debugrange sections, then we don't need to manually fix up addresses
+ 		// extracted from DWARF data.
+ 		// TODO: probably only needed for local section provider
+-		boolean hasRelocations = hasRelocations(debugInfoBR) || hasRelocations(debugRanges);
++		boolean hasRelocations = hasRelocations(originalInfoBR) || hasRelocations(debugRanges);
+ 		if (!hasRelocations) {
+ 			Program prog = dprog.getGhidraProgram();
+ 			Long oib = ElfLoader.getElfOriginalImageBase(prog);
+@@ -179,14 +206,20 @@ public class DIEContainer implements Iterable<DebugInfoEntry> {
+ 		bootstrapCompilationUnits(monitor);
+ 
+ 		int defaultIntSize = dprog.getDefaultIntSize();
++		boolean gnuSplitV4 = !skeletonsByDwoId.isEmpty() && !compUnits.isEmpty() &&
++			compUnits.get(0).getDWARFVersion() <= 4;
+ 		rangeListTable.bootstrap("DWARF: Bootstrapping Range Lists",
+ 			reader -> DWARFRangeListHeader.read(reader, defaultIntSize), monitor);
+ 		locationListTable.bootstrap("DWARF: Bootstrapping Location Lists",
+ 			reader -> DWARFLocationListHeader.read(reader, defaultIntSize), monitor);
+ 		addressListTable.bootstrap("DWARF: Bootstrapping Address Lists",
+-			reader -> DWARFAddressListHeader.read(reader, defaultIntSize), monitor);
++			reader -> gnuSplitV4
++					? DWARFAddressListHeader.readV4Raw(reader, compUnits.get(0).getPointerSize())
++					: DWARFAddressListHeader.read(reader, defaultIntSize), monitor);
+ 		stringsOffsetTable.bootstrap("DWARF: Bootstrapping String Offset Lists",
+-			reader -> DWARFStringOffsetTableHeader.readV5(reader, defaultIntSize), monitor);
++			reader -> gnuSplitV4
++					? DWARFStringOffsetTableHeader.readV4Raw(reader, compUnits.get(0).getIntSize())
++					: DWARFStringOffsetTableHeader.readV5(reader, defaultIntSize), monitor);
+ 
+ 		indexDIEs(monitor);
+ 		indexDIEATypeRefs(monitor);
+@@ -204,6 +237,8 @@ public class DIEContainer implements Iterable<DebugInfoEntry> {
+ 			lineStrings = null;
+ 		}
+ 		compUnits.clear();
++		typeSignatureToDIEOffset.clear();
++		skeletonsByDwoId = Map.of();
+ 
+ 		debugAbbrBR = null;
+ 		debugInfoBR = null;
+@@ -256,7 +291,7 @@ public class DIEContainer implements Iterable<DebugInfoEntry> {
+ 
+ 		debugInfoBR.setPointerIndex(0);
+ 		monitor.initialize(debugInfoBR.length(), "DWARF: Bootstrapping Compilation Units");
+-		while (debugInfoBR.hasNext()) {
++		while (debugInfoBR.getPointerIndex() < debugInfoSectionSize) {
+ 			monitor.checkCancelled();
+ 			monitor.setProgress(debugInfoBR.getPointerIndex());
+ 			monitor.setMessage("DWARF: Bootstrapping Compilation Unit #" + compUnits.size());
+@@ -268,7 +303,14 @@ public class DIEContainer implements Iterable<DebugInfoEntry> {
+ 
+ 			debugInfoBR.setPointerIndex(unitHeader.getEndOffset());
+ 			if (unitHeader instanceof DWARFCompilationUnit cu) {
++				if (cu.getUnitType() == DWARFUnitType.DW_UT_split_compile) {
++					cu.setSkeleton(skeletonsByDwoId.get(cu.getDwoId()));
++				}
+ 				compUnits.add(cu);
++				if (cu.isTypeUnit()) {
++					typeSignatureToDIEOffset.putIfAbsent(cu.getTypeSignature(),
++						cu.getTypeDIEOffset());
++				}
+ 				importSummary.dwarfVers.add((int) cu.getDWARFVersion());
+ 			}
+ 			else {
+@@ -276,9 +318,96 @@ public class DIEContainer implements Iterable<DebugInfoEntry> {
+ 					unitHeader.getStartOffset());
+ 			}
+ 		}
++		if (debugInfoBR.length() > debugInfoSectionSize) {
++			debugInfoBR.setPointerIndex(debugInfoSectionSize);
++			while (debugInfoBR.hasNext()) {
++				monitor.checkCancelled();
++				monitor.setProgress(debugInfoBR.getPointerIndex());
++				DWARFUnitHeader unitHeader = DWARFUnitHeader.read(this, debugInfoBR,
++					compUnits.size(), true);
++				if (unitHeader == null) {
++					break;
++				}
++				debugInfoBR.setPointerIndex(unitHeader.getEndOffset());
++				if (unitHeader instanceof DWARFCompilationUnit cu) {
++					compUnits.add(cu);
++					importSummary.dwarfVers.add((int) cu.getDWARFVersion());
++					typeSignatureToDIEOffset.putIfAbsent(cu.getTypeSignature(),
++						cu.getTypeDIEOffset());
++				}
++			}
++		}
+ 		importSummary.compUnitCount = compUnits.size();
+ 	}
+ 
++	/** Gives .debug_types its own offset range without copying either section. */
++	private static class CombinedInfoProvider implements ByteProvider {
++		private final ByteProvider info;
++		private final ByteProvider types;
++		private final long split;
++
++		CombinedInfoProvider(ByteProvider info, ByteProvider types) {
++			this.info = info;
++			this.types = types;
++			this.split = info.length();
++		}
++
++		@Override
++		public File getFile() {
++			return null;
++		}
++
++		@Override
++		public String getName() {
++			return "DWARF info and types";
++		}
++
++		@Override
++		public String getAbsolutePath() {
++			return null;
++		}
++
++		@Override
++		public long length() {
++			return split + types.length();
++		}
++
++		@Override
++		public boolean isValidIndex(long index) {
++			return index >= 0 && index < length();
++		}
++
++		@Override
++		public byte readByte(long index) throws IOException {
++			return index < split ? info.readByte(index) : types.readByte(index - split);
++		}
++
++		@Override
++		public byte[] readBytes(long index, long count) throws IOException {
++			if (index < 0 || count < 0 || count > Integer.MAX_VALUE ||
++				index > length() - count) {
++				throw new IOException("Invalid DWARF section read");
++			}
++			if (index >= split) {
++				return types.readBytes(index - split, count);
++			}
++			if (index + count <= split) {
++				return info.readBytes(index, count);
++			}
++			int infoCount = (int) (split - index);
++			byte[] result = new byte[(int) count];
++			System.arraycopy(info.readBytes(index, infoCount), 0, result, 0, infoCount);
++			System.arraycopy(types.readBytes(0, count - infoCount), 0, result, infoCount,
++				(int) count - infoCount);
++			return result;
++		}
++
++		@Override
++		public void close() {
++			// The section provider owns both input providers.
++		}
++	}
++
+ 	private void indexDIEs(TaskMonitor monitor) throws CancelledException, IOException {
+ 		LongArrayList dieOffsetList = new LongArrayList();
+ 		IntArrayList siblingIndexList = new IntArrayList();
+@@ -381,6 +510,9 @@ public class DIEContainer implements Iterable<DebugInfoEntry> {
+ 
+ 				if (die.getOffset() == cu.getFirstDIEOffset()) {
+ 					cu.init(die);
++					if (cu.getDWARFVersion() <= 4) {
++						cu.setSkeleton(skeletonsByDwoId.get(cu.getDwoId()));
++					}
+ 				}
+ 
+ 				DIEAggregate diea = DIEAggregate.createSingle(die);
+@@ -451,6 +583,10 @@ public class DIEContainer implements Iterable<DebugInfoEntry> {
+ 	 */
+ 	public DebugInfoEntry getDIE(DWARFForm form, long rawOffset, DWARFCompilationUnit cu)
+ 			throws IOException {
++		if (form == DWARFForm.DW_FORM_ref_sig8) {
++			Long typeDIEOffset = typeSignatureToDIEOffset.get(rawOffset);
++			return typeDIEOffset != null ? getDIEByOffset(typeDIEOffset) : null;
++		}
+ 		return getDIEByOffset(getLocalDIEOffset(form, rawOffset, cu));
+ 	}
+ 
+@@ -690,6 +826,7 @@ public class DIEContainer implements Iterable<DebugInfoEntry> {
+ 			throws IOException {
+ 		DWARFIndirectTable table = switch (form) {
+ 			case DW_FORM_addrx:
++			case DW_FORM_gnu_addr_index:
+ 			case DW_FORM_addrx1:
+ 			case DW_FORM_addrx2:
+ 			case DW_FORM_addrx3:
+@@ -700,6 +837,7 @@ public class DIEContainer implements Iterable<DebugInfoEntry> {
+ 			case DW_FORM_loclistx:
+ 				yield locationListTable;
+ 			case DW_FORM_strx:
++			case DW_FORM_gnu_str_index:
+ 			case DW_FORM_strx1:
+ 			case DW_FORM_strx2:
+ 			case DW_FORM_strx3:
+@@ -726,6 +864,7 @@ public class DIEContainer implements Iterable<DebugInfoEntry> {
+ 			case DW_FORM_udata:
+ 				return value;
+ 			case DW_FORM_addrx:
++			case DW_FORM_gnu_addr_index:
+ 			case DW_FORM_addrx1:
+ 			case DW_FORM_addrx2:
+ 			case DW_FORM_addrx3:
+@@ -733,7 +872,6 @@ public class DIEContainer implements Iterable<DebugInfoEntry> {
+ 				long addr = addressListTable.getOffset((int) value, cu);
+ 				return addr;
+ 			}
+-			case DW_FORM_gnu_addr_index:
+ 			default:
+ 				throw new IOException("Unsupported form %s".formatted(form));
+ 		}
+@@ -815,7 +953,8 @@ public class DIEContainer implements Iterable<DebugInfoEntry> {
+ 				return debugStrings.getStringAtOffset(offset);
+ 			case DW_FORM_gnu_strp_alt:
+ 			case DW_FORM_gnu_str_index:
+-				throw new IOException("Unsupported DWARF string attribute form " + form);
++				long gnuStrOffset = stringsOffsetTable.getOffset((int) offset, cu);
++				return debugStrings.getStringAtOffset(gnuStrOffset);
+ 			case DW_FORM_strx, DW_FORM_strx1, DW_FORM_strx2, DW_FORM_strx3, DW_FORM_strx4:
+ 				long strOffset = stringsOffsetTable.getOffset((int) offset, cu);
+ 				return debugStrings.getStringAtOffset(strOffset);
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/dwarf/DWARFAddressListHeader.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/dwarf/DWARFAddressListHeader.java
+index 994a90c50a..c9fc9a4835 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/dwarf/DWARFAddressListHeader.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/dwarf/DWARFAddressListHeader.java
+@@ -60,6 +60,18 @@ public class DWARFAddressListHeader extends DWARFIndirectTableHeader {
+ 			segmentSelectorSize, count);
+ 	}
+ 
++	/** Reads the headerless GNU split DWARF 4 address table. */
++	public static DWARFAddressListHeader readV4Raw(BinaryReader reader, int addressSize)
++			throws IOException {
++		long length = reader.length();
++		if (length % addressSize != 0 || length / addressSize > Integer.MAX_VALUE) {
++			throw new IOException("Invalid GNU split DWARF address table size");
++		}
++		reader.setPointerIndex(length);
++		return new DWARFAddressListHeader(0, length, 0, addressSize, 0,
++			(int) (length / addressSize));
++	}
++
+ 	private final int addressSize;
+ 	private final int segmentSelectorSize;
+ 	private final int addrCount;
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/dwarf/DWARFCompilationUnit.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/dwarf/DWARFCompilationUnit.java
+index 6286bba425..76187c9465 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/dwarf/DWARFCompilationUnit.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/dwarf/DWARFCompilationUnit.java
+@@ -26,13 +26,12 @@ import ghidra.app.util.bin.format.dwarf.line.DWARFLine;
+ import ghidra.app.util.bin.format.dwarf.macro.DWARFMacroHeader;
+ 
+ /**
+- * A DWARF CompilationUnit is a contiguous block of {@link DebugInfoEntry DIE} records found
+- * in a .debug_info section of an program.  The compilation unit block starts with a
+- * header that has a few important values and flags, and is followed by the DIE records.
++ * A DWARFCompilationUnit is a contiguous block of {@link DebugInfoEntry DIE} records found
++ * in .debug_info or .debug_types. The unit starts with a header followed by DIE records.
+  * <p>
+- * The first DIE record must be a DW_TAG_compile_unit.
++ * The first DIE describes a compile, skeleton, or type unit.
+  * <p>
+- * DIE records are identified by their byte offset in the .debug_info section.
++ * DIE records are identified by their byte offset in the container's combined info stream.
+  */
+ public class DWARFCompilationUnit extends DWARFUnitHeader {
+ 	/**
+@@ -77,6 +76,27 @@ public class DWARFCompilationUnit extends DWARFUnitHeader {
+ 		return cu;
+ 	}
+ 
++	/** Reads a DWARF 4 type unit from .debug_types. */
++	public static DWARFCompilationUnit readTypeV4(DWARFUnitHeader partial, BinaryReader reader)
++			throws DWARFException, IOException {
++		long abbreviationOffset = reader.readNextUnsignedValue(partial.getIntSize());
++		byte pointerSize = reader.readNextByte();
++		long signature = reader.readNextLong();
++		long typeOffset = reader.readNextUnsignedValue(partial.getIntSize());
++		long firstDIEOffset = reader.getPointerIndex();
++		long typeDIEOffset = partial.startOffset + typeOffset;
++		if (firstDIEOffset >= partial.endOffset || typeDIEOffset < firstDIEOffset ||
++			typeDIEOffset >= partial.endOffset) {
++			throw new DWARFException("Invalid DWARF type unit at 0x%x".formatted(partial.startOffset));
++		}
++		Map<Integer, DWARFAbbreviation> abbrevs =
++			partial.getDIEContainer().getAbbrevs(abbreviationOffset);
++		DWARFCompilationUnit cu = new DWARFCompilationUnit(partial, pointerSize,
++			firstDIEOffset, abbrevs, signature, typeDIEOffset);
++		cu.unitType = DWARFUnitType.DW_UT_type;
++		return cu;
++	}
++
+ 	/**
+ 	 * Creates a new {@link DWARFCompilationUnit} by reading a compilationUnit's header data
+ 	 * from the debug_info section.
+@@ -119,6 +139,49 @@ public class DWARFCompilationUnit extends DWARFUnitHeader {
+ 		return cu;
+ 	}
+ 
++	/**
++	 * Reads a DWARF 5 type unit. Its signature identifies the type DIE at an offset relative
++	 * to the start of the unit header.
++	 */
++	public static DWARFCompilationUnit readTypeV5(DWARFUnitHeader partial, BinaryReader reader,
++			int unitType)
++			throws DWARFException, IOException {
++		byte pointerSize = reader.readNextByte();
++		long abbreviationOffset = reader.readNextUnsignedValue(partial.getIntSize());
++		long signature = reader.readNextLong();
++		long typeOffset = reader.readNextUnsignedValue(partial.getIntSize());
++		long firstDIEOffset = reader.getPointerIndex();
++		long typeDIEOffset = partial.startOffset + typeOffset;
++		if (firstDIEOffset >= partial.endOffset || typeDIEOffset < firstDIEOffset ||
++			typeDIEOffset >= partial.endOffset) {
++			throw new DWARFException("Invalid DWARF type unit at 0x%x".formatted(partial.startOffset));
++		}
++		Map<Integer, DWARFAbbreviation> abbrevs =
++			partial.getDIEContainer().getAbbrevs(abbreviationOffset);
++		DWARFCompilationUnit cu = new DWARFCompilationUnit(partial, pointerSize,
++			firstDIEOffset, abbrevs, signature, typeDIEOffset);
++		cu.unitType = unitType;
++		return cu;
++	}
++
++	public static DWARFCompilationUnit readSplitV5(DWARFUnitHeader partial, BinaryReader reader,
++			int unitType) throws DWARFException, IOException {
++		byte pointerSize = reader.readNextByte();
++		long abbreviationOffset = reader.readNextUnsignedValue(partial.getIntSize());
++		long dwoId = reader.readNextLong();
++		long firstDIEOffset = reader.getPointerIndex();
++		if (firstDIEOffset >= partial.endOffset) {
++			throw new DWARFException("Invalid DWARF split unit at 0x%x".formatted(partial.startOffset));
++		}
++		Map<Integer, DWARFAbbreviation> abbrevs =
++			partial.getDIEContainer().getAbbrevs(abbreviationOffset);
++		DWARFCompilationUnit cu =
++			new DWARFCompilationUnit(partial, pointerSize, firstDIEOffset, abbrevs);
++		cu.dwoId = dwoId;
++		cu.unitType = unitType;
++		return cu;
++	}
++
+ 	/**
+ 	 * Size of pointers that are held in DIEs in this compUnit. (from header)
+ 	 */
+@@ -129,6 +192,13 @@ public class DWARFCompilationUnit extends DWARFUnitHeader {
+ 	 */
+ 	private final long firstDIEOffset;
+ 
++	/** Offset of the defining type DIE, or -1 for a compilation unit. */
++	private final long typeDIEOffset;
++	private final long typeSignature;
++	private long dwoId;
++	private int unitType = DWARFUnitType.DW_UT_compile;
++	private DWARFCompilationUnit skeleton;
++
+ 	/**
+ 	 * Map of abbrevCode to {@link DWARFAbbreviation} instances.
+ 	 */
+@@ -143,11 +213,18 @@ public class DWARFCompilationUnit extends DWARFUnitHeader {
+ 
+ 	private DWARFCompilationUnit(DWARFUnitHeader partial, byte pointerSize, long firstDIEOffset,
+ 			Map<Integer, DWARFAbbreviation> abbrMap) {
++		this(partial, pointerSize, firstDIEOffset, abbrMap, 0, -1);
++	}
++
++	private DWARFCompilationUnit(DWARFUnitHeader partial, byte pointerSize, long firstDIEOffset,
++			Map<Integer, DWARFAbbreviation> abbrMap, long typeSignature, long typeDIEOffset) {
+ 		super(partial);
+ 
+ 		this.pointerSize = pointerSize;
+ 		this.firstDIEOffset = firstDIEOffset;
+ 		this.codeToAbbreviationMap = (abbrMap != null) ? abbrMap : new HashMap<>();
++		this.typeSignature = typeSignature;
++		this.typeDIEOffset = typeDIEOffset;
+ 	}
+ 
+ 	/**
+@@ -171,6 +248,32 @@ public class DWARFCompilationUnit extends DWARFUnitHeader {
+ 		this.firstDIEOffset = firstDIEOffset;
+ 		this.codeToAbbreviationMap =
+ 			(codeToAbbreviationMap != null) ? codeToAbbreviationMap : new HashMap<>();
++		this.typeSignature = 0;
++		this.typeDIEOffset = -1;
++	}
++
++	public boolean isTypeUnit() {
++		return typeDIEOffset != -1;
++	}
++
++	public long getTypeSignature() {
++		return typeSignature;
++	}
++
++	public long getTypeDIEOffset() {
++		return typeDIEOffset;
++	}
++
++	public long getDwoId() {
++		return dwoId;
++	}
++
++	public int getUnitType() {
++		return unitType;
++	}
++
++	public void setSkeleton(DWARFCompilationUnit skeleton) {
++		this.skeleton = skeleton;
+ 	}
+ 
+ 	/**
+@@ -182,6 +285,9 @@ public class DWARFCompilationUnit extends DWARFUnitHeader {
+ 	 */
+ 	public void init(DebugInfoEntry rootDIE) throws IOException {
+ 		diea = DIEAggregate.createSingle(rootDIE);
++		if (dwarfVersion <= 4) {
++			dwoId = diea.getUnsignedLong(DW_AT_GNU_dwo_id, 0);
++		}
+ 		line = getDIEContainer().getLine(diea, DW_AT_stmt_list);
+ 	}
+ 
+@@ -263,11 +369,13 @@ public class DWARFCompilationUnit extends DWARFUnitHeader {
+ 	}
+ 
+ 	public boolean hasDWO() {
+-		return diea.hasAttribute(DW_AT_GNU_dwo_id) && diea.hasAttribute(DW_AT_GNU_dwo_name);
++		return diea.hasAttribute(DW_AT_dwo_name) || diea.hasAttribute(DW_AT_GNU_dwo_name);
+ 	}
+ 
+ 	public long getAddrTableBase() {
+-		return diea.getUnsignedLong(DW_AT_addr_base, 0);
++		long base = diea.getUnsignedLong(DW_AT_addr_base,
++			diea.getUnsignedLong(DW_AT_GNU_addr_base, -1));
++		return base >= 0 ? base : skeleton != null ? skeleton.getAddrTableBase() : 0;
+ 	}
+ 
+ 	public long getRangeListsBase() {
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/dwarf/DWARFDataTypeImporter.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/dwarf/DWARFDataTypeImporter.java
+index ef57d83d67..0289e3253e 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/dwarf/DWARFDataTypeImporter.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/dwarf/DWARFDataTypeImporter.java
+@@ -129,6 +129,12 @@ public class DWARFDataTypeImporter {
+ 		if (diea == null) {
+ 			return defaultValue;
+ 		}
++		if (diea.getBool(DW_AT_declaration, false) && diea.hasAttribute(DW_AT_signature)) {
++			DIEAggregate definition = diea.getRef(DW_AT_signature);
++			if (definition != null) {
++				return getDataType(definition, defaultValue);
++			}
++		}
+ 
+ 		// First try to find a datatype that has already been constructed for this DIEA and return
+ 		// that if available.
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/dwarf/DWARFImporter.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/dwarf/DWARFImporter.java
+index 459c9d4e3d..1483813cac 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/dwarf/DWARFImporter.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/dwarf/DWARFImporter.java
+@@ -214,8 +214,13 @@ public class DWARFImporter {
+ 		Set<SourceFileInfo> badSourceFileInfo = new HashSet<>();
+ 		List<SourceFileAddr> sourceInfo = new ArrayList<>();
+ 		for (DWARFCompilationUnit cu : compUnits) {
+-			DWARFLine dLine = cu.getLine();
+ 			monitor.increment();
++			// Type units use DW_AT_stmt_list to resolve DW_AT_decl_file, but do not own
++			// executable line mappings. Replaying their line programs duplicates source rows.
++			if (cu.isTypeUnit()) {
++				continue;
++			}
++			DWARFLine dLine = cu.getLine();
+ 			for (SourceFileInfo sfi : dLine.getAllSourceFileInfos()) {
+ 				if (sourceFileInfoToSourceFile.containsKey(sfi)) {
+ 					continue;
+@@ -241,7 +246,7 @@ public class DWARFImporter {
+ 					continue;
+ 				}
+ 			}
+-			sourceInfo.addAll(cu.getLine().getAllSourceFileAddrInfo(cu));
++			dLine.addSourceFileAddrInfo(cu, sourceInfo);
+ 		}
+ 
+ 		int sourceInfoSize = sourceInfo.size();
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/dwarf/DWARFStringOffsetTableHeader.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/dwarf/DWARFStringOffsetTableHeader.java
+index 49f72d6b75..b5ebca298b 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/dwarf/DWARFStringOffsetTableHeader.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/dwarf/DWARFStringOffsetTableHeader.java
+@@ -71,6 +71,18 @@ public class DWARFStringOffsetTableHeader extends DWARFIndirectTableHeader {
+ 			lengthInfo.intSize(), count);
+ 	}
+ 
++	/** Reads the headerless GNU split DWARF 4 string offset table. */
++	public static DWARFStringOffsetTableHeader readV4Raw(BinaryReader reader, int intSize)
++			throws IOException {
++		long length = reader.length();
++		if (length % intSize != 0 || length / intSize > Integer.MAX_VALUE) {
++			throw new IOException("Invalid GNU split DWARF string offsets size");
++		}
++		reader.setPointerIndex(length);
++		return new DWARFStringOffsetTableHeader(0, length, 0, intSize,
++			(int) (length / intSize));
++	}
++
+ 	private final int count;
+ 	private final int intSize;
+ 
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/dwarf/DWARFUnitHeader.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/dwarf/DWARFUnitHeader.java
+index 5953749fe4..0b1daca599 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/dwarf/DWARFUnitHeader.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/dwarf/DWARFUnitHeader.java
+@@ -29,12 +29,17 @@ public class DWARFUnitHeader {
+ 	 * @param dieContainer {@link DIEContainer}
+ 	 * @param reader {@link BinaryReader} stream
+ 	 * @param unitNumber ordinal of this item
+-	 * @return a unit header (only comp units for now), or null if at end-of-list
++	 * @return a unit header, or null if at end-of-list
+ 	 * @throws DWARFException if invalid dwarf data
+ 	 * @throws IOException if error reading data
+ 	 */
+ 	public static DWARFUnitHeader read(DIEContainer dieContainer, BinaryReader reader,
+ 			int unitNumber) throws DWARFException, IOException {
++		return read(dieContainer, reader, unitNumber, false);
++	}
++
++	public static DWARFUnitHeader read(DIEContainer dieContainer, BinaryReader reader,
++			int unitNumber, boolean typeSection) throws DWARFException, IOException {
+ 		// unit_length : dwarf_length
+ 		// version : 2 bytes
+ 		// unit type : 1 byte [ version >= 5 ]
+@@ -56,17 +61,27 @@ public class DWARFUnitHeader {
+ 			lengthInfo.intSize(), version, unitNumber);
+ 
+ 		if (2 <= version && version <= 4) {
+-			return DWARFCompilationUnit.readV4(partial, reader);
++			if (typeSection && version != 4) {
++				throw new DWARFException("Unsupported .debug_types version [%d]".formatted(version));
++			}
++			return typeSection ? DWARFCompilationUnit.readTypeV4(partial, reader)
++					: DWARFCompilationUnit.readV4(partial, reader);
++		}
++		if (typeSection) {
++			throw new DWARFException("DWARF 5 type units belong in .debug_info");
+ 		}
+ 		int unitType = reader.readNextUnsignedByte();
+ 		switch (unitType) {
+ 			case DWARFUnitType.DW_UT_compile:
+ 				return DWARFCompilationUnit.readV5(partial, reader);
+ 			case DWARFUnitType.DW_UT_type:
+-			case DWARFUnitType.DW_UT_partial:
++				return DWARFCompilationUnit.readTypeV5(partial, reader, unitType);
+ 			case DWARFUnitType.DW_UT_skeleton:
+ 			case DWARFUnitType.DW_UT_split_compile:
++				return DWARFCompilationUnit.readSplitV5(partial, reader, unitType);
+ 			case DWARFUnitType.DW_UT_split_type:
++				return DWARFCompilationUnit.readTypeV5(partial, reader, unitType);
++			case DWARFUnitType.DW_UT_partial:
+ 			default:
+ 				throw new DWARFException("Unsupported unitType %d, %s".formatted(unitType,
+ 					DWARFUtil.toString(DWARFUnitType.class, unitType)));
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/dwarf/attribs/DWARFForm.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/dwarf/attribs/DWARFForm.java
+index 89bd3c3f31..168e7c0248 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/dwarf/attribs/DWARFForm.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/dwarf/attribs/DWARFForm.java
+@@ -211,7 +211,7 @@ public enum DWARFForm {
+ 		}
+ 	},
+ 	DW_FORM_line_strp(0x1f, DWARFForm.DWARF_INTSIZE, string),
+-	DW_FORM_ref_sig8(0x20, 8, reference), // unimpl
++	DW_FORM_ref_sig8(0x20, 8, reference),
+ 	DW_FORM_implicit_const(0x21, 0) {
+ 		@Override
+ 		public DWARFAttributeValue readValue(DWARFFormContext context) throws IOException {
+@@ -350,6 +350,10 @@ public enum DWARFForm {
+ 				long uoffset = context.reader().readNext(LEB128::unsigned);
+ 				return new DWARFNumericAttribute(64, uoffset, false);
+ 			}
++			case DW_FORM_ref_sig8: {
++				long signature = context.reader().readNextLong();
++				return new DWARFNumericAttribute(64, signature, false);
++			}
+ 
+ 			case DW_FORM_strx1:
+ 			case DW_FORM_strx2:
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/dwarf/line/DWARFLine.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/dwarf/line/DWARFLine.java
+index 7bf38d380f..4734c8d488 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/dwarf/line/DWARFLine.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/dwarf/line/DWARFLine.java
+@@ -18,7 +18,9 @@ package ghidra.app.util.bin.format.dwarf.line;
+ import java.io.IOException;
+ import java.nio.charset.Charset;
+ import java.util.ArrayList;
++import java.util.IdentityHashMap;
+ import java.util.List;
++import java.util.Map;
+ 
+ import ghidra.app.util.bin.BinaryReader;
+ import ghidra.app.util.bin.format.dwarf.*;
+@@ -280,12 +282,21 @@ public class DWARFLine {
+ 
+ 	public List<SourceFileAddr> getAllSourceFileAddrInfo(DWARFCompilationUnit cu)
+ 			throws IOException {
++		List<SourceFileAddr> results = new ArrayList<>();
++		addSourceFileAddrInfo(cu, results);
++		return results;
++	}
++
++	/** Adds source rows directly to a caller-owned list without retaining decoded line states. */
++	public void addSourceFileAddrInfo(DWARFCompilationUnit cu, List<SourceFileAddr> results)
++			throws IOException {
+ 		if (cu.getDIEContainer().getDebugLineReader() == null) {
+-			return List.of();
++			return;
+ 		}
+ 		try (DWARFLineProgramExecutor lpe = getLineProgramExecutor(cu)) {
+-			List<SourceFileAddr> results = new ArrayList<>();
+-			for (DWARFLineProgramState row : lpe.allRows()) {
++			Map<DWARFFile, String> filePaths = new IdentityHashMap<>();
++			DWARFLineProgramState row;
++			while ((row = lpe.nextRow()) != null) {
+ 				if (row.tombstone) {
+ 					// skips elements that were based on tombstoned/dead code that wasn't included
+ 					// in final binary
+@@ -294,15 +305,14 @@ public class DWARFLine {
+ 				}
+ 				try {
+ 					DWARFFile file = getFile(row.file);
+-					results.add(new SourceFileAddr(row.address, file.getPathName(this),
++					String path = filePaths.computeIfAbsent(file, f -> f.getPathName(this));
++					results.add(new SourceFileAddr(row.address, path,
+ 						file.getMD5(), row.line, row.isEndSequence));
+ 				}
+ 				catch (IOException e) {
+ 					cu.getProgram().getImportSummary().badSourceFileCount++;
+ 				}
+ 			}
+-
+-			return results;
+ 		}
+ 	}
+ 
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/dwarf/line/DWARFLineNumberStandardOpcodes.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/dwarf/line/DWARFLineNumberStandardOpcodes.java
+index 20a879f5d5..a791df277c 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/dwarf/line/DWARFLineNumberStandardOpcodes.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/dwarf/line/DWARFLineNumberStandardOpcodes.java
+@@ -15,8 +15,6 @@
+  */
+ package ghidra.app.util.bin.format.dwarf.line;
+ 
+-import ghidra.app.util.bin.format.dwarf.DWARFUtil;
+-
+ public class DWARFLineNumberStandardOpcodes {
+ 	public final static int DW_LNS_copy = 1;
+ 	public final static int DW_LNS_advance_pc = 2;
+@@ -32,6 +30,20 @@ public class DWARFLineNumberStandardOpcodes {
+ 	public final static int DW_LNS_set_isa = 12;
+ 
+ 	public static String toString(int value) {
+-		return DWARFUtil.toString(DWARFLineNumberStandardOpcodes.class, value);
++		return switch (value) {
++			case DW_LNS_copy -> "DW_LNS_copy";
++			case DW_LNS_advance_pc -> "DW_LNS_advance_pc";
++			case DW_LNS_advance_line -> "DW_LNS_advance_line";
++			case DW_LNS_set_file -> "DW_LNS_set_file";
++			case DW_LNS_set_column -> "DW_LNS_set_column";
++			case DW_LNS_negate_statement -> "DW_LNS_negate_statement";
++			case DW_LNS_set_basic_block -> "DW_LNS_set_basic_block";
++			case DW_LNS_const_add_pc -> "DW_LNS_const_add_pc";
++			case DW_LNS_fixed_advanced_pc -> "DW_LNS_fixed_advanced_pc";
++			case DW_LNS_set_prologue_end -> "DW_LNS_set_prologue_end";
++			case DW_LNS_set_epilog_begin -> "DW_LNS_set_epilog_begin";
++			case DW_LNS_set_isa -> "DW_LNS_set_isa";
++			default -> "Unknown DWARF Value: 0x" + Integer.toHexString(value);
++		};
+ 	}
+ }
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/dwarf/sectionprovider/ElfDWOSectionProvider.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/dwarf/sectionprovider/ElfDWOSectionProvider.java
+new file mode 100644
+index 0000000000..375c2954d3
+--- /dev/null
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/dwarf/sectionprovider/ElfDWOSectionProvider.java
+@@ -0,0 +1,123 @@
++/* ###
++ * IP: GHIDRA
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package ghidra.app.util.bin.format.dwarf.sectionprovider;
++
++import java.io.File;
++import java.io.IOException;
++import java.nio.file.AccessMode;
++import java.util.HashMap;
++import java.util.Map;
++import java.util.zip.InflaterInputStream;
++
++import ghidra.app.util.bin.*;
++import ghidra.app.util.bin.format.elf.*;
++import ghidra.util.task.TaskMonitor;
++
++/**
++ * Reads split DWARF sections from an ELF .dwo file. Sections omitted from the .dwo file,
++ * notably .debug_addr, are supplied by the object containing its skeleton unit.
++ */
++public class ElfDWOSectionProvider implements DWARFSectionProvider {
++	private final FileByteProvider fileProvider;
++	private final ElfHeader elf;
++	private final DWARFSectionProvider skeletonProvider;
++	private final Map<String, ByteProvider> decompressedSections = new HashMap<>();
++
++	public ElfDWOSectionProvider(File dwoFile, DWARFSectionProvider skeletonProvider)
++			throws IOException {
++		this.fileProvider = new FileByteProvider(dwoFile, null, AccessMode.READ);
++		try {
++			this.elf = new ElfHeader(fileProvider, null);
++			elf.parse();
++		}
++		catch (IOException | ElfException e) {
++			fileProvider.close();
++			throw new IOException("Invalid split DWARF file: " + dwoFile, e);
++		}
++		this.skeletonProvider = skeletonProvider;
++	}
++
++	@Override
++	public boolean hasSection(String... sectionNames) {
++		for (String sectionName : sectionNames) {
++			if (getDwoSection(sectionName) == null &&
++				(!canUseSkeletonSection(sectionName) || !skeletonProvider.hasSection(sectionName))) {
++				return false;
++			}
++		}
++		return true;
++	}
++
++	@Override
++	public ByteProvider getSectionAsByteProvider(String sectionName, TaskMonitor monitor)
++			throws IOException {
++		ElfSectionHeader section = getDwoSection(sectionName);
++		if (section == null) {
++			return canUseSkeletonSection(sectionName)
++					? skeletonProvider.getSectionAsByteProvider(sectionName, monitor)
++					: null;
++		}
++		if (!section.isCompressed()) {
++			return new ByteProviderWrapper(fileProvider, section.getOffset(), section.getSize());
++		}
++		ByteProvider cached = decompressedSections.get(sectionName);
++		if (cached != null) {
++			return cached;
++		}
++		if (section.getLogicalSize() > Integer.MAX_VALUE) {
++			throw new IOException("Split DWARF section is too large: " + sectionName);
++		}
++		BinaryReader reader = new BinaryReader(
++			new ByteProviderWrapper(fileProvider, section.getOffset(), section.getSize()),
++			elf.isLittleEndian());
++		ElfCompressedSectionHeader header = ElfCompressedSectionHeader.read(reader, elf);
++		if (header.getCh_type() != ElfCompressedSectionHeader.ELFCOMPRESS_ZLIB) {
++			throw new IOException("Unsupported compression in split DWARF section: " + sectionName);
++		}
++		byte[] bytes;
++		try (InflaterInputStream input = new InflaterInputStream(
++			fileProvider.getInputStream(section.getOffset() + header.getHeaderSize()))) {
++			bytes = input.readNBytes((int) section.getLogicalSize());
++		}
++		if (bytes.length != section.getLogicalSize()) {
++			throw new IOException("Truncated split DWARF section: " + sectionName);
++		}
++		ByteProvider result = new ByteArrayProvider(bytes);
++		decompressedSections.put(sectionName, result);
++		return result;
++	}
++
++	private boolean canUseSkeletonSection(String sectionName) {
++		return sectionName.equals(DWARFSectionId.DEBUG_ADDR.getSectionName()) ||
++			sectionName.equals(DWARFSectionId.DEBUG_LINE.getSectionName()) ||
++			sectionName.equals(DWARFSectionId.DEBUG_LINE_STR.getSectionName());
++	}
++
++	private ElfSectionHeader getDwoSection(String sectionName) {
++		return elf.getSection("." + sectionName + ".dwo");
++	}
++
++	@Override
++	public void close() {
++		decompressedSections.clear();
++		try {
++			fileProvider.close();
++		}
++		catch (IOException e) {
++			// Nothing to do while closing a read-only provider.
++		}
++	}
++}
+diff --git a/Ghidra/Features/Base/src/test/java/ghidra/app/util/bin/format/dwarf/SplitDWARFTest.java b/Ghidra/Features/Base/src/test/java/ghidra/app/util/bin/format/dwarf/SplitDWARFTest.java
+new file mode 100644
+index 0000000000..222e0394cb
+--- /dev/null
++++ b/Ghidra/Features/Base/src/test/java/ghidra/app/util/bin/format/dwarf/SplitDWARFTest.java
+@@ -0,0 +1,184 @@
++/* ###
++ * IP: GHIDRA
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package ghidra.app.util.bin.format.dwarf;
++
++import static ghidra.app.util.bin.format.dwarf.DWARFTag.*;
++import static ghidra.app.util.bin.format.dwarf.attribs.DWARFForm.*;
++import static org.junit.Assert.*;
++
++import java.io.*;
++import java.nio.file.AccessMode;
++import java.util.Map;
++
++import org.junit.Assume;
++import org.junit.Test;
++
++import ghidra.app.util.bin.FileByteProvider;
++import ghidra.app.util.bin.format.dwarf.sectionprovider.*;
++import ghidra.app.util.bin.format.elf.*;
++import ghidra.program.model.data.*;
++
++/** Tests Clang DWARF 4 and 5 type units and split objects with signature references. */
++public class SplitDWARFTest extends DWARFTestBase {
++
++	@Test
++	public void testSplitTypeReference() throws Exception {
++		checkDwarf5Split("sample.dwo");
++	}
++
++	@Test
++	public void testCompressedSplitTypeReference() throws Exception {
++		checkDwarf5Split("sample_compressed.dwo");
++	}
++
++	private void checkDwarf5Split(String dwoName) throws Exception {
++		loadObjectSections(fixture("sample.o"));
++		File dwo = fixture(dwoName);
++
++		try (DWARFProgram main = new DWARFProgram(program, new DWARFImportOptions(),
++			new BaseSectionProvider(program))) {
++			main.init(monitor);
++			Map<Long, DWARFCompilationUnit> skeletons =
++				main.getDIEContainer().getSkeletonsByDwoId();
++			assertEquals(1, skeletons.size());
++			try (DWARFProgram split = new DWARFProgram(program, new DWARFImportOptions(),
++				new ElfDWOSectionProvider(dwo, main.getSectionProvider()))) {
++				split.getDIEContainer().setSkeletonsByDwoId(skeletons);
++				split.init(monitor);
++				checkTypeReference(split);
++				DWARFCompilationUnit splitCU = split.getCompilationUnits()
++						.stream()
++						.filter(cu -> cu.getUnitType() == DWARFUnitType.DW_UT_split_compile)
++						.findFirst()
++						.orElseThrow();
++				assertEquals(skeletons.get(splitCU.getDwoId()).getAddrTableBase(),
++					splitCU.getAddrTableBase());
++			}
++		}
++	}
++
++	@Test
++	public void testDwarf4TypeReference() throws Exception {
++		loadObjectSections(fixture("type_sample.o"));
++		try (DWARFProgram dwarf = new DWARFProgram(program, new DWARFImportOptions(),
++			new BaseSectionProvider(program))) {
++			dwarf.init(monitor);
++			checkTypeReference(dwarf);
++		}
++	}
++
++	@Test
++	public void testDwarf4SplitTypeReference() throws Exception {
++		loadObjectSections(fixture("split_v4.o"));
++		try (DWARFProgram main = new DWARFProgram(program, new DWARFImportOptions(),
++			new BaseSectionProvider(program))) {
++			main.init(monitor);
++			Map<Long, DWARFCompilationUnit> skeletons =
++				main.getDIEContainer().getSkeletonsByDwoId();
++			assertEquals(1, skeletons.size());
++			try (DWARFProgram split = new DWARFProgram(program, new DWARFImportOptions(),
++				new ElfDWOSectionProvider(fixture("split_v4.dwo"), main.getSectionProvider()))) {
++				split.getDIEContainer().setSkeletonsByDwoId(skeletons);
++				split.init(monitor);
++				checkTypeReference(split);
++				DWARFCompilationUnit splitCU = split.getCompilationUnits()
++						.stream()
++						.filter(cu -> !cu.isTypeUnit())
++						.findFirst()
++						.orElseThrow();
++				assertEquals(0, split.getDIEContainer().getAddress(DW_FORM_gnu_addr_index, 0,
++					splitCU));
++			}
++		}
++	}
++
++	@Test
++	public void testExternalDwarf4TypeUnits() throws Exception {
++		String path = System.getenv("GHIDRA_DWARF_INPUT");
++		Assume.assumeNotNull(path);
++		loadObjectSections(new File(path));
++		try (DWARFProgram dwarf = new DWARFProgram(program, new DWARFImportOptions(),
++			new BaseSectionProvider(program))) {
++			dwarf.init(monitor);
++			DWARFCompilationUnit typeUnit = dwarf.getCompilationUnits()
++					.stream()
++					.filter(DWARFCompilationUnit::isTypeUnit)
++					.findFirst()
++					.orElseThrow();
++			assertNotNull(dwarf.getDIEContainer().getDIE(DW_FORM_ref_sig8,
++				typeUnit.getTypeSignature(), typeUnit));
++			DIEAggregate type = dwarf.getDIEContainer().getAggregate(
++				typeUnit.getTypeDIEOffset());
++			dwarf.getDwarfDTM().importAllDataTypes(monitor);
++			assertNotNull(dwarf.getDwarfDTM().getDataType(type, null));
++		}
++	}
++
++	private void loadObjectSections(File object) throws Exception {
++		try (FileByteProvider objectBytes = new FileByteProvider(object, null, AccessMode.READ)) {
++			ElfHeader elf = new ElfHeader(objectBytes, null);
++			elf.parse();
++			long address = 0x10000;
++			for (ElfSectionHeader section : elf.getSections()) {
++				String name = section.getNameAsString();
++				if (!name.startsWith(".debug_") || section.getSize() == 0) {
++					continue;
++				}
++				byte[] data = objectBytes.readBytes(section.getOffset(), section.getSize());
++				program.getMemory()
++						.createInitializedBlock(name, addr(address), new ByteArrayInputStream(data),
++							data.length, monitor, false);
++				address += data.length + 0x10000;
++			}
++		}
++	}
++
++	private void checkTypeReference(DWARFProgram dwarf) throws Exception {
++		DWARFCompilationUnit typeUnit = dwarf.getCompilationUnits()
++				.stream()
++				.filter(DWARFCompilationUnit::isTypeUnit)
++				.findFirst()
++				.orElseThrow();
++		DebugInfoEntry type = dwarf.getDIEContainer().getDIE(DW_FORM_ref_sig8,
++			typeUnit.getTypeSignature(), typeUnit);
++		assertNotNull(type);
++		assertEquals(typeUnit.getTypeDIEOffset(), type.getOffset());
++		assertEquals(DW_TAG_structure_type, type.getTag());
++
++		DWARFCompilationUnit compileUnit = dwarf.getCompilationUnits()
++				.stream()
++				.filter(cu -> !cu.isTypeUnit())
++				.findFirst()
++				.orElseThrow();
++		DebugInfoEntry subprogram = compileUnit.getCompUnitDIEA()
++				.getChildren(DW_TAG_subprogram).get(0);
++		DIEAggregate function = dwarf.getDIEContainer().getAggregate(subprogram);
++		assertEquals(type.getOffset(), function.getTypeRef().getOffset());
++
++		dwarf.getDwarfDTM().importAllDataTypes(monitor);
++		DataType point = dwarf.getDwarfDTM().getDataType(typeUnit.getTypeDIEOffset(), null);
++		assertTrue(String.valueOf(point), point instanceof Structure);
++		Structure structure = (Structure) point;
++		assertEquals(8, structure.getLength());
++		assertEquals(2, structure.getNumComponents());
++	}
++
++	private File fixture(String name) throws Exception {
++		return new File(getClass()
++				.getResource("/ghidra/app/util/bin/format/dwarf/split/" + name)
++				.toURI());
++	}
++}
+diff --git a/Ghidra/Features/Base/src/test/java/ghidra/app/util/bin/format/dwarf/attribs/DWARFAttributeFactoryTest.java b/Ghidra/Features/Base/src/test/java/ghidra/app/util/bin/format/dwarf/attribs/DWARFAttributeFactoryTest.java
+index a1c6b4518c..9b4380fbf7 100644
+--- a/Ghidra/Features/Base/src/test/java/ghidra/app/util/bin/format/dwarf/attribs/DWARFAttributeFactoryTest.java
++++ b/Ghidra/Features/Base/src/test/java/ghidra/app/util/bin/format/dwarf/attribs/DWARFAttributeFactoryTest.java
+@@ -461,6 +461,23 @@ public class DWARFAttributeFactoryTest extends DWARFTestBase {
+ 			((DWARFNumericAttribute) result).getValue());
+ 	}
+ 
++	@Test
++	public void testRefSig8() throws IOException {
++		BinaryReader br = br(
++			0x80, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
++			0xff);
++
++		DWARFNumericAttribute result =
++			(DWARFNumericAttribute) read(br, DW_AT_signature, DW_FORM_ref_sig8);
++		assertEquals(0x8001020304050607L, result.getUnsignedValue());
++		assertEquals("guard byte", (byte) 0xff, br.readNextByte());
++
++		// Even a signature equal to an existing DIE offset must not be treated as an offset.
++		long rootOffset = cu.getCompUnitDIEA().getOffset();
++		assertNotNull(dieContainer.getDIE(DW_FORM_ref_addr, rootOffset, cu));
++		assertNull(dieContainer.getDIE(DW_FORM_ref_sig8, rootOffset, cu));
++	}
++
+ 	@Test
+ 	public void testRefUData() throws IOException {
+ 		BinaryReader br = br(55, 0xff, 0x7e);
+diff --git a/Ghidra/Features/Base/src/test/resources/ghidra/app/util/bin/format/dwarf/split/sample.cpp b/Ghidra/Features/Base/src/test/resources/ghidra/app/util/bin/format/dwarf/split/sample.cpp
+new file mode 100644
+index 0000000000..4e896a352a
+--- /dev/null
++++ b/Ghidra/Features/Base/src/test/resources/ghidra/app/util/bin/format/dwarf/split/sample.cpp
+@@ -0,0 +1,23 @@
++/* ###
++ * IP: GHIDRA
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++// Rebuild the ELF fixtures from this directory with LLVM 23.1.2:
++// clang++ --target=x86_64-unknown-linux-gnu -g -gdwarf-4 -fdebug-types-section -c sample.cpp -o type_sample.o
++// clang++ --target=x86_64-unknown-linux-gnu -g -gdwarf-4 -gsplit-dwarf -fdebug-types-section -c sample.cpp -o split_v4.o
++// clang++ --target=x86_64-unknown-linux-gnu -g -gdwarf-5 -gsplit-dwarf -fdebug-types-section -c sample.cpp -o sample.o
++// llvm-objcopy --compress-debug-sections=zlib sample.dwo sample_compressed.dwo
++// The split-dwarf commands also generate split_v4.dwo and sample.dwo.
++struct Point { int x; int y; };
++Point move(Point p) { return {p.x + 1, p.y + 1}; }
+diff --git a/Ghidra/Features/Base/src/test/resources/ghidra/app/util/bin/format/dwarf/split/sample.dwo b/Ghidra/Features/Base/src/test/resources/ghidra/app/util/bin/format/dwarf/split/sample.dwo
+new file mode 100644
+index 0000000000000000000000000000000000000000..49c2d0e0d4314affd94c6d08fae2f006c32563c2
+GIT binary patch
+literal 1176
+zcmbtT&ui2`82u*6WMhNX8pPIuX2F1nB(>I}ZK>OX;(~{&Xwgf^cC*{S<_DQHtEb(A
+zcM%b9p7ie!LGa)|pa>p%@#H}~dhwfV(jAtT9vpa+_ukI?hJ5>FaO>`Ei4dq3fpr+G
+z$_4l;jd`P>4XEMCRpb;@ja&5l@1L)K3_jJ7lR8K;HziurfXK=U7X)N=L=;dcRbUNG
+z3bcrCHrd->-|oMl$LcU8t6=iLBg{z4$ZFEdL>p1is+(Y;$m51<8et$VBkmy{Ahr;X
+z5iY_*3^;$X6vnxKZ8Hv{3^)bnA@ft_?BedEeiAdMyA!li51b?oaxe3pEKEwzWl1l{
+zT;_#I&$rwC7@h(z^bAG?6SxzHek=9+=627Ex@L~0gE%r5ui97a#iL7ZCkc=ZV$gXj
+zw@#kH78+z(mn~gi(N}c<`8dc{)8OJdO63B|bzMhFXNYAPRK^^DYLl7yQ)**2vSf=N
+zZW=e|u#Xg^*~$RW3|N~BOl(Vlpr93PB82>%#!VxKc19+ebb_8EM|Oz64k&w{pI<!x
+z@$BAd_5GJuWCQHB-`efEUJDzQ7hNnJmZfgo=`cTI6SgRWs1u927eu4~!p3~&weVg3
+zZ}Fii=69k@zx)pPFo}zZ0{IO@=?%r78l~WaD6YvoALN7bAIi{@7#^S9cQ2J5ejvkr
+q6Um=ayc132)&1i0p!?sHCOafw+0AjyVde4XRN22!G?7>LR`x#uTdKqW
+
+literal 0
+HcmV?d00001
+
+diff --git a/Ghidra/Features/Base/src/test/resources/ghidra/app/util/bin/format/dwarf/split/sample.o b/Ghidra/Features/Base/src/test/resources/ghidra/app/util/bin/format/dwarf/split/sample.o
+new file mode 100644
+index 0000000000000000000000000000000000000000..6c569e5e1a00e5857918a14f670d633949e5a255
+GIT binary patch
+literal 2984
+zcmb_d&5ImG6tAA%p50Bd$!ucSY*w;kVq}rnlf=)%5+~~DBm`Lkdr@L<&ra`T$n<p6
+z-8-8I;wR#=2Ngj)DF}i$J$Uk>;=x1yf{=>@Ja~vi@UZwn{JrjaJGGSx0r5fAd-Z$2
+zdhb<rRoCl{bI+G7OR!ktlo*Z}72->0XxDSIE)IaX*j)dmx&GR%jmE9Fzqi&Kn;VTk
+za^vsjMq~5BkJedHnM$T+j(+pZ^x){^%-(W3h3OBXIbvjtA}yRrKfQVF{QJYSmZ*{g
+zvI|YgENY8skfgO$^tB|2qqNq!*lj1isKrTl;AcTC3uB3SY252(Uh0Q&FL2vyk&Kon
+z&7&VcU&^gH^as(7htVL&k;CYRzWXq$bo-fjf{cZT%v_pL7_^dLt-9Rv`<?0l)petO
+z_2i@O3HKxzG?B!5^}MhySFD*`qhlXnrS}7)MpC8j^zO>LrDrF~FN1*LB{WBji6@~g
+z%ld2g1S#4gG#ImF3fr13?Qss}wivnb(>rssKODTVzx>73kF3)pLW~zH0CS)7z>c?^
+zBjtJL(7f~TymKr!rsj8^EtL@OzwhgE98)EClh5H85x?Iy`E9wuy3ZE24&`GTkxXKX
+zvI$0%;ipy!wis83TedCsZP}_}i~Z^_w+Y#+)L)eh&bR|(brl?eaOTjIY3d+^(?Mq+
+zT@Vt&N6{E(O}M&hx+o-!b6n=r5!pHnuz4==)m^<CUImYYVyJNr=V*~v-Bnk^xt^xP
+z^?HQc4qB@n&u`&24TPHomowqL^cda8$BX;sE=OS);NrPS(DNlf%@QwKSxJK|-G+Di
+zt6sd?%C5wL(b4xqaui7sgw0;JA9(p#N#eKLi70+F+kYx__|<B<{gp_#{U{6E7hYU^
+zB+dNgOTz8-2BAkW(r#xPosvl)xah4Us7bg;p7|~4D<SFsNyf3^>Urd_@5zrpUHn5B
+zzT*wp0}oO7d@!*tjVc3DSF|zB)l%e)CCQ^lK^2|*9h^Ew{53ggPHI*<_ggq<sdXku
+zy&yMbNsg%w;_<zqCxYYznjVwz&!~f#)?0Xr{uq=g|JO4AaY?59w8wh>0WiwXJeawB
+zCG{z(S#hnbKZb*C=8(QA2luM~L-0)X|19h0eWLp5KcLr72icVWAK)bX78avBxfkFt
+z<=-^q-wCds{|qowem?gPabl@;?sLFR`6~oM)b&qbtmi)hjAH8F?`fH67Cu!tKkKV-
+zvaRx7F@XjyJ;0#GC3Q0FB{}~o4d?n9{u732{d0!(PlC(yd0&15W-9d)2}YbqYMuKl
+za8v%e%-@vr=={+uuIGOf7{%20e^hSBz3$I-%(c(mrZV3^+Y<hNGC=uB^!g_O=zCAR
+PrUb|21XA=S>-GN&28H)X
+
+literal 0
+HcmV?d00001
+
+diff --git a/Ghidra/Features/Base/src/test/resources/ghidra/app/util/bin/format/dwarf/split/sample_compressed.dwo b/Ghidra/Features/Base/src/test/resources/ghidra/app/util/bin/format/dwarf/split/sample_compressed.dwo
+new file mode 100644
+index 0000000000000000000000000000000000000000..c3a734874421e53eb5bdbf170dbb7d97d513401e
+GIT binary patch
+literal 1208
+zcmb<-^>JfjWMqH=Mg}_u1P><4!0>|!!FB*M9T?bwDq(8tq0%sZ#hlG)2?+_Q36B#P
+zE^fECn_sp5Ux(6!vnx&<IKm^8l9c*9At5DgBU7P-<cymNJYsBOVPRry(i_UcHhg0^
+z|EMxQpY7}BA}yl=!_9^o4OdzjzZ%SBjC|uG%x$6I!^Stmmxn>XTbL7WzX^u@#z5;6
+zQX3fT6vWt)WEJ>W9wjL7u|M)q=wpB6qOguViNSgYvlz_1OEC1eo-yP*WWdv!D6gvC
+z;o4|zuxY~vm&|NYZ_gY{#n#)Gxyq(3kI(;c=<k%Jmw#%-NWI~#Se+s||MsGZUPqrE
+z-0bRL`fj7(wl(|pLwxTz^+pQ+tQ4&{$hY?)w^oeG<%})6G>>lDvG1bJQC|1@4~OfE
+zf?D~1##;5m+*6F<9@Epi`5XcSST01qR=Vl2fpt;fjWEroiYa!ki@*F`=VYF4<jlS@
+z`_0BREKExsZ@8$<WPKo#v%F5i_VBr4(T^9OrY!6G%imFTYPQm?)wgf#`?xZi_XwZk
+zS8<0$5wBLWeqc&i&vk?W9-g@v_Mc7xh3A6=50*<kJw5w>Hn6ZSuFELQ3fx$yIpK=F
+zm+lGuYyRg?_-J~iB&0n_c$7Xh`HH^ADIISe&#U?;bsJ6{6&HV!GVO@C`ZKX7OJ1pp
+zix?Peu(7(gNU=WP)kKZkmo871lx5syry#(fmy()PnjW8+lvI>jrk7Hl4-+XaDT>ce
+zODj$-DMk}U=4R%l<s<WRGV@X)e4zf4#3ZQKD54^Px|y+<Fa?@V64B&f@d^{R1Tw&4
+z91IOGF%azl<-qb2l*_;YV?b$PAdOA`0jRtKl!j60`n7-(ApHht_QMju1eiuB4bu<v
+h2Z+XI{{*OlIvo08!k#$v3qZrK1*Q;6!|aC%0{~mX0Y3l$
+
+literal 0
+HcmV?d00001
+
+diff --git a/Ghidra/Features/Base/src/test/resources/ghidra/app/util/bin/format/dwarf/split/split_v4.dwo b/Ghidra/Features/Base/src/test/resources/ghidra/app/util/bin/format/dwarf/split/split_v4.dwo
+new file mode 100644
+index 0000000000000000000000000000000000000000..218cf3a1ef947ce76b3b653570eedd7571271af4
+GIT binary patch
+literal 1176
+zcmbu7O>5LZ7{{N<%WfoCtfAN<$Sx}Q0$J^wwJqtkpjh$X$wMz8+nwE}>?T7JQ!7g2
+zUIcF*1iyq(zk}aG@Y=IS@!~VdBpDa=;=q&n|9|s5$;^{EdGO?+LI{+DfCIHFDZodi
+z*4<oo!NANl)LQNh{p<I$58qC{TtQ3PIa74qAVgK}aYR7X3Za3f>KeFv%i}PmD^Ei|
+zNPtUt0bCwKffzgr$FvvGqt^b&3x=(fMzJ3Tt;Hq#uDu8y7Wt`{&`vUDo#BDsk32VK
+zBR_FtZ_Gy2-e>F|N$IlPKMM1W&fwF+n8R4WxQxM%a1~=4V}P-NQ69C~2IJiQo2Q>%
+z9{hOMfEF&1XLv+q1yxgd&l-h<sw+UYiKSn-1fW=C)l?^rX|9_aCV+Y#(Cu2>t)bVh
+zagWQW^;vR#;#fL@)18U)d8Y}`u*vKj=VGHfA50uv;B~v!7H+$#gEC(c0K<aK1)pzj
+z6+?qN_#}k<oFQ`O0RGlGg85+gY47>a^?LXp(!61U#7X3agF#G_SjNdQqrU;nlh^%V
+z5Xye!2ej~*n0P(@&Ho>V_zLw8uW5^W98Im|N0rzu)PiLahORK1GDJOH&o2vS*zydg
+zYP=HaZAA)E)|WHCj6!E}sw&_O8P>TKeO$Awf+%i_`YjovF27r1?gh(A#^*x;U&|2n
+Tbp2k<GCB23B(BS_&aLP#n}C_e
+
+literal 0
+HcmV?d00001
+
+diff --git a/Ghidra/Features/Base/src/test/resources/ghidra/app/util/bin/format/dwarf/split/split_v4.o b/Ghidra/Features/Base/src/test/resources/ghidra/app/util/bin/format/dwarf/split/split_v4.o
+new file mode 100644
+index 0000000000000000000000000000000000000000..2fe204a2aa334d4c743dd4ee521fa9d3a5d21760
+GIT binary patch
+literal 2576
+zcmb_e-Afcv6u-0U`mL>&m>D%C1clA2DO4=68Cxb668KWoI_r+>(9Q=l<N5(n6h!8W
+z^wJ;DO9X*oe}ED6EWPAwP!B;53OyJFcFxQ_>v$dCI&kkf_ji8xoO|b<xib&5BUfXR
+z#7HD|iS3LCWo)f#$Ikd>hP456Y-r*8(87a_#q7qDRcRr+wV3_o8-Iruvs-sRN-Zqe
+z-r4+quw!|!`Q2bmi_}`ZGT06gx}gO@Yj-8QaC-Ue{M7H~eiG<pZluOs&2dxH(5D>D
+zw%k;4N-sDnOWBTIRy{4{88*jqu3gf-T)AH<%vcnN9R@4rk9wf*fYxJJWz9!ULcil{
+zfKgI6JvM;GsD-94LzbcC9c@OQD5+*qF2jm+%ar@hDZNS`G7beiCe7bs(ri-dY^<qW
+zg8dx@92<&^-R0)w)7X`!>N`MyVF_9lOG7V7(x2ugRQOn+N#PAL7VMhu&{Yk)q$v}&
+zjZDVsf<1tBFma;(aiXg_oj8_GoJl9TeWN|yFdU0Pa3n{`Jb+bfb34ix=TAuV#aUd0
+z{BfM0ujq`kY7yf6ntkw=J$M@+t)cbEoI#Q6VH{pnBlja7&XNq_32vjJb3{JkSS={B
+z-}~nh${tiRx{yz6;8b7X1FxJ-h=cslt5umR;xh11Fh)4ebsyck9;Otu{B$v==Am56
+zO!2f?kL7OnW5Evu1+7e2hM_@aD~?uDIlpL5=j`dcH)m^Zl*3dFbOga&&)LOM3k7H2
+z`V42$%}I+XrsZkMwVPvST~D33&y-TBY~(P8s~300E$ODl0c|Qb>A)J80?9o!4|>i(
+z{h#D3#0l38g<a?1CIMWFFVX?P5ff`5!}&7Tq^SOAjB~}9=o`ll<Vc_@y~uqD9uY$_
+zzSk&t^Mys^z5plIV<t=jdyN;}636lVKpx&*D0sJ`+=GTO#XN7&334$|m7emGHo-%7
+zg#^YoKA?Q$6S+D#qSimo&yUuL>&JV5;t@U!m>3fv_7gi0y2FFfUTzi~QTb;h^49@Z
+z%-;)GRDSwKo}$EDi(LAuW(3|+M1K6riTS$#!<gdvDLm0}Aui=7{ff^QXzT_N1cwNJ
+z3Fh13I}WFea^iVmKCPeN&tOD7|JM=w$9I+H)A@e_Ok5Mje#Su?2O$x;AHWxte>EaM
+se$~YMD}cpEw(+Os5wwcX{X+nKpTzt>fFM3QoU_G=>pTDsF}IliA1FB0WB>pF
+
+literal 0
+HcmV?d00001
+
+diff --git a/Ghidra/Features/Base/src/test/resources/ghidra/app/util/bin/format/dwarf/split/type_sample.o b/Ghidra/Features/Base/src/test/resources/ghidra/app/util/bin/format/dwarf/split/type_sample.o
+new file mode 100644
+index 0000000000000000000000000000000000000000..114203c5cacb4657bada7bbc71609abecff6cbdf
+GIT binary patch
+literal 2728
+zcmbtV&2Jl35TCc}P13qqoES(-plsD5MNrmGNRR_2I4TB*R;WS>LVU>GBwNSe^)Bm;
+zn;=C&AR$G$lmmhTe*hQG9H~?!_!E#o+z{7P>Y);q+L^cStzVxUI55(CGr!-=?9BVJ
+z_v@EmHy8sc43=SlBnvP*GO%mhtidEkt~Cz+Y8>nx9oCP&xXBLccMt1#xN)y>Sik$>
+zt=BL%$K%JW-*5l@^`HAcpFzmZa?Y?wjWK4DuHnE|6g!vZS~*}VtY{Uc0E{AgF>l)W
+z{7d<l^8n^JnD%OsKm}p$Ji_IC9!+b4J!2Ow(=JTS*b{6L7ck;7GHTOZ+q5ZVwfO33
+zfKdyKX-Qx^MW~)`JJ`$zIArr^LfSN0syGO;-66o<!HEkq$Q(7kiU_6%vW<X782Ib4
+zf8E*Wc-@xM_v2nW>^k!=xO472l%lxZ_Y%L91W~EA)!vM~W-scrlV;BgqK@xwL=lwM
+zdYDz(#<>*xQP>la(0p$p2>brxm9X7SfK1o{GIt@Ru%&;m&sXp$pRxB(-v+i*U^Ayi
+z$8O*Sc@lXVBo0k0cHv9o;`qq>7=W;YBL`KS8Dsz0<D@W+?iN!Q25{WUC>l-}G?Nsq
+zvnM~d&W%*9Gga%^s&#=IQ`P*NhCv_45IQP;p(y?sxq^HSZr>l~HX*B)xqsmnzmgdz
+z4Rdhpk`mD;9>NlsU`sR8kD)cG)OCbMUZ|6Z(<_)do)CWGWeiacO(?|E9$Y7YGMlQ5
+z4+UP(_-%n#H2xETWi7p*Q(C-$xTaKOKlJEH9#0kTM}CtibzRi|MG+_S=zP`Fc~1Cs
+zeo64ME<ItAS5lSj!$$&N()c}r9igeFT6b0OdR=fg{q^lu(_6;}-3K@EcM|Olx*K5-
+z`1k_d*zb5EKG}`@o=ol~F}STb+>VZY6>4s~do2XF8z#Q{##?L8_Y!a8V{kj2e$ezb
+zH}SWm^-!r!yXy<W-)dfqy#OJWOuTi}y8-FBg}KG0`AT`AQmHI0mCI-^iWUDq^&_Sa
+zdqoZLVE@oQPy4INBM697?+p2CG@&?r9!!OS$t^m!35_H8t2kVFk12-wly6SzIplax
+z>SaLgDh`rHs<K({{{njWx3v6k#ira4nN*+R=r@#PI#s;3{!MayFZ}ZT3YhjP0qOw9
+zu>7Y4c~yxeQ;*$3j{2(MP-RwZ(2*di|4|%z|I5hHH_JFw*%O8KRT6DkU+Qy$)AR3%
+zfT#Z>e^>dY8akt$hxEz16916qM|!v;h>8ppTCQKxbWX$eZ(7`cdCs(dbQfj5<iA5s
+z?+Gb*SJaOPD5A%HgT7()%R}nZzm#7806FvWefs<O3`ZvN{YrxRC(-Nwgq*&26!)7T
+MZxTSEykYm}0ctYmApigX
+
+literal 0
+HcmV?d00001
+
+-- 
+2.45.1
+

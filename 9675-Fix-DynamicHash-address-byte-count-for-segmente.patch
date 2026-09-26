@@ -1,0 +1,79 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: defrancescojp <jpdefrancesco@gmail.com>
+Date: Fri, 25 Sep 2026 10:12:26 -0300
+Subject: [PATCH] 9675: Fix DynamicHash address byte count for segmented spaces
+ (follow-up to #336, closes #9672)
+
+Fix DynamicHash address byte count for SegmentedAddressSpace
+
+DynamicHash.ToOpEdge.hash() was computing the CRC over the wrong
+number of address bytes for x86:LE:16:Real Mode, causing
+ActionDynamicMapping.findVarnode to never match equate symbols in
+that language. The Java side used ceil(21/8)=3 bytes (from getSize()
+with i+=8, introduced in the #336 fix); the C++ decompiler always
+used 4 bytes because SleighLanguage encodes SegmentedAddressSpace as
+32-bit when building the decompiler XML.
+
+Add getAddressByteSize(Address) which returns 4 for SegmentedAddressSpace
+(matching the SleighLanguage encoding) and (getSize()+7)/8 for all other
+spaces (unchanged behavior). Update ToOpEdge.hash() to call the helper
+with ++i.
+
+Equates on CALLOTHER inputs (out, in, swi) now display correctly in
+16-bit Real Mode. No change in behavior for other architectures.
+
+Follow-up to #336
+---
+ .../program/model/pcode/DynamicHash.java      | 22 +++++++++++++++++--
+ 1 file changed, 20 insertions(+), 2 deletions(-)
+
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/DynamicHash.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/DynamicHash.java
+index 563f02ab14..9aca276f1d 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/DynamicHash.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/DynamicHash.java
+@@ -19,6 +19,8 @@ import java.util.*;
+ 
+ import generic.hash.SimpleCRC32;
+ import ghidra.program.model.address.Address;
++import ghidra.program.model.address.AddressSpace;
++import ghidra.program.model.address.SegmentedAddressSpace;
+ import ghidra.program.model.listing.Instruction;
+ 
+ /**
+@@ -106,8 +108,8 @@ public class DynamicHash {
+ 			reg = SimpleCRC32.hashOneByte(reg, slot);
+ 			reg = SimpleCRC32.hashOneByte(reg, transtable[op.getOpcode()]);
+ 			long val = op.getSeqnum().getTarget().getOffset();
+-			int sz = op.getSeqnum().getTarget().getSize();
+-			for (int i = 0; i < sz; i += 8) {
++			int sz = getAddressByteSize(op.getSeqnum().getTarget());
++			for (int i = 0; i < sz; ++i) {
+ 				reg = SimpleCRC32.hashOneByte(reg, (int) val);
+ 				val >>= 8;
+ 			}
+@@ -222,6 +224,22 @@ public class DynamicHash {
+ 		opedge.clear();
+ 	}
+ 
++	/**
++	 * Return the number of address bytes to hash for an instruction's seqnum address.
++	 * This must match the addressSize the C++ decompiler uses, which is determined by
++	 * SleighLanguage encoding: SegmentedAddressSpace is encoded as 32 bits (4 bytes);
++	 * all other spaces use ceiling(getSize()/8).
++	 * @param addr is the seqnum target address
++	 * @return the number of bytes to include in the hash
++	 */
++	private static int getAddressByteSize(Address addr) {
++		AddressSpace spc = addr.getAddressSpace();
++		if (spc instanceof SegmentedAddressSpace) {
++			return 4;		// SleighLanguage encodes segmented spaces as 32 bits
++		}
++		return (spc.getSize() + 7) / 8;
++	}
++
+ 	/**
+ 	 * For a DynamicHash on a PcodeOp, the op must not be a CAST or other skipped opcode.
+ 	 * Test if the given op is a skip op, and if so follow data-flow indicated by the
+-- 
+2.45.1
+

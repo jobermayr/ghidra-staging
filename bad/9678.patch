@@ -1,0 +1,1389 @@
+From 02162aabb2c5f62ec3435f17006569a4b6f0fe7b Mon Sep 17 00:00:00 2001
+From: Igor Savin <iselwin@gmail.com>
+Date: Sat, 26 Sep 2026 03:59:37 +0300
+Subject: [PATCH 1/2] 9678: x86: Emulate 16-bit segmented code
+
+x86: Emulate 16-bit segmented code
+
+Add a segment userop to the x86 emulator library for the 16-bit
+languages, computing the same address as the segmentop in each 16-bit
+pspec: base << 4 in real mode and base << 16 in protected mode.
+
+Fix 16-bit far branches in ia.sinc that dropped or never set CS:
+RET imm16, RETF imm16 and IRET now return to segment(CS,IP) like RET
+and RETF, CALLF m16:16 assigns CS from the far pointer, and JMPF m16:16
+with 16-bit addressing assigns CS and jumps to segment(CS,off).
+---
+ Ghidra/Processors/x86/build.gradle            |   1 +
+ Ghidra/Processors/x86/data/languages/ia.sinc  |  11 +-
+ .../X86PcodeUseropLibraryFactory.java         |  35 +++
+ .../emulation/X86PcodeUseropLibraryTest.java  | 280 ++++++++++++++++++
+ 4 files changed, 322 insertions(+), 5 deletions(-)
+ create mode 100644 Ghidra/Processors/x86/src/test/java/ghidra/program/emulation/X86PcodeUseropLibraryTest.java
+
+diff --git a/Ghidra/Processors/x86/build.gradle b/Ghidra/Processors/x86/build.gradle
+index 7d29812b942..371fea6bfda 100644
+--- a/Ghidra/Processors/x86/build.gradle
++++ b/Ghidra/Processors/x86/build.gradle
+@@ -24,5 +24,6 @@ eclipse.project.name = 'Processors x86'
+ 
+ dependencies {
+ 	api project(':Base')
++	testImplementation project(path: ':Emulation', configuration: 'testArtifacts')
+ }
+ 
+diff --git a/Ghidra/Processors/x86/data/languages/ia.sinc b/Ghidra/Processors/x86/data/languages/ia.sinc
+index fad8c595803..2fcaf2c058a 100644
+--- a/Ghidra/Processors/x86/data/languages/ia.sinc
++++ b/Ghidra/Processors/x86/data/languages/ia.sinc
+@@ -2953,8 +2953,8 @@ with : lockprefx=0 {
+ :CALLF ptr1616      is vexMode=0 & addrsize=1 & opsize=0 & byte=0x9a; ptr1616           { push42(CS); build ptr1616; push42(&:2 inst_next); call ptr1616; }
+ :CALLF ptr1632      is vexMode=0 & addrsize=0 & opsize=1 & byte=0x9a; ptr1632           { push22(CS); build ptr1632; push24(&:4 inst_next); call ptr1632; }
+ :CALLF ptr1632      is vexMode=0 & addrsize=1 & opsize=1 & byte=0x9a; ptr1632           { pushseg44(CS); build ptr1632; push44(&:4 inst_next); call ptr1632; }
+-:CALLF addr16       is vexMode=0 & addrsize=0 & opsize=0 & byte=0xff; addr16 & reg_opcode=3 ... { local ptr:$(SIZE) = segment(DS,addr16); local addrptr:$(SIZE) = segment(*:2 (ptr+2),*:2 ptr);
+-                                                                                                  push22(CS); push22(&:2 inst_next); call [addrptr]; }
++:CALLF addr16       is vexMode=0 & addrsize=0 & opsize=0 & byte=0xff; addr16 & reg_opcode=3 ... { local ptr:$(SIZE) = segment(DS,addr16); local sel:2 = *:2 (ptr+2); local addrptr:$(SIZE) = segment(sel,*:2 ptr);
++                                                                                                  push22(CS); push22(&:2 inst_next); CS = sel; call [addrptr]; }
+ :CALLF addr32       is vexMode=0 & addrsize=1 & opsize=0 & byte=0xff; addr32 & reg_opcode=3 ... { local dest:4 = addr32; push42(CS); push42(&:2 inst_next); call [dest]; }
+ @ifdef IA64
+ :CALLF addr64       is $(LONGMODE_ON) & vexMode=0 & addrsize=2 & opsize=0 & byte=0xff; addr64 & reg_opcode=3 ... { local dest:8 = addr64; push82(CS); push82(&:2 inst_next); call [dest]; }
+@@ -3721,7 +3721,7 @@ define pcodeop ibhf;
+ :INVPCID r64, m128     is $(LONGMODE_ON) & vexMode=0 & addrsize=2 & $(PRE_66) & byte=0x0F; byte=0x38; byte=0x82; r64 ... & m128    { invpcid(r64, m128); }
+ @endif
+ 
+-:IRET           is vexMode=0 & addrsize=0 & opsize=0 & byte=0xcf            { pop22(IP); EIP=zext(IP); pop22(CS); pop22(flags); return [EIP]; }    
++:IRET           is vexMode=0 & addrsize=0 & opsize=0 & byte=0xcf            { pop22(IP); pop22(CS); pop22(flags); EIP=segment(CS,IP); return [EIP]; }    
+ :IRET           is vexMode=0 & addrsize=1 & opsize=0 & byte=0xcf            { pop42(IP); EIP=zext(IP); pop42(CS); pop42(flags); return [EIP]; }    
+ @ifdef IA64
+ :IRET           is $(LONGMODE_ON) & vexMode=0 & addrsize=2 & opsize=0 & byte=0xcf            { pop82(IP); RIP=zext(IP); pop82(CS); pop82(flags); return [RIP]; }    
+@@ -3776,6 +3776,7 @@ jccRel32: rel32, "bt"  is segover=3 & rel32 { export rel32; }
+ 
+ :JMPF ptr1616   is vexMode=0 & opsize=0 & byte=0xea; ptr1616                    { goto ptr1616; }
+ :JMPF ptr1632   is vexMode=0 & opsize=1 & byte=0xea; ptr1632                    { goto ptr1632; }
++:JMPF Mem       is vexMode=0 & addrsize=0 & opsize=0 & byte=0xff; Mem & reg_opcode=5 ... { local off:2 = *:2 Mem; CS = *:2 (Mem+2); target:$(SIZE) = segment(CS,off); goto [target]; }
+ :JMPF Mem       is vexMode=0 & opsize=0 & byte=0xff; Mem & reg_opcode=5 ...     { target:$(SIZE) = zext(*:2 Mem); goto [target]; }
+ :JMPF Mem       is vexMode=0 & opsize=1 & byte=0xff; Mem & reg_opcode=5 ...     {
+ @ifdef IA64
+@@ -4613,7 +4614,7 @@ define pcodeop rdtsc;
+ :RETF           is $(LONGMODE_ON) & vexMode=0 & addrsize=2 & opsize=2 & byte=0xcb            { pop88(RIP); tmp:8=0; pop88(tmp); CS=tmp(0); return [RIP]; }
+ @endif
+ 
+-:RET imm16      is $(LONGMODE_OFF) & vexMode=0 & addrsize=0 & opsize=0 & byte=0xc2; imm16     { pop22(IP); EIP=zext(IP); SP=SP+imm16; return [EIP]; }      
++:RET imm16      is $(LONGMODE_OFF) & vexMode=0 & addrsize=0 & opsize=0 & byte=0xc2; imm16     { pop22(IP); EIP=segment(CS,IP); SP=SP+imm16; return [EIP]; }      
+ :RET imm16      is $(LONGMODE_OFF) & vexMode=0 & addrsize=1 & opsize=0 & byte=0xc2; imm16     { pop42(IP); EIP=zext(IP); ESP=ESP+imm16; return [EIP]; }        
+ :RET imm16      is $(LONGMODE_OFF) & vexMode=0 & addrsize=0 & opsize=1 & byte=0xc2; imm16     { pop24(EIP); SP=SP+imm16; return [EIP]; }
+ :RET imm16      is $(LONGMODE_OFF) & vexMode=0 & addrsize=1 & opsize=1 & byte=0xc2; imm16     { pop44(EIP); ESP=ESP+imm16; return [EIP]; }
+@@ -4621,7 +4622,7 @@ define pcodeop rdtsc;
+ :RET imm16      is $(LONGMODE_ON) & vexMode=0 & byte=0xc2; imm16     { pop88(RIP); RSP=RSP+imm16; return [RIP]; }
+ @endif
+ 
+-:RETF imm16     is vexMode=0 & addrsize=0 & opsize=0 & byte=0xca; imm16     { pop22(IP); EIP=zext(IP); pop22(CS); SP=SP+imm16; return [EIP]; }       
++:RETF imm16     is vexMode=0 & addrsize=0 & opsize=0 & byte=0xca; imm16     { pop22(IP); pop22(CS); EIP=segment(CS,IP); SP=SP+imm16; return [EIP]; }       
+ :RETF imm16     is vexMode=0 & addrsize=1 & opsize=0 & byte=0xca; imm16     { pop42(IP); EIP=zext(IP); pop42(CS); ESP=ESP+imm16; return [EIP]; }         
+ @ifdef IA64
+ :RETF imm16     is $(LONGMODE_ON) & vexMode=0 & addrsize=2 & opsize=0 & byte=0xca; imm16     { pop82(IP); RIP=zext(IP); pop82(CS); RSP=RSP+imm16; return [RIP]; }         
+diff --git a/Ghidra/Processors/x86/src/main/java/ghidra/program/emulation/X86PcodeUseropLibraryFactory.java b/Ghidra/Processors/x86/src/main/java/ghidra/program/emulation/X86PcodeUseropLibraryFactory.java
+index a24b86cf0ce..c700a80a842 100644
+--- a/Ghidra/Processors/x86/src/main/java/ghidra/program/emulation/X86PcodeUseropLibraryFactory.java
++++ b/Ghidra/Processors/x86/src/main/java/ghidra/program/emulation/X86PcodeUseropLibraryFactory.java
+@@ -18,12 +18,21 @@
+ import ghidra.app.plugin.processors.sleigh.SleighLanguage;
+ import ghidra.pcode.exec.*;
+ import ghidra.pcode.exec.PcodeUseropLibraryFactory.UseropLibrary;
++import ghidra.pcode.exec.SleighPcodeUseropDefinition.BuilderStage1;
++import ghidra.program.model.address.*;
+ 
+ @UseropLibrary(id = "x86")
+ public class X86PcodeUseropLibraryFactory implements PcodeUseropLibraryFactory {
+ 	@Override
+ 	public <T> PcodeUseropLibrary<T> create(SleighLanguage language,
+ 			PcodeArithmetic<T> arithmetic) {
++		AddressSpace space = language.getDefaultSpace();
++		if (space instanceof ProtectedAddressSpace) {
++			return new X86ProtectedModePcodeUseropLibrary<>();
++		}
++		if (space instanceof SegmentedAddressSpace) {
++			return new X86RealModePcodeUseropLibrary<>();
++		}
+ 		return new X86PcodeUseropLibrary<>();
+ 	}
+ 
+@@ -42,4 +51,30 @@ public void LOCK() {
+ 		public void UNLOCK() {
+ 		}
+ 	}
++
++	/**
++	 * The x86 library for 16-bit real mode, where {@code segment} computes the same address as
++	 * the {@code segmentop} in {@code x86-16-real.pspec}
++	 */
++	public static class X86RealModePcodeUseropLibrary<T> extends X86PcodeUseropLibrary<T> {
++		@PcodeUserop
++		public SleighPcodeUseropDefinition segment(BuilderStage1 builder) {
++			return builder.params("base", "inner").body(_ -> """
++					__op_output = (zext(base) << 4) + zext(inner);
++					""").build();
++		}
++	}
++
++	/**
++	 * The x86 library for 16-bit protected mode, where {@code segment} computes the same address
++	 * as the {@code segmentop} in {@code x86-16.pspec}
++	 */
++	public static class X86ProtectedModePcodeUseropLibrary<T> extends X86PcodeUseropLibrary<T> {
++		@PcodeUserop
++		public SleighPcodeUseropDefinition segment(BuilderStage1 builder) {
++			return builder.params("base", "inner").body(_ -> """
++					__op_output = (zext(base) << 16) + zext(inner);
++					""").build();
++		}
++	}
+ }
+diff --git a/Ghidra/Processors/x86/src/test/java/ghidra/program/emulation/X86PcodeUseropLibraryTest.java b/Ghidra/Processors/x86/src/test/java/ghidra/program/emulation/X86PcodeUseropLibraryTest.java
+new file mode 100644
+index 00000000000..4b7571c0d6b
+--- /dev/null
++++ b/Ghidra/Processors/x86/src/test/java/ghidra/program/emulation/X86PcodeUseropLibraryTest.java
+@@ -0,0 +1,280 @@
++/* ###
++ * IP: GHIDRA
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package ghidra.program.emulation;
++
++import static org.junit.Assert.*;
++
++import java.lang.invoke.MethodHandles;
++import java.math.BigInteger;
++
++import org.junit.Test;
++
++import ghidra.app.plugin.processors.sleigh.SleighLanguage;
++import ghidra.pcode.emu.PcodeEmulator;
++import ghidra.pcode.emu.PcodeThread;
++import ghidra.pcode.emu.jit.JitConfiguration;
++import ghidra.pcode.emu.jit.JitPcodeEmulator;
++import ghidra.pcode.exec.*;
++import ghidra.pcode.exec.PcodeArithmetic.Purpose;
++import ghidra.pcode.exec.PcodeExecutorStatePiece.Reason;
++import ghidra.program.model.address.Address;
++import ghidra.program.model.address.SegmentedAddressSpace;
++import ghidra.program.model.lang.LanguageID;
++import ghidra.program.model.lang.Register;
++import ghidra.program.util.DefaultLanguageService;
++
++public class X86PcodeUseropLibraryTest extends AbstractEmulationEquivalenceTest {
++	static final LanguageID LANG_ID_REAL = new LanguageID("x86:LE:16:Real Mode");
++	static final LanguageID LANG_ID_PROTECTED = new LanguageID("x86:LE:16:Protected Mode");
++	static final LanguageID LANG_ID_32 = new LanguageID("x86:LE:32:default");
++
++	static final int CODE_SEG = 0x1000;
++	static final int STACK_SEG = 0x2000;
++	static final int FAR_SEG = 0x3000;
++	static final int DATA_SEG = 0x4000;
++	static final int ENTRY = 0x0100;
++	static final int STACK_TOP = 0x0100;
++	static final int FAR_TARGET = 0x0234;
++
++	static SleighLanguage getLanguage(LanguageID id) throws Exception {
++		return (SleighLanguage) DefaultLanguageService.getLanguageService().getLanguage(id);
++	}
++
++	/**
++	 * Every instruction test runs on both the interpreting and the JIT-compiling emulator
++	 */
++	static final boolean[] JIT_MODES = { false, true };
++
++	/**
++	 * A 16-bit machine that places code at {@code CODE_SEG:ENTRY} and the stack at
++	 * {@code STACK_SEG:STACK_TOP}
++	 */
++	static class Machine16 {
++		final SleighLanguage language;
++		final SegmentedAddressSpace space;
++		final PcodeEmulator emu;
++		final PcodeThread<byte[]> thread;
++		final PcodeArithmetic<byte[]> arithmetic;
++
++		Machine16(LanguageID id, boolean jit, int... code) throws Exception {
++			language = getLanguage(id);
++			space = (SegmentedAddressSpace) language.getDefaultSpace();
++			emu = jit
++					? new JitPcodeEmulator(language, new JitConfiguration(), MethodHandles.lookup())
++					: new PcodeEmulator(language);
++			thread = emu.newThread();
++			arithmetic = thread.getArithmetic();
++
++			byte[] bytes = new byte[code.length];
++			for (int i = 0; i < code.length; i++) {
++				bytes[i] = (byte) code[i];
++			}
++			emu.getSharedState().setVar(addr(CODE_SEG, ENTRY), bytes.length, false, bytes);
++
++			setReg("CS", CODE_SEG);
++			setReg("SS", STACK_SEG);
++			setReg("DS", DATA_SEG);
++			setReg("SP", STACK_TOP);
++		}
++
++		Address addr(int segment, int offset) {
++			return space.getAddress(segment, offset);
++		}
++
++		void setReg(String name, long value) {
++			Register reg = language.getRegister(name);
++			thread.getState()
++					.setVar(reg, arithmetic.fromConst(BigInteger.valueOf(value), reg.getNumBytes()));
++		}
++
++		long getReg(String name) {
++			Register reg = language.getRegister(name);
++			return arithmetic.toLong(thread.getState().getVar(reg, Reason.INSPECT),
++				Purpose.INSPECT);
++		}
++
++		void writeWord(int segment, int offset, int value) {
++			emu.getSharedState()
++					.setVar(addr(segment, offset), 2, false,
++						new byte[] { (byte) value, (byte) (value >> 8) });
++		}
++
++		int readWord(int segment, int offset) {
++			byte[] bytes = emu.getSharedState().getVar(addr(segment, offset), 2, false,
++				Reason.INSPECT);
++			return (bytes[0] & 0xff) | ((bytes[1] & 0xff) << 8);
++		}
++
++		void step() {
++			thread.setCounter(addr(CODE_SEG, ENTRY));
++			thread.overrideContextWithDefault();
++			thread.stepInstruction();
++		}
++
++		void assertAtFarTarget() {
++			assertEquals(addr(FAR_SEG, FAR_TARGET).getOffset(), thread.getCounter().getOffset());
++			assertEquals(FAR_SEG, getReg("CS"));
++		}
++	}
++
++	@Test
++	public void testSegmentFoundByLang() throws Exception {
++		for (LanguageID id : new LanguageID[] { LANG_ID_REAL, LANG_ID_PROTECTED }) {
++			SleighLanguage language = getLanguage(id);
++			PcodeUseropLibrary<byte[]> lib = PcodeUseropLibraryFactory
++					.createUseropLibraryForLanguage(language,
++						BytesPcodeArithmetic.forLanguage(language));
++			assertNotNull(id.toString(), lib.getUserops().get("segment"));
++		}
++	}
++
++	@Test
++	public void testSegmentAbsentFor32Bit() throws Exception {
++		SleighLanguage language = getLanguage(LANG_ID_32);
++		PcodeUseropLibrary<byte[]> lib = PcodeUseropLibraryFactory
++				.createUseropLibraryForLanguage(language,
++					BytesPcodeArithmetic.forLanguage(language));
++		assertNull(lib.getUserops().get("segment"));
++	}
++
++	protected void doTestMovFromDataSegment(LanguageID id) throws Exception {
++		for (boolean jit : JIT_MODES) {
++			Machine16 m = new Machine16(id, jit, 0x8b, 0x07); // MOV AX,word ptr [BX]
++			m.setReg("BX", 0x0010);
++			m.writeWord(DATA_SEG, 0x0010, 0xbeef);
++			m.step();
++			assertEquals(0xbeef, m.getReg("AX"));
++		}
++	}
++
++	@Test
++	public void testMovFromDataSegmentReal() throws Exception {
++		doTestMovFromDataSegment(LANG_ID_REAL);
++	}
++
++	@Test
++	public void testMovFromDataSegmentProtected() throws Exception {
++		doTestMovFromDataSegment(LANG_ID_PROTECTED);
++	}
++
++	protected void doTestRetImm16(LanguageID id) throws Exception {
++		for (boolean jit : JIT_MODES) {
++			Machine16 m = new Machine16(id, jit, 0xc2, 0x04, 0x00); // RET 0x4
++			m.writeWord(STACK_SEG, STACK_TOP, FAR_TARGET);
++			m.step();
++			assertEquals(m.addr(CODE_SEG, FAR_TARGET).getOffset(), m.thread.getCounter().getOffset());
++			assertEquals(CODE_SEG, m.getReg("CS"));
++			assertEquals(STACK_TOP + 2 + 4, m.getReg("SP"));
++		}
++	}
++
++	@Test
++	public void testRetImm16Real() throws Exception {
++		doTestRetImm16(LANG_ID_REAL);
++	}
++
++	@Test
++	public void testRetImm16Protected() throws Exception {
++		doTestRetImm16(LANG_ID_PROTECTED);
++	}
++
++	protected void doTestRetfImm16(LanguageID id) throws Exception {
++		for (boolean jit : JIT_MODES) {
++			Machine16 m = new Machine16(id, jit, 0xca, 0x04, 0x00); // RETF 0x4
++			m.writeWord(STACK_SEG, STACK_TOP, FAR_TARGET);
++			m.writeWord(STACK_SEG, STACK_TOP + 2, FAR_SEG);
++			m.step();
++			m.assertAtFarTarget();
++			assertEquals(STACK_TOP + 4 + 4, m.getReg("SP"));
++		}
++	}
++
++	@Test
++	public void testRetfImm16Real() throws Exception {
++		doTestRetfImm16(LANG_ID_REAL);
++	}
++
++	@Test
++	public void testRetfImm16Protected() throws Exception {
++		doTestRetfImm16(LANG_ID_PROTECTED);
++	}
++
++	protected void doTestIret(LanguageID id) throws Exception {
++		for (boolean jit : JIT_MODES) {
++			Machine16 m = new Machine16(id, jit, 0xcf); // IRET
++			m.writeWord(STACK_SEG, STACK_TOP, FAR_TARGET);
++			m.writeWord(STACK_SEG, STACK_TOP + 2, FAR_SEG);
++			m.writeWord(STACK_SEG, STACK_TOP + 4, 0x0002);
++			m.step();
++			m.assertAtFarTarget();
++			assertEquals(STACK_TOP + 6, m.getReg("SP"));
++		}
++	}
++
++	@Test
++	public void testIretReal() throws Exception {
++		doTestIret(LANG_ID_REAL);
++	}
++
++	@Test
++	public void testIretProtected() throws Exception {
++		doTestIret(LANG_ID_PROTECTED);
++	}
++
++	protected void doTestCallfIndirect(LanguageID id) throws Exception {
++		for (boolean jit : JIT_MODES) {
++			Machine16 m = new Machine16(id, jit, 0xff, 0x1e, 0x00, 0x05); // CALLF [0x500]
++			m.writeWord(DATA_SEG, 0x0500, FAR_TARGET);
++			m.writeWord(DATA_SEG, 0x0502, FAR_SEG);
++			m.step();
++			m.assertAtFarTarget();
++			assertEquals(STACK_TOP - 4, m.getReg("SP"));
++			assertEquals(ENTRY + 4, m.readWord(STACK_SEG, STACK_TOP - 4));
++			assertEquals(CODE_SEG, m.readWord(STACK_SEG, STACK_TOP - 2));
++		}
++	}
++
++	@Test
++	public void testCallfIndirectReal() throws Exception {
++		doTestCallfIndirect(LANG_ID_REAL);
++	}
++
++	@Test
++	public void testCallfIndirectProtected() throws Exception {
++		doTestCallfIndirect(LANG_ID_PROTECTED);
++	}
++
++	protected void doTestJmpfIndirect(LanguageID id) throws Exception {
++		for (boolean jit : JIT_MODES) {
++			Machine16 m = new Machine16(id, jit, 0xff, 0x2e, 0x00, 0x05); // JMPF [0x500]
++			m.writeWord(DATA_SEG, 0x0500, FAR_TARGET);
++			m.writeWord(DATA_SEG, 0x0502, FAR_SEG);
++			m.step();
++			m.assertAtFarTarget();
++			assertEquals(STACK_TOP, m.getReg("SP"));
++		}
++	}
++
++	@Test
++	public void testJmpfIndirectReal() throws Exception {
++		doTestJmpfIndirect(LANG_ID_REAL);
++	}
++
++	@Test
++	public void testJmpfIndirectProtected() throws Exception {
++		doTestJmpfIndirect(LANG_ID_PROTECTED);
++	}
++}
+
+From b0e20c21ad221a6c8898108c119ee58473dbd298 Mon Sep 17 00:00:00 2001
+From: Igor Savin <iselwin@gmail.com>
+Date: Sat, 26 Sep 2026 04:31:19 +0300
+Subject: [PATCH 2/2] x86: Fix 16-bit returns, far calls and segment emulation
+
+Near and far calls pushed the low 16 bits of the linear return address,
+which only matches the offset the returns expect when CS is a multiple of
+0x1000. A new retOffset16 subconstructor pushes inst_next minus the CS
+base instead.
+
+CALLF m16:16 reads the far pointer through Mem, so segment overrides and
+the SS default for BP-based operands apply, and writes the caller's CS
+back after the call so static analysis does not keep the callee's CS.
+The 0x67-prefixed CALLF, RET, RETF, IRET and JMPF forms and the m16:32
+CALLF in 16-bit code now dereference the pointer, set CS and return
+through segment(CS,IP) like the unprefixed forms.
+
+The emulator builds segment from each pspec's <segmentop> payload through
+a new always-included SegmentopPcodeUseropLibraryFactory, replacing the
+two hardcoded x86 bodies. x86 languages without a segmentop get a flat
+segment that zero-extends the offset, so 32-bit code with 16-bit
+prefixes still emulates.
+---
+ .../SegmentopPcodeUseropLibraryFactory.java   | 196 ++++++++++
+ Ghidra/Processors/x86/data/languages/ia.sinc  |  53 ++-
+ .../X86PcodeUseropLibraryFactory.java         |  46 ++-
+ .../emulation/X86PcodeUseropLibraryTest.java  | 352 +++++++++++++-----
+ 4 files changed, 501 insertions(+), 146 deletions(-)
+ create mode 100644 Ghidra/Framework/Emulation/src/main/java/ghidra/pcode/exec/SegmentopPcodeUseropLibraryFactory.java
+
+diff --git a/Ghidra/Framework/Emulation/src/main/java/ghidra/pcode/exec/SegmentopPcodeUseropLibraryFactory.java b/Ghidra/Framework/Emulation/src/main/java/ghidra/pcode/exec/SegmentopPcodeUseropLibraryFactory.java
+new file mode 100644
+index 00000000000..d1330fabf18
+--- /dev/null
++++ b/Ghidra/Framework/Emulation/src/main/java/ghidra/pcode/exec/SegmentopPcodeUseropLibraryFactory.java
+@@ -0,0 +1,196 @@
++/* ###
++ * IP: GHIDRA
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package ghidra.pcode.exec;
++
++import java.lang.reflect.Method;
++import java.util.*;
++import java.util.concurrent.ConcurrentHashMap;
++
++import ghidra.app.plugin.processors.sleigh.SleighLanguage;
++import ghidra.pcode.exec.PcodeUseropLibrary.PcodeUseropDefinition;
++import ghidra.pcode.exec.PcodeUseropLibrary.PcodeUseropSymbolMap;
++import ghidra.pcode.exec.PcodeUseropLibraryFactory.UseropLibrary;
++import ghidra.program.model.address.Address;
++import ghidra.program.model.lang.*;
++import ghidra.program.model.pcode.PcodeOp;
++import ghidra.program.model.pcode.Varnode;
++
++/**
++ * A factory for the userops declared by {@code <segmentop>} tags in a processor spec
++ *
++ * <p>
++ * Each userop executes the p-code body of its {@code <segmentop>}, so the emulator computes the
++ * same address the decompiler does. Languages without a {@code <segmentop>} get an empty library.
++ * Processor libraries are applied after this one, so they can still override a segment userop.
++ */
++@UseropLibrary(id = "segmentop", includeAlways = true, order = 0)
++public class SegmentopPcodeUseropLibraryFactory implements PcodeUseropLibraryFactory {
++	/** The suffix {@link InjectPayloadSegment} appends to the userop name */
++	private static final String PAYLOAD_SUFFIX = "_pcode";
++
++	@Override
++	public <T> PcodeUseropLibrary<T> create(SleighLanguage language,
++			PcodeArithmetic<T> arithmetic) {
++		return new SegmentopPcodeUseropLibrary<>(language);
++	}
++
++	/**
++	 * The library of segment userops for one language
++	 *
++	 * @param <T> the type of values in the emulator
++	 */
++	public static class SegmentopPcodeUseropLibrary<T> extends DefaultPcodeUseropLibrary<T> {
++		public SegmentopPcodeUseropLibrary(SleighLanguage language) {
++			List<InjectPayloadSleigh> declared = language.getAdditionalInject();
++			if (declared == null) {
++				return;
++			}
++			// The compiler spec's inject library holds the compiled form of each payload
++			PcodeInjectLibrary injectLibrary =
++				language.getDefaultCompilerSpec().getPcodeInjectLibrary();
++			for (InjectPayloadSleigh payload : declared) {
++				if (!(payload instanceof InjectPayloadSegment)) {
++					continue;
++				}
++				String payloadName = payload.getName();
++				InjectPayload compiled =
++					injectLibrary.getPayload(InjectPayload.EXECUTABLEPCODE_TYPE, payloadName);
++				if (compiled == null) {
++					continue;
++				}
++				String name = payloadName.endsWith(PAYLOAD_SUFFIX)
++						? payloadName.substring(0, payloadName.length() - PAYLOAD_SUFFIX.length())
++						: payloadName;
++				putOp(new SegmentopPcodeUseropDefinition<>(language, name, compiled));
++			}
++		}
++	}
++
++	/**
++	 * A userop that executes the p-code of a {@code <segmentop>} payload
++	 *
++	 * <p>
++	 * The payload is instantiated once for each combination of argument varnodes. Its temporaries
++	 * are allocated in the inject region of the unique space, so they cannot collide with those of
++	 * the instruction invoking the userop.
++	 *
++	 * @param <T> the type of values in the emulator
++	 */
++	public static class SegmentopPcodeUseropDefinition<T> implements PcodeUseropDefinition<T> {
++		private final SleighLanguage language;
++		private final String name;
++		private final InjectPayload payload;
++		private final Address injectAddress;
++		private final Map<List<Varnode>, PcodeProgram> cacheByArgs = new ConcurrentHashMap<>();
++
++		public SegmentopPcodeUseropDefinition(SleighLanguage language, String name,
++				InjectPayload payload) {
++			this.language = language;
++			this.name = name;
++			this.payload = payload;
++			this.injectAddress = language.getDefaultSpace().getAddress(0);
++		}
++
++		@Override
++		public String getName() {
++			return name;
++		}
++
++		@Override
++		public int getInputCount() {
++			return payload.getInput().length;
++		}
++
++		@Override
++		public void execute(PcodeExecutor<T> executor, PcodeUseropLibrary<T> library,
++				PcodeOp op, Varnode outVar, List<Varnode> inVars) {
++			List<Varnode> args = new ArrayList<>(inVars.size() + 1);
++			args.add(outVar);
++			args.addAll(inVars);
++			executor.execute(cacheByArgs.computeIfAbsent(args, this::programFor), library);
++		}
++
++		private PcodeProgram programFor(List<Varnode> args) {
++			InjectContext context = new InjectContext();
++			context.language = language;
++			context.baseAddr = injectAddress;
++			context.nextAddr = injectAddress;
++			context.inputlist = new ArrayList<>(args.subList(1, args.size()));
++			context.output = args.get(0) == null
++					? new ArrayList<>()
++					: new ArrayList<>(List.of(args.get(0)));
++			try {
++				PcodeOp[] pcode = payload.getPcode(null, context);
++				return new PcodeProgram(language, List.of(pcode),
++					PcodeUseropSymbolMap.empty(language));
++			}
++			catch (Exception e) {
++				throw new PcodeExecutionException(
++					"Cannot instantiate segmentop '%s': %s".formatted(name, e.getMessage()), e);
++			}
++		}
++
++		@Override
++		public boolean isFunctional() {
++			return false;
++		}
++
++		@Override
++		public boolean canInterrupt() {
++			return false;
++		}
++
++		@Override
++		public boolean hasSideEffects() {
++			return true;
++		}
++
++		@Override
++		public boolean modifiesContext() {
++			return false;
++		}
++
++		@Override
++		public boolean canInlinePcode() {
++			return true;
++		}
++
++		@Override
++		public boolean isOutSigned() {
++			return false;
++		}
++
++		@Override
++		public boolean isInSigned(int index) {
++			return false;
++		}
++
++		@Override
++		public Class<?> getOutputType() {
++			return null;
++		}
++
++		@Override
++		public Method getJavaMethod() {
++			return null;
++		}
++
++		@Override
++		public PcodeUseropLibrary<?> getDefiningLibrary() {
++			return null;
++		}
++	}
++}
+diff --git a/Ghidra/Processors/x86/data/languages/ia.sinc b/Ghidra/Processors/x86/data/languages/ia.sinc
+index 2fcaf2c058a..1e5664c5726 100644
+--- a/Ghidra/Processors/x86/data/languages/ia.sinc
++++ b/Ghidra/Processors/x86/data/languages/ia.sinc
+@@ -1107,6 +1107,10 @@ addr64: [Base64 + Index64*ss]			is mod=2 & r_m=4; Index64 & Base64 & ss; imm32=0
+ 
+ currentCS: CS is protectedMode=0 & CS { tmp:4 = (inst_next >> 4) & 0xf000; CS = tmp:2; export CS; }
+ currentCS: CS is protectedMode=1 & CS { tmp:4 = (inst_next >> 16) & 0xffff; CS = tmp:2; export CS; }
++
++# The 16-bit return address a near or far call pushes: the offset of inst_next from the CS base.
++# The returns compute segment(CS,IP) from it, so it must be built before the call changes CS.
++retOffset16: is epsilon { local csBase:$(SIZE) = segment(CS, 0:2); local nextOff:$(SIZE) = inst_next - csBase; local ret:2 = nextOff:2; export ret; }
+  
+ segWide: is segover=0		        { export 0:$(SIZE); }
+ segWide: CS: is segover=1 & CS	{ export 0:$(SIZE); }
+@@ -2910,15 +2914,15 @@ with : lockprefx=0 {
+ :BTS Rmr64,imm8     is $(LONGMODE_ON) & vexMode=0 & opsize=2 & byte=0xf; byte=0xba; mod=3 & Rmr64 & reg_opcode=5; imm8   { local bit=imm8&0x3f; local val=(Rmr64>>bit)&1; Rmr64=Rmr64 | (1<<bit); CF=(val!=0); }
+ @endif
+ 
+-:CALL rel16     is $(LONGMODE_OFF) & vexMode=0 & addrsize=0 & opsize=0 & byte=0xe8; rel16     { push22(&:2 inst_next); call rel16; }
+-:CALL rel16     is $(LONGMODE_OFF) & vexMode=0 & addrsize=1 & opsize=0 & byte=0xe8; rel16     { push42(&:2 inst_next); call rel16; }
++:CALL rel16     is $(LONGMODE_OFF) & vexMode=0 & addrsize=0 & opsize=0 & byte=0xe8 & retOffset16; rel16     { push22(retOffset16); call rel16; }
++:CALL rel16     is $(LONGMODE_OFF) & vexMode=0 & addrsize=1 & opsize=0 & byte=0xe8 & retOffset16; rel16     { push42(retOffset16); call rel16; }
+ @ifdef IA64
+ :CALL rel16     is $(LONGMODE_ON) & vexMode=0 & opsize=0 & byte=0xe8; rel16     { push88(&:8 inst_next); call rel16; }
+ @endif
+ 
+ #  When is a Call a Jump, when it jumps right after.  Not always the case but...
+-:CALL rel16     is $(LONGMODE_OFF) & vexMode=0 & addrsize=0 & opsize=0 & byte=0xe8; simm16=0 & rel16      { push22(&:2 inst_next); goto rel16; }
+-:CALL rel16     is $(LONGMODE_OFF) & vexMode=0 & addrsize=1 & opsize=0 & byte=0xe8; simm16=0 & rel16      { push42(&:2 inst_next); goto rel16; }
++:CALL rel16     is $(LONGMODE_OFF) & vexMode=0 & addrsize=0 & opsize=0 & byte=0xe8 & retOffset16; simm16=0 & rel16      { push22(retOffset16); goto rel16; }
++:CALL rel16     is $(LONGMODE_OFF) & vexMode=0 & addrsize=1 & opsize=0 & byte=0xe8 & retOffset16; simm16=0 & rel16      { push42(retOffset16); goto rel16; }
+ @ifdef IA64
+ :CALL rel16     is $(LONGMODE_ON) & vexMode=0 & opsize=0 & byte=0xe8; simm16=0 & rel16      { push88(&:8 inst_next); goto rel16; }
+ @endif
+@@ -2936,8 +2940,8 @@ with : lockprefx=0 {
+ :CALL rel32     is $(LONGMODE_ON) & vexMode=0 & (opsize=1 | opsize=2) & byte=0xe8; simm32=0 & rel32      { push88(&:8 inst_next); goto rel32; }
+ @endif
+ 
+-:CALL rm16	    is $(LONGMODE_OFF) & vexMode=0 & addrsize=0 & opsize=0 & byte=0xff & currentCS; rm16 & reg_opcode=2 ...	{ local dest:4 = segment(currentCS,rm16); push22(&:2 inst_next); call [dest]; }
+-:CALL rm16      is $(LONGMODE_OFF) & vexMode=0 & addrsize=1 & opsize=0 & byte=0xff; rm16 & reg_opcode=2 ...   { local dest:2 = rm16; push42(&:2 inst_next); call [dest]; }
++:CALL rm16	    is $(LONGMODE_OFF) & vexMode=0 & addrsize=0 & opsize=0 & byte=0xff & currentCS & retOffset16; rm16 & reg_opcode=2 ...	{ local dest:4 = segment(currentCS,rm16); build retOffset16; push22(retOffset16); call [dest]; }
++:CALL rm16      is $(LONGMODE_OFF) & vexMode=0 & addrsize=1 & opsize=0 & byte=0xff & retOffset16; rm16 & reg_opcode=2 ...   { local dest:2 = rm16; push42(retOffset16); call [dest]; }
+ @ifdef IA64
+ :CALL rm16      is $(LONGMODE_ON) & vexMode=0 & opsize=0 & byte=0xff; rm16 & reg_opcode=2 ...   { local dest:8 = inst_next + zext(rm16); push88(&:8 inst_next); call [dest]; }
+ @endif
+@@ -2949,19 +2953,26 @@ with : lockprefx=0 {
+ @endif
+ 
+ # direct far calls generate an opcode undefined exception in x86-64
+-:CALLF ptr1616      is vexMode=0 & addrsize=0 & opsize=0 & byte=0x9a; ptr1616           { push22(CS); build ptr1616; push22(&:2 inst_next); call ptr1616; }
+-:CALLF ptr1616      is vexMode=0 & addrsize=1 & opsize=0 & byte=0x9a; ptr1616           { push42(CS); build ptr1616; push42(&:2 inst_next); call ptr1616; }
++:CALLF ptr1616      is vexMode=0 & addrsize=0 & opsize=0 & byte=0x9a & retOffset16; ptr1616           { push22(CS); build retOffset16; build ptr1616; push22(retOffset16); call ptr1616; }
++:CALLF ptr1616      is vexMode=0 & addrsize=1 & opsize=0 & byte=0x9a & retOffset16; ptr1616           { push42(CS); build retOffset16; build ptr1616; push42(retOffset16); call ptr1616; }
+ :CALLF ptr1632      is vexMode=0 & addrsize=0 & opsize=1 & byte=0x9a; ptr1632           { push22(CS); build ptr1632; push24(&:4 inst_next); call ptr1632; }
+ :CALLF ptr1632      is vexMode=0 & addrsize=1 & opsize=1 & byte=0x9a; ptr1632           { pushseg44(CS); build ptr1632; push44(&:4 inst_next); call ptr1632; }
+-:CALLF addr16       is vexMode=0 & addrsize=0 & opsize=0 & byte=0xff; addr16 & reg_opcode=3 ... { local ptr:$(SIZE) = segment(DS,addr16); local sel:2 = *:2 (ptr+2); local addrptr:$(SIZE) = segment(sel,*:2 ptr);
+-                                                                                                  push22(CS); push22(&:2 inst_next); CS = sel; call [addrptr]; }
+-:CALLF addr32       is vexMode=0 & addrsize=1 & opsize=0 & byte=0xff; addr32 & reg_opcode=3 ... { local dest:4 = addr32; push42(CS); push42(&:2 inst_next); call [dest]; }
+-@ifdef IA64
++# Indirect far calls load CS from the far pointer. The emulator stops at the call, and the callee's
++# RETF pops the caller's CS. The p-code after the call models that return for static analysis by
++# writing the caller's CS back.
++:CALLF Mem          is vexMode=0 & addrsize=0 & opsize=0 & byte=0xff & retOffset16; Mem & reg_opcode=3 ... { local off:2 = *:2 Mem; local sel:2 = *:2 (Mem+2); local callerCS = CS;
++                                                                                                  push22(CS); push22(retOffset16); CS = sel; local dest:$(SIZE) = segment(CS,off); call [dest]; CS = callerCS; }
++:CALLF Mem          is $(LONGMODE_OFF) & vexMode=0 & addrsize=1 & opsize=0 & byte=0xff & retOffset16; Mem & reg_opcode=3 ... { local off:2 = *:2 Mem; local sel:2 = *:2 (Mem+2); local callerCS = CS;
++                                                                                                  push42(CS); push42(retOffset16); CS = sel; local dest:$(SIZE) = segment(CS,off); call [dest]; CS = callerCS; }
++@ifdef IA64
++:CALLF addr32       is $(LONGMODE_ON) & vexMode=0 & addrsize=1 & opsize=0 & byte=0xff; addr32 & reg_opcode=3 ... { local dest:4 = addr32; push42(CS); push42(&:2 inst_next); call [dest]; }
+ :CALLF addr64       is $(LONGMODE_ON) & vexMode=0 & addrsize=2 & opsize=0 & byte=0xff; addr64 & reg_opcode=3 ... { local dest:8 = addr64; push82(CS); push82(&:2 inst_next); call [dest]; }
+ @endif
+ 
+ 
+-:CALLF addr16       is vexMode=0 & addrsize=0 & opsize=1 & byte=0xff; addr16 & reg_opcode=3 ... { local dest:2 = addr16; push22(CS); push24(&:4 inst_next); call [dest]; }
++# The m16:32 pointer's offset is 32 bits, wider than the segment userop's inner operand
++:CALLF Mem          is vexMode=0 & addrsize=0 & opsize=1 & byte=0xff; Mem & reg_opcode=3 ... { local off:4 = *:4 Mem; local sel:2 = *:2 (Mem+4); local callerCS = CS;
++                                                                                                  push22(CS); push24(&:4 inst_next); CS = sel; local csBase:4 = segment(CS,0:2); local dest:4 = csBase + off; call [dest]; CS = callerCS; }
+ :CALLF addr32       is vexMode=0 & addrsize=1 & opsize=1 & byte=0xff; addr32 & reg_opcode=3 ... { local dest:4 = addr32; pushseg44(CS); push44(&:4 inst_next); call [dest]; }
+ @ifdef IA64
+ :CALLF addr32       is $(LONGMODE_ON) &vexMode=0 & addrsize=1 & opsize=2 & byte=0xff; addr32 & reg_opcode=3 ... { local dest:4 = addr32; pushseg88(CS); push88(&:8 inst_next); call [dest]; }
+@@ -3722,7 +3733,7 @@ define pcodeop ibhf;
+ @endif
+ 
+ :IRET           is vexMode=0 & addrsize=0 & opsize=0 & byte=0xcf            { pop22(IP); pop22(CS); pop22(flags); EIP=segment(CS,IP); return [EIP]; }    
+-:IRET           is vexMode=0 & addrsize=1 & opsize=0 & byte=0xcf            { pop42(IP); EIP=zext(IP); pop42(CS); pop42(flags); return [EIP]; }    
++:IRET           is vexMode=0 & addrsize=1 & opsize=0 & byte=0xcf            { pop42(IP); pop42(CS); pop42(flags); EIP=segment(CS,IP); return [EIP]; }    
+ @ifdef IA64
+ :IRET           is $(LONGMODE_ON) & vexMode=0 & addrsize=2 & opsize=0 & byte=0xcf            { pop82(IP); RIP=zext(IP); pop82(CS); pop82(flags); return [RIP]; }    
+ @endif
+@@ -3776,8 +3787,10 @@ jccRel32: rel32, "bt"  is segover=3 & rel32 { export rel32; }
+ 
+ :JMPF ptr1616   is vexMode=0 & opsize=0 & byte=0xea; ptr1616                    { goto ptr1616; }
+ :JMPF ptr1632   is vexMode=0 & opsize=1 & byte=0xea; ptr1632                    { goto ptr1632; }
+-:JMPF Mem       is vexMode=0 & addrsize=0 & opsize=0 & byte=0xff; Mem & reg_opcode=5 ... { local off:2 = *:2 Mem; CS = *:2 (Mem+2); target:$(SIZE) = segment(CS,off); goto [target]; }
+-:JMPF Mem       is vexMode=0 & opsize=0 & byte=0xff; Mem & reg_opcode=5 ...     { target:$(SIZE) = zext(*:2 Mem); goto [target]; }
++:JMPF Mem       is $(LONGMODE_OFF) & vexMode=0 & opsize=0 & byte=0xff; Mem & reg_opcode=5 ... { local off:2 = *:2 Mem; CS = *:2 (Mem+2); target:$(SIZE) = segment(CS,off); goto [target]; }
++@ifdef IA64
++:JMPF Mem       is $(LONGMODE_ON) & vexMode=0 & opsize=0 & byte=0xff; Mem & reg_opcode=5 ...     { target:$(SIZE) = zext(*:2 Mem); goto [target]; }
++@endif
+ :JMPF Mem       is vexMode=0 & opsize=1 & byte=0xff; Mem & reg_opcode=5 ...     {
+ @ifdef IA64
+     target:$(SIZE) = zext(*:4 Mem);
+@@ -4594,7 +4607,7 @@ define pcodeop rdtsc;
+ :RDTSC          is vexMode=0 & byte=0xf; byte=0x31                  { tmp:8 = rdtsc(); EDX = tmp(4); EAX = tmp(0); }
+ 
+ :RET            is $(LONGMODE_OFF) & vexMode=0 & addrsize=0 & opsize=0 & byte=0xc3            { pop22(IP); EIP=segment(CS,IP); return [EIP]; }
+-:RET            is $(LONGMODE_OFF) & vexMode=0 & addrsize=1 & opsize=0 & byte=0xc3            { pop42(IP); EIP=zext(IP); return [EIP]; }
++:RET            is $(LONGMODE_OFF) & vexMode=0 & addrsize=1 & opsize=0 & byte=0xc3            { pop42(IP); EIP=segment(CS,IP); return [EIP]; }
+ :RET            is $(LONGMODE_OFF) & vexMode=0 & addrsize=0 & opsize=1 & byte=0xc3            { pop24(EIP); return [EIP]; }
+ :RET            is $(LONGMODE_OFF) & vexMode=0 & addrsize=1 & opsize=1 & byte=0xc3            { pop44(EIP); return [EIP]; }
+ @ifdef IA64
+@@ -4602,7 +4615,7 @@ define pcodeop rdtsc;
+ @endif
+ 
+ :RETF           is vexMode=0 & addrsize=0 & opsize=0 & byte=0xcb            { pop22(IP); pop22(CS); EIP = segment(CS,IP); return [EIP]; }
+-:RETF           is $(LONGMODE_OFF) & vexMode=0 & addrsize=1 & opsize=0 & byte=0xcb            { pop42(IP); EIP=zext(IP); pop42(CS); return [EIP]; }        
++:RETF           is $(LONGMODE_OFF) & vexMode=0 & addrsize=1 & opsize=0 & byte=0xcb            { pop42(IP); pop42(CS); EIP=segment(CS,IP); return [EIP]; }        
+ @ifdef IA64
+ :RETF           is $(LONGMODE_ON) & vexMode=0 & addrsize=1 & opsize=0 & byte=0xcb            { pop82(IP); RIP=zext(IP); pop82(CS); return [RIP]; }        
+ :RETF           is $(LONGMODE_ON) & vexMode=0 & addrsize=2 & opsize=0 & byte=0xcb            { pop82(IP); RIP=zext(IP); pop82(CS); return [RIP]; }        
+@@ -4615,7 +4628,7 @@ define pcodeop rdtsc;
+ @endif
+ 
+ :RET imm16      is $(LONGMODE_OFF) & vexMode=0 & addrsize=0 & opsize=0 & byte=0xc2; imm16     { pop22(IP); EIP=segment(CS,IP); SP=SP+imm16; return [EIP]; }      
+-:RET imm16      is $(LONGMODE_OFF) & vexMode=0 & addrsize=1 & opsize=0 & byte=0xc2; imm16     { pop42(IP); EIP=zext(IP); ESP=ESP+imm16; return [EIP]; }        
++:RET imm16      is $(LONGMODE_OFF) & vexMode=0 & addrsize=1 & opsize=0 & byte=0xc2; imm16     { pop42(IP); EIP=segment(CS,IP); ESP=ESP+imm16; return [EIP]; }        
+ :RET imm16      is $(LONGMODE_OFF) & vexMode=0 & addrsize=0 & opsize=1 & byte=0xc2; imm16     { pop24(EIP); SP=SP+imm16; return [EIP]; }
+ :RET imm16      is $(LONGMODE_OFF) & vexMode=0 & addrsize=1 & opsize=1 & byte=0xc2; imm16     { pop44(EIP); ESP=ESP+imm16; return [EIP]; }
+ @ifdef IA64
+@@ -4623,7 +4636,7 @@ define pcodeop rdtsc;
+ @endif
+ 
+ :RETF imm16     is vexMode=0 & addrsize=0 & opsize=0 & byte=0xca; imm16     { pop22(IP); pop22(CS); EIP=segment(CS,IP); SP=SP+imm16; return [EIP]; }       
+-:RETF imm16     is vexMode=0 & addrsize=1 & opsize=0 & byte=0xca; imm16     { pop42(IP); EIP=zext(IP); pop42(CS); ESP=ESP+imm16; return [EIP]; }         
++:RETF imm16     is vexMode=0 & addrsize=1 & opsize=0 & byte=0xca; imm16     { pop42(IP); pop42(CS); EIP=segment(CS,IP); ESP=ESP+imm16; return [EIP]; }         
+ @ifdef IA64
+ :RETF imm16     is $(LONGMODE_ON) & vexMode=0 & addrsize=2 & opsize=0 & byte=0xca; imm16     { pop82(IP); RIP=zext(IP); pop82(CS); RSP=RSP+imm16; return [RIP]; }         
+ @endif
+diff --git a/Ghidra/Processors/x86/src/main/java/ghidra/program/emulation/X86PcodeUseropLibraryFactory.java b/Ghidra/Processors/x86/src/main/java/ghidra/program/emulation/X86PcodeUseropLibraryFactory.java
+index c700a80a842..51acc481059 100644
+--- a/Ghidra/Processors/x86/src/main/java/ghidra/program/emulation/X86PcodeUseropLibraryFactory.java
++++ b/Ghidra/Processors/x86/src/main/java/ghidra/program/emulation/X86PcodeUseropLibraryFactory.java
+@@ -15,25 +15,30 @@
+  */
+ package ghidra.program.emulation;
+ 
++import java.util.List;
++
+ import ghidra.app.plugin.processors.sleigh.SleighLanguage;
+ import ghidra.pcode.exec.*;
+ import ghidra.pcode.exec.PcodeUseropLibraryFactory.UseropLibrary;
+ import ghidra.pcode.exec.SleighPcodeUseropDefinition.BuilderStage1;
+-import ghidra.program.model.address.*;
++import ghidra.program.model.lang.InjectPayloadSegment;
++import ghidra.program.model.lang.InjectPayloadSleigh;
+ 
+ @UseropLibrary(id = "x86")
+ public class X86PcodeUseropLibraryFactory implements PcodeUseropLibraryFactory {
+ 	@Override
+ 	public <T> PcodeUseropLibrary<T> create(SleighLanguage language,
+ 			PcodeArithmetic<T> arithmetic) {
+-		AddressSpace space = language.getDefaultSpace();
+-		if (space instanceof ProtectedAddressSpace) {
+-			return new X86ProtectedModePcodeUseropLibrary<>();
+-		}
+-		if (space instanceof SegmentedAddressSpace) {
+-			return new X86RealModePcodeUseropLibrary<>();
++		if (hasSegmentop(language)) {
++			// SegmentopPcodeUseropLibraryFactory provides segment from the pspec
++			return new X86PcodeUseropLibrary<>();
+ 		}
+-		return new X86PcodeUseropLibrary<>();
++		return new X86FlatPcodeUseropLibrary<>();
++	}
++
++	static boolean hasSegmentop(SleighLanguage language) {
++		List<InjectPayloadSleigh> injects = language.getAdditionalInject();
++		return injects != null && injects.stream().anyMatch(InjectPayloadSegment.class::isInstance);
+ 	}
+ 
+ 	public static class X86PcodeUseropLibrary<T> extends AnnotatedPcodeUseropLibrary<T> {
+@@ -53,27 +58,18 @@ public void UNLOCK() {
+ 	}
+ 
+ 	/**
+-	 * The x86 library for 16-bit real mode, where {@code segment} computes the same address as
+-	 * the {@code segmentop} in {@code x86-16-real.pspec}
+-	 */
+-	public static class X86RealModePcodeUseropLibrary<T> extends X86PcodeUseropLibrary<T> {
+-		@PcodeUserop
+-		public SleighPcodeUseropDefinition segment(BuilderStage1 builder) {
+-			return builder.params("base", "inner").body(_ -> """
+-					__op_output = (zext(base) << 4) + zext(inner);
+-					""").build();
+-		}
+-	}
+-
+-	/**
+-	 * The x86 library for 16-bit protected mode, where {@code segment} computes the same address
+-	 * as the {@code segmentop} in {@code x86-16.pspec}
++	 * The x86 library for the 32- and 64-bit languages, which declare no {@code segmentop}
++	 * 
++	 * <p>
++	 * Instructions with 16-bit operand or address size still call {@code segment}. These languages
++	 * model a flat address space, so {@code segment} ignores the segment register and zero-extends
++	 * the offset.
+ 	 */
+-	public static class X86ProtectedModePcodeUseropLibrary<T> extends X86PcodeUseropLibrary<T> {
++	public static class X86FlatPcodeUseropLibrary<T> extends X86PcodeUseropLibrary<T> {
+ 		@PcodeUserop
+ 		public SleighPcodeUseropDefinition segment(BuilderStage1 builder) {
+ 			return builder.params("base", "inner").body(_ -> """
+-					__op_output = (zext(base) << 16) + zext(inner);
++					__op_output = zext(inner);
+ 					""").build();
+ 		}
+ 	}
+diff --git a/Ghidra/Processors/x86/src/test/java/ghidra/program/emulation/X86PcodeUseropLibraryTest.java b/Ghidra/Processors/x86/src/test/java/ghidra/program/emulation/X86PcodeUseropLibraryTest.java
+index 4b7571c0d6b..d8ad1127723 100644
+--- a/Ghidra/Processors/x86/src/test/java/ghidra/program/emulation/X86PcodeUseropLibraryTest.java
++++ b/Ghidra/Processors/x86/src/test/java/ghidra/program/emulation/X86PcodeUseropLibraryTest.java
+@@ -15,11 +15,13 @@
+  */
+ package ghidra.program.emulation;
+ 
++import static org.hamcrest.MatcherAssert.assertThat;
+ import static org.junit.Assert.*;
+ 
+ import java.lang.invoke.MethodHandles;
+ import java.math.BigInteger;
+ 
++import org.hamcrest.Matchers;
+ import org.junit.Test;
+ 
+ import ghidra.app.plugin.processors.sleigh.SleighLanguage;
+@@ -30,68 +32,72 @@
+ import ghidra.pcode.exec.*;
+ import ghidra.pcode.exec.PcodeArithmetic.Purpose;
+ import ghidra.pcode.exec.PcodeExecutorStatePiece.Reason;
++import ghidra.pcode.exec.SegmentopPcodeUseropLibraryFactory.SegmentopPcodeUseropDefinition;
+ import ghidra.program.model.address.Address;
++import ghidra.program.model.address.AddressSpace;
+ import ghidra.program.model.address.SegmentedAddressSpace;
+ import ghidra.program.model.lang.LanguageID;
+ import ghidra.program.model.lang.Register;
+ import ghidra.program.util.DefaultLanguageService;
++import ghidra.util.NumericUtilities;
+ 
+ public class X86PcodeUseropLibraryTest extends AbstractEmulationEquivalenceTest {
+ 	static final LanguageID LANG_ID_REAL = new LanguageID("x86:LE:16:Real Mode");
+ 	static final LanguageID LANG_ID_PROTECTED = new LanguageID("x86:LE:16:Protected Mode");
+ 	static final LanguageID LANG_ID_32 = new LanguageID("x86:LE:32:default");
+ 
+-	static final int CODE_SEG = 0x1000;
+-	static final int STACK_SEG = 0x2000;
+-	static final int FAR_SEG = 0x3000;
+-	static final int DATA_SEG = 0x4000;
++	/**
++	 * Segment values that are not multiples of 0x1000, so a real-mode offset differs from the low
++	 * 16 bits of its linear address
++	 */
++	static final int CODE_SEG = 0x1234;
++	static final int STACK_SEG = 0x2345;
++	static final int FAR_SEG = 0x3456;
++	static final int DATA_SEG = 0x4567;
++	static final int EXTRA_SEG = 0x5678;
++
+ 	static final int ENTRY = 0x0100;
+ 	static final int STACK_TOP = 0x0100;
+ 	static final int FAR_TARGET = 0x0234;
+ 
+-	static SleighLanguage getLanguage(LanguageID id) throws Exception {
+-		return (SleighLanguage) DefaultLanguageService.getLanguageService().getLanguage(id);
+-	}
+-
+ 	/**
+ 	 * Every instruction test runs on both the interpreting and the JIT-compiling emulator
+ 	 */
+ 	static final boolean[] JIT_MODES = { false, true };
+ 
++	static SleighLanguage getLanguage(LanguageID id) throws Exception {
++		return (SleighLanguage) DefaultLanguageService.getLanguageService().getLanguage(id);
++	}
++
+ 	/**
+-	 * A 16-bit machine that places code at {@code CODE_SEG:ENTRY} and the stack at
+-	 * {@code STACK_SEG:STACK_TOP}
++	 * An x86 machine for a single thread
++	 *
++	 * <p>
++	 * For the 16-bit languages, {@link #addr(int, int)} takes a segment and an offset. The 32-bit
++	 * language ignores the segment.
+ 	 */
+-	static class Machine16 {
++	static class Machine {
+ 		final SleighLanguage language;
+-		final SegmentedAddressSpace space;
++		final AddressSpace space;
+ 		final PcodeEmulator emu;
+ 		final PcodeThread<byte[]> thread;
+ 		final PcodeArithmetic<byte[]> arithmetic;
+ 
+-		Machine16(LanguageID id, boolean jit, int... code) throws Exception {
++		Machine(LanguageID id, boolean jit) throws Exception {
+ 			language = getLanguage(id);
+-			space = (SegmentedAddressSpace) language.getDefaultSpace();
++			space = language.getDefaultSpace();
+ 			emu = jit
+ 					? new JitPcodeEmulator(language, new JitConfiguration(), MethodHandles.lookup())
+ 					: new PcodeEmulator(language);
+ 			thread = emu.newThread();
+ 			arithmetic = thread.getArithmetic();
+-
+-			byte[] bytes = new byte[code.length];
+-			for (int i = 0; i < code.length; i++) {
+-				bytes[i] = (byte) code[i];
+-			}
+-			emu.getSharedState().setVar(addr(CODE_SEG, ENTRY), bytes.length, false, bytes);
+-
+-			setReg("CS", CODE_SEG);
+-			setReg("SS", STACK_SEG);
+-			setReg("DS", DATA_SEG);
+-			setReg("SP", STACK_TOP);
+ 		}
+ 
+ 		Address addr(int segment, int offset) {
+-			return space.getAddress(segment, offset);
++			if (space instanceof SegmentedAddressSpace seg) {
++				return seg.getAddress(segment, offset);
++			}
++			return space.getAddress(offset);
+ 		}
+ 
+ 		void setReg(String name, long value) {
+@@ -106,6 +112,14 @@ long getReg(String name) {
+ 				Purpose.INSPECT);
+ 		}
+ 
++		/**
++		 * Write bytes given as hex, e.g., {@code "ff 1e 00 05"}
++		 */
++		void write(int segment, int offset, String hex) {
++			byte[] bytes = NumericUtilities.convertStringToBytes(hex.replace(" ", ""));
++			emu.getSharedState().setVar(addr(segment, offset), bytes.length, false, bytes);
++		}
++
+ 		void writeWord(int segment, int offset, int value) {
+ 			emu.getSharedState()
+ 					.setVar(addr(segment, offset), 2, false,
+@@ -113,168 +127,304 @@ void writeWord(int segment, int offset, int value) {
+ 		}
+ 
+ 		int readWord(int segment, int offset) {
+-			byte[] bytes = emu.getSharedState().getVar(addr(segment, offset), 2, false,
+-				Reason.INSPECT);
++			byte[] bytes =
++				emu.getSharedState().getVar(addr(segment, offset), 2, false, Reason.INSPECT);
+ 			return (bytes[0] & 0xff) | ((bytes[1] & 0xff) << 8);
+ 		}
+ 
+-		void step() {
+-			thread.setCounter(addr(CODE_SEG, ENTRY));
++		void start(int segment, int offset) {
++			thread.setCounter(addr(segment, offset));
+ 			thread.overrideContextWithDefault();
++		}
++
++		void step() {
+ 			thread.stepInstruction();
+ 		}
+ 
++		void assertCounter(int segment, int offset) {
++			assertEquals(addr(segment, offset).getOffset(), thread.getCounter().getOffset());
++		}
++	}
++
++	/**
++	 * A 16-bit machine with its code at {@code CODE_SEG:ENTRY} and its stack at
++	 * {@code STACK_SEG:STACK_TOP}
++	 */
++	static class Machine16 extends Machine {
++		Machine16(LanguageID id, boolean jit, String code) throws Exception {
++			super(id, jit);
++			write(CODE_SEG, ENTRY, code);
++			setReg("CS", CODE_SEG);
++			setReg("SS", STACK_SEG);
++			setReg("DS", DATA_SEG);
++			setReg("ES", EXTRA_SEG);
++			setReg("SP", STACK_TOP);
++			start(CODE_SEG, ENTRY);
++		}
++
+ 		void assertAtFarTarget() {
+-			assertEquals(addr(FAR_SEG, FAR_TARGET).getOffset(), thread.getCounter().getOffset());
++			assertCounter(FAR_SEG, FAR_TARGET);
+ 			assertEquals(FAR_SEG, getReg("CS"));
+ 		}
++
++		/**
++		 * Assert a far call pushed the caller's CS and the offset of the next instruction
++		 */
++		void assertFarReturnPushed(int stackSeg, int top, int nextOffset) {
++			assertEquals(nextOffset, readWord(stackSeg, top - 4));
++			assertEquals(CODE_SEG, readWord(stackSeg, top - 2));
++		}
++	}
++
++	interface TestBody {
++		void run(LanguageID id, boolean jit) throws Exception;
++	}
++
++	static void on16BitModes(TestBody body) throws Exception {
++		for (LanguageID id : new LanguageID[] { LANG_ID_REAL, LANG_ID_PROTECTED }) {
++			for (boolean jit : JIT_MODES) {
++				body.run(id, jit);
++			}
++		}
+ 	}
+ 
+ 	@Test
+-	public void testSegmentFoundByLang() throws Exception {
++	public void testSegmentFromSegmentop() throws Exception {
+ 		for (LanguageID id : new LanguageID[] { LANG_ID_REAL, LANG_ID_PROTECTED }) {
+ 			SleighLanguage language = getLanguage(id);
+ 			PcodeUseropLibrary<byte[]> lib = PcodeUseropLibraryFactory
+ 					.createUseropLibraryForLanguage(language,
+ 						BytesPcodeArithmetic.forLanguage(language));
+-			assertNotNull(id.toString(), lib.getUserops().get("segment"));
++			assertThat(id.toString(), lib.getUserops().get("segment"),
++				Matchers.instanceOf(SegmentopPcodeUseropDefinition.class));
+ 		}
+ 	}
+ 
+ 	@Test
+-	public void testSegmentAbsentFor32Bit() throws Exception {
++	public void testSegmentFlatFor32Bit() throws Exception {
+ 		SleighLanguage language = getLanguage(LANG_ID_32);
+ 		PcodeUseropLibrary<byte[]> lib = PcodeUseropLibraryFactory
+ 				.createUseropLibraryForLanguage(language,
+ 					BytesPcodeArithmetic.forLanguage(language));
+-		assertNull(lib.getUserops().get("segment"));
++		assertThat(lib.getUserops().get("segment"),
++			Matchers.instanceOf(SleighPcodeUseropDefinition.class));
+ 	}
+ 
+-	protected void doTestMovFromDataSegment(LanguageID id) throws Exception {
+-		for (boolean jit : JIT_MODES) {
+-			Machine16 m = new Machine16(id, jit, 0x8b, 0x07); // MOV AX,word ptr [BX]
++	@Test
++	public void testMovFromDataSegment() throws Exception {
++		on16BitModes((id, jit) -> {
++			Machine16 m = new Machine16(id, jit, "8b 07"); // MOV AX,word ptr [BX]
+ 			m.setReg("BX", 0x0010);
+ 			m.writeWord(DATA_SEG, 0x0010, 0xbeef);
+ 			m.step();
+ 			assertEquals(0xbeef, m.getReg("AX"));
+-		}
+-	}
+-
+-	@Test
+-	public void testMovFromDataSegmentReal() throws Exception {
+-		doTestMovFromDataSegment(LANG_ID_REAL);
++		});
+ 	}
+ 
+ 	@Test
+-	public void testMovFromDataSegmentProtected() throws Exception {
+-		doTestMovFromDataSegment(LANG_ID_PROTECTED);
+-	}
+-
+-	protected void doTestRetImm16(LanguageID id) throws Exception {
+-		for (boolean jit : JIT_MODES) {
+-			Machine16 m = new Machine16(id, jit, 0xc2, 0x04, 0x00); // RET 0x4
++	public void testRetImm16() throws Exception {
++		on16BitModes((id, jit) -> {
++			Machine16 m = new Machine16(id, jit, "c2 04 00"); // RET 0x4
+ 			m.writeWord(STACK_SEG, STACK_TOP, FAR_TARGET);
+ 			m.step();
+-			assertEquals(m.addr(CODE_SEG, FAR_TARGET).getOffset(), m.thread.getCounter().getOffset());
++			m.assertCounter(CODE_SEG, FAR_TARGET);
+ 			assertEquals(CODE_SEG, m.getReg("CS"));
+ 			assertEquals(STACK_TOP + 2 + 4, m.getReg("SP"));
+-		}
+-	}
+-
+-	@Test
+-	public void testRetImm16Real() throws Exception {
+-		doTestRetImm16(LANG_ID_REAL);
++		});
+ 	}
+ 
+ 	@Test
+-	public void testRetImm16Protected() throws Exception {
+-		doTestRetImm16(LANG_ID_PROTECTED);
+-	}
+-
+-	protected void doTestRetfImm16(LanguageID id) throws Exception {
+-		for (boolean jit : JIT_MODES) {
+-			Machine16 m = new Machine16(id, jit, 0xca, 0x04, 0x00); // RETF 0x4
++	public void testRetfImm16() throws Exception {
++		on16BitModes((id, jit) -> {
++			Machine16 m = new Machine16(id, jit, "ca 04 00"); // RETF 0x4
+ 			m.writeWord(STACK_SEG, STACK_TOP, FAR_TARGET);
+ 			m.writeWord(STACK_SEG, STACK_TOP + 2, FAR_SEG);
+ 			m.step();
+ 			m.assertAtFarTarget();
+ 			assertEquals(STACK_TOP + 4 + 4, m.getReg("SP"));
+-		}
++		});
+ 	}
+ 
+ 	@Test
+-	public void testRetfImm16Real() throws Exception {
+-		doTestRetfImm16(LANG_ID_REAL);
+-	}
+-
+-	@Test
+-	public void testRetfImm16Protected() throws Exception {
+-		doTestRetfImm16(LANG_ID_PROTECTED);
+-	}
+-
+-	protected void doTestIret(LanguageID id) throws Exception {
+-		for (boolean jit : JIT_MODES) {
+-			Machine16 m = new Machine16(id, jit, 0xcf); // IRET
++	public void testIret() throws Exception {
++		on16BitModes((id, jit) -> {
++			Machine16 m = new Machine16(id, jit, "cf"); // IRET
+ 			m.writeWord(STACK_SEG, STACK_TOP, FAR_TARGET);
+ 			m.writeWord(STACK_SEG, STACK_TOP + 2, FAR_SEG);
+ 			m.writeWord(STACK_SEG, STACK_TOP + 4, 0x0002);
+ 			m.step();
+ 			m.assertAtFarTarget();
+ 			assertEquals(STACK_TOP + 6, m.getReg("SP"));
+-		}
++		});
+ 	}
+ 
+ 	@Test
+-	public void testIretReal() throws Exception {
+-		doTestIret(LANG_ID_REAL);
++	public void testCallRetRoundTrip() throws Exception {
++		on16BitModes((id, jit) -> {
++			Machine16 m = new Machine16(id, jit, "e8 0d 00"); // CALL ENTRY+0x10
++			m.write(CODE_SEG, ENTRY + 0x10, "c2 00 00"); // RET 0x0
++			m.step();
++			m.assertCounter(CODE_SEG, ENTRY + 0x10);
++			assertEquals(ENTRY + 3, m.readWord(STACK_SEG, STACK_TOP - 2));
++			m.step();
++			m.assertCounter(CODE_SEG, ENTRY + 3);
++			assertEquals(STACK_TOP, m.getReg("SP"));
++		});
+ 	}
+ 
+ 	@Test
+-	public void testIretProtected() throws Exception {
+-		doTestIret(LANG_ID_PROTECTED);
++	public void testCallfDirectRetfRoundTrip() throws Exception {
++		on16BitModes((id, jit) -> {
++			// CALLF FAR_SEG:FAR_TARGET
++			Machine16 m = new Machine16(id, jit, "9a 34 02 56 34");
++			m.write(FAR_SEG, FAR_TARGET, "cb"); // RETF
++			m.step();
++			m.assertAtFarTarget();
++			m.assertFarReturnPushed(STACK_SEG, STACK_TOP, ENTRY + 5);
++			m.step();
++			m.assertCounter(CODE_SEG, ENTRY + 5);
++			assertEquals(CODE_SEG, m.getReg("CS"));
++			assertEquals(STACK_TOP, m.getReg("SP"));
++		});
+ 	}
+ 
+-	protected void doTestCallfIndirect(LanguageID id) throws Exception {
+-		for (boolean jit : JIT_MODES) {
+-			Machine16 m = new Machine16(id, jit, 0xff, 0x1e, 0x00, 0x05); // CALLF [0x500]
++	@Test
++	public void testCallfIndirectRetfRoundTrip() throws Exception {
++		on16BitModes((id, jit) -> {
++			Machine16 m = new Machine16(id, jit, "ff 1e 00 05"); // CALLF [0x500]
+ 			m.writeWord(DATA_SEG, 0x0500, FAR_TARGET);
+ 			m.writeWord(DATA_SEG, 0x0502, FAR_SEG);
++			m.write(FAR_SEG, FAR_TARGET, "cb"); // RETF
+ 			m.step();
+ 			m.assertAtFarTarget();
+ 			assertEquals(STACK_TOP - 4, m.getReg("SP"));
+-			assertEquals(ENTRY + 4, m.readWord(STACK_SEG, STACK_TOP - 4));
+-			assertEquals(CODE_SEG, m.readWord(STACK_SEG, STACK_TOP - 2));
+-		}
++			m.assertFarReturnPushed(STACK_SEG, STACK_TOP, ENTRY + 4);
++			m.step();
++			m.assertCounter(CODE_SEG, ENTRY + 4);
++			assertEquals(CODE_SEG, m.getReg("CS"));
++		});
+ 	}
+ 
+ 	@Test
+-	public void testCallfIndirectReal() throws Exception {
+-		doTestCallfIndirect(LANG_ID_REAL);
++	public void testCallfIndirectSegmentOverride() throws Exception {
++		on16BitModes((id, jit) -> {
++			Machine16 m = new Machine16(id, jit, "26 ff 1f"); // CALLF ES:[BX]
++			m.setReg("BX", 0x0010);
++			m.writeWord(EXTRA_SEG, 0x0010, FAR_TARGET);
++			m.writeWord(EXTRA_SEG, 0x0012, FAR_SEG);
++			m.step();
++			m.assertAtFarTarget();
++			m.assertFarReturnPushed(STACK_SEG, STACK_TOP, ENTRY + 3);
++		});
+ 	}
+ 
+ 	@Test
+-	public void testCallfIndirectProtected() throws Exception {
+-		doTestCallfIndirect(LANG_ID_PROTECTED);
++	public void testCallfIndirectBpUsesStackSegment() throws Exception {
++		on16BitModes((id, jit) -> {
++			Machine16 m = new Machine16(id, jit, "ff 5e 06"); // CALLF [BP + 0x6]
++			m.setReg("BP", 0x0020);
++			m.writeWord(STACK_SEG, 0x0026, FAR_TARGET);
++			m.writeWord(STACK_SEG, 0x0028, FAR_SEG);
++			m.step();
++			m.assertAtFarTarget();
++			m.assertFarReturnPushed(STACK_SEG, STACK_TOP, ENTRY + 3);
++		});
+ 	}
+ 
+-	protected void doTestJmpfIndirect(LanguageID id) throws Exception {
+-		for (boolean jit : JIT_MODES) {
+-			Machine16 m = new Machine16(id, jit, 0xff, 0x2e, 0x00, 0x05); // JMPF [0x500]
++	@Test
++	public void testCallfIndirect32BitOffset() throws Exception {
++		on16BitModes((id, jit) -> {
++			// CALLF [0x500] with a 0x66 prefix, through an m16:32 pointer
++			Machine16 m = new Machine16(id, jit, "66 ff 1e 00 05");
++			m.writeWord(DATA_SEG, 0x0500, FAR_TARGET);
++			m.writeWord(DATA_SEG, 0x0502, 0);
++			m.writeWord(DATA_SEG, 0x0504, FAR_SEG);
++			m.step();
++			m.assertAtFarTarget();
++		});
++	}
++
++	@Test
++	public void testJmpfIndirect() throws Exception {
++		on16BitModes((id, jit) -> {
++			Machine16 m = new Machine16(id, jit, "ff 2e 00 05"); // JMPF [0x500]
+ 			m.writeWord(DATA_SEG, 0x0500, FAR_TARGET);
+ 			m.writeWord(DATA_SEG, 0x0502, FAR_SEG);
+ 			m.step();
+ 			m.assertAtFarTarget();
+ 			assertEquals(STACK_TOP, m.getReg("SP"));
+-		}
++		});
++	}
++
++	/*
++	 * With a 0x67 prefix, 16-bit code addresses memory and the stack through 32-bit registers,
++	 * which ia.sinc does not offset by a segment base. These tests place the data at linear
++	 * addresses to match.
++	 */
++
++	@Test
++	public void testRetfImm16AddrPrefix() throws Exception {
++		on16BitModes((id, jit) -> {
++			Machine16 m = new Machine16(id, jit, "67 ca 04 00"); // RETF 0x4
++			m.setReg("ESP", 0x0600);
++			m.writeWord(0, 0x0600, FAR_TARGET);
++			m.writeWord(0, 0x0602, FAR_SEG);
++			m.step();
++			m.assertAtFarTarget();
++			assertEquals(0x0600 + 4 + 4, m.getReg("ESP"));
++		});
+ 	}
+ 
+ 	@Test
+-	public void testJmpfIndirectReal() throws Exception {
+-		doTestJmpfIndirect(LANG_ID_REAL);
++	public void testIretAddrPrefix() throws Exception {
++		on16BitModes((id, jit) -> {
++			Machine16 m = new Machine16(id, jit, "67 cf"); // IRET
++			m.setReg("ESP", 0x0600);
++			m.writeWord(0, 0x0600, FAR_TARGET);
++			m.writeWord(0, 0x0602, FAR_SEG);
++			m.writeWord(0, 0x0604, 0x0002);
++			m.step();
++			m.assertAtFarTarget();
++		});
++	}
++
++	@Test
++	public void testCallfIndirectAddrPrefix() throws Exception {
++		on16BitModes((id, jit) -> {
++			Machine16 m = new Machine16(id, jit, "67 ff 1f"); // CALLF [EDI]
++			m.setReg("EDI", 0x0500);
++			m.setReg("ESP", 0x0600);
++			m.writeWord(0, 0x0500, FAR_TARGET);
++			m.writeWord(0, 0x0502, FAR_SEG);
++			m.step();
++			m.assertAtFarTarget();
++			m.assertFarReturnPushed(0, 0x0600, ENTRY + 3);
++		});
+ 	}
+ 
+ 	@Test
+-	public void testJmpfIndirectProtected() throws Exception {
+-		doTestJmpfIndirect(LANG_ID_PROTECTED);
++	public void testJmpfIndirectAddrPrefix() throws Exception {
++		on16BitModes((id, jit) -> {
++			Machine16 m = new Machine16(id, jit, "67 ff 2f"); // JMPF [EDI]
++			m.setReg("EDI", 0x0500);
++			m.writeWord(0, 0x0500, FAR_TARGET);
++			m.writeWord(0, 0x0502, FAR_SEG);
++			m.step();
++			m.assertAtFarTarget();
++		});
++	}
++
++	@Test
++	public void testRetImm16With16BitPrefixesIn32BitCode() throws Exception {
++		for (boolean jit : JIT_MODES) {
++			Machine m = new Machine(LANG_ID_32, jit);
++			m.write(0, 0x00400000, "66 67 c2 04 00"); // RET 0x4
++			m.setReg("ESP", 0x0600);
++			m.writeWord(0, 0x0600, 0x1234);
++			m.start(0, 0x00400000);
++			m.step();
++			m.assertCounter(0, 0x1234);
++			assertEquals(0x0600 + 2 + 4, m.getReg("ESP"));
++		}
+ 	}
+ }
