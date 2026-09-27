@@ -29,10 +29,10 @@ Subject: [PATCH] 2727: Proper C++ Parser (GhidraClangPoweredParse)
  .../util/gcpp/processing/ParsedVtable.java    |   93 ++
  .../util/gcpp/processing/SourceParser.java    |  625 ++++++++++
  .../app/util/gcpp/processing/TypePool.java    |  319 ++++++
- .../app/util/gcpp/task/ClangParseTask.java    |  212 ++++
- .../app/util/gcpp/ui/ClangParseDialog.java    | 1005 +++++++++++++++++
+ .../app/util/gcpp/task/ClangParseTask.java    |  214 ++++
+ .../app/util/gcpp/ui/ClangParseDialog.java    | 1006 +++++++++++++++++
  .../RuntimeScripts/support/launch.properties  |    5 +
- 28 files changed, 5688 insertions(+)
+ 28 files changed, 5691 insertions(+)
  create mode 100644 Ghidra/Features/Base/src/main/java/ghidra/app/util/gcpp/GCPPPlugin.java
  create mode 100644 Ghidra/Features/Base/src/main/java/ghidra/app/util/gcpp/clang/CallingConvention.java
  create mode 100644 Ghidra/Features/Base/src/main/java/ghidra/app/util/gcpp/clang/Cursor.java
@@ -61,10 +61,10 @@ Subject: [PATCH] 2727: Proper C++ Parser (GhidraClangPoweredParse)
  create mode 100644 Ghidra/Features/Base/src/main/java/ghidra/app/util/gcpp/ui/ClangParseDialog.java
 
 diff --git a/Ghidra/Features/Base/certification.manifest b/Ghidra/Features/Base/certification.manifest
-index 8fcedb9297..75c3cfa6e5 100644
+index 9e4cddce41..ade383c093 100644
 --- a/Ghidra/Features/Base/certification.manifest
 +++ b/Ghidra/Features/Base/certification.manifest
-@@ -837,6 +837,32 @@ src/main/java/ghidra/app/util/bin/format/stabs/types/StabsTypeModifierTypeDescri
+@@ -839,6 +839,32 @@ src/main/java/ghidra/app/util/bin/format/stabs/types/StabsTypeModifierTypeDescri
  src/main/java/ghidra/app/util/bin/format/stabs/types/StabsTypeReferenceTypeDescriptor.java||GHIDRA||||END|
  src/main/java/ghidra/app/util/bin/package.html||GHIDRA||||END|
  src/main/java/ghidra/app/util/exporter/package.html||GHIDRA||||END|
@@ -4683,10 +4683,10 @@ index 0000000000..efe6dfbdc2
 +}
 diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/gcpp/task/ClangParseTask.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/gcpp/task/ClangParseTask.java
 new file mode 100644
-index 0000000000..d82266d457
+index 0000000000..fcb9f92c68
 --- /dev/null
 +++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/gcpp/task/ClangParseTask.java
-@@ -0,0 +1,212 @@
+@@ -0,0 +1,214 @@
 +/**
 + * Copyright 2024 playday3008
 + * Permission to use, copy, modify, and/or distribute this software for any purpose with or without fee is hereby granted,
@@ -4707,9 +4707,11 @@ index 0000000000..d82266d457
 +import java.io.IOException;
 +
 +import docking.widgets.dialogs.MultiLineMessageDialog;
-+import ghidra.program.database.data.ProgramDataTypeManager;
++import ghidra.program.database.dtarchive.DataTypeArchiveFactory;
 +import ghidra.program.model.data.DataTypeManager;
-+import ghidra.program.model.data.FileDataTypeManager;
++import ghidra.program.model.dtarchive.DataTypeStore;
++import ghidra.program.model.dtarchive.FileDataTypeArchive;
++import ghidra.program.model.listing.Program;
 +import ghidra.util.Msg;
 +import ghidra.util.task.Task;
 +import ghidra.util.task.TaskMonitor;
@@ -4800,14 +4802,14 @@ index 0000000000..d82266d457
 +    {
 +        LOGGER.info("Starting clang parse task: {} source file(s)", filenames != null ? filenames.length : 0);
 +
-+        FileDataTypeManager fileDtMgr = null;
++        FileDataTypeArchive dataFileArchive = null;
 +
 +        if (dataFile != null)
 +        {
 +            try
 +            {
 +                LOGGER.debug("Creating archive file: {}", dataFile.getAbsolutePath());
-+                fileDtMgr = FileDataTypeManager.createFileArchive(dataFile, languageId, compilerSpecId);
++                dataFileArchive = DataTypeArchiveFactory.createFileArchive(dataFile, languageId, compilerSpecId, this);
 +            }
 +            catch (IOException e)
 +            {
@@ -4817,7 +4819,7 @@ index 0000000000..d82266d457
 +            }
 +        }
 +
-+        DataTypeManager dtMgr = fileDtMgr != null ? fileDtMgr : dataTypeManager;
++        DataTypeManager dtMgr = dataFileArchive != null ? dataFileArchive.getDataTypeManager() : dataTypeManager;
 +        int initialDtCount = dtMgr.getDataTypeCount(true);
 +
 +        try
@@ -4833,31 +4835,31 @@ index 0000000000..d82266d457
 +                    compSpec = lcsPair.compilerSpecID.getIdAsString();
 +            }
 +
-+            LOGGER.debug("Parse target: {}, language={}, compiler={}", getParseDestination(dtMgr), langId, compSpec);
++            LOGGER.debug("Parse target: {}, language={}, compiler={}", getParseDestination(dtMgr.getDataStore()), langId, compSpec);
 +            String diagnostics = plugin.parseWithClang(filenames, includePaths, options, dtMgr, langId, compSpec, openArchives, monitor);
 +
-+            if (fileDtMgr != null && dtMgr.getDataTypeCount(true) != 0)
-+                fileDtMgr.save();
++            if (dataFileArchive != null && dataFileArchive.getDataTypeManager().getDataTypeCount(true) != 0)
++                dataFileArchive.save(null, monitor);
 +
-+            int added = dtMgr.getDataTypeCount(true) - initialDtCount;
-+            String destination = getParseDestination(dtMgr);
++            int added = dataFileArchive.getDataTypeManager().getDataTypeCount(true) - initialDtCount;
++            String destination = getParseDestination(dtMgr.getDataStore());
 +            LOGGER.info("Parse completed successfully: {} data types added to {}", added, destination);
 +            showSuccess(added, destination, diagnostics);
 +        }
 +        catch (Exception e)
 +        {
-+            int added = dtMgr.getDataTypeCount(true) - initialDtCount;
++            int added = dataFileArchive.getDataTypeManager().getDataTypeCount(true) - initialDtCount;
 +            LOGGER.error("Parse failed ({} types added before failure)", added, e);
 +            String countMsg = added > 0 ? added + " data types added before failure.\n\n" : "";
 +            showError("Clang Parse Failed", countMsg + e.getMessage());
 +        }
 +        finally
 +        {
-+            if (fileDtMgr != null)
++            if (dataFileArchive != null)
 +            {
-+                boolean empty = fileDtMgr.getDataTypeCount(true) == 0;
-+                fileDtMgr.close();
-+                if (empty) {
++                boolean deleteFile = dataFileArchive.getDataTypeManager().getDataTypeCount(true) == 0;
++                dataFileArchive.release(this);
++                if (deleteFile) {
 +                    LOGGER.debug("Deleting empty archive: {}", dataFile.getAbsolutePath());
 +                    dataFile.delete();
 +                }
@@ -4865,13 +4867,13 @@ index 0000000000..d82266d457
 +        }
 +    }
 +
-+    private String getParseDestination(DataTypeManager dtMgr)
++    private String getParseDestination(DataTypeStore archive)
 +    {
-+        if (dtMgr instanceof ProgramDataTypeManager)
-+            return "Program " + dtMgr.getName();
-+        if (dtMgr instanceof FileDataTypeManager fileDtm)
-+            return "Archive File: " + fileDtm.getFilename();
-+        return dtMgr.getName();
++        if (archive instanceof Program)
++            return "Program " + archive.getName();
++        if (archive instanceof FileDataTypeArchive fileArchive)
++            return "Archive File: " + fileArchive.getPath();
++        return archive.getName();
 +    }
 +
 +    private void showSuccess(int addedCount, String destination, String diagnostics)
@@ -4901,10 +4903,10 @@ index 0000000000..d82266d457
 +}
 diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/gcpp/ui/ClangParseDialog.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/gcpp/ui/ClangParseDialog.java
 new file mode 100644
-index 0000000000..922812cdb1
+index 0000000000..de03e06c85
 --- /dev/null
 +++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/gcpp/ui/ClangParseDialog.java
-@@ -0,0 +1,1005 @@
+@@ -0,0 +1,1006 @@
 +/**
 + * Copyright 2024 playday3008
 + * Permission to use, copy, modify, and/or distribute this software for any purpose with or without fee is hereby granted,
@@ -4951,6 +4953,7 @@ index 0000000000..922812cdb1
 +import ghidra.framework.preferences.Preferences;
 +import ghidra.framework.store.db.PackedDatabase;
 +import ghidra.program.model.data.FileDataTypeManager;
++import ghidra.program.model.dtarchive.FileDataTypeArchive;
 +import ghidra.program.model.lang.CompilerSpecID;
 +import ghidra.program.model.lang.LanguageID;
 +import ghidra.util.Msg;
@@ -5819,8 +5822,8 @@ index 0000000000..922812cdb1
 +            Preferences.setProperty(Preferences.LAST_EXPORT_DIRECTORY, parent.getAbsolutePath());
 +
 +        String name = file.getName();
-+        if (!name.endsWith(FileDataTypeManager.SUFFIX))
-+            file = new File(file.getParentFile(), name + FileDataTypeManager.SUFFIX);
++        if (!name.endsWith(FileDataTypeArchive.SUFFIX))
++            file = new File(file.getParentFile(), name + FileDataTypeArchive.SUFFIX);
 +
 +        if (!file.exists())
 +            return file;
