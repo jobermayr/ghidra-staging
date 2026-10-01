@@ -5,22 +5,25 @@ Subject: [PATCH] 8312: Decompiler support for typed pointer offsets
 
 ---
  .../src/decompile/cpp/coreaction.cc           |  1 +
+ .../decompile/cpp/include/ghidra/metatype.hh  | 23 +++----
  .../decompile/cpp/include/ghidra/printc.hh    |  1 +
  .../cpp/include/ghidra/ruleaction.hh          | 10 +++
- .../src/decompile/cpp/include/ghidra/type.hh  | 89 ++++++++++++-------
+ .../src/decompile/cpp/include/ghidra/type.hh  | 66 +++++++++++++------
  .../decompile/cpp/include/ghidra/typeop.hh    |  1 +
+ .../Decompiler/src/decompile/cpp/metatype.cc  |  5 ++
  .../src/decompile/cpp/modelrules.cc           |  1 +
- .../Decompiler/src/decompile/cpp/printc.cc    | 21 +++--
- .../src/decompile/cpp/ruleaction.cc           | 59 ++++++++++++
- .../Decompiler/src/decompile/cpp/type.cc      | 44 ++++++++-
- .../Decompiler/src/decompile/cpp/typeop.cc    | 16 ++++
- 10 files changed, 206 insertions(+), 37 deletions(-)
+ .../Decompiler/src/decompile/cpp/printc.cc    | 21 ++++--
+ .../src/decompile/cpp/ruleaction.cc           | 59 +++++++++++++++++
+ .../Decompiler/src/decompile/cpp/type.cc      | 39 ++++++++++-
+ .../Decompiler/src/decompile/cpp/typeop.cc    | 16 +++++
+ .../program/model/pcode/MetaDataType.java     | 23 +++----
+ 13 files changed, 218 insertions(+), 48 deletions(-)
 
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
-index 7df9bce90d..85a07b0f99 100644
+index 808ccb021d..7f93f02459 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
-@@ -6048,6 +6048,7 @@ void ActionDatabase::universalAction(Architecture *conf)
+@@ -6054,6 +6054,7 @@ void ActionDatabase::universalAction(Architecture *conf)
  	actprop2->addRule( new RulePushPtr("typerecovery") );
  	actprop2->addRule( new RuleStructOffset0("typerecovery") );
  	actprop2->addRule( new RulePtrArith("typerecovery") );
@@ -28,6 +31,40 @@ index 7df9bce90d..85a07b0f99 100644
  	//	actprop2->addRule( new RuleIndirectConcat("analysis") );
  	actprop2->addRule( new RuleLoadVarnode("stackvars") );
  	actprop2->addRule( new RuleStoreVarnode("stackvars") );
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/metatype.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/metatype.hh
+index aeb1ea5c6d..4f0f072dd9 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/metatype.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/metatype.hh
+@@ -26,17 +26,18 @@ namespace ghidra {
+ /// The core meta-types supported by the decompiler. These are sizeless templates
+ /// for the elements making up the type algebra.  Index is important for Datatype::base2sub array.
+ enum type_metatype {
+-  TYPE_VOID = 17,		///< Standard "void" type, absence of type
+-  TYPE_SPACEBASE = 16,		///< Placeholder for symbol/type look-up calculations
+-  TYPE_UNKNOWN = 15,		///< An unknown low-level type. Treated as an unsigned integer.
+-  TYPE_INT = 14,		///< Signed integer. Signed is considered less specific than unsigned in C
+-  TYPE_UINT = 13,		///< Unsigned integer
+-  TYPE_BOOL = 12,		///< Boolean
+-  TYPE_CODE = 11,		///< Data is actual executable code
+-  TYPE_FLOAT = 10,		///< Floating-point
+-
+-  TYPE_PTR = 9,			///< Pointer data-type
+-  TYPE_PTRREL = 8,		///< Pointer relative to another data-type (specialization of TYPE_PTR)
++  TYPE_VOID = 18,		///< Standard "void" type, absence of type
++  TYPE_SPACEBASE = 17,		///< Placeholder for symbol/type look-up calculations
++  TYPE_UNKNOWN = 16,		///< An unknown low-level type. Treated as an unsigned integer.
++  TYPE_INT = 15,		///< Signed integer. Signed is considered less specific than unsigned in C
++  TYPE_UINT = 14,		///< Unsigned integer
++  TYPE_BOOL = 13,		///< Boolean
++  TYPE_CODE = 12,		///< Data is actual executable code
++  TYPE_FLOAT = 11,		///< Floating-point
++
++  TYPE_PTR = 10,			///< Pointer data-type
++  TYPE_PTRREL = 9,		///< Pointer relative to another data-type (specialization of TYPE_PTR)
++  TYPE_PTROFF = 8,
+   TYPE_ARRAY = 7,		///< Array data-type, made up of a sequence of "element" datatype
+   TYPE_ENUM_UINT = 6,		///< Unsigned enumeration data-type (specialization of TYPE_UINT)
+   TYPE_ENUM_INT = 5,		///< Signed enumeration data-type (specialization of TYPE_INT)
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/printc.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/printc.hh
 index 661936087d..e4a05edb44 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/printc.hh
@@ -62,40 +99,10 @@ index 50c2aa3a52..588823b74e 100644
  public:
    RuleStructOffset0(const string &g) : Rule(g, 0, "structoffset0") {}	///< Constructor
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/type.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/type.hh
-index 8ec587852b..eedc90eef0 100644
+index 2faef86c4e..26bde7857f 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/type.hh
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/type.hh
-@@ -78,17 +78,18 @@ extern void print_data(ostream &s,uint1 *buffer,int4 size,const Address &baseadd
- /// The core meta-types supported by the decompiler. These are sizeless templates
- /// for the elements making up the type algebra.  Index is important for Datatype::base2sub array.
- enum type_metatype {
--  TYPE_VOID = 17,		///< Standard "void" type, absence of type
--  TYPE_SPACEBASE = 16,		///< Placeholder for symbol/type look-up calculations
--  TYPE_UNKNOWN = 15,		///< An unknown low-level type. Treated as an unsigned integer.
--  TYPE_INT = 14,		///< Signed integer. Signed is considered less specific than unsigned in C
--  TYPE_UINT = 13,		///< Unsigned integer
--  TYPE_BOOL = 12,		///< Boolean
--  TYPE_CODE = 11,		///< Data is actual executable code
--  TYPE_FLOAT = 10,		///< Floating-point
--
--  TYPE_PTR = 9,			///< Pointer data-type
--  TYPE_PTRREL = 8,		///< Pointer relative to another data-type (specialization of TYPE_PTR)
-+  TYPE_VOID = 18,		///< Standard "void" type, absence of type
-+  TYPE_SPACEBASE = 17,		///< Placeholder for symbol/type look-up calculations
-+  TYPE_UNKNOWN = 16,		///< An unknown low-level type. Treated as an unsigned integer.
-+  TYPE_INT = 15,		///< Signed integer. Signed is considered less specific than unsigned in C
-+  TYPE_UINT = 14,		///< Unsigned integer
-+  TYPE_BOOL = 13,		///< Boolean
-+  TYPE_CODE = 12,		///< Data is actual executable code
-+  TYPE_FLOAT = 11,		///< Floating-point
-+
-+  TYPE_PTR = 10,			///< Pointer data-type
-+  TYPE_PTRREL = 9,		///< Pointer relative to another data-type (specialization of TYPE_PTR)
-+  TYPE_PTROFF = 8,
-   TYPE_ARRAY = 7,		///< Array data-type, made up of a sequence of "element" datatype
-   TYPE_ENUM_UINT = 6,		///< Unsigned enumeration data-type (specialization of TYPE_UINT)
-   TYPE_ENUM_INT = 5,		///< Signed enumeration data-type (specialization of TYPE_INT)
-@@ -102,24 +103,26 @@ enum type_metatype {
+@@ -79,24 +79,26 @@ extern void print_data(ostream &s,uint1 *buffer,int4 size,const Address &baseadd
  /// Specializations of the core meta-types.  Each enumeration is associated with a specific #type_metatype.
  /// Ordering is important: The lower the number, the more \b specific the data-type, affecting propagation.
  enum sub_metatype {
@@ -140,7 +147,7 @@ index 8ec587852b..eedc90eef0 100644
    SUB_PTRREL = 5,		///< Pointer relative to another data-type, sub-type of TYPE_PTR
    SUB_PTR_STRUCT = 4,		///< Pointer into struct, sub-type of TYPE_PTR
    SUB_ARRAY = 3,		///< Compare as TYPE_ARRAY
-@@ -175,7 +178,7 @@ public:
+@@ -146,7 +148,7 @@ public:
      int4 elSize;	///< Element size responsive to query
    };
  protected:
@@ -149,7 +156,7 @@ index 8ec587852b..eedc90eef0 100644
    /// Boolean properties of datatypes
    enum {
      coretype = 1,		///< This is a basic type which will never be redefined
-@@ -259,6 +262,8 @@ public:
+@@ -230,6 +232,8 @@ public:
    virtual bool nearestArrayedComponentForward(int8 off,Nearest &res) const;
    virtual bool nearestArrayedComponentBackward(int8 off,Nearest &res) const;
  
@@ -158,7 +165,7 @@ index 8ec587852b..eedc90eef0 100644
    /// \brief Get number of bytes at the given offset that are padding
    ///
    /// For the given offset into \b this data-type, determine if the byte at that offset is considered
-@@ -778,6 +783,30 @@ public:
+@@ -749,6 +753,30 @@ public:
    static Datatype *getPtrToFromParent(Datatype *base,int4 off,TypeFactory &typegrp);
  };
  
@@ -201,6 +208,29 @@ index 8d6b255d23..653ac1ee46 100644
    virtual void push(PrintLanguage *lng,const PcodeOp *op,const PcodeOp *readOp) const { lng->opPtradd(op); }
    virtual void printRaw(ostream &s,const PcodeOp *op);
  };
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/metatype.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/metatype.cc
+index e0847798a5..0cb08d6ca4 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/metatype.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/metatype.cc
+@@ -34,6 +34,9 @@ void metatype2string(type_metatype metatype,string &res)
+   case TYPE_PTRREL:
+     res = "ptrrel";
+     break;
++  case TYPE_PTROFF:
++    res = "ptroff";
++    break;
+   case TYPE_ARRAY:
+     res = "array";
+     break;
+@@ -96,6 +99,8 @@ type_metatype string2metatype(const string &metastring)
+       return TYPE_PTR;
+     else if (metastring=="ptrrel")
+       return TYPE_PTRREL;
++    else if (metastring=="ptroff")
++      return TYPE_PTROFF;
+     else if (metastring=="partunion")
+       return TYPE_PARTIALUNION;
+     else if (metastring=="partstruct")
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/modelrules.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/modelrules.cc
 index be968989de..c35179237c 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/modelrules.cc
@@ -330,7 +360,7 @@ index 5ba30f585c..34b542c863 100644
  /// \brief Convert a LOAD or STORE to the first element of a structure to a PTRSUB.
  ///
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/type.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/type.cc
-index 0705d85a23..cad467db9b 100644
+index bbe3758e01..f094040c5d 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/type.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/type.cc
 @@ -20,9 +20,9 @@ namespace ghidra {
@@ -345,26 +375,7 @@ index 0705d85a23..cad467db9b 100644
      SUB_SPACEBASE, SUB_VOID
  };
  
-@@ -265,6 +265,9 @@ void metatype2string(type_metatype metatype,string &res)
-   case TYPE_PTRREL:
-     res = "ptrrel";
-     break;
-+  case TYPE_PTROFF:
-+    res = "ptroff";
-+    break;
-   case TYPE_ARRAY:
-     res = "array";
-     break;
-@@ -327,6 +330,8 @@ type_metatype string2metatype(const string &metastring)
-       return TYPE_PTR;
-     else if (metastring=="ptrrel")
-       return TYPE_PTRREL;
-+    else if (metastring=="ptroff")
-+      return TYPE_PTROFF;
-     else if (metastring=="partunion")
-       return TYPE_PARTIALUNION;
-     else if (metastring=="partstruct")
-@@ -3325,6 +3330,32 @@ Datatype *TypePointerRel::getPtrToFromParent(Datatype *base,int4 off,TypeFactory
+@@ -3190,6 +3190,32 @@ Datatype *TypePointerRel::getPtrToFromParent(Datatype *base,int4 off,TypeFactory
    return base;
  }
  
@@ -397,7 +408,7 @@ index 0705d85a23..cad467db9b 100644
  /// Turn on the data-type's function prototype
  /// \param tfact is the factory that owns \b this
  /// \param sig is the list of names and data-types making up the prototype
-@@ -5212,6 +5243,15 @@ Datatype *TypeFactory::decodeTypeNoRef(Decoder &decoder,bool forcecore)
+@@ -5077,6 +5103,15 @@ Datatype *TypeFactory::decodeTypeNoRef(Decoder &decoder,bool forcecore)
        ct = findAdd(tp);
      }
      break;
@@ -454,6 +465,48 @@ index f68a3f9775..abeb5b14df 100644
  void TypeOpPtradd::printRaw(ostream &s,const PcodeOp *op)
  
  {
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/MetaDataType.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/MetaDataType.java
+index 273b060392..d2e0ba60e9 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/MetaDataType.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/MetaDataType.java
+@@ -23,17 +23,18 @@ import ghidra.program.model.data.Enum;
+  *  Values are comparable. A lower value indicates a more "specific" data-type.
+  */
+ public enum MetaDataType {
+-	TYPE_VOID(17, "void"),		// Standard "void" type, absence of type
+-	TYPE_SPACEBASE(16, "spacebase"),
+-	TYPE_UNKNOWN(15, "unknown"),		// An unknown low-level type. Treated as an unsigned integer.
+-	TYPE_INT(14, "int"),		// Signed integer. Signed is considered less specific than unsigned in C
+-	TYPE_UINT(13, "uint"),		// Unsigned integer
+-	TYPE_BOOL(12, "bool"),		// Boolean
+-	TYPE_CODE(11, "code"),		// Data is actual executable code
+-	TYPE_FLOAT(10, "float"),	// Floating-point
++	TYPE_VOID(18, "void"),		// Standard "void" type, absence of type
++	TYPE_SPACEBASE(17, "spacebase"),
++	TYPE_UNKNOWN(16, "unknown"),		// An unknown low-level type. Treated as an unsigned integer.
++	TYPE_INT(15, "int"),		// Signed integer. Signed is considered less specific than unsigned in C
++	TYPE_UINT(14, "uint"),		// Unsigned integer
++	TYPE_BOOL(13, "bool"),		// Boolean
++	TYPE_CODE(12, "code"),		// Data is actual executable code
++	TYPE_FLOAT(11, "float"),	// Floating-point
+ 
+-	TYPE_PTR(9, "ptr"),		// Pointer data-type
+-	TYPE_PTRREL(8, "ptrrel"),	// Pointer relative to another data-type (specialization of TYPE_PTR)
++	TYPE_PTR(10, "ptr"),		// Pointer data-type
++	TYPE_PTRREL(9, "ptrrel"),	// Pointer relative to another data-type (specialization of TYPE_PTR)
++	TYPE_PTROFF(8, "ptroff"),
+ 	TYPE_ARRAY(7, "array"),		// Array data-type, made up of a sequence of "element" datatype
+ 	TYPE_ENUM_UINT(6, "enum_uint"),	// Unsigned enumeration (specialization of TYPE_UINT)
+ 	TYPE_ENUM_INT(5, "enum_int"),	// Signed enumeration (specialization of TYPE_INT)
+@@ -46,7 +47,7 @@ public enum MetaDataType {
+ 	private int value;			// Enum value matching decompiler
+ 	private String name;		// Name for debug marshaling
+ 
+-	private static MetaDataType METATYPE[] = new MetaDataType[18];
++	private static MetaDataType METATYPE[] = new MetaDataType[19];
+ 
+ 	static {
+ 		for (MetaDataType meta : values()) {
 -- 
 2.45.1
 
