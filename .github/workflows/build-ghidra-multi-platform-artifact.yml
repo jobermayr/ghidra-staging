@@ -1,0 +1,100 @@
+name: Build Ghidra Multi-Platform Artifact
+
+on:
+  push:
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        platform: [ubuntu-latest, macos-latest, windows-latest]
+
+    runs-on: ${{ matrix.platform }}
+    steps:
+
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Clone Upstream Ghidra
+        run: git clone https://github.com/nationalsecurityagency/ghidra
+
+      - name: Read Ghidra JDK Version
+        shell: bash
+        run: echo "JDK_VER=$(awk -F'=' '$1=="application.java.min" {print $2}' ghidra/Ghidra/application.properties)" >> $GITHUB_ENV
+
+      - name: Setup JDK
+        uses: actions/setup-java@v6
+        with:
+          distribution: 'temurin'
+          java-version: '${{ env.JDK_VER }}'
+
+      - name: Apply Ghidra Staging patches
+        shell: bash
+        run: |
+          git config --global user.email "action@github.com"
+          git config --global user.name "Github Action"
+          cd ghidra
+          UPSTREAM_DATE=$(git log -1 --format='%cI' | python3 -c 'import sys,datetime; print(datetime.datetime.fromisoformat(sys.stdin.read().strip()).strftime("%Y%m%dT%H%M%S"))')
+          STAGING_DATE=$(git -C "$GITHUB_WORKSPACE" log -1 --format='%cI' | python3 -c 'import sys,datetime; print(datetime.datetime.fromisoformat(sys.stdin.read().strip()).strftime("%Y%m%dT%H%M%S"))')
+          STRING_DATE=${UPSTREAM_DATE}-staging-${STAGING_DATE}
+          echo "STRING_DATE=${STRING_DATE}" >> $GITHUB_ENV
+          echo "STRING_DATE=${STRING_DATE}"
+          for f in "${{ github.workspace }}"/*.patch; do
+            git am -3 "$f"
+          done
+
+      - name: Fetch Dependencies
+        run: cd ghidra && ./gradlew -I gradle/support/fetchDependencies.gradle -DhideDownloadProgress -DnoEclipse
+
+      - name: Install Native Dependencies (Linux)
+        if: matrix.platform == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y binutils-dev build-essential libiberty-dev
+
+      - name: Build Ghidra Linux
+        if: matrix.platform == 'ubuntu-latest'
+        run: cd ghidra && ./gradlew assembleAll -Pcli -Popt -Plto --parallel
+
+      - name: Build Ghidra
+        if: matrix.platform != 'ubuntu-latest'
+        run: cd ghidra && ./gradlew assembleAll --parallel
+
+      - name: Create Linux archive
+        if: matrix.platform == 'ubuntu-latest'
+        run: |
+          cd ghidra/build/dist
+          tar -c ghidra_* | xz -z -9 -e >$GITHUB_WORKSPACE/ghidra-linux-${{ env.STRING_DATE }}.tar.xz
+
+      - name: Create MacOS archive
+        if: matrix.platform == 'macos-latest'
+        run: |
+          cd ghidra/build/dist
+          zip -r -9 "$GITHUB_WORKSPACE/ghidra-macos-${{ env.STRING_DATE }}.zip" ghidra_*
+
+      - name: Create Windows archive
+        if: matrix.platform == 'windows-latest'
+        run: |
+          cd ghidra/build/dist
+          7z a "${{ github.workspace }}/ghidra-windows-${{ env.STRING_DATE }}.7z" ghidra_*
+
+      - name: Upload Linux Artifact
+        uses: actions/upload-artifact@v7
+        if: matrix.platform == 'ubuntu-latest'
+        with:
+          archive: false
+          path: ghidra-linux-${{ env.STRING_DATE }}.tar.xz
+
+      - name: Upload Windows Artifact
+        uses: actions/upload-artifact@v7
+        if: matrix.platform == 'windows-latest'
+        with:
+          archive: false
+          path: ghidra-windows-${{ env.STRING_DATE }}.7z
+
+      - name: Upload macOS Artifact
+        uses: actions/upload-artifact@v7
+        if: matrix.platform == 'macos-latest'
+        with:
+          archive: false
+          path: ghidra-macos-${{ env.STRING_DATE }}.zip
