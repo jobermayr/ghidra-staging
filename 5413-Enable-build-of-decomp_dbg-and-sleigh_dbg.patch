@@ -3,20 +3,18 @@ From: Johannes Obermayr <johannesobermayr@gmx.de>
 Date: Sat, 3 Jun 2023 12:49:09 +0200
 Subject: [PATCH] 5413: Enable build of decomp_dbg and sleigh_dbg
 
-Building decomp_dbg and sleigh_dbg can now easily enabled via 'gradle -Pdebug' switch.
-
-Fixes: #5296
+Building decomp_dbg and sleigh_dbg can now easily enabled via 'gradle -Pcli' switch.
 ---
- .../Features/Decompiler/buildNatives.gradle   | 541 ++++++++++++------
+ .../Features/Decompiler/buildNatives.gradle   | 581 ++++++++++++------
  .../src/decompile/cpp/ghidra_arch.cc          |   7 +
  .../src/decompile/cpp/ghidra_process.cc       |  48 ++
- 3 files changed, 415 insertions(+), 181 deletions(-)
+ 3 files changed, 455 insertions(+), 181 deletions(-)
 
 diff --git a/Ghidra/Features/Decompiler/buildNatives.gradle b/Ghidra/Features/Decompiler/buildNatives.gradle
-index 2ac7e326b8..0a1a671bfc 100644
+index 2ac7e326b8..a4f33d68f3 100644
 --- a/Ghidra/Features/Decompiler/buildNatives.gradle
 +++ b/Ghidra/Features/Decompiler/buildNatives.gradle
-@@ -22,20 +22,180 @@ if (findProject(':Generic') == null) {
+@@ -22,20 +22,220 @@ if (findProject(':Generic') == null) {
  	apply from: "../../../GPL/nativeBuildProperties.gradle"
  }
  
@@ -164,20 +162,59 @@ index 2ac7e326b8..0a1a671bfc 100644
 +/*
 + * Try to find libbfd*.so or a static libbfd.a for linking decomp_dbg
 + */
-+def linkBFDUnix = {
-+	def fallback = '-lbfd -Wl,--no-whole-archive -liberty -lsframe -lz -lzstd'
-+	def versionProc = 'ld.bfd -v'.execute()
-+	def versionOut = versionProc.text
-+	def matcher = versionOut =~ /([0-9].*)/
-+	if (!matcher.find()) return fallback
-+	def libName = "-lbfd-${matcher.group(1)}"
-+	def checkProc = ["ld", "-shared", "-o", "/dev/null", libName].execute()
-+	def checkErr = checkProc.err.text
-+	checkProc.waitFor()
-+	if (!checkErr.contains("cannot find")) {
-+		return "${libName} -Wl,--no-whole-archive -liberty -lsframe -lz -lzstd"
++def linkBFDUnix(String compilerCmd) {
++	boolean isShared = project.hasProperty('sharedBfd')
++
++	def libName = "bfd"
++	if (isShared) {
++		def versionProc = 'ld.bfd -v'.execute()
++		def versionOut = versionProc.text
++		def matcher = versionOut =~ /([0-9].*)/
++		if (matcher.find()) {
++			def sharedName = "bfd-${matcher.group(1)}"
++			def checkProc = ["ld", "-shared", "-o", "/dev/null", "-l" + libName].execute()
++			def checkErr = checkProc.err.text
++			checkProc.waitFor()
++			if (!checkErr.contains("cannot find")) {
++				libName = sharedName
++			}
++		}
 +	}
-+	return fallback
++
++	def linkPrefix = isShared ? "" : "-Wl,-Bstatic "
++	def linkSuffix = isShared ? "" : " -Wl,-Bdynamic"
++
++	def lFlags = linkPrefix + "-l" + libName + linkSuffix + " -Wl,--no-whole-archive -lz"
++
++	File dummyFile = File.createTempFile("bfd_test", ".c")
++	dummyFile.deleteOnExit()
++	dummyFile.text = "int main() { return 0; }"
++
++	def cmd = [compilerCmd, dummyFile.absolutePath, "-o", "/dev/null"]
++
++	cmd.add("-Wl,-u,bfd_openr")
++	cmd.addAll(lFlags.split(/\s+/))
++
++	def process = new ProcessBuilder(cmd).redirectErrorStream(true).start()
++	def output = process.inputStream.text
++	process.waitFor()
++
++	if (process.exitValue() != 0) {
++
++		if (output.contains("xmalloc") || output.contains("concat") || output.contains("hexvalue")) {
++			lFlags += (" " + linkPrefix + "-liberty" + linkSuffix)
++		}
++
++		if (output.contains("sframe_")) {
++			lFlags += (" " + linkPrefix + "-lsframe" + linkSuffix)
++		}
++
++		if (output.contains("ZSTD_")) {
++			lFlags += " -lzstd"
++		}
++	}
++
++	return lFlags
 +}
 +
 +/*
@@ -190,6 +227,7 @@ index 2ac7e326b8..0a1a671bfc 100644
 + * -Plto	Enable Link Time Optimization (not for debug interfaces (-Pcli), disable on Windows with -Pnolto)
 + * -Popt	Build optimized with GCC / Clang (disable on Windows with -Pnoopt)
 + * -PsysZlib	Build against system zlib (ignored for Windows)
++ * -PsharedBfd	Link against a shared libbfd
   */
  model {
 -	// Define the source files that are compiled and linked to become the decompiler.
@@ -205,7 +243,7 @@ index 2ac7e326b8..0a1a671bfc 100644
  			// these tell gradle for which platforms to build a decompiler executable.
  			targetPlatform "win_x86_64"
  			targetPlatform "win_arm_64"
-@@ -49,106 +209,37 @@ model {
+@@ -49,106 +249,37 @@ model {
  			targetPlatform "openbsd_arm_64"
  			sources {
  				cpp {
@@ -340,7 +378,7 @@ index 2ac7e326b8..0a1a671bfc 100644
  		} // end decompile
  
  		sleigh(NativeExecutableSpec) {
-@@ -164,91 +255,194 @@ model {
+@@ -164,91 +295,194 @@ model {
  			targetPlatform "openbsd_arm_64"
  			sources {
  				cpp {
@@ -398,12 +436,8 @@ index 2ac7e326b8..0a1a671bfc 100644
 +							srcDir "src/decompile/zlib"
 +							include "*.c"
 +						}
- 					}
- 				}
--			} // end sources (sleigh)
--			
--			binaries {
--				all{ b ->
++					}
++				}
 +			}
 +			binaries.all { b ->
 +				if (b.toolChain in Gcc || b.toolChain in Clang) {
@@ -424,8 +458,12 @@ index 2ac7e326b8..0a1a671bfc 100644
 +							b.cCompiler.args "-flto"
 +						}
 +						b.linker.args "-flto"
-+					}
-+				}
+ 					}
+ 				}
+-			} // end sources (sleigh)
+-			
+-			binaries {
+-				all{ b ->
 +				if (isCurrentWindows() || !project.hasProperty('sysZlib')) {
  					b.cppCompiler.define "LOCAL_ZLIB"
  					b.cCompiler.define "NO_GZIP"
@@ -471,7 +509,7 @@ index 2ac7e326b8..0a1a671bfc 100644
 +				binaries.all { b ->
 +					if (b.toolChain in Gcc || b.toolChain in Clang) {
 +						b.cppCompiler.args "-g"
-+						b.linker.args linkBFDUnix().split(" ")
++						b.linker.args linkBFDUnix((b.toolChain in Clang) ? "clang" : "gcc").split(" ")
 +					}
 +					else if (b.toolChain in VisualCpp) {
 +						b.cppCompiler.args "/Zi"
@@ -573,9 +611,9 @@ index 2ac7e326b8..0a1a671bfc 100644
 +					b.cppCompiler.args "/Oy"	// Omit frame pointer
 +					b.cppCompiler.args "/GL"
 +					b.cCompiler.args "/EHsc"
-+					b.cCompiler.args "O2"
-+					b.cCompiler.args "Oy"		// Omit frame pointer
-+					b.cCompiler.args "GL"
++					b.cCompiler.args "/O2"
++					b.cCompiler.args "/Oy"		// Omit frame pointer
++					b.cCompiler.args "/GL"
 +				}
 +				if (!project.hasProperty('nolto')) {
 +					b.linker.args "/LTCG"
@@ -594,7 +632,7 @@ index 2ac7e326b8..0a1a671bfc 100644
  				if (b.targetPlatform.operatingSystem.windows) {
  					b.cppCompiler.define "WINDOWS"
  					b.cppCompiler.define "_WINDOWS"
-@@ -259,25 +453,10 @@ model {
+@@ -259,25 +493,10 @@ model {
  						b.cppCompiler.define "_WIN64"
  					}	
  				}
