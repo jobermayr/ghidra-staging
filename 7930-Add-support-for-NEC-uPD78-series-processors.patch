@@ -36,6 +36,10 @@ Resolve issue with incorrect rotate behaviour in DRLL and DRLR in uPD78 processo
 Simplify 'Skip if/no flag' and 'Skip if/no interrupt' instruction constructors in uPD78 processor spec
 
 Remove redundant 'flag_' subtable from uPD78 processor spec
+
+Set 'possibleSkip' flag for CALx instructions in uPD78 processor spec
+
+Resolve issue with incorrect call destination in CALT instruction in uPD78 processor spec
 ---
  Ghidra/Processors/upd78/Module.manifest       |    0
  Ghidra/Processors/upd78/build.gradle          |   20 +
@@ -43,8 +47,8 @@ Remove redundant 'flag_' subtable from uPD78 processor spec
  .../upd78/data/languages/upd78.cspec          |   31 +
  .../upd78/data/languages/upd78.ldefs          |   15 +
  .../upd78/data/languages/upd78.pspec          |   28 +
- .../upd78/data/languages/upd78.slaspec        | 1548 +++++++++++++++++
- 7 files changed, 1647 insertions(+)
+ .../upd78/data/languages/upd78.slaspec        | 1552 +++++++++++++++++
+ 7 files changed, 1651 insertions(+)
  create mode 100644 Ghidra/Processors/upd78/Module.manifest
  create mode 100644 Ghidra/Processors/upd78/build.gradle
  create mode 100644 Ghidra/Processors/upd78/certification.manifest
@@ -187,10 +191,10 @@ index 0000000000..8327afeee1
 +</processor_spec>
 diff --git a/Ghidra/Processors/upd78/data/languages/upd78.slaspec b/Ghidra/Processors/upd78/data/languages/upd78.slaspec
 new file mode 100644
-index 0000000000..1859649751
+index 0000000000..df4285aca6
 --- /dev/null
 +++ b/Ghidra/Processors/upd78/data/languages/upd78.slaspec
-@@ -0,0 +1,1548 @@
+@@ -0,0 +1,1552 @@
 +# sleigh specification file for NEC uPD78 series
 +
 +
@@ -234,6 +238,10 @@ index 0000000000..1859649751
 +
 +define register offset=0xF0 size=4 contextreg;
 +define context contextreg
++    # Set on an instruction that the preceding instruction may skip, so that the
++    # SK flag check is emitted for it. The call instructions set it on their
++    # fall-through, since the next instruction is the one that would be skipped
++    # in the case that a RETS instruction was executed.
 +    possibleSkip = (0,0) noflow
 +;
 +
@@ -1631,33 +1639,33 @@ index 0000000000..1859649751
 +# 14.6.13 Call instructions                                    #
 +################################################################
 +
-+:CALL Addr16 is op0_7 = 0x40; Addr16 {
++:CALL Addr16 is op0_7 = 0x40; Addr16 [ possibleSkip = 1; globalset(inst_next,possibleSkip); ] {
 +    local tmp:2 = inst_next;
 +    push16(tmp);
 +    call Addr16;
 +}
 +
-+:CALB is op0_7 = 0x48; op0_7 = 0x29 {
++:CALB is op0_7 = 0x48; op0_7 = 0x29 [ possibleSkip = 1; globalset(inst_next,possibleSkip); ] {
 +    local tmp:2 = inst_next;
 +    push16(tmp);
 +    call [BC];
 +}
 +
-+:CALF faAddr is op3_7 = 0x0f ... & faAddr {
++:CALF faAddr is op3_7 = 0x0f ... & faAddr [ possibleSkip = 1; globalset(inst_next,possibleSkip); ] {
 +    local tmp:2 = inst_next;
 +    push16(tmp);
 +    call faAddr;
 +}
 +
-+:CALT loc is op5_7 = 0x4 & ta_0_4 [ loc = 0x0080 + (ta_0_4 << 1); ] {
++:CALT loc is op5_7 = 0x4 & ta_0_4 [ loc = 0x0080 + (ta_0_4 << 1); possibleSkip = 1; globalset(inst_next,possibleSkip); ] {
 +    local tmp:2 = inst_next;
-+    local ptr:2 = 0x0080 + (ta_0_4 << 2);
++    local ptr:2 = 0x0080 + (ta_0_4 << 1);
 +    local dest = *:2 ptr;
 +    push16(tmp);
 +    call [dest];
 +}
 +
-+:SOFTI is op0_7 = 0x72 {
++:SOFTI is op0_7 = 0x72 [ possibleSkip = 1; globalset(inst_next,possibleSkip); ] {
 +    local tmp:2 = inst_next;
 +    push8(PSW);
 +    push16(tmp);
@@ -1674,7 +1682,7 @@ index 0000000000..1859649751
 +    return [tmp];
 +}
 +
-+:RETS is op0_7 = 0xb9 [ possibleSkip = 1; globalset(inst_next,possibleSkip); ] {
++:RETS is op0_7 = 0xb9 {
 +    local tmp:2 = 0;
 +    pop16(tmp);
 +    $(SK_flag) = 1;

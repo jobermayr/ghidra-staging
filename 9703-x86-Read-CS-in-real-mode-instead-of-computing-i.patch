@@ -1,0 +1,381 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Igor Savin <iselwin@gmail.com>
+Date: Fri, 2 Oct 2026 15:14:05 +0300
+Subject: [PATCH] 9703: x86: Read CS in real mode instead of computing it
+
+x86: Read CS in real mode instead of computing it
+
+In real mode, currentCS wrote CS = (inst_next >> 4) & 0xf000 before
+exporting it. That is only the real code segment when CS is a multiple
+of 0x1000, so CS: operands and near indirect CALL and JMP resolved into
+the wrong segment and overwrote CS for the rest of the function.
+
+currentCS now exports CS. The MZ loader already sets CS for each block.
+Where nothing sets it, x86-16-real.pspec supplies the value currentCS
+used to compute, one tracked_set per 64K, so COM files, ROMs and raw
+binaries resolve as before.
+
+Direct CALLF writes the callee's segment into CS, and static analysis
+continues in the caller after the call, so the caller's CS is restored
+after the call op, as the indirect forms need too.
+
+Constant propagation treats a zero read from a register as a suspect
+constant, which dropped references through segment 0 once CS came from
+context. In real-mode segmented spaces a zero segment base now counts
+as segment 0. Protected mode keeps the old handling, since selector 0
+is the null selector there.
+
+x86: Handle overlays in the real-mode segment check, trim comments
+
+The real-mode check in SymbolicPropogator now uses the physical space of
+the instruction address, so code in an overlay of the real-mode ram
+space treats a zero segment as segment 0 like the base space does.
+
+The "segment_pcode" payload name is now a constant instead of three
+string literals.
+
+Removed comments that restated the code and shortened the rest.
+---
+ .../program/util/SymbolicPropogator.java      |  14 +-
+ .../analysis/X86RealModeCsOverrideTest.java   | 189 ++++++++++++++++++
+ Ghidra/Processors/x86/data/languages/ia.sinc  |  13 +-
+ .../x86/data/languages/x86-16-real.pspec      |  52 +++++
+ 4 files changed, 260 insertions(+), 8 deletions(-)
+ create mode 100644 Ghidra/Features/Base/src/test/java/ghidra/app/plugin/core/analysis/X86RealModeCsOverrideTest.java
+
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/program/util/SymbolicPropogator.java b/Ghidra/Features/Base/src/main/java/ghidra/program/util/SymbolicPropogator.java
+index 255843c718..bdbdcfa2fb 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/program/util/SymbolicPropogator.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/program/util/SymbolicPropogator.java
+@@ -81,6 +81,8 @@ public class SymbolicPropogator {
+ 	/* maximum instructions along to continue along a path that has been followed already */
+ 	private static final int MAX_EXTRA_INSTRUCTION_FLOW = 16;
+ 
++	private static final String SEGMENT_PAYLOAD_NAME = "segment_pcode";
++
+ 	private static int LRU_SIZE = 4096;
+ 
+ 	/** NOTE: most of these caches are to reduce contention on the program lock to enable better threading.
+@@ -1908,12 +1910,20 @@ public class SymbolicPropogator {
+ 			return null;
+ 		}
+ 
++		AddressSpace space = instr.getAddress().getAddressSpace().getPhysicalSpace();
++		boolean isRealModeSegment = payload.getName().equals(SEGMENT_PAYLOAD_NAME) &&
++			space instanceof SegmentedAddressSpace && !(space instanceof ProtectedAddressSpace);
+ 		ArrayList<Varnode> inputs = new ArrayList<Varnode>();
+ 		for (int i = 1; i < ins.length; i++) {
+ 			Varnode vval = context.getValue(ins[i], evaluator);
+ 			if (vval == null || !context.isConstant(vval)) {
+ 				return checkSegmentCallOther(payload, instr, ins, out);
+ 			}
++			// segment 0 is valid in real mode, unlike the null selector in protected mode
++			if (isRealModeSegment && i == 1 && context.isRegister(ins[i]) &&
++				context.isSuspectConstant(vval) && vval.getOffset() == 0) {
++				vval = context.createConstantVarnode(0, vval.getSize());
++			}
+ 			inputs.add(vval);
+ 		}
+ 
+@@ -1938,7 +1948,7 @@ public class SymbolicPropogator {
+ 
+ 	private PcodeOp[] checkSegmentCallOther(InjectPayload payload, Instruction instr, Varnode[] ins,
+ 			Varnode out) {
+-		if (!payload.getName().equals("segment_pcode")) {
++		if (!payload.getName().equals(SEGMENT_PAYLOAD_NAME)) {
+ 			return null;
+ 		}
+ 		if (ins.length != 3) {
+@@ -1979,7 +1989,7 @@ public class SymbolicPropogator {
+ 		// segment is special named injection
+ 		if ("segment".equals(opName)) {
+ 			payload =
+-				snippetLibrary.getPayload(InjectPayload.EXECUTABLEPCODE_TYPE, "segment_pcode");
++				snippetLibrary.getPayload(InjectPayload.EXECUTABLEPCODE_TYPE, SEGMENT_PAYLOAD_NAME);
+ 		}
+ 		else {
+ 			payload = snippetLibrary.getPayload(InjectPayload.CALLOTHERFIXUP_TYPE, opName);
+diff --git a/Ghidra/Features/Base/src/test/java/ghidra/app/plugin/core/analysis/X86RealModeCsOverrideTest.java b/Ghidra/Features/Base/src/test/java/ghidra/app/plugin/core/analysis/X86RealModeCsOverrideTest.java
+new file mode 100644
+index 0000000000..79985cc27e
+--- /dev/null
++++ b/Ghidra/Features/Base/src/test/java/ghidra/app/plugin/core/analysis/X86RealModeCsOverrideTest.java
+@@ -0,0 +1,189 @@
++/* ###
++ * IP: GHIDRA
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package ghidra.app.plugin.core.analysis;
++
++import static org.junit.Assert.*;
++
++import java.util.Set;
++import java.util.TreeSet;
++
++import org.junit.*;
++
++import generic.test.AbstractGenericTest;
++import ghidra.program.database.ProgramBuilder;
++import ghidra.program.model.address.Address;
++import ghidra.program.model.address.AddressSet;
++import ghidra.program.model.lang.Register;
++import ghidra.program.model.listing.Instruction;
++import ghidra.program.model.listing.Program;
++import ghidra.program.model.pcode.PcodeOp;
++import ghidra.program.model.pcode.Varnode;
++import ghidra.program.model.symbol.Reference;
++import ghidra.util.task.TaskMonitor;
++
++public class X86RealModeCsOverrideTest extends AbstractGenericTest {
++
++	private ProgramBuilder builder;
++	private Program program;
++	private int txId;
++
++	@After
++	public void tearDown() {
++		if (program != null) {
++			program.endTransaction(txId, false);
++		}
++		if (builder != null) {
++			builder.dispose();
++		}
++	}
++
++	private void load(String blockStart, int size, Integer cs) throws Exception {
++		load("x86:LE:16:Real Mode", blockStart, size, cs);
++	}
++
++	private void load(String language, String blockStart, int size, Integer cs)
++			throws Exception {
++		builder = new ProgramBuilder("RealModeCs", language);
++		program = builder.getProgram();
++		txId = program.startTransaction("Test");
++		Address start = builder.addr(blockStart);
++		builder.createMemory("code", blockStart, size).setExecute(true);
++		if (cs != null) {
++			builder.setRegisterValue("CS", blockStart, start.add(size - 1).toString(), cs);
++		}
++	}
++
++	private Set<Long> references(String at, String bytes) throws Exception {
++		return references(at, bytes, at);
++	}
++
++	/**
++	 * Disassembles {@code bytes} at {@code at} as one function, runs constant propagation and
++	 * returns the linear addresses referenced from {@code from}.
++	 */
++	private Set<Long> references(String at, String bytes, String from) throws Exception {
++		int length = bytes.split(" ").length;
++		builder.setBytes(at, bytes);
++		builder.disassemble(at, length);
++		builder.createFunction(at);
++		Address start = builder.addr(at);
++		new ConstantPropagationAnalyzer().added(program,
++			new AddressSet(start, start.add(length - 1)), TaskMonitor.DUMMY, null);
++		Set<Long> to = new TreeSet<>();
++		for (Reference ref : program.getReferenceManager()
++				.getReferencesFrom(builder.addr(from))) {
++			to.add(ref.getToAddress().getOffset());
++		}
++		return to;
++	}
++
++	// MOV AX,CS:[0x20]
++	private static final String LOAD = "2e a1 20 00";
++	// JMP word ptr CS:[0x20]
++	private static final String JUMP = "2e ff 26 20 00";
++
++	@Test
++	public void testCsOverrideReadsCsFromLoader() throws Exception {
++		load("1234:0000", 0x40, 0x1234);
++		assertEquals(Set.of(0x12360L), references("1234:0010", LOAD));
++	}
++
++	@Test
++	public void testJumpTableReadsCsFromLoader() throws Exception {
++		load("1234:0000", 0x40, 0x1234);
++		builder.setBytes("1234:0020", "30 00");
++		// the table entry at 1234:0020 and the target 1234:0030
++		assertEquals(Set.of(0x12360L, 0x12370L), references("1234:0000", JUMP));
++	}
++
++	@Test
++	public void testCsAfterFarCallIsTheCallers() throws Exception {
++		load("1234:0000", 0x40, 0x1234);
++		builder.createMemory("callee", "2000:0000", 0x10).setExecute(true);
++		builder.setBytes("2000:0000", "cb");
++		// CALLF 0x2000:0000; MOV AX,CS:[0x20]
++		assertEquals(Set.of(0x12360L),
++			references("1234:0000", "9a 00 00 00 20 " + LOAD, "1234:0005"));
++	}
++
++	@Test
++	public void testCsIsNotWritten() throws Exception {
++		load("1234:0000", 0x40, 0x1234);
++		builder.setBytes("1234:0000", JUMP);
++		builder.disassemble("1234:0000", 5);
++		Instruction instr = program.getListing().getInstructionAt(builder.addr("1234:0000"));
++		Register cs = program.getRegister("CS");
++		for (PcodeOp op : instr.getPcode()) {
++			Varnode out = op.getOutput();
++			assertFalse("CS is written by " + op,
++				out != null && out.isRegister() && out.getAddress().equals(cs.getAddress()));
++		}
++	}
++
++	@Test
++	public void testComLayoutWithoutCs() throws Exception {
++		load("0000:0000", 0x200, null);
++		assertEquals(Set.of(0x20L), references("0000:0100", LOAD));
++	}
++
++	@Test
++	public void testComLayoutJumpTableWithoutCs() throws Exception {
++		load("0000:0000", 0x200, null);
++		builder.setBytes("0000:0020", "30 01");
++		assertEquals(Set.of(0x20L, 0x130L), references("0000:0100", JUMP));
++	}
++
++	@Test
++	public void testRomLayoutWithoutCs() throws Exception {
++		load("f000:0000", 0x100, null);
++		builder.setBytes("f000:0020", "30 00");
++		assertEquals(Set.of(0xf0020L, 0xf0030L), references("f000:0000", JUMP));
++	}
++
++	@Test
++	public void testZeroSegmentRegisterSelectsSegmentZero() throws Exception {
++		load("1234:0000", 0x40, 0x1234);
++		assertEquals(Set.of(0x46cL), zeroDataSegmentReferences());
++	}
++
++	@Test
++	public void testZeroSelectorInProtectedModeIsNotReferenced() throws Exception {
++		load("x86:LE:16:Protected Mode", "1234:0000", 0x40, null);
++		assertEquals(Set.of(), zeroDataSegmentReferences());
++	}
++
++	// XOR AX,AX; MOV DS,AX; MOV AX,[0x46c]
++	private Set<Long> zeroDataSegmentReferences() throws Exception {
++		builder.setBytes("1234:0000", "31 c0 8e d8 a1 6c 04");
++		builder.disassemble("1234:0000", 7);
++		builder.createFunction("1234:0000");
++		Address start = builder.addr("1234:0000");
++		new ConstantPropagationAnalyzer().added(program, new AddressSet(start, start.add(6)),
++			TaskMonitor.DUMMY, null);
++		Set<Long> to = new TreeSet<>();
++		for (Reference ref : program.getReferenceManager()
++				.getReferencesFrom(builder.addr("1234:0004"))) {
++			to.add(ref.getToAddress().getOffset());
++		}
++		return to;
++	}
++
++	@Test
++	public void testUnalignedSegmentWithoutCsKeepsComputedSegment() throws Exception {
++		load("1234:0000", 0x40, null);
++		assertEquals(Set.of(0x10020L), references("1234:0010", LOAD));
++	}
++}
+diff --git a/Ghidra/Processors/x86/data/languages/ia.sinc b/Ghidra/Processors/x86/data/languages/ia.sinc
+index 0e8848fc19..cda1d0ff60 100644
+--- a/Ghidra/Processors/x86/data/languages/ia.sinc
++++ b/Ghidra/Processors/x86/data/languages/ia.sinc
+@@ -3186,12 +3186,13 @@ define pcodeop __builtin_bswap64;
+ @endif
+ 
+ # direct far calls generate an opcode undefined exception in x86-64
+-:CALLF ptr1616      is $(LONGMODE_OFF) & vexMode=0 & addrsize=0 & opsize=0 & byte=0x9a; ptr1616           { tmp:2 = CS; push22(CS); build ptr1616; push22(&:2 inst_next); call ptr1616; CS = tmp; }
+-:CALLF ptr1616      is $(LONGMODE_OFF) & vexMode=0 & addrsize=1 & opsize=0 & byte=0x9a; ptr1616           { tmp:2 = CS; push42(CS); build ptr1616; push42(&:2 inst_next); call ptr1616; CS = tmp; }
+-:CALLF ptr1632      is $(LONGMODE_OFF) & vexMode=0 & addrsize=0 & opsize=1 & byte=0x9a; ptr1632           { tmp:2 = CS; push22(CS); build ptr1632; push24(&:4 inst_next); call ptr1632; CS = tmp; }
+-:CALLF ptr1632      is $(LONGMODE_OFF) & vexMode=0 & addrsize=1 & opsize=1 & byte=0x9a; ptr1632           { tmp:2 = CS; pushseg44(CS); build ptr1632; push44(&:4 inst_next); call ptr1632; CS = tmp; }
+-:CALLF m1616        is vexMode=0 & addrsize=0 & opsize=0 & byte=0xff; m1616 & reg_opcode=3 ... { push22(CS); build m1616; push22(&:2 inst_next); call [m1616]; }
+-:CALLF m1616        is vexMode=0 & addrsize=1 & opsize=0 & byte=0xff; m1616 & reg_opcode=3 ... { push42(CS); build m1616; push42(&:2 inst_next); call [m1616]; }
++:CALLF ptr1616      is $(LONGMODE_OFF) & vexMode=0 & addrsize=0 & opsize=0 & byte=0x9a; ptr1616           { local callerCS = CS; push22(CS); build ptr1616; push22(&:2 inst_next); call ptr1616; CS = callerCS; }
++:CALLF ptr1616      is $(LONGMODE_OFF) & vexMode=0 & addrsize=1 & opsize=0 & byte=0x9a; ptr1616           { local callerCS = CS; push42(CS); build ptr1616; push42(&:2 inst_next); call ptr1616; CS = callerCS; }
++:CALLF ptr1632      is $(LONGMODE_OFF) & vexMode=0 & addrsize=0 & opsize=1 & byte=0x9a; ptr1632           { local callerCS = CS; push22(CS); build ptr1632; push24(&:4 inst_next); call ptr1632; CS = callerCS; }
++:CALLF ptr1632      is $(LONGMODE_OFF) & vexMode=0 & addrsize=1 & opsize=1 & byte=0x9a; ptr1632           { local callerCS = CS; pushseg44(CS); build ptr1632; push44(&:4 inst_next); call ptr1632; CS = callerCS; }
++:CALLF addr16       is vexMode=0 & addrsize=0 & opsize=0 & byte=0xff; addr16 & reg_opcode=3 ... { local ptr:$(SIZE) = segment(DS,addr16); local addrptr:$(SIZE) = segment(*:2 (ptr+2),*:2 ptr);
++                                                                                                  push22(CS); push22(&:2 inst_next); call [addrptr]; }
++:CALLF addr32       is vexMode=0 & addrsize=1 & opsize=0 & byte=0xff; addr32 & reg_opcode=3 ... { local dest:4 = addr32; push42(CS); push42(&:2 inst_next); call [dest]; }
+ @ifdef IA64
+ :CALLF m1616        is $(LONGMODE_ON) & vexMode=0 & addrsize=2 & opsize=0 & byte=0xff; m1616 & reg_opcode=3 ... { push82(CS); build m1616; push82(&:2 inst_next); call [m1616]; }
+ @endif
+diff --git a/Ghidra/Processors/x86/data/languages/x86-16-real.pspec b/Ghidra/Processors/x86/data/languages/x86-16-real.pspec
+index c8c6483d28..61c5dd8052 100644
+--- a/Ghidra/Processors/x86/data/languages/x86-16-real.pspec
++++ b/Ghidra/Processors/x86/data/languages/x86-16-real.pspec
+@@ -30,5 +30,57 @@
+     <tracked_set space="ram">
+       <set name="DF" val="0"/>
+     </tracked_set>
++    <!-- Default CS for each 64K of the address space, used where a loader sets none -->
++    <tracked_set space="ram" first="0x00000" last="0x0ffff">
++      <set name="CS" val="0x0000"/>
++    </tracked_set>
++    <tracked_set space="ram" first="0x10000" last="0x1ffff">
++      <set name="CS" val="0x1000"/>
++    </tracked_set>
++    <tracked_set space="ram" first="0x20000" last="0x2ffff">
++      <set name="CS" val="0x2000"/>
++    </tracked_set>
++    <tracked_set space="ram" first="0x30000" last="0x3ffff">
++      <set name="CS" val="0x3000"/>
++    </tracked_set>
++    <tracked_set space="ram" first="0x40000" last="0x4ffff">
++      <set name="CS" val="0x4000"/>
++    </tracked_set>
++    <tracked_set space="ram" first="0x50000" last="0x5ffff">
++      <set name="CS" val="0x5000"/>
++    </tracked_set>
++    <tracked_set space="ram" first="0x60000" last="0x6ffff">
++      <set name="CS" val="0x6000"/>
++    </tracked_set>
++    <tracked_set space="ram" first="0x70000" last="0x7ffff">
++      <set name="CS" val="0x7000"/>
++    </tracked_set>
++    <tracked_set space="ram" first="0x80000" last="0x8ffff">
++      <set name="CS" val="0x8000"/>
++    </tracked_set>
++    <tracked_set space="ram" first="0x90000" last="0x9ffff">
++      <set name="CS" val="0x9000"/>
++    </tracked_set>
++    <tracked_set space="ram" first="0xa0000" last="0xaffff">
++      <set name="CS" val="0xa000"/>
++    </tracked_set>
++    <tracked_set space="ram" first="0xb0000" last="0xbffff">
++      <set name="CS" val="0xb000"/>
++    </tracked_set>
++    <tracked_set space="ram" first="0xc0000" last="0xcffff">
++      <set name="CS" val="0xc000"/>
++    </tracked_set>
++    <tracked_set space="ram" first="0xd0000" last="0xdffff">
++      <set name="CS" val="0xd000"/>
++    </tracked_set>
++    <tracked_set space="ram" first="0xe0000" last="0xeffff">
++      <set name="CS" val="0xe000"/>
++    </tracked_set>
++    <tracked_set space="ram" first="0xf0000" last="0xfffff">
++      <set name="CS" val="0xf000"/>
++    </tracked_set>
++    <tracked_set space="ram" first="0x100000" last="0x10ffef">
++      <set name="CS" val="0x0"/>
++    </tracked_set>
+   </context_data>
+ </processor_spec>
+-- 
+2.45.1
+
