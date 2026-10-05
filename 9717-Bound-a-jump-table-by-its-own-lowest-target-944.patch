@@ -1,0 +1,183 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Chris Bongaarts <cab@bongalow.net>
+Date: Sat, 15 Aug 2026 19:26:43 -0500
+Subject: [PATCH] 9717: Bound a jump table by its own lowest target (#9447)
+
+A table cannot extend past the first address it dispatches to: the table
+bytes and the code they target cannot occupy the same memory. Walk the
+entries in order tracking the lowest target seen so far, and cut the table
+off at the first entry whose own table bytes would reach it.
+
+This is the only bound available when the switch index is unconstrained at
+the site, where the entry count is an invariant of the caller. That is the
+normal situation for a doubled byte index on an 8-bit architecture, and the
+case the 1-byte switch-variable guard in findSmallestNormal misses once the
+range has been divided by the stride (#9447): an unbounded byte index read
+as a 128-case switch, recovering 256 bytes of "table".
+
+It runs inside JumpBasic::sanityCheck, which already exists to cut a table
+off at the first unreasonable address and already owns the truncation; its
+existing |diff| > 0xffff test can never fire in a 16-bit space. It runs
+before LoadTable::collapseTable, so loadpoints still hold one entry per LOAD
+in execution order and loadcounts maps entries to their LOADs. Each entry's
+byte extent therefore comes from the LOADs it actually performed, with no
+assumption about stride or contiguity, and LOADs at a fixed address (a
+lookup rather than a table) are ignored. LoadTable gains read accessors for
+this.
+
+The bound only ever shrinks a table, never rejects a model, and only runs
+when per-entry LOADs were collected. It declines unless the table lies below
+its lowest target, so a table stored above or away from the code it
+dispatches to (the usual .rodata arrangement) is untouched.
+---
+ .../decompile/cpp/include/ghidra/jumptable.hh |   3 +
+ .../Decompiler/src/decompile/cpp/jumptable.cc | 112 ++++++++++++++++++
+ 2 files changed, 115 insertions(+)
+
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/jumptable.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/jumptable.hh
+index 39973d6d55..9b35f6774e 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/jumptable.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/jumptable.hh
+@@ -57,6 +57,9 @@ public:
+   LoadTable(const Address &ad,int4 sz) { addr = ad, size = sz; num = 1; }	///< Constructor for a single entry table
+   LoadTable(const Address &ad,int4 sz,int4 nm) { addr = ad; size = sz; num = nm; }	///< Construct a full table
+   bool operator<(const LoadTable &op2) const { return (addr < op2.addr); }	///< Compare \b this with another table by address
++  const Address &getAddr(void) const { return addr; }	///< Get the starting address of the table
++  int4 getSize(void) const { return size; }		///< Get the size of a table entry
++  int4 getNum(void) const { return num; }		///< Get the number of entries in the table
+   void encode(Encoder &encoder) const;				///< Encode a description of \b this as an \<loadtable> element
+   void decode(Decoder &decoder);				///< Decode \b this table from a \<loadtable> element
+   static void collapseTable(vector<LoadTable> &table);		///< Collapse a sequence of table descriptions
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/jumptable.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/jumptable.cc
+index ad60fc414c..3b054037bb 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/jumptable.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/jumptable.cc
+@@ -1611,6 +1611,109 @@ bool JumpBasic::foldInGuards(Funcdata *fd,JumpTable *jump)
+   return change;
+ }
+ 
++/// \brief Bound an address table by the lowest address it dispatches to
++///
++/// A table cannot extend past its own lowest target: the bytes holding the table and the
++/// code that table jumps to cannot occupy the same memory.  Walk the entries in order,
++/// tracking the lowest target seen so far, and cut off at the first entry whose own table
++/// bytes would reach that target.  This recovers a true entry count for tables whose index
++/// is not bounded anywhere at the site -- where the count is an invariant of the caller and
++/// the value-range analysis can only supply an upper bound -- which is the normal situation
++/// for a scaled byte index on an 8-bit architecture.
++///
++/// This needs the \b loadpoints as collected, one per LOAD in execution order, so it must run
++/// before LoadTable::collapseTable.  The byte extent of each entry is taken from the LOADs
++/// that entry actually performed, so no assumption is made about the table's stride or about
++/// its entries being contiguous.
++///
++/// The idiom only holds for a table sitting below the code it dispatches to, so if the lowest
++/// target is not above the table nothing is recovered.  A caller that gets \b false must leave
++/// the table alone.
++/// \param addresstable is the recovered list of target addresses
++/// \param loadpoints holds one entry per LOAD performed, in execution order
++/// \param loadcounts gives the running number of LOADs consumed through each table entry
++/// \param cutoff will hold the recovered entry count
++/// \return \b true if a bound was recovered
++static bool boundByLowestTarget(const vector<Address> &addresstable,
++				const vector<LoadTable> &loadpoints,
++				const vector<int4> &loadcounts,int4 &cutoff)
++
++{
++  if (addresstable.empty()) return false;
++  if (loadcounts.size() != addresstable.size()) return false;
++  int4 num = addresstable.size();
++  if (num < 2) return false;		// Need two entries to tell a table from a fixed load
++
++  // Every entry emulates the same path, so it performs the same LOADs in the same order:
++  // the k-th LOAD of each entry is the same instruction, and its addresses across entries
++  // form one table.  Require that uniform shape, then consider only the slots whose address
++  // actually MOVES with the index.  A LOAD at a fixed address is not a table and must not
++  // contribute to the byte extent -- otherwise one unrelated fixed lookup at a high address
++  // bounds the table to nothing.
++  int4 nload = loadcounts[0];
++  if (nload < 1) return false;
++  if ((int4)loadpoints.size() < nload * num) return false;
++  for(int4 i=0;i<num;++i) {
++    if (loadcounts[i] != nload * (i+1))
++      return false;			// Non-uniform LOAD pattern; shape not understood
++  }
++  AddrSpace *spc = addresstable[0].getSpace();
++  vector<bool> isTable(nload,false);
++  int4 tablecount = 0;
++  for(int4 k=0;k<nload;++k) {
++    const Address &first(loadpoints[k].getAddr());
++    const Address &second(loadpoints[nload + k].getAddr());
++    if (first.getSpace() != spc || second.getSpace() != spc)
++      continue;				// Not in the space the targets live in
++    if (first == second)
++      continue;				// Fixed address: a lookup, not a table
++    isTable[k] = true;
++    tablecount += 1;
++  }
++  if (tablecount == 0) return false;
++
++  uintb minTarget = 0;
++  uintb tableStart = 0;
++  bool haveTarget = false;
++  bool haveStart = false;
++  int4 lo = 0;
++  int4 i;
++
++  for(i=0;i<num;++i) {
++    int4 hi = loadcounts[i];
++    uintb entryEnd = 0;
++    for(int4 j=lo;j<hi;++j) {
++      if (!isTable[j-lo]) continue;
++      if (loadpoints[j].getAddr().getSpace() != spc)
++	return false;		// Table and targets in different spaces
++      uintb beg = loadpoints[j].getAddr().getOffset();
++      uintb end = beg + loadpoints[j].getSize();
++      if (end > entryEnd)
++	entryEnd = end;
++      if (!haveStart || beg < tableStart) {
++	tableStart = beg;
++	haveStart = true;
++      }
++    }
++    lo = hi;
++    if (haveTarget && entryEnd > minTarget)
++      break;			// This entry's bytes would collide with the lowest target
++    if (addresstable[i].getSpace() != spc)
++      return false;
++    uintb target = addresstable[i].getOffset();
++    if (!haveTarget || target < minTarget) {
++      minTarget = target;
++      haveTarget = true;
++    }
++  }
++  if (i == 0 || !haveTarget || !haveStart)
++    return false;
++  if (minTarget <= tableStart)
++    return false;		// Table does not precede its targets; the idiom does not apply
++  cutoff = i;
++  return true;
++}
++
+ bool JumpBasic::sanityCheck(Funcdata *fd,PcodeOp *indop,vector<Address> &addresstable,
+ 			    vector<LoadTable> &loadpoints,vector<int4> *loadcounts)
+ {
+@@ -1642,6 +1745,15 @@ bool JumpBasic::sanityCheck(Funcdata *fd,PcodeOp *indop,vector<Address> &address
+   }
+   if (i==0)
+     return false;
++  if (loadcounts != (vector<int4> *)0) {
++    // A table cannot run into its own lowest target.  This is the only bound available when
++    // the switch index is unconstrained at the site, and it never widens the table.
++    int4 bound;
++    if (boundByLowestTarget(addresstable,loadpoints,*loadcounts,bound)) {
++      if (bound < i)
++	i = bound;
++    }
++  }
+   if (i!=addresstable.size()) {
+     addresstable.resize(i);
+     jrange->truncate(i);
+-- 
+2.45.1
+
