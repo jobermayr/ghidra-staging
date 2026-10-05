@@ -1,22 +1,530 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Christopher Wrogg <39571085+retu2libc@users.noreply.github.com>
 Date: Wed, 30 Sep 2026 14:10:04 -0400
-Subject: [PATCH] 9705: Debugger: Mark the current PC in the Decompiler
+Subject: [PATCH] 9705: Debugger: Mark the tracked location in the Decompiler
 
-A Debugger plugin tracks the PC as the listings do and marks it in the Decompiler, independent of the caret, with the tracked-register margin marker and token highlight (#9697).
+Mark the location tracked by the primary dynamic listing, usually the PC, in the Decompiler, independent of the caret. The tokens of the instruction at that location get the tracked-register background, and their lines get the tracked-register icon (#9697).
+
+The breakpoint margin becomes a generic Debugger icon margin, provided by DebuggerDecompilerMarginService, so breakpoints and the tracked location share one margin.
 ---
- .../DebuggerDecompilerPcMarkerPlugin.java     | 237 ++++++++++++++++++
- .../PcDecompilerMarginProvider.java           | 112 +++++++++
- 2 files changed, 349 insertions(+)
- create mode 100644 Ghidra/Debug/Debugger/src/main/java/ghidra/app/plugin/core/debug/gui/decompiler/DebuggerDecompilerPcMarkerPlugin.java
- create mode 100644 Ghidra/Debug/Debugger/src/main/java/ghidra/app/plugin/core/debug/gui/decompiler/PcDecompilerMarginProvider.java
+ .../src/main/help/help/TOC_Source.xml         |   8 +-
+ ...DebuggerDecompilerTrackLocationPlugin.html |  41 ++
+ .../DebuggerBreakpointMarkerPlugin.java       |  55 ++-
+ ...DebuggerDecompilerIconMarginProvider.java} |  80 ++--
+ .../DebuggerDecompilerMarginService.java      |  46 ++
+ ...DebuggerDecompilerMarginServicePlugin.java |  98 ++++
+ ...DebuggerDecompilerTrackLocationPlugin.java | 311 +++++++++++++
+ .../DecompilerMarginIconSource.java           |  65 +++
+ ...ggerDecompilerTrackLocationPluginTest.java | 433 ++++++++++++++++++
+ 9 files changed, 1095 insertions(+), 42 deletions(-)
+ create mode 100644 Ghidra/Debug/Debugger/src/main/help/help/topics/DebuggerDecompilerTrackLocationPlugin/DebuggerDecompilerTrackLocationPlugin.html
+ rename Ghidra/Debug/Debugger/src/main/java/ghidra/app/plugin/core/debug/gui/{breakpoint/BreakpointsDecompilerMarginProvider.java => decompiler/DebuggerDecompilerIconMarginProvider.java} (59%)
+ create mode 100644 Ghidra/Debug/Debugger/src/main/java/ghidra/app/plugin/core/debug/gui/decompiler/DebuggerDecompilerMarginService.java
+ create mode 100644 Ghidra/Debug/Debugger/src/main/java/ghidra/app/plugin/core/debug/gui/decompiler/DebuggerDecompilerMarginServicePlugin.java
+ create mode 100644 Ghidra/Debug/Debugger/src/main/java/ghidra/app/plugin/core/debug/gui/decompiler/DebuggerDecompilerTrackLocationPlugin.java
+ create mode 100644 Ghidra/Debug/Debugger/src/main/java/ghidra/app/plugin/core/debug/gui/decompiler/DecompilerMarginIconSource.java
+ create mode 100644 Ghidra/Test/DebuggerIntegrationTest/src/test/java/ghidra/app/plugin/core/debug/gui/decompiler/DebuggerDecompilerTrackLocationPluginTest.java
 
-diff --git a/Ghidra/Debug/Debugger/src/main/java/ghidra/app/plugin/core/debug/gui/decompiler/DebuggerDecompilerPcMarkerPlugin.java b/Ghidra/Debug/Debugger/src/main/java/ghidra/app/plugin/core/debug/gui/decompiler/DebuggerDecompilerPcMarkerPlugin.java
+diff --git a/Ghidra/Debug/Debugger/src/main/help/help/TOC_Source.xml b/Ghidra/Debug/Debugger/src/main/help/help/TOC_Source.xml
+index 2ad8d21af6..a36da82e1b 100644
+--- a/Ghidra/Debug/Debugger/src/main/help/help/TOC_Source.xml
++++ b/Ghidra/Debug/Debugger/src/main/help/help/TOC_Source.xml
+@@ -53,7 +53,13 @@
+ 
+ 			<tocdef id="DebuggerListingPlugin" text="Dynamic Listing"
+ 				sortgroup="k"
+-				target="help/topics/DebuggerListingPlugin/DebuggerListingPlugin.html" />
++				target="help/topics/DebuggerListingPlugin/DebuggerListingPlugin.html">
++
++				<tocdef id="DebuggerDecompilerTrackLocationPlugin"
++					text="Tracked Location in the Decompiler"
++					sortgroup="a"
++					target="help/topics/DebuggerDecompilerTrackLocationPlugin/DebuggerDecompilerTrackLocationPlugin.html" />
++			</tocdef>
+ 
+ 			<tocdef id="DebuggerDisassemblerPlugin"
+ 				text="Disassembly and Assembly"
+diff --git a/Ghidra/Debug/Debugger/src/main/help/help/topics/DebuggerDecompilerTrackLocationPlugin/DebuggerDecompilerTrackLocationPlugin.html b/Ghidra/Debug/Debugger/src/main/help/help/topics/DebuggerDecompilerTrackLocationPlugin/DebuggerDecompilerTrackLocationPlugin.html
 new file mode 100644
-index 0000000000..7f844adc40
+index 0000000000..08c8408fba
 --- /dev/null
-+++ b/Ghidra/Debug/Debugger/src/main/java/ghidra/app/plugin/core/debug/gui/decompiler/DebuggerDecompilerPcMarkerPlugin.java
-@@ -0,0 +1,237 @@
++++ b/Ghidra/Debug/Debugger/src/main/help/help/topics/DebuggerDecompilerTrackLocationPlugin/DebuggerDecompilerTrackLocationPlugin.html
+@@ -0,0 +1,41 @@
++<!DOCTYPE doctype PUBLIC "-//W3C//DTD HTML 4.0 Frameset//EN">
++
++<HTML>
++  <HEAD>
++    <META name="generator" content=
++    "HTML Tidy for Java (vers. 2009-12-01), see jtidy.sourceforge.net">
++
++    <TITLE>Debugger: Tracked Location in the Decompiler</TITLE>
++    <META http-equiv="Content-Type" content="text/html; charset=windows-1252">
++    <LINK rel="stylesheet" type="text/css" href="help/shared/DefaultStyle.css">
++  </HEAD>
++
++  <BODY lang="EN-US">
++    <H1><A name="plugin"></A>Debugger: Tracked Location in the Decompiler</H1>
++
++    <P>When active in the Debugger, the <A href=
++    "help/topics/DecompilePlugin/DecompilerIntro.html">Decompiler</A> marks the tracked location,
++    usually the program counter, the same way the static listing does. The location is mapped from
++    the current trace into the decompiled program using the <A href=
++    "help/topics/DebuggerStaticMappingPlugin/DebuggerStaticMappingPlugin.html">Static Mappings</A>.
++    Each token generated from the instruction at that location is given the tracked-register
++    background color, and each line containing one of those tokens has the tracked-register marker
++    in the Debugger's margin. That margin is shared with the <A href=
++    "help/topics/DebuggerBreakpointMarkerPlugin/DebuggerBreakpointMarkerPlugin.html">breakpoint</A>
++    markers. Keep in mind, the relationship between machine instructions and the decompiled code is
++    not always so simple. One instruction may contribute to many lines, or to none at all. If the
++    tracked location is not in the decompiled function, or it cannot be mapped to the program,
++    nothing is marked.</P>
++
++    <P>These marks are independent of the Decompiler's cursor. They follow the debugger as it
++    executes, while the cursor and its highlights remain under the user's control.</P>
++
++    <P>The location tracked is the same as in the primary <A href=
++    "help/topics/DebuggerListingPlugin/DebuggerListingPlugin.html">Dynamic Listing</A>, and is
++    configured using its <A href=
++    "help/topics/DebuggerListingPlugin/DebuggerListingPlugin.html#track_location">Track
++    Location</A> action. For example, if that listing tracks the stack pointer, or a watch
++    expression, the Decompiler will mark that location instead. If it tracks nothing, the
++    Decompiler marks nothing.</P>
++  </BODY>
++</HTML>
+diff --git a/Ghidra/Debug/Debugger/src/main/java/ghidra/app/plugin/core/debug/gui/breakpoint/DebuggerBreakpointMarkerPlugin.java b/Ghidra/Debug/Debugger/src/main/java/ghidra/app/plugin/core/debug/gui/breakpoint/DebuggerBreakpointMarkerPlugin.java
+index 26ab4df201..96b99deaee 100644
+--- a/Ghidra/Debug/Debugger/src/main/java/ghidra/app/plugin/core/debug/gui/breakpoint/DebuggerBreakpointMarkerPlugin.java
++++ b/Ghidra/Debug/Debugger/src/main/java/ghidra/app/plugin/core/debug/gui/breakpoint/DebuggerBreakpointMarkerPlugin.java
+@@ -17,6 +17,7 @@ package ghidra.app.plugin.core.debug.gui.breakpoint;
+ 
+ import java.awt.Color;
+ import java.awt.event.KeyEvent;
++import java.awt.event.MouseEvent;
+ import java.util.*;
+ import java.util.concurrent.CompletableFuture;
+ import java.util.stream.Collectors;
+@@ -38,6 +39,8 @@ import ghidra.app.plugin.core.debug.event.TraceClosedPluginEvent;
+ import ghidra.app.plugin.core.debug.event.TraceOpenedPluginEvent;
+ import ghidra.app.plugin.core.debug.gui.DebuggerResources;
+ import ghidra.app.plugin.core.debug.gui.DebuggerResources.*;
++import ghidra.app.plugin.core.debug.gui.decompiler.DebuggerDecompilerMarginService;
++import ghidra.app.plugin.core.debug.gui.decompiler.DecompilerMarginIconSource;
+ import ghidra.app.plugin.core.decompile.DecompilerActionContext;
+ import ghidra.app.plugin.core.functiongraph.FunctionGraphMarginService;
+ import ghidra.app.plugin.core.marker.MarginProviderSupplier;
+@@ -84,6 +87,7 @@ import ghidra.util.Msg;
+ 	},
+ 	servicesRequired = {
+ 		DebuggerLogicalBreakpointService.class,
++		DebuggerDecompilerMarginService.class,
+ 		MarkerService.class,
+ 	})
+ public class DebuggerBreakpointMarkerPlugin extends Plugin {
+@@ -507,6 +511,41 @@ public class DebuggerBreakpointMarkerPlugin extends Plugin {
+ 		}
+ 	}
+ 
++	private class BreakpointsDecompilerMarginIconSource implements DecompilerMarginIconSource {
++		@Override
++		public Icon getIcon(Program program, ClangLine line) {
++			if (breakpointService == null) {
++				return null;
++			}
++			return computeState(getLocationsFromLine(program, line)).icon;
++		}
++
++		@Override
++		public int getPriority() {
++			return MarkerService.BREAKPOINT_PRIORITY;
++		}
++
++		@Override
++		public void marginPressed(Program program, int index, List<ClangLine> lines,
++				MouseEvent e) {
++			if (e.getClickCount() != 2 || e.getButton() != MouseEvent.BUTTON1 ||
++				breakpointService == null) {
++				return;
++			}
++			List<ProgramLocation> locs = nearestLocationsToLine(program, index, lines);
++			if (locs == null || locs.isEmpty()) {
++				return;
++			}
++			Set<LogicalBreakpoint> col = collectBreakpoints(locs);
++			breakpointService.toggleBreakpointsAt(col, locs.get(0), () -> {
++				placeBreakpointDialog.prompt(tool, breakpointService, "Set breakpoint",
++					locs.get(0), 1, CommonSet.SWX, "");
++				// Not great, but I'm not sticking around for the dialog
++				return CompletableFuture.completedFuture(Set.of());
++			});
++		}
++	}
++
+ 	private class DefaultMarginProviderSupplier implements MarginProviderSupplier {
+ 		@Override
+ 		public MarkerMarginProvider createMarginProvider() {
+@@ -749,7 +788,7 @@ public class DebuggerBreakpointMarkerPlugin extends Plugin {
+ 	@AutoServiceConsumed
+ 	private DebuggerControlService controlService;
+ 	// @AutoServiceConsumed via method
+-	DecompilerMarginService decompilerMarginService;
++	private DebuggerDecompilerMarginService decompilerMarginService;
+ 	// @AutoServiceConsumed via method
+ 	private FunctionGraphMarginService functionGraphMarginService;
+ 	@SuppressWarnings("unused")
+@@ -805,13 +844,13 @@ public class DebuggerBreakpointMarkerPlugin extends Plugin {
+ 
+ 	DebuggerPlaceBreakpointDialog placeBreakpointDialog = new DebuggerPlaceBreakpointDialog();
+ 
+-	BreakpointsDecompilerMarginProvider decompilerMarginProvider;
++	private final DecompilerMarginIconSource decompilerIconSource =
++		new BreakpointsDecompilerMarginIconSource();
+ 	private MarginProviderSupplier functionGraphMarginSupplier =
+ 		new DefaultMarginProviderSupplier();
+ 
+ 	public DebuggerBreakpointMarkerPlugin(PluginTool tool) {
+ 		super(tool);
+-		this.decompilerMarginProvider = new BreakpointsDecompilerMarginProvider(this);
+ 		this.autoServiceWiring = AutoService.wireServicesProvidedAndConsumed(this);
+ 		this.autoOptionsWiring = AutoOptions.wireOptions(this);
+ 
+@@ -1008,6 +1047,9 @@ public class DebuggerBreakpointMarkerPlugin extends Plugin {
+ 			for (BreakpointMarkerSets markerSet : markersByProgram.values()) {
+ 				markerSet.clear();
+ 			}
++			if (decompilerMarginService != null) {
++				decompilerMarginService.iconsChanged();
++			}
+ 			if (breakpointService == null) {
+ 				return;
+ 			}
+@@ -1051,13 +1093,14 @@ public class DebuggerBreakpointMarkerPlugin extends Plugin {
+ 	}
+ 
+ 	@AutoServiceConsumed
+-	private void setDecompilerMarginService(DecompilerMarginService decompilerMarginService) {
++	private void setDecompilerMarginService(
++			DebuggerDecompilerMarginService decompilerMarginService) {
+ 		if (this.decompilerMarginService != null) {
+-			this.decompilerMarginService.removeMarginProvider(decompilerMarginProvider);
++			this.decompilerMarginService.removeIconSource(decompilerIconSource);
+ 		}
+ 		this.decompilerMarginService = decompilerMarginService;
+ 		if (this.decompilerMarginService != null) {
+-			this.decompilerMarginService.addMarginProvider(decompilerMarginProvider);
++			this.decompilerMarginService.addIconSource(decompilerIconSource);
+ 		}
+ 	}
+ 
+diff --git a/Ghidra/Debug/Debugger/src/main/java/ghidra/app/plugin/core/debug/gui/breakpoint/BreakpointsDecompilerMarginProvider.java b/Ghidra/Debug/Debugger/src/main/java/ghidra/app/plugin/core/debug/gui/decompiler/DebuggerDecompilerIconMarginProvider.java
+similarity index 59%
+rename from Ghidra/Debug/Debugger/src/main/java/ghidra/app/plugin/core/debug/gui/breakpoint/BreakpointsDecompilerMarginProvider.java
+rename to Ghidra/Debug/Debugger/src/main/java/ghidra/app/plugin/core/debug/gui/decompiler/DebuggerDecompilerIconMarginProvider.java
+index 7730c6fb8d..01a4f36565 100644
+--- a/Ghidra/Debug/Debugger/src/main/java/ghidra/app/plugin/core/debug/gui/breakpoint/BreakpointsDecompilerMarginProvider.java
++++ b/Ghidra/Debug/Debugger/src/main/java/ghidra/app/plugin/core/debug/gui/decompiler/DebuggerDecompilerIconMarginProvider.java
+@@ -13,16 +13,16 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-package ghidra.app.plugin.core.debug.gui.breakpoint;
++package ghidra.app.plugin.core.debug.gui.decompiler;
+ 
+ import java.awt.*;
+ import java.awt.event.MouseAdapter;
+ import java.awt.event.MouseEvent;
+ import java.math.BigInteger;
++import java.util.*;
+ import java.util.List;
+-import java.util.Set;
+-import java.util.concurrent.CompletableFuture;
+ 
++import javax.swing.Icon;
+ import javax.swing.JPanel;
+ 
+ import docking.widgets.fieldpanel.LayoutModel;
+@@ -31,28 +31,28 @@ import docking.widgets.fieldpanel.listener.LayoutModelListener;
+ import ghidra.app.decompiler.ClangLine;
+ import ghidra.app.decompiler.component.margin.DecompilerMarginProvider;
+ import ghidra.app.decompiler.component.margin.LayoutPixelIndexMap;
+-import ghidra.debug.api.breakpoint.LogicalBreakpoint;
+-import ghidra.debug.api.breakpoint.LogicalBreakpoint.State;
+ import ghidra.program.model.listing.Program;
+-import ghidra.program.util.ProgramLocation;
+-import ghidra.trace.model.breakpoint.TraceBreakpointKind.CommonSet;
+ 
+-public class BreakpointsDecompilerMarginProvider extends JPanel
++/**
++ * A Decompiler margin that paints the icons of every {@link DecompilerMarginIconSource} added to
++ * the {@link DebuggerDecompilerMarginService}
++ */
++public class DebuggerDecompilerIconMarginProvider extends JPanel
+ 		implements DecompilerMarginProvider, LayoutModelListener {
+ 
+ 	private Program program;
+ 	private LayoutModel model;
+ 	private LayoutPixelIndexMap pixmap;
+ 
+-	private final DebuggerBreakpointMarkerPlugin plugin;
++	private final DebuggerDecompilerMarginServicePlugin plugin;
+ 
+-	public BreakpointsDecompilerMarginProvider(DebuggerBreakpointMarkerPlugin plugin) {
++	public DebuggerDecompilerIconMarginProvider(DebuggerDecompilerMarginServicePlugin plugin) {
+ 		this.plugin = plugin;
+ 		setPreferredSize(new Dimension(16, 0));
+ 		addMouseListener(new MouseAdapter() {
+ 			@Override
+ 			public void mousePressed(MouseEvent e) {
+-				doToggleBreakpoint(e);
++				doMarginPressed(e);
+ 			}
+ 		});
+ 	}
+@@ -93,49 +93,59 @@ public class BreakpointsDecompilerMarginProvider extends JPanel
+ 		repaint();
+ 	}
+ 
++	/**
++	 * Get the icons for the given line, in the order they are painted
++	 *
++	 * @param line the line
++	 * @return the icons, lowest priority first
++	 */
++	List<Icon> getIcons(ClangLine line) {
++		if (program == null) {
++			return List.of();
++		}
++		List<DecompilerMarginIconSource> sources = new ArrayList<>(plugin.sources);
++		sources.sort(Comparator.comparingInt(DecompilerMarginIconSource::getPriority));
++		List<Icon> icons = new ArrayList<>();
++		for (DecompilerMarginIconSource source : sources) {
++			Icon icon = source.getIcon(program, line);
++			if (icon != null) {
++				icons.add(icon);
++			}
++		}
++		return icons;
++	}
++
+ 	@Override
+ 	public void paint(Graphics g) {
+ 		super.paint(g);
+-		if (plugin.breakpointService == null) {
++		if (pixmap == null) {
+ 			return;
+ 		}
+ 		Rectangle visible = getVisibleRect();
+ 		BigInteger startIdx = pixmap.getIndex(visible.y);
+ 		BigInteger endIdx = pixmap.getIndex(visible.y + visible.height);
+ 
+-		List<ClangLine> lines = plugin.decompilerMarginService.getDecompilerPanel().getLines();
++		List<ClangLine> lines = plugin.getLines();
+ 		for (BigInteger index = startIdx; index.compareTo(endIdx) <= 0; index =
+ 			index.add(BigInteger.ONE)) {
+ 			int i = index.intValue();
+ 			if (i >= lines.size()) {
+ 				continue;
+ 			}
+-			ClangLine line = lines.get(i);
+-			List<ProgramLocation> locs =
+-				DebuggerBreakpointMarkerPlugin.getLocationsFromLine(program, line);
+-			State state = plugin.computeState(locs);
+-			if (state.icon != null) {
+-				state.icon.paintIcon(this, g, 0, pixmap.getPixel(index));
++			for (Icon icon : getIcons(lines.get(i))) {
++				icon.paintIcon(this, g, 0, pixmap.getPixel(index));
+ 			}
+ 		}
+ 	}
+ 
+-	private void doToggleBreakpoint(MouseEvent e) {
+-		if (e.getClickCount() == 2 && e.getButton() == MouseEvent.BUTTON1) {
+-			int i = pixmap.getIndex(e.getY()).intValue();
+-			List<ClangLine> lines = plugin.decompilerMarginService.getDecompilerPanel().getLines();
+-			List<ProgramLocation> locs =
+-				DebuggerBreakpointMarkerPlugin.nearestLocationsToLine(program, i, lines);
+-			if (locs == null || locs.isEmpty()) {
+-				return;
+-			}
+-			Set<LogicalBreakpoint> col = plugin.collectBreakpoints(locs);
+-			plugin.breakpointService.toggleBreakpointsAt(col, locs.get(0), () -> {
+-				plugin.placeBreakpointDialog.prompt(plugin.getTool(), plugin.breakpointService,
+-					"Set breakpoint", locs.get(0), 1, CommonSet.SWX, "");
+-				// Not great, but I'm not sticking around for the dialog
+-				return CompletableFuture.completedFuture(Set.of());
+-			});
++	private void doMarginPressed(MouseEvent e) {
++		if (pixmap == null || program == null) {
++			return;
++		}
++		int i = pixmap.getIndex(e.getY()).intValue();
++		List<ClangLine> lines = plugin.getLines();
++		for (DecompilerMarginIconSource source : plugin.sources) {
++			source.marginPressed(program, i, lines, e);
+ 		}
+ 	}
+ }
+diff --git a/Ghidra/Debug/Debugger/src/main/java/ghidra/app/plugin/core/debug/gui/decompiler/DebuggerDecompilerMarginService.java b/Ghidra/Debug/Debugger/src/main/java/ghidra/app/plugin/core/debug/gui/decompiler/DebuggerDecompilerMarginService.java
+new file mode 100644
+index 0000000000..7416c0ffac
+--- /dev/null
++++ b/Ghidra/Debug/Debugger/src/main/java/ghidra/app/plugin/core/debug/gui/decompiler/DebuggerDecompilerMarginService.java
+@@ -0,0 +1,46 @@
++/* ###
++ * IP: GHIDRA
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package ghidra.app.plugin.core.debug.gui.decompiler;
++
++import ghidra.framework.plugintool.ServiceInfo;
++
++/**
++ * A service for displaying Debugger icons, e.g., breakpoints and the tracked location, in a single
++ * margin of the Decompiler
++ */
++@ServiceInfo(
++	defaultProvider = DebuggerDecompilerMarginServicePlugin.class,
++	description = "Display Debugger icons in the Decompiler's margin")
++public interface DebuggerDecompilerMarginService {
++	/**
++	 * Add a source of icons to the margin
++	 *
++	 * @param source the source
++	 */
++	void addIconSource(DecompilerMarginIconSource source);
++
++	/**
++	 * Remove a source of icons from the margin
++	 *
++	 * @param source the source
++	 */
++	void removeIconSource(DecompilerMarginIconSource source);
++
++	/**
++	 * Notify the margin that the icons of one or more sources have changed
++	 */
++	void iconsChanged();
++}
+diff --git a/Ghidra/Debug/Debugger/src/main/java/ghidra/app/plugin/core/debug/gui/decompiler/DebuggerDecompilerMarginServicePlugin.java b/Ghidra/Debug/Debugger/src/main/java/ghidra/app/plugin/core/debug/gui/decompiler/DebuggerDecompilerMarginServicePlugin.java
+new file mode 100644
+index 0000000000..ade0e7df15
+--- /dev/null
++++ b/Ghidra/Debug/Debugger/src/main/java/ghidra/app/plugin/core/debug/gui/decompiler/DebuggerDecompilerMarginServicePlugin.java
+@@ -0,0 +1,98 @@
++/* ###
++ * IP: GHIDRA
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package ghidra.app.plugin.core.debug.gui.decompiler;
++
++import java.util.List;
++import java.util.concurrent.CopyOnWriteArrayList;
++
++import ghidra.app.decompiler.ClangLine;
++import ghidra.app.decompiler.DecompilerMarginService;
++import ghidra.app.plugin.PluginCategoryNames;
++import ghidra.app.plugin.core.debug.DebuggerPluginPackage;
++import ghidra.framework.plugintool.*;
++import ghidra.framework.plugintool.annotation.AutoServiceConsumed;
++import ghidra.framework.plugintool.util.PluginStatus;
++import ghidra.util.Swing;
++
++@PluginInfo(
++	shortDescription = "Debugger icon margin in the Decompiler",
++	description = "Displays the icons of Debugger plugins, e.g., breakpoints and the tracked " +
++		"location, in a single margin of the Decompiler",
++	category = PluginCategoryNames.DEBUGGER,
++	packageName = DebuggerPluginPackage.NAME,
++	status = PluginStatus.RELEASED,
++	servicesProvided = {
++		DebuggerDecompilerMarginService.class,
++	})
++public class DebuggerDecompilerMarginServicePlugin extends Plugin
++		implements DebuggerDecompilerMarginService {
++
++	// package access for testing
++	final DebuggerDecompilerIconMarginProvider marginProvider;
++	final List<DecompilerMarginIconSource> sources = new CopyOnWriteArrayList<>();
++
++	// @AutoServiceConsumed via method
++	DecompilerMarginService decompilerMarginService;
++	@SuppressWarnings("unused")
++	private final AutoService.Wiring autoServiceWiring;
++
++	public DebuggerDecompilerMarginServicePlugin(PluginTool tool) {
++		super(tool);
++		this.marginProvider = new DebuggerDecompilerIconMarginProvider(this);
++		this.autoServiceWiring = AutoService.wireServicesProvidedAndConsumed(this);
++	}
++
++	@Override
++	protected void dispose() {
++		setDecompilerMarginService(null);
++		super.dispose();
++	}
++
++	@AutoServiceConsumed
++	private void setDecompilerMarginService(DecompilerMarginService decompilerMarginService) {
++		if (this.decompilerMarginService != null) {
++			this.decompilerMarginService.removeMarginProvider(marginProvider);
++		}
++		this.decompilerMarginService = decompilerMarginService;
++		if (this.decompilerMarginService != null) {
++			this.decompilerMarginService.addMarginProvider(marginProvider);
++		}
++	}
++
++	@Override
++	public void addIconSource(DecompilerMarginIconSource source) {
++		sources.add(source);
++		iconsChanged();
++	}
++
++	@Override
++	public void removeIconSource(DecompilerMarginIconSource source) {
++		sources.remove(source);
++		iconsChanged();
++	}
++
++	@Override
++	public void iconsChanged() {
++		Swing.runIfSwingOrRunLater(marginProvider::repaint);
++	}
++
++	List<ClangLine> getLines() {
++		if (decompilerMarginService == null) {
++			return List.of();
++		}
++		return decompilerMarginService.getDecompilerPanel().getLines();
++	}
++}
+diff --git a/Ghidra/Debug/Debugger/src/main/java/ghidra/app/plugin/core/debug/gui/decompiler/DebuggerDecompilerTrackLocationPlugin.java b/Ghidra/Debug/Debugger/src/main/java/ghidra/app/plugin/core/debug/gui/decompiler/DebuggerDecompilerTrackLocationPlugin.java
+new file mode 100644
+index 0000000000..54b5f1cb56
+--- /dev/null
++++ b/Ghidra/Debug/Debugger/src/main/java/ghidra/app/plugin/core/debug/gui/decompiler/DebuggerDecompilerTrackLocationPlugin.java
+@@ -0,0 +1,311 @@
 +/* ###
 + * IP: GHIDRA
 + *
@@ -37,100 +545,139 @@ index 0000000000..7f844adc40
 +import java.awt.Color;
 +import java.util.Set;
 +
++import javax.swing.Icon;
++
 +import ghidra.app.decompiler.*;
 +import ghidra.app.plugin.PluginCategoryNames;
 +import ghidra.app.plugin.core.debug.DebuggerPluginPackage;
 +import ghidra.app.plugin.core.debug.event.TraceActivatedPluginEvent;
++import ghidra.app.plugin.core.debug.event.TrackingChangedPluginEvent;
 +import ghidra.app.plugin.core.debug.gui.DebuggerResources;
 +import ghidra.app.plugin.core.debug.gui.action.DebuggerTrackLocationTrait;
-+import ghidra.app.services.DebuggerStaticMappingService;
-+import ghidra.app.services.DebuggerTraceManagerService;
++import ghidra.app.services.*;
++import ghidra.debug.api.action.LocationTrackingSpec;
 +import ghidra.debug.api.modules.DebuggerStaticMappingChangeListener;
 +import ghidra.framework.plugintool.*;
 +import ghidra.framework.plugintool.annotation.AutoServiceConsumed;
 +import ghidra.framework.plugintool.util.PluginStatus;
 +import ghidra.program.model.address.Address;
++import ghidra.program.model.listing.Function;
 +import ghidra.program.model.listing.Program;
++import ghidra.program.model.pcode.HighFunction;
 +import ghidra.program.util.ProgramLocation;
 +import ghidra.trace.model.Trace;
++import ghidra.util.Swing;
 +
 +/**
-+ * Marks the current program counter in the Decompiler.
++ * Marks the tracked location, e.g., the program counter, in the Decompiler
 + *
 + * <p>
-+ * The listings mark the tracked PC, but the Decompiler only moves its caret to the start of the
-+ * PC's line, and that caret is also the user's. This plugin tracks the PC the same way the listings
-+ * do ({@link DebuggerTrackLocationTrait} with its default, PC, spec), maps it into the static
-+ * program, and then marks it independently of the caret: the tokens of the PC's instruction get the
-+ * tracked-register background, and their lines get the tracked-register marker in a Decompiler
-+ * margin, as {@code BreakpointsDecompilerMarginProvider} does for breakpoints.
++ * The location is tracked the same way as in the primary dynamic listing, and follows that
++ * listing's "Track Location" setting. The location is mapped into the static program and marked
++ * independently of the Decompiler's cursor: the tokens of the instruction at the location get the
++ * tracked-register background, and their lines get the tracked-register icon in the Debugger's
++ * {@link DebuggerDecompilerMarginService margin}.
 + */
 +@PluginInfo(
-+	shortDescription = "Debugger program counter in the Decompiler",
-+	description = "Marks the current program counter in the Decompiler, independent of the caret",
++	shortDescription = "Debugger tracked location in the Decompiler",
++	description = "Marks the tracked location, e.g., the program counter, in the Decompiler",
 +	category = PluginCategoryNames.DEBUGGER,
 +	packageName = DebuggerPluginPackage.NAME,
 +	status = PluginStatus.RELEASED,
 +	eventsConsumed = {
 +		TraceActivatedPluginEvent.class,
++		TrackingChangedPluginEvent.class,
 +	},
 +	servicesRequired = {
 +		DebuggerStaticMappingService.class,
++		DebuggerDecompilerMarginService.class,
 +	})
-+public class DebuggerDecompilerPcMarkerPlugin extends Plugin {
-+	static final String HIGHLIGHTER_ID = DebuggerDecompilerPcMarkerPlugin.class.getName();
-+	static final Color COLOR_PC = DebuggerResources.COLOR_REGISTER_MARKERS;
++public class DebuggerDecompilerTrackLocationPlugin extends Plugin {
++	static final String HIGHLIGHTER_ID = DebuggerDecompilerTrackLocationPlugin.class.getName();
++	static final Color COLOR_TRACKED = DebuggerResources.COLOR_REGISTER_MARKERS;
++	static final Icon ICON_TRACKED = DebuggerResources.ICON_REGISTER_MARKER;
 +
-+	private class PcTracker extends DebuggerTrackLocationTrait {
-+		PcTracker() {
-+			super(DebuggerDecompilerPcMarkerPlugin.this.getTool(),
-+				DebuggerDecompilerPcMarkerPlugin.this, null);
++	private class ForDecompilerTrackLocationTrait extends DebuggerTrackLocationTrait {
++		ForDecompilerTrackLocationTrait() {
++			super(DebuggerDecompilerTrackLocationPlugin.this.getTool(),
++				DebuggerDecompilerTrackLocationPlugin.this, null);
 +		}
 +
 +		@Override
 +		protected void locationTracked() {
-+			updateStaticPc();
++			updateStaticLocation();
 +		}
 +	}
 +
-+	private class PcMatcher implements CTokenHighlightMatcher {
++	private class TrackedTokenMatcher implements CTokenHighlightMatcher {
++		private Program program;
++
++		@Override
++		public void start(ClangNode root) {
++			ClangFunction clangFunction = root == null ? null : root.getClangFunction();
++			HighFunction highFunction =
++				clangFunction == null ? null : clangFunction.getHighFunction();
++			Function function = highFunction == null ? null : highFunction.getFunction();
++			program = function == null ? null : function.getProgram();
++		}
++
 +		@Override
 +		public Color getTokenHighlight(ClangToken token) {
-+			return isPcToken(token) ? COLOR_PC : null;
++			ProgramLocation loc = staticLocation;
++			if (loc == null || program != null && program != loc.getProgram()) {
++				return null;
++			}
++			return isTrackedToken(loc, token) ? COLOR_TRACKED : null;
++		}
++	}
++
++	private class TrackedLocationIconSource implements DecompilerMarginIconSource {
++		@Override
++		public Icon getIcon(Program program, ClangLine line) {
++			return isTrackedLine(program, line) ? ICON_TRACKED : null;
++		}
++
++		@Override
++		public int getPriority() {
++			return DebuggerResources.PRIORITY_REGISTER_MARKER;
 +		}
 +	}
 +
 +	private final DebuggerStaticMappingChangeListener mappingsListener = this::mappingsChanged;
-+	private final PcTracker tracker;
-+	private final PcDecompilerMarginProvider marginProvider;
++	private final DecompilerMarginIconSource iconSource = new TrackedLocationIconSource();
++	// package access for testing
++	final ForDecompilerTrackLocationTrait trackingTrait;
 +
 +	@AutoServiceConsumed
 +	private DebuggerTraceManagerService traceManager;
 +	// @AutoServiceConsumed via method
++	private DebuggerListingService listingService;
++	// @AutoServiceConsumed via method
 +	private DebuggerStaticMappingService mappingService;
 +	// @AutoServiceConsumed via method
-+	private DecompilerMarginService marginService;
++	private DebuggerDecompilerMarginService marginService;
 +	// @AutoServiceConsumed via method
 +	private DecompilerHighlightService highlightService;
 +	@SuppressWarnings("unused")
 +	private final AutoService.Wiring autoServiceWiring;
 +
-+	private DecompilerHighlighter highlighter;
-+	/** The PC mapped into the static program, or null */
-+	private ProgramLocation staticPc;
++	// package access for testing
++	DecompilerHighlighter highlighter;
++	/** The tracked location mapped into the static program, or null */
++	private volatile ProgramLocation staticLocation;
 +
-+	public DebuggerDecompilerPcMarkerPlugin(PluginTool tool) {
++	public DebuggerDecompilerTrackLocationPlugin(PluginTool tool) {
 +		super(tool);
-+		this.tracker = new PcTracker();
-+		this.marginProvider = new PcDecompilerMarginProvider(this);
++		this.trackingTrait = new ForDecompilerTrackLocationTrait();
 +		this.autoServiceWiring = AutoService.wireServicesConsumed(this, this);
 +	}
 +
 +	@Override
 +	protected void init() {
 +		super.init();
++		syncTrackingSpec();
 +		if (traceManager != null) {
-+			tracker.goToCoordinates(traceManager.getCurrent());
++			trackingTrait.goToCoordinates(traceManager.getCurrent());
 +		}
 +	}
 +
@@ -145,9 +692,43 @@ index 0000000000..7f844adc40
 +	@Override
 +	public void processEvent(PluginEvent event) {
 +		super.processEvent(event);
-+		if (event instanceof TraceActivatedPluginEvent ev) {
-+			tracker.goToCoordinates(ev.getActiveCoordinates());
++		switch (event) {
++			case TraceActivatedPluginEvent ev -> {
++				// The listing may have restored its spec without firing an event
++				syncTrackingSpec();
++				trackingTrait.goToCoordinates(ev.getActiveCoordinates());
++			}
++			case TrackingChangedPluginEvent ev -> setTrackingSpec(ev.getLocationTrackingSpec());
++			default -> {
++			}
 +		}
++	}
++
++	/**
++	 * Adopt the tracking spec of the primary dynamic listing, if present
++	 */
++	private void syncTrackingSpec() {
++		if (listingService == null) {
++			return;
++		}
++		LocationTrackingSpec spec = listingService.getTrackingSpec();
++		if (spec != null && spec != trackingTrait.getSpec()) {
++			setTrackingSpec(spec);
++		}
++	}
++
++	void setTrackingSpec(LocationTrackingSpec spec) {
++		trackingTrait.setSpec(spec);
++	}
++
++	LocationTrackingSpec getTrackingSpec() {
++		return trackingTrait.getSpec();
++	}
++
++	@AutoServiceConsumed
++	private void setListingService(DebuggerListingService listingService) {
++		this.listingService = listingService;
++		syncTrackingSpec();
 +	}
 +
 +	@AutoServiceConsumed
@@ -159,17 +740,17 @@ index 0000000000..7f844adc40
 +		if (this.mappingService != null) {
 +			this.mappingService.addChangeListener(mappingsListener);
 +		}
-+		updateStaticPc();
++		updateStaticLocation();
 +	}
 +
 +	@AutoServiceConsumed
-+	private void setMarginService(DecompilerMarginService marginService) {
++	private void setMarginService(DebuggerDecompilerMarginService marginService) {
 +		if (this.marginService != null) {
-+			this.marginService.removeMarginProvider(marginProvider);
++			this.marginService.removeIconSource(iconSource);
 +		}
 +		this.marginService = marginService;
 +		if (this.marginService != null) {
-+			this.marginService.addMarginProvider(marginProvider);
++			this.marginService.addIconSource(iconSource);
 +		}
 +	}
 +
@@ -181,45 +762,46 @@ index 0000000000..7f844adc40
 +		}
 +		this.highlightService = highlightService;
 +		if (this.highlightService != null) {
-+			highlighter = this.highlightService.createHighlighter(HIGHLIGHTER_ID, new PcMatcher());
++			highlighter =
++				this.highlightService.createHighlighter(HIGHLIGHTER_ID, new TrackedTokenMatcher());
 +			refreshMarks();
 +		}
 +	}
 +
 +	private void mappingsChanged(Set<Trace> affectedTraces, Set<Program> affectedPrograms) {
-+		updateStaticPc();
++		updateStaticLocation();
 +	}
 +
-+	private void updateStaticPc() {
-+		ProgramLocation dynamic = tracker.getTrackedLocation();
-+		staticPc = dynamic == null || mappingService == null ? null
++	private void updateStaticLocation() {
++		ProgramLocation dynamic = trackingTrait.getTrackedLocation();
++		staticLocation = dynamic == null || mappingService == null ? null
 +				: mappingService.getStaticLocationFromDynamic(dynamic);
-+		refreshMarks();
++		Swing.runIfSwingOrRunLater(this::refreshMarks);
 +	}
 +
 +	private void refreshMarks() {
 +		if (highlighter != null) {
 +			highlighter.clearHighlights();
-+			if (staticPc != null) {
++			if (staticLocation != null) {
 +				highlighter.applyHighlights();
 +			}
 +		}
-+		marginProvider.repaint();
-+	}
-+
-+	DecompilerMarginService getMarginService() {
-+		return marginService;
++		if (marginService != null) {
++			marginService.iconsChanged();
++		}
 +	}
 +
 +	/**
-+	 * Check if the given token is part of the instruction at the PC
++	 * Get the tracked location, mapped into the static program
 +	 *
-+	 * @param token the token
-+	 * @return true if the token's address range covers the PC in the static program
++	 * @return the location, or null if not tracking or not mapped
 +	 */
-+	boolean isPcToken(ClangToken token) {
-+		ProgramLocation pc = staticPc;
-+		if (pc == null || token == null) {
++	ProgramLocation getStaticLocation() {
++		return staticLocation;
++	}
++
++	private static boolean isTrackedToken(ProgramLocation loc, ClangToken token) {
++		if (token == null) {
 +			return false;
 +		}
 +		Address min = token.getMinAddress();
@@ -227,7 +809,7 @@ index 0000000000..7f844adc40
 +		if (min == null || max == null) {
 +			return false;
 +		}
-+		Address addr = pc.getAddress();
++		Address addr = loc.getAddress();
 +		if (!addr.getAddressSpace().equals(min.getAddressSpace())) {
 +			return false;
 +		}
@@ -235,31 +817,31 @@ index 0000000000..7f844adc40
 +	}
 +
 +	/**
-+	 * Check if any token of the given line is part of the instruction at the PC
++	 * Check if any token of the given line is part of the instruction at the tracked location
 +	 *
 +	 * @param program the program the line was decompiled from
 +	 * @param line the line
-+	 * @return true if the line holds the PC
++	 * @return true if the line holds the tracked location
 +	 */
-+	boolean isPcLine(Program program, ClangLine line) {
-+		ProgramLocation pc = staticPc;
-+		if (pc == null || pc.getProgram() != program) {
++	boolean isTrackedLine(Program program, ClangLine line) {
++		ProgramLocation loc = staticLocation;
++		if (loc == null || loc.getProgram() != program) {
 +			return false;
 +		}
 +		for (ClangToken token : line.getAllTokens()) {
-+			if (isPcToken(token)) {
++			if (isTrackedToken(loc, token)) {
 +				return true;
 +			}
 +		}
 +		return false;
 +	}
 +}
-diff --git a/Ghidra/Debug/Debugger/src/main/java/ghidra/app/plugin/core/debug/gui/decompiler/PcDecompilerMarginProvider.java b/Ghidra/Debug/Debugger/src/main/java/ghidra/app/plugin/core/debug/gui/decompiler/PcDecompilerMarginProvider.java
+diff --git a/Ghidra/Debug/Debugger/src/main/java/ghidra/app/plugin/core/debug/gui/decompiler/DecompilerMarginIconSource.java b/Ghidra/Debug/Debugger/src/main/java/ghidra/app/plugin/core/debug/gui/decompiler/DecompilerMarginIconSource.java
 new file mode 100644
-index 0000000000..42604bc069
+index 0000000000..4dd9c9a051
 --- /dev/null
-+++ b/Ghidra/Debug/Debugger/src/main/java/ghidra/app/plugin/core/debug/gui/decompiler/PcDecompilerMarginProvider.java
-@@ -0,0 +1,112 @@
++++ b/Ghidra/Debug/Debugger/src/main/java/ghidra/app/plugin/core/debug/gui/decompiler/DecompilerMarginIconSource.java
+@@ -0,0 +1,65 @@
 +/* ###
 + * IP: GHIDRA
 + *
@@ -277,99 +859,491 @@ index 0000000000..42604bc069
 + */
 +package ghidra.app.plugin.core.debug.gui.decompiler;
 +
-+import java.awt.*;
-+import java.math.BigInteger;
++import java.awt.event.MouseEvent;
 +import java.util.List;
 +
-+import javax.swing.JPanel;
++import javax.swing.Icon;
 +
-+import docking.widgets.fieldpanel.LayoutModel;
-+import docking.widgets.fieldpanel.listener.IndexMapper;
-+import docking.widgets.fieldpanel.listener.LayoutModelListener;
 +import ghidra.app.decompiler.ClangLine;
-+import ghidra.app.decompiler.DecompilerMarginService;
-+import ghidra.app.decompiler.component.margin.DecompilerMarginProvider;
-+import ghidra.app.decompiler.component.margin.LayoutPixelIndexMap;
-+import ghidra.app.plugin.core.debug.gui.DebuggerResources;
 +import ghidra.program.model.listing.Program;
 +
 +/**
-+ * A Decompiler margin that draws the tracked-register marker beside each line holding part of the
-+ * instruction at the program counter
++ * A source of icons for the Debugger's icon margin in the Decompiler
++ *
++ * @see DebuggerDecompilerMarginService
 + */
-+public class PcDecompilerMarginProvider extends JPanel
-+		implements DecompilerMarginProvider, LayoutModelListener {
++public interface DecompilerMarginIconSource {
++	/**
++	 * Get the icon to display beside the given line
++	 *
++	 * @param program the program the line was decompiled from
++	 * @param line the line
++	 * @return the icon, or null for no icon
++	 */
++	Icon getIcon(Program program, ClangLine line);
 +
-+	private final DebuggerDecompilerPcMarkerPlugin plugin;
++	/**
++	 * Get the priority of this source's icons
++	 *
++	 * <p>
++	 * When several sources have an icon for the same line, they are painted in order of increasing
++	 * priority, so the highest priority icon is on top. These follow the same convention as the
++	 * priorities given to the {@link ghidra.app.services.MarkerService}.
++	 *
++	 * @return the priority
++	 */
++	int getPriority();
 +
-+	private Program program;
-+	private LayoutModel model;
-+	private LayoutPixelIndexMap pixmap;
++	/**
++	 * The user pressed a mouse button in the margin
++	 *
++	 * @param program the program the lines were decompiled from
++	 * @param index the index of the line under the mouse
++	 * @param lines the complete list of decompiled lines
++	 * @param e the mouse event
++	 */
++	default void marginPressed(Program program, int index, List<ClangLine> lines,
++			MouseEvent e) {
++		// Optional
++	}
++}
+diff --git a/Ghidra/Test/DebuggerIntegrationTest/src/test/java/ghidra/app/plugin/core/debug/gui/decompiler/DebuggerDecompilerTrackLocationPluginTest.java b/Ghidra/Test/DebuggerIntegrationTest/src/test/java/ghidra/app/plugin/core/debug/gui/decompiler/DebuggerDecompilerTrackLocationPluginTest.java
+new file mode 100644
+index 0000000000..5130fad80f
+--- /dev/null
++++ b/Ghidra/Test/DebuggerIntegrationTest/src/test/java/ghidra/app/plugin/core/debug/gui/decompiler/DebuggerDecompilerTrackLocationPluginTest.java
+@@ -0,0 +1,433 @@
++/* ###
++ * IP: GHIDRA
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package ghidra.app.plugin.core.debug.gui.decompiler;
 +
-+	public PcDecompilerMarginProvider(DebuggerDecompilerPcMarkerPlugin plugin) {
-+		this.plugin = plugin;
-+		setPreferredSize(new Dimension(16, 0));
++import static org.junit.Assert.*;
++
++import java.math.BigInteger;
++import java.util.*;
++
++import javax.swing.Icon;
++
++import org.junit.Before;
++import org.junit.Test;
++
++import db.Transaction;
++import generic.Unique;
++import ghidra.app.decompiler.*;
++import ghidra.app.decompiler.component.*;
++import ghidra.app.plugin.core.codebrowser.CodeBrowserPlugin;
++import ghidra.app.plugin.core.debug.gui.AbstractGhidraHeadedDebuggerIntegrationTest;
++import ghidra.app.plugin.core.debug.gui.action.*;
++import ghidra.app.plugin.core.debug.gui.breakpoint.DebuggerBreakpointMarkerPlugin;
++import ghidra.app.plugin.core.debug.gui.breakpoint.MockDecompileResults;
++import ghidra.app.plugin.core.debug.gui.listing.DebuggerListingPlugin;
++import ghidra.app.plugin.core.debug.service.breakpoint.DebuggerLogicalBreakpointServicePlugin;
++import ghidra.app.plugin.core.debug.service.modules.DebuggerStaticMappingUtils;
++import ghidra.app.plugin.core.decompile.DecompilePlugin;
++import ghidra.app.plugin.core.decompile.DecompilerProvider;
++import ghidra.app.services.DebuggerLogicalBreakpointService;
++import ghidra.debug.api.breakpoint.LogicalBreakpoint;
++import ghidra.program.model.address.*;
++import ghidra.program.model.lang.Register;
++import ghidra.program.model.lang.RegisterValue;
++import ghidra.program.model.listing.Function;
++import ghidra.program.model.listing.Program;
++import ghidra.program.model.symbol.SourceType;
++import ghidra.program.util.ProgramLocation;
++import ghidra.trace.database.ToyDBTraceBuilder.ToySchemaBuilder;
++import ghidra.trace.database.memory.DBTraceMemoryManager;
++import ghidra.trace.model.*;
++import ghidra.trace.model.memory.TraceMemoryFlag;
++import ghidra.trace.model.memory.TraceMemorySpace;
++import ghidra.trace.model.stack.TraceStack;
++import ghidra.trace.model.target.schema.SchemaContext;
++import ghidra.trace.model.thread.TraceThread;
++
++public class DebuggerDecompilerTrackLocationPluginTest
++		extends AbstractGhidraHeadedDebuggerIntegrationTest {
++
++	/**
++	 * Lines of the mock decompilation:
++	 *
++	 * <pre>
++	 * 0: test()          (no address)
++	 * 1: x = 1;          0x00600000 (dynamic 0x00400000)
++	 * 2: y = 2;          0x00600004 (dynamic 0x00400004)
++	 * </pre>
++	 */
++	protected static final int LINE_X = 1;
++	protected static final int LINE_Y = 2;
++
++	protected DebuggerDecompilerTrackLocationPlugin trackPlugin;
++	protected DebuggerDecompilerMarginServicePlugin marginPlugin;
++	protected DecompilerProvider decompilerProvider;
++
++	protected Function function;
++	protected Address entry;
++	protected TraceThread thread;
++
++	@Before
++	public void setUpDecompilerTrackLocationPluginTest() throws Exception {
++		addPlugin(tool, DecompilePlugin.class);
++		decompilerProvider = waitForComponentProvider(DecompilerProvider.class);
++		runSwing(() -> tool.showComponentProvider(decompilerProvider, true));
++		trackPlugin = addPlugin(tool, DebuggerDecompilerTrackLocationPlugin.class);
++		marginPlugin = (DebuggerDecompilerMarginServicePlugin) tool
++				.getService(DebuggerDecompilerMarginService.class);
 +	}
 +
-+	@Override
-+	public void setProgram(Program program, LayoutModel model, LayoutPixelIndexMap pixmap) {
-+		this.program = program;
-+		setLayoutManager(model);
-+		this.pixmap = pixmap;
-+		repaint();
++	protected SchemaContext buildContext() {
++		return new ToySchemaBuilder()
++				.noRegisterGroups()
++				.useRegistersPerFrame()
++				.build();
 +	}
 +
-+	private void setLayoutManager(LayoutModel model) {
-+		if (this.model == model) {
-+			return;
++	/**
++	 * Create a trace and a program mapped from it, with one thread and a function in the program
++	 */
++	protected void createMappedTraceAndProgram() throws Throwable {
++		createAndOpenTrace();
++		createAndOpenProgramFromTrace();
++		intoProject(tb.trace);
++		intoProject(program);
++
++		AddressSpace ss = program.getAddressFactory().getDefaultAddressSpace();
++		entry = ss.getAddress(0x00600000);
++		try (Transaction tx = program.openTransaction("Add block and function")) {
++			program.getMemory()
++					.createInitializedBlock(".text", entry, 0x10000, (byte) 0, monitor, false);
++			function = program.getFunctionManager()
++					.createFunction("test", entry, new AddressSet(entry, entry.add(0xf)),
++						SourceType.USER_DEFINED);
 +		}
-+		if (this.model != null) {
-+			this.model.removeLayoutModelListener(this);
++		try (Transaction tx = tb.startTransaction()) {
++			tb.createRootObject(buildContext(), "Target");
++			DBTraceMemoryManager memory = tb.trace.getMemoryManager();
++			memory.addRegion("Memory[exe:.text]", Lifespan.nowOn(0),
++				tb.range(0x00400000, 0x0040ffff),
++				TraceMemoryFlag.READ, TraceMemoryFlag.EXECUTE);
++			TraceLocation from =
++				new DefaultTraceLocation(tb.trace, null, Lifespan.nowOn(0), tb.addr(0x00400000));
++			ProgramLocation to = new ProgramLocation(program, entry);
++			DebuggerStaticMappingUtils.addMapping(from, to, 0x8000, false);
++
++			thread = tb.getOrAddThread("Threads[1]", 0);
++			tb.createObjectsFramesAndRegs(thread, Lifespan.nowOn(0), tb.host, 1);
 +		}
-+		this.model = model;
-+		if (this.model != null) {
-+			this.model.addLayoutModelListener(this);
-+		}
++		waitForProgram(program);
++		waitForDomainObject(tb.trace);
 +	}
 +
-+	@Override
-+	public Component getComponent() {
-+		return this;
-+	}
-+
-+	@Override
-+	public void modelSizeChanged(IndexMapper indexMapper) {
-+		repaint();
-+	}
-+
-+	@Override
-+	public void dataChanged(BigInteger start, BigInteger end) {
-+		repaint();
-+	}
-+
-+	@Override
-+	public void paint(Graphics g) {
-+		super.paint(g);
-+		DecompilerMarginService marginService = plugin.getMarginService();
-+		if (marginService == null || pixmap == null || program == null) {
-+			return;
-+		}
-+		Rectangle visible = getVisibleRect();
-+		BigInteger startIdx = pixmap.getIndex(visible.y);
-+		BigInteger endIdx = pixmap.getIndex(visible.y + visible.height);
-+
-+		List<ClangLine> lines = marginService.getDecompilerPanel().getLines();
-+		for (BigInteger index = startIdx; index.compareTo(endIdx) <= 0; index =
-+			index.add(BigInteger.ONE)) {
-+			int i = index.intValue();
-+			if (i >= lines.size()) {
-+				continue;
++	protected void setMockDecompileData() {
++		DecompileResults results = new MockDecompileResults(function) {
++			{
++				root(function(
++					token("test()"), brk(),
++					token("x = 1;", entry), brk(),
++					token("y = 2;", entry.add(4))));
 +			}
-+			if (plugin.isPcLine(program, lines.get(i))) {
-+				DebuggerResources.ICON_REGISTER_MARKER.paintIcon(this, g, 0,
-+					pixmap.getPixel(index));
++
++			ClangBuilder<ClangBreak> brk() {
++				return ClangBreak::new;
 +			}
++		};
++		Program p = function.getProgram();
++		DecompileData data = new DecompileData(p, function, new ProgramLocation(p, entry),
++			results, "", null, null);
++		runSwing(() -> decompilerProvider.getController().setDecompileData(data));
++		waitForPass(() -> assertEquals(3, getLines().size()));
++	}
++
++	protected void setRegister(Register register, long snap, long value) {
++		try (Transaction tx = tb.startTransaction()) {
++			TraceMemorySpace regs =
++				tb.trace.getMemoryManager().getMemoryRegisterSpace(thread, true);
++			regs.setValue(snap, new RegisterValue(register, BigInteger.valueOf(value)));
 +		}
++		waitForDomainObject(tb.trace);
++	}
++
++	protected void setPc(long value) {
++		setRegister(tb.language.getProgramCounter(), 0, value);
++	}
++
++	protected List<ClangLine> getLines() {
++		return runSwing(() -> decompilerProvider.getDecompilerPanel().getLines());
++	}
++
++	protected List<Icon> getIcons(int line) {
++		return runSwing(() -> marginPlugin.marginProvider.getIcons(getLines().get(line)));
++	}
++
++	protected Set<String> getHighlightedText() {
++		return runSwing(() -> {
++			DecompilerPanel panel = decompilerProvider.getDecompilerPanel();
++			TokenHighlights highlights =
++				panel.getHighlightController().getHighlighterHighlights(trackPlugin.highlighter);
++			Set<String> result = new HashSet<>();
++			if (highlights == null) {
++				return result;
++			}
++			for (HighlightToken hl : highlights) {
++				result.add(hl.getToken().getText());
++			}
++			return result;
++		});
++	}
++
++	/**
++	 * Assert the tracked location is marked on the given line, and only that line
++	 *
++	 * @param line the line, or -1 to assert no line is marked
++	 */
++	protected void assertMarkedLine(int line) {
++		waitForPass(() -> {
++			for (int i = 0; i < getLines().size(); i++) {
++				assertEquals("Icon on line " + i, i == line,
++					getIcons(i).contains(DebuggerDecompilerTrackLocationPlugin.ICON_TRACKED));
++			}
++			Set<String> expected = switch (line) {
++				case LINE_X -> Set.of("x = 1;");
++				case LINE_Y -> Set.of("y = 2;");
++				default -> Set.of();
++			};
++			assertEquals(expected, getHighlightedText());
++		});
++	}
++
++	@Test
++	public void testNoTraceNoMarks() throws Throwable {
++		createMappedTraceAndProgram();
++		setMockDecompileData();
++
++		assertNull(trackPlugin.getStaticLocation());
++		assertMarkedLine(-1);
++	}
++
++	@Test
++	public void testNoDecompilationNoErrors() throws Throwable {
++		createMappedTraceAndProgram();
++		traceManager.activateThread(thread);
++		setPc(0x00400004);
++
++		waitForPass(() -> assertEquals(new ProgramLocation(program, entry.add(4)),
++			trackPlugin.getStaticLocation()));
++	}
++
++	@Test
++	public void testActivateThenUpdatePcMarks() throws Throwable {
++		createMappedTraceAndProgram();
++		setMockDecompileData();
++
++		traceManager.activateThread(thread);
++		waitForSwing();
++		assertMarkedLine(-1);
++
++		setPc(0x00400004);
++		assertMarkedLine(LINE_Y);
++	}
++
++	@Test
++	public void testUpdatePcThenActivateMarks() throws Throwable {
++		createMappedTraceAndProgram();
++		setMockDecompileData();
++
++		setPc(0x00400004);
++		assertMarkedLine(-1);
++
++		traceManager.activateThread(thread);
++		assertMarkedLine(LINE_Y);
++	}
++
++	@Test
++	public void testDecompileAfterTrackingMarks() throws Throwable {
++		createMappedTraceAndProgram();
++		traceManager.activateThread(thread);
++		setPc(0x00400004);
++		waitForPass(() -> assertNotNull(trackPlugin.getStaticLocation()));
++
++		setMockDecompileData();
++		assertMarkedLine(LINE_Y);
++	}
++
++	@Test
++	public void testPcChangeMovesMarks() throws Throwable {
++		createMappedTraceAndProgram();
++		setMockDecompileData();
++		traceManager.activateThread(thread);
++		setPc(0x00400004);
++		assertMarkedLine(LINE_Y);
++
++		setPc(0x00400000);
++		assertMarkedLine(LINE_X);
++	}
++
++	@Test
++	public void testStackPcMarks() throws Throwable {
++		createMappedTraceAndProgram();
++		setMockDecompileData();
++		try (Transaction tx = tb.startTransaction()) {
++			TraceStack stack = tb.trace.getStackManager().getStack(thread, 0, true);
++			stack.getFrame(0, 0, true).setProgramCounter(Lifespan.ALL, tb.addr(0x00400004));
++		}
++		waitForDomainObject(tb.trace);
++		traceManager.activateThread(thread);
++		assertMarkedLine(LINE_Y);
++
++		try (Transaction tx = tb.startTransaction()) {
++			TraceStack stack = tb.trace.getStackManager().getStack(thread, 0, true);
++			stack.getFrame(0, 0, true).setProgramCounter(Lifespan.ALL, tb.addr(0x00400000));
++		}
++		waitForDomainObject(tb.trace);
++		assertMarkedLine(LINE_X);
++	}
++
++	@Test
++	public void testSnapChangeMovesMarks() throws Throwable {
++		createMappedTraceAndProgram();
++		setMockDecompileData();
++		Register pc = tb.language.getProgramCounter();
++		setRegister(pc, 0, 0x00400004);
++		setRegister(pc, 1, 0x00400000);
++		traceManager.activateThread(thread);
++		assertMarkedLine(LINE_Y);
++
++		traceManager.activateSnap(1);
++		assertMarkedLine(LINE_X);
++	}
++
++	@Test
++	public void testPcOutsideFunctionNoMarks() throws Throwable {
++		createMappedTraceAndProgram();
++		setMockDecompileData();
++		traceManager.activateThread(thread);
++		setPc(0x00400004);
++		assertMarkedLine(LINE_Y);
++
++		setPc(0x00400100);
++		waitForPass(() -> assertEquals(new ProgramLocation(program, entry.add(0x100)),
++			trackPlugin.getStaticLocation()));
++		assertMarkedLine(-1);
++	}
++
++	@Test
++	public void testPcUnmappedNoMarks() throws Throwable {
++		createMappedTraceAndProgram();
++		setMockDecompileData();
++		traceManager.activateThread(thread);
++		setPc(0x00400004);
++		assertMarkedLine(LINE_Y);
++
++		setPc(0x00500000);
++		waitForPass(() -> assertNull(trackPlugin.getStaticLocation()));
++		assertMarkedLine(-1);
++	}
++
++	@Test
++	public void testCloseTraceClearsMarks() throws Throwable {
++		createMappedTraceAndProgram();
++		setMockDecompileData();
++		traceManager.activateThread(thread);
++		setPc(0x00400004);
++		assertMarkedLine(LINE_Y);
++
++		traceManager.closeTraceNoConfirm(tb.trace);
++		waitForSwing();
++		assertMarkedLine(-1);
++	}
++
++	@Test
++	public void testListingTrackingSpecChangeUpdatesImmediately() throws Throwable {
++		DebuggerListingPlugin listingPlugin = addPlugin(tool, DebuggerListingPlugin.class);
++		assertEquals(PCLocationTrackingSpec.INSTANCE, trackPlugin.getTrackingSpec());
++
++		createMappedTraceAndProgram();
++		setMockDecompileData();
++		setRegister(tb.trace.getBaseCompilerSpec().getStackPointer(), 0, 0x00400000);
++		traceManager.activateThread(thread);
++		setPc(0x00400004);
++		assertMarkedLine(LINE_Y);
++
++		runSwing(() -> listingPlugin.setTrackingSpec(SPLocationTrackingSpec.INSTANCE));
++		waitForPass(() -> assertEquals(SPLocationTrackingSpec.INSTANCE,
++			trackPlugin.getTrackingSpec()));
++		assertMarkedLine(LINE_X);
++
++		runSwing(() -> listingPlugin.setTrackingSpec(NoneLocationTrackingSpec.INSTANCE));
++		waitForPass(() -> assertEquals(NoneLocationTrackingSpec.INSTANCE,
++			trackPlugin.getTrackingSpec()));
++		assertMarkedLine(-1);
++
++		runSwing(() -> listingPlugin.setTrackingSpec(PCLocationTrackingSpec.INSTANCE));
++		assertMarkedLine(LINE_Y);
++	}
++
++	@Test
++	public void testListingWatchTrackingSpec() throws Throwable {
++		DebuggerListingPlugin listingPlugin = addPlugin(tool, DebuggerListingPlugin.class);
++
++		createMappedTraceAndProgram();
++		setMockDecompileData();
++		setRegister(tb.language.getRegister("r0"), 0, 0x00400000);
++		traceManager.activateThread(thread);
++		setPc(0x00400000);
++		assertMarkedLine(LINE_X);
++
++		runSwing(() -> listingPlugin.setTrackingSpec(new WatchLocationTrackingSpec("*:4 (r0+4)")));
++		assertMarkedLine(LINE_Y);
++	}
++
++	@Test
++	public void testAdoptsListingTrackingSpecWhenAddedLater() throws Throwable {
++		runSwing(() -> tool.removePlugins(List.of(trackPlugin)));
++		DebuggerListingPlugin listingPlugin = addPlugin(tool, DebuggerListingPlugin.class);
++		runSwing(() -> listingPlugin.setTrackingSpec(SPLocationTrackingSpec.INSTANCE));
++
++		trackPlugin = addPlugin(tool, DebuggerDecompilerTrackLocationPlugin.class);
++		assertEquals(SPLocationTrackingSpec.INSTANCE, trackPlugin.getTrackingSpec());
++	}
++
++	@Test
++	public void testSharesMarginWithBreakpoints() throws Throwable {
++		addPlugin(tool, CodeBrowserPlugin.class);
++		addPlugin(tool, DebuggerLogicalBreakpointServicePlugin.class);
++		addPlugin(tool, DebuggerBreakpointMarkerPlugin.class);
++		DebuggerLogicalBreakpointService breakpointService =
++			tool.getService(DebuggerLogicalBreakpointService.class);
++
++		createMappedTraceAndProgram();
++		setMockDecompileData();
++		traceManager.activateThread(thread);
++		setPc(0x00400004);
++		assertMarkedLine(LINE_Y);
++
++		try (Transaction tx = program.openTransaction("Add breakpoint")) {
++			program.getBookmarkManager()
++					.setBookmark(entry.add(4), LogicalBreakpoint.ENABLED_BOOKMARK_TYPE, "x;1", "");
++		}
++		LogicalBreakpoint lb = waitForValue(() -> Unique.assertAtMostOne(
++			breakpointService.getBreakpointsAt(program, entry.add(4))));
++		Icon breakpointIcon = lb.computeStateForProgram(program).icon;
++		assertNotNull(breakpointIcon);
++		// Lowest priority first, so the breakpoint is painted on top, as in the listings
++		waitForPass(() -> assertEquals(
++			List.of(DebuggerDecompilerTrackLocationPlugin.ICON_TRACKED, breakpointIcon),
++			getIcons(LINE_Y)));
++		assertEquals(List.of(), getIcons(LINE_X));
 +	}
 +}
 -- 
