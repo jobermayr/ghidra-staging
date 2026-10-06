@@ -2,6 +2,9 @@ From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: clearbluejar <3752074+clearbluejar@users.noreply.github.com>
 Date: Tue, 7 Apr 2026 15:45:06 -0600
 Subject: [PATCH] 9107: #9106: Add PDiff similarity score to Version Tracking
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
 
 Store PDiff similarity score in database
 
@@ -24,11 +27,19 @@ Key files:
 - SimilarityFilter: reads stored score, passes null scores through
 - BasicBlockMnemonicFunctionBulker: adjusted weights to 95/5
 - BestPDiffMatchFilter: deduplicates matches across correlators
+
+Fix stale PDiff score from reused VTMatchInfo object
+
+Correlators reuse a single VTMatchInfo across all addMatch() calls.
+The null check on getPdiffSimilarityScore() meant the score was only
+computed for the first match — all subsequent matches inherited that
+stale value. Remove the null guard so the score is always recomputed
+for FUNCTION matches.
 ---
  .../BasicBlockMnemonicFunctionBulker.java     | 167 ++++++++++++++++
  .../correlator/program/FunctionBulker.java    |  38 ++++
  .../ghidra/feature/vt/api/db/VTMatchDB.java   |  25 +++
- .../feature/vt/api/db/VTMatchSetDB.java       |  48 +++++
+ .../feature/vt/api/db/VTMatchSetDB.java       |  49 +++++
  .../vt/api/db/VTMatchTableDBAdapter.java      |  11 +-
  .../vt/api/db/VTMatchTableDBAdapterV0.java    |  85 +++++++-
  .../ghidra/feature/vt/api/db/VTSessionDB.java | 119 ++++++++++-
@@ -40,7 +51,7 @@ Key files:
  .../matchtable/VTMatchTableModel.java         |   1 +
  .../matchtable/VTMatchTableProvider.java      |  18 ++
  .../gui/util/AbstractVTMatchTableModel.java   |  64 ++++++
- 15 files changed, 846 insertions(+), 13 deletions(-)
+ 15 files changed, 847 insertions(+), 13 deletions(-)
  create mode 100644 Ghidra/Features/VersionTracking/src/main/java/ghidra/feature/vt/api/correlator/program/BasicBlockMnemonicFunctionBulker.java
  create mode 100644 Ghidra/Features/VersionTracking/src/main/java/ghidra/feature/vt/api/correlator/program/FunctionBulker.java
  create mode 100644 Ghidra/Features/VersionTracking/src/main/java/ghidra/feature/vt/gui/provider/matchtable/BestPDiffMatchFilter.java
@@ -300,7 +311,7 @@ index c3f6d2c5bd..b1e19e17e7 100644
  		return record.getString(LENGTH_TYPE.column());
  	}
 diff --git a/Ghidra/Features/VersionTracking/src/main/java/ghidra/feature/vt/api/db/VTMatchSetDB.java b/Ghidra/Features/VersionTracking/src/main/java/ghidra/feature/vt/api/db/VTMatchSetDB.java
-index 1e8c6573e2..dfa1d6eb18 100644
+index 1e8c6573e2..30dbf12cdc 100644
 --- a/Ghidra/Features/VersionTracking/src/main/java/ghidra/feature/vt/api/db/VTMatchSetDB.java
 +++ b/Ghidra/Features/VersionTracking/src/main/java/ghidra/feature/vt/api/db/VTMatchSetDB.java
 @@ -25,6 +25,7 @@ import org.jdom2.JDOMException;
@@ -324,7 +335,7 @@ index 1e8c6573e2..dfa1d6eb18 100644
  import ghidra.util.exception.VersionException;
  import ghidra.util.task.TaskMonitor;
  import ghidra.util.xml.XmlUtilities;
-@@ -158,6 +161,51 @@ public class VTMatchSetDB extends DbObject implements VTMatchSet {
+@@ -158,6 +161,52 @@ public class VTMatchSetDB extends DbObject implements VTMatchSet {
  
  	@Override
  	public VTMatch addMatch(VTMatchInfo info) {
@@ -341,8 +352,9 @@ index 1e8c6573e2..dfa1d6eb18 100644
 +		//
 +		// Computed before lock.acquire() since hashing can be slow for large functions.
 +		// Skipped for DATA matches (leave null) or if already set by the caller.
-+		if (info.getAssociationType() == VTAssociationType.FUNCTION &&
-+				info.getPdiffSimilarityScore() == null) {
++		// Always compute for FUNCTION matches — VTMatchInfo is reused across addMatch()
++		// calls by correlators, so the previous score would be stale if we checked for null.
++		if (info.getAssociationType() == VTAssociationType.FUNCTION) {
 +			Program srcProg = session.getSourceProgram();
 +			Program dstProg = session.getDestinationProgram();
 +			if (srcProg != null && dstProg != null) {
