@@ -1,0 +1,186 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Xeno Kovah <xeno@ost2.fyi>
+Date: Thu, 8 Oct 2026 15:53:24 -0400
+Subject: [PATCH] 9752: Fix JIT emulator re-executing delay slots when a branch
+ falls through
+
+The p-code of an instruction with a delay slot already includes the p-code
+of its delay-slotted instruction(s). DefaultPcodeThread accounts for this
+by advancing the counter by InstructionDecoder#getLastLengthWithDelays(),
+but the JIT's DecoderExecutor#getAdvancedAddress() used
+instruction.getMaxAddress().next(). When a delay-slotted branch was not
+taken, the JIT therefore fell through to the delay slot address and
+executed the delay-slotted instruction a second time.
+
+Record the length including delay slots when the decoder decodes an
+instruction, and use it to compute the fall-through address.
+
+Add MIPS tests for a taken and a not-taken delay-slotted branch to
+AbstractPcodeEmulatorTest, so both the plain and JIT emulators run them.
+Without the fix, JitPcodeEmulatorTest#testDelaySlotBranchNotTaken fails
+with "expected:<1> but was:<2>".
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../pcode/emu/jit/decode/DecoderExecutor.java | 16 +++++
+ .../emu/jit/decode/JitPassageDecoder.java     | 11 +++
+ .../pcode/emu/AbstractPcodeEmulatorTest.java  | 68 +++++++++++++++++++
+ 3 files changed, 95 insertions(+)
+
+diff --git a/Ghidra/Framework/Emulation/src/main/java/ghidra/pcode/emu/jit/decode/DecoderExecutor.java b/Ghidra/Framework/Emulation/src/main/java/ghidra/pcode/emu/jit/decode/DecoderExecutor.java
+index 0c043a8ef1..2fa3a5a722 100644
+--- a/Ghidra/Framework/Emulation/src/main/java/ghidra/pcode/emu/jit/decode/DecoderExecutor.java
++++ b/Ghidra/Framework/Emulation/src/main/java/ghidra/pcode/emu/jit/decode/DecoderExecutor.java
+@@ -84,6 +84,10 @@ class DecoderExecutor extends FoldingExecutor implements DisassemblerContextAdap
+ 	final AddrCtx at;
+ 
+ 	private PseudoInstruction instruction;
++	/**
++	 * The length of {@link #instruction}, including any delay-slotted instructions
++	 */
++	private int lengthWithDelays;
+ 	private final Map<PcodeFrame, NopPcodeOp> termNopsPerFrame = new HashMap<>();
+ 
+ 	private RegisterValue flow;
+@@ -164,6 +168,7 @@ class DecoderExecutor extends FoldingExecutor implements DisassemblerContextAdap
+ 	 */
+ 	void setInstruction(PseudoInstruction instruction) {
+ 		this.instruction = instruction;
++		this.lengthWithDelays = instruction == null ? 0 : instruction.getLength();
+ 		if (at.rvCtx == null || instruction == null ||
+ 			instruction instanceof DecodeErrorInstruction) {
+ 			this.flow = at.rvCtx;
+@@ -191,6 +196,9 @@ class DecoderExecutor extends FoldingExecutor implements DisassemblerContextAdap
+ 	public PseudoInstruction decodeInstruction() {
+ 		PseudoInstruction instruction = stride.decoder.decodeInstruction(at.address, at.rvCtx);
+ 		setInstruction(instruction);
++		if (instruction.getDelaySlotDepth() > 0) {
++			lengthWithDelays = stride.decoder.getLastLengthWithDelays();
++		}
+ 		return instruction;
+ 	}
+ 
+@@ -560,6 +568,14 @@ class DecoderExecutor extends FoldingExecutor implements DisassemblerContextAdap
+ 	 */
+ 	Address getAdvancedAddress() {
+ 		if (instruction != null) {
++			/**
++			 * The p-code of an instruction with delay slots already includes that of its
++			 * delay-slotted instruction(s), so fall through must skip them, too. This mirrors
++			 * DefaultPcodeThread, which advances by InstructionDecoder#getLastLengthWithDelays().
++			 */
++			if (lengthWithDelays > instruction.getLength()) {
++				return instruction.getAddress().addWrap(lengthWithDelays);
++			}
+ 			return instruction.getMaxAddress().next();
+ 		}
+ 		Msg.warn(this, "An inject may have forgotten control flow.");
+diff --git a/Ghidra/Framework/Emulation/src/main/java/ghidra/pcode/emu/jit/decode/JitPassageDecoder.java b/Ghidra/Framework/Emulation/src/main/java/ghidra/pcode/emu/jit/decode/JitPassageDecoder.java
+index 93f2846bc0..87b916ce0f 100644
+--- a/Ghidra/Framework/Emulation/src/main/java/ghidra/pcode/emu/jit/decode/JitPassageDecoder.java
++++ b/Ghidra/Framework/Emulation/src/main/java/ghidra/pcode/emu/jit/decode/JitPassageDecoder.java
+@@ -165,4 +165,15 @@ public class JitPassageDecoder {
+ 			return JitPassage.decodeError(decoder.getLanguage(), address, ctx, e.getMessage());
+ 		}
+ 	}
++
++	/**
++	 * Get the length of the last instruction decoded by {@link #decodeInstruction(Address,
++	 * RegisterValue)}, including any delay-slotted instructions
++	 *
++	 * @return the length
++	 * @see InstructionDecoder#getLastLengthWithDelays()
++	 */
++	public int getLastLengthWithDelays() {
++		return decoder.getLastLengthWithDelays();
++	}
+ }
+diff --git a/Ghidra/Test/IntegrationTest/src/test.slow/java/ghidra/pcode/emu/AbstractPcodeEmulatorTest.java b/Ghidra/Test/IntegrationTest/src/test.slow/java/ghidra/pcode/emu/AbstractPcodeEmulatorTest.java
+index 3d6c6e36c1..a56d88ab5d 100644
+--- a/Ghidra/Test/IntegrationTest/src/test.slow/java/ghidra/pcode/emu/AbstractPcodeEmulatorTest.java
++++ b/Ghidra/Test/IntegrationTest/src/test.slow/java/ghidra/pcode/emu/AbstractPcodeEmulatorTest.java
+@@ -46,6 +46,7 @@ public abstract class AbstractPcodeEmulatorTest extends AbstractGTest {
+ 	public static final LanguageID LANGID_TOY_LE = new LanguageID("Toy:BE:64:default");
+ 	public static final LanguageID LANGID_X64 = new LanguageID("x86:LE:64:default");
+ 	public static final LanguageID LANGID_ARMV8 = new LanguageID("ARM:LE:32:v8");
++	public static final LanguageID LANGID_MIPS_BE = new LanguageID("MIPS:BE:32:default");
+ 
+ 	public static final int FIB_ITER_N = 100000;
+ 	public static final long FIB_ITER_VAL = 2754320626097736315L;
+@@ -235,6 +236,73 @@ public abstract class AbstractPcodeEmulatorTest extends AbstractGTest {
+ 			arithmetic.toLong(thread.getState().getVar(rax, Reason.INSPECT), Purpose.INSPECT));
+ 	}
+ 
++	/**
++	 * Run raw MIPS code at 0x00400000 until a breakpoint at {@code brkOffset}, then return t0.
++	 *
++	 * <p>
++	 * The MIPS assembler cannot (yet) assemble delay-slotted instructions, so these tests take
++	 * encoded instructions.
++	 */
++	protected long runMipsToBreakpoint(int[] code, int brkOffset) throws Exception {
++		PcodeEmulator emu = createEmulator(getLanguage(LANGID_MIPS_BE));
++		PcodeArithmetic<byte[]> arithmetic = emu.getArithmetic();
++		AddressSpace space = emu.getLanguage().getDefaultSpace();
++		Address entry = space.getAddress(0x00400000);
++		Address brk = entry.add(brkOffset);
++
++		byte[] bytes = new byte[code.length * 4];
++		for (int i = 0; i < code.length; i++) {
++			bytes[i * 4] = (byte) (code[i] >> 24);
++			bytes[i * 4 + 1] = (byte) (code[i] >> 16);
++			bytes[i * 4 + 2] = (byte) (code[i] >> 8);
++			bytes[i * 4 + 3] = (byte) code[i];
++		}
++		emu.getSharedState().setVar(entry, bytes.length, false, bytes);
++		PcodeThread<byte[]> thread = emu.newThread();
++		thread.overrideCounter(entry);
++
++		emu.addBreakpoint(brk, "1:1");
++
++		try {
++			thread.run();
++			fail("Should have interrupted on breakpoint");
++		}
++		catch (InterruptPcodeExecutionException e) {
++		}
++		assertEquals(brk, thread.getCounter());
++
++		Register t0 = emu.getLanguage().getRegister("t0");
++		return arithmetic.toLong(thread.getState().getVar(t0, Reason.INSPECT), Purpose.INSPECT);
++	}
++
++	/**
++	 * A delay-slotted branch that is not taken falls through to the instruction after its delay
++	 * slot. The delay-slotted instruction must execute exactly once.
++	 */
++	@Test
++	public void testDelaySlotBranchNotTaken() throws Exception {
++		assertEquals(1, runMipsToBreakpoint(new int[] {
++			0x24080000, // addiu  t0,zero,0x0
++			0x14000002, // bne    zero,zero,0x00400010   (never taken)
++			0x25080001, // _addiu t0,t0,0x1              (delay slot)
++			0x24090000, // addiu  t1,zero,0x0            <- breakpoint
++		}, 0xc));
++	}
++
++	/**
++	 * A delay-slotted branch that is taken executes its delay slot once, then the target.
++	 */
++	@Test
++	public void testDelaySlotBranchTaken() throws Exception {
++		assertEquals(1, runMipsToBreakpoint(new int[] {
++			0x24080000, // addiu  t0,zero,0x0
++			0x10000002, // beq    zero,zero,0x00400010   (always taken)
++			0x25080001, // _addiu t0,t0,0x1              (delay slot)
++			0x25080010, // addiu  t0,t0,0x10             (skipped)
++			0x24090000, // addiu  t1,zero,0x0            <- breakpoint
++		}, 0x10));
++	}
++
+ 	@Test
+ 	public void testSwi() throws Exception {
+ 		PcodeEmulator emu = createEmulator(getLanguage(LANGID_TOY_BE));
+-- 
+2.45.1
+
