@@ -1,0 +1,174 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: ai-hakzarov <226896199+ai-hakzarov@users.noreply.github.com>
+Date: Wed, 7 Oct 2026 23:02:48 -0400
+Subject: [PATCH] 9745: Decompiler: lane split reassembles a value consumed
+ whole by a call
+
+LaneDivide::traceForward refused any CALL, CALLIND, CALLOTHER or RETURN that
+took the traced value as an input, so a vector built or used lane by lane and
+then passed by value to a function (or to a user-defined op such as a byte
+shuffle) kept the whole-register variable and printed as byte pieces. Such an
+op is now a terminal: the lanes are concatenated back with PIECE ops placed
+before it and the op's inputs are reattached with the reassembled value; an op
+that takes the value in more than one slot is reattached once. A value that is
+already such a reassembly (defined by a PIECE and read only by the consuming
+op) is left alone, so the division cannot feed itself if it runs more than
+once. A datatest compiled from a few lines of C covers a vector scaled lane by
+lane, stored, and handed whole to PSHUFB.
+---
+ .../Decompiler/certification.manifest         |  1 +
+ .../decompile/cpp/include/ghidra/subflow.hh   |  3 +
+ .../Decompiler/src/decompile/cpp/subflow.cc   | 66 +++++++++++++++++++
+ .../src/decompile/datatests/callwhole.xml     | 30 +++++++++
+ 4 files changed, 100 insertions(+)
+ create mode 100644 Ghidra/Features/Decompiler/src/decompile/datatests/callwhole.xml
+
+diff --git a/Ghidra/Features/Decompiler/certification.manifest b/Ghidra/Features/Decompiler/certification.manifest
+index bad069cfd2..13888f1cd9 100644
+--- a/Ghidra/Features/Decompiler/certification.manifest
++++ b/Ghidra/Features/Decompiler/certification.manifest
+@@ -23,6 +23,7 @@ src/decompile/cpp/xml.cc||GHIDRA||||END|
+ src/decompile/datatests/bitfields.xml||GHIDRA||||END|
+ src/decompile/datatests/bitfields2.xml||GHIDRA||||END|
+ src/decompile/datatests/boolless.xml||GHIDRA||||END|
++src/decompile/datatests/callwhole.xml||GHIDRA||||END|
+ src/decompile/datatests/ccmp.xml||GHIDRA||||END|
+ src/decompile/datatests/concat.xml||GHIDRA||||END|
+ src/decompile/datatests/concatsplit.xml||GHIDRA||||END|
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/subflow.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/subflow.hh
+index 0e88b420c9..0ecea03b2e 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/subflow.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/subflow.hh
+@@ -446,6 +446,9 @@ class LaneDivide : public TransformManager {
+   bool buildMultiequal(PcodeOp *op,TransformVar *outVars,int4 numLanes,int4 skipLanes);
+   bool buildIndirect(PcodeOp *op,TransformVar *outVars,int4 numLanes,int4 skipLanes);
+   bool buildStore(PcodeOp *op,int4 numLanes,int4 skipLanes);
++  set<PcodeOp *> wholeInputOps;		///< Ops consuming a traced value whole that have already been reattached
++  bool buildWholeInput(PcodeOp *op,TransformVar *rvn,int4 numLanes,int4 skipLanes);
++  static bool isWholeReassembly(Varnode *vn,PcodeOp *op);
+   bool buildLoad(PcodeOp *op,TransformVar *outVars,int4 numLanes,int4 skipLanes);
+   bool buildRightShift(PcodeOp *op,TransformVar *outVars,int4 numLanes,int4 skipLanes);
+   bool buildLeftShift(PcodeOp *op,TransformVar *outVars,int4 numLanes,int4 skipLanes);
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/subflow.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/subflow.cc
+index 0af1eb2554..420e1525d1 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/subflow.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/subflow.cc
+@@ -4032,6 +4032,18 @@ bool LaneDivide::traceForward(TransformVar *rvn,int4 numLanes,int4 skipLanes)
+ 	if (!buildStore(op,numLanes,skipLanes))
+ 	  return false;
+ 	break;
++      case CPUI_CALL:
++      case CPUI_CALLIND:
++      case CPUI_CALLOTHER:
++      case CPUI_RETURN:
++	if (isWholeReassembly(rvn->getOriginal(),op))
++	  return false;		// Already lanes PIECEd together for this op: dividing again changes nothing
++	if (wholeInputOps.find(op) != wholeInputOps.end())
++	  break;		// The value feeds this op in more than one slot: reassembled once, every slot set
++	if (!buildWholeInput(op,rvn,numLanes,skipLanes))
++	  return false;
++	wholeInputOps.insert(op);
++	break;
+       default:
+ 	return false;
+     }
+@@ -4039,6 +4051,60 @@ bool LaneDivide::traceForward(TransformVar *rvn,int4 numLanes,int4 skipLanes)
+   return true;
+ }
+ 
++/// \brief Determine if a Varnode is already the reassembly of lanes feeding one consuming op
++///
++/// After buildWholeInput, the consuming op reads a value defined by a PIECE and read by nothing else.
++/// Dividing such a value again would only rebuild the same PIECEs before the same op, and since the
++/// reassembled value is itself of a laned size, the division would otherwise repeat on every pass.
++/// \param vn is the Varnode being traced
++/// \param op is the op consuming it whole
++/// \return \b true if the Varnode is a PIECE result read only by the given op
++bool LaneDivide::isWholeReassembly(Varnode *vn,PcodeOp *op)
++
++{
++  if (!vn->isWritten()) return false;
++  if (vn->getDef()->code() != CPUI_PIECE) return false;
++  return (vn->loneDescend() == op);
++}
++
++/// \brief Reassemble the lanes into one value for a PcodeOp that consumes it whole
++///
++/// A CALL, CALLIND, CALLOTHER, or RETURN takes the original Varnode as an input it cannot split.
++/// The lanes are concatenated back together with PIECE ops placed just before the op, and the op's
++/// inputs are reattached with the reassembled value in place of the original. A vector that is built
++/// or used lane by lane and then passed whole to a call is thus still divided into its lanes.
++/// \param op is the consuming PcodeOp
++/// \param rvn is the first lane placeholder of the value
++/// \param numLanes is the number of lanes making up the value
++/// \param skipLanes is the index of the first lane within the global description
++/// \return \b true if the op was reattached
++bool LaneDivide::buildWholeInput(PcodeOp *op,TransformVar *rvn,int4 numLanes,int4 skipLanes)
++
++{
++  Varnode *origvn = rvn->getOriginal();
++  TransformOp *rop = newPreexistingOp(op->numInput(), op->code(), op);
++  TransformVar *whole = rvn;			// Least significant lane first
++  int4 size = description.getSize(skipLanes);
++  for(int4 i=1;i<numLanes;++i) {
++    int4 laneSize = description.getSize(skipLanes + i);
++    TransformVar *next = newUnique(size + laneSize);
++    TransformOp *pieceOp = newOp(2, CPUI_PIECE, rop);
++    opSetOutput(pieceOp, next);
++    opSetInput(pieceOp, rvn + i, 0);		// More significant lane on top
++    opSetInput(pieceOp, whole, 1);
++    whole = next;
++    size += laneSize;
++  }
++  for(int4 i=0;i<op->numInput();++i) {
++    Varnode *vn = op->getIn(i);
++    if (vn == origvn)
++      opSetInput(rop, whole, i);
++    else
++      opSetInput(rop, getPreexistingVarnode(vn), i);
++  }
++  return true;
++}
++
+ /// \brief Pull the logical lanes back through the defining PcodeOp of the given variable
+ ///
+ /// Determine if the logical lanes can be pulled back naturally, and create placeholder
+diff --git a/Ghidra/Features/Decompiler/src/decompile/datatests/callwhole.xml b/Ghidra/Features/Decompiler/src/decompile/datatests/callwhole.xml
+new file mode 100644
+index 0000000000..659dbb6f01
+--- /dev/null
++++ b/Ghidra/Features/Decompiler/src/decompile/datatests/callwhole.xml
+@@ -0,0 +1,30 @@
++<decompilertest>
++<binaryimage arch="x86:LE:64:default:gcc">
++<!--
++#include <tmmintrin.h>
++/* a vector scaled lane by lane, stored, and handed whole to a byte shuffle (an op the decompiler keeps opaque); the
++   lanes must still be divided for the stores, the shuffle takes the value reassembled */
++void scaleshuffle(float *out, const float *in, float s) {
++  __m128 v = _mm_mul_ps(_mm_loadu_ps(in), _mm_set1_ps(s));
++  __m128i r = _mm_shuffle_epi8(_mm_castps_si128(v), _mm_set1_epi8(3));
++  _mm_storeu_ps(out, v);
++  _mm_storeu_si128((__m128i *)(out + 4), r);
++}
++-->
++<bytechunk space="ram" offset="0x100000" readonly="true">
++554889e50f100e0fc6c0000f59c10f1107660f38000500000000f30f7f47105dc3
++</bytechunk>
++<symbol space="ram" offset="0x100000" name="scaleshuffle"/>
++</binaryimage>
++<script>
++  <com>parse line extern void scaleshuffle(float4 *out, float4 *in, float4 s);</com>
++  <com>lo fu scaleshuffle</com>
++  <com>decompile</com>
++  <com>print C</com>
++</script>
++<stringmatch name="CallWhole #1" min="1" max="1">\*out = s \* fVar1;</stringmatch>
++<stringmatch name="CallWhole #2" min="1" max="1">out\[3\] = s \* fVar4;</stringmatch>
++<stringmatch name="CallWhole #3" min="1" max="1">= pshufb\(</stringmatch>
++<stringmatch name="CallWhole #4" min="0" max="0">\[16\]\)out = </stringmatch>
++<stringmatch name="CallWhole #5" min="0" max="0">= s \* \*in;</stringmatch>
++</decompilertest>
+-- 
+2.45.1
+

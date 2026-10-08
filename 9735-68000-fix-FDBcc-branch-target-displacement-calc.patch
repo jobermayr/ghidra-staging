@@ -1,0 +1,45 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Rahad Bhuiya <rahadbhuiya2021@gmail.com>
+Date: Wed, 7 Oct 2026 16:04:14 +0600
+Subject: [PATCH] 9735: 68000: fix FDBcc branch target displacement calculation
+
+FDBcc is a three-word coprocessor instruction where the 16-bit displacement is relative to the address of the displacement word (inst_start + 4).
+
+Reusing the addr16 subconstructor computed the offset relative to inst_start + 2, causing the branch target to be 2 bytes too low and corrupting control flow analysis.
+
+Introduce the addr16DBcc subconstructor using inst_start + 4 to compute FDBcc branch targets accurately.
+
+Closes #9702
+---
+ Ghidra/Processors/68000/data/languages/68000.sinc | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/Ghidra/Processors/68000/data/languages/68000.sinc b/Ghidra/Processors/68000/data/languages/68000.sinc
+index 769da1a271..cd6a8138c6 100644
+--- a/Ghidra/Processors/68000/data/languages/68000.sinc
++++ b/Ghidra/Processors/68000/data/languages/68000.sinc
+@@ -697,6 +697,7 @@ ctlreg: "UNK_CTL_"^ctl   is ctl     { tmp:4 = 0xffffffff; export tmp; }
+ # Relative jump destinations
+ addr8: reloc    is d8base [ reloc=inst_start+2+d8base; ]	{ export *[ram]:4 reloc; }
+ addr16: reloc	is d16    [ reloc=inst_start+2+d16; ]		{ export *[ram]:4 reloc; }
++addr16DBcc: reloc is d16  [ reloc=inst_start+4+d16; ]		{ export *[ram]:4 reloc; }
+ addr32: reloc	is d32    [ reloc=inst_start+2+d32; ]		{ export *[ram]:4 reloc; }
+ # Jump locations for coprocessor instructions
+ #caddr16: reloc is d16	[ reloc=inst_next-2+d16; ]		{ export *[ram]:4 reloc; }
+@@ -2575,11 +2576,11 @@ faddrnd: "d"	is fdst & fopmode=0x66	{ tmp:8 = float2float(fdst); fdst = float2fl
+ 									[ savmod2=savmod1; regtsan=regtfan; ] { fdst = cosh(f_mem);}
+ :fcosh			fsrc, fdst		is op=15 & $(FP_COP) & op68=0 & mode=0 & regan=0; frm=0 & f1515=0 & f1313=0 & fsrc & fdst & fopmode=0x19	{ fdst = cos(fsrc);}
+ 
+-:fdb^fcc fcnt, addr16		is fop=15 & $(FP_FCOP) & f0308=9 & fcnt; f0615=0 & fcc; addr16
++:fdb^fcc fcnt, addr16DBcc		is fop=15 & $(FP_FCOP) & f0308=9 & fcnt; f0615=0 & fcc; addr16DBcc
+       { if (fcc) goto inst_next;
+         fcnt = fcnt - 1;
+         local tst = (fcnt == -1);
+-        if (!tst) goto addr16;
++        if (!tst) goto addr16DBcc;
+       }
+ 
+ :fdiv.^fprec f_mem, fdst	is op=15 & $(FP_COP) & op68=0 & $(DAT_ALTER_ADDR_MODES); (frm=1 & f1515=0 & f1313=0 & fdst & fprec & fopmode=0x20) ... & f_mem
+-- 
+2.45.1
+

@@ -1,0 +1,149 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: ai-hakzarov <226896199+ai-hakzarov@users.noreply.github.com>
+Date: Wed, 7 Oct 2026 23:02:48 -0400
+Subject: [PATCH] 9742: x86: SQRTPS, DIVPS and MOVMSKPS as lane-wise p-code
+ instead of opaque pcodeops
+
+SQRTPS and DIVPS were defined as opaque pcodeops over the whole 128-bit
+register, and MOVMSKPS as an opaque pcodeop producing its 32-bit result. The
+decompiler's lane division cannot see through an opaque op, so any function
+that used one of them kept the whole register as a 16-byte variable and printed
+its float lanes as byte pieces. The three are now written lane by lane, as
+ADDPS, MULPS and SUBPS already are: SQRTPS and DIVPS as four FLOAT_SQRT and
+FLOAT_DIV, MOVMSKPS as the sign bit of each lane shifted into place. The
+semantics were checked against hardware on random register states. A datatest
+compiled from a few lines of C covers all three.
+---
+ .../Decompiler/certification.manifest         |  1 +
+ .../src/decompile/datatests/simdlanes.xml     | 34 ++++++++++++++
+ Ghidra/Processors/x86/data/languages/ia.sinc  | 47 +++++++++++++++----
+ 3 files changed, 74 insertions(+), 8 deletions(-)
+ create mode 100644 Ghidra/Features/Decompiler/src/decompile/datatests/simdlanes.xml
+
+diff --git a/Ghidra/Features/Decompiler/certification.manifest b/Ghidra/Features/Decompiler/certification.manifest
+index 9e96f23708..cb6dac63a2 100644
+--- a/Ghidra/Features/Decompiler/certification.manifest
++++ b/Ghidra/Features/Decompiler/certification.manifest
+@@ -105,6 +105,7 @@ src/decompile/datatests/retvalhighhalf_be.xml||GHIDRA||||END|
+ src/decompile/datatests/revisit.xml||GHIDRA||||END|
+ src/decompile/datatests/riscv_isaext_memcpy.xml||GHIDRA||||END|
+ src/decompile/datatests/sbyte.xml||GHIDRA||||END|
++src/decompile/datatests/simdlanes.xml||GHIDRA||||END|
+ src/decompile/datatests/skipnext2.xml||GHIDRA||||END|
+ src/decompile/datatests/stackcorner.xml||GHIDRA||||END|
+ src/decompile/datatests/stackobjectalias.xml||GHIDRA||||END|
+diff --git a/Ghidra/Features/Decompiler/src/decompile/datatests/simdlanes.xml b/Ghidra/Features/Decompiler/src/decompile/datatests/simdlanes.xml
+new file mode 100644
+index 0000000000..bbdcd55161
+--- /dev/null
++++ b/Ghidra/Features/Decompiler/src/decompile/datatests/simdlanes.xml
+@@ -0,0 +1,34 @@
++<decompilertest>
++<binaryimage arch="x86:LE:64:default:gcc">
++<!--
++  Two small functions compiled from C with SSE (clang -O1):
++    void rootdiv(float *out, const float *a, const float *b) {
++      _mm_storeu_ps(out, _mm_div_ps(_mm_sqrt_ps(_mm_loadu_ps(a)), _mm_loadu_ps(b)));
++    }
++    int signs(const float *a) { return _mm_movemask_ps(_mm_loadu_ps(a)); }
++-->
++<bytechunk space="ram" offset="0x100000" readonly="true">
++554889e50f10060f51c00f100a0f5ec10f11075dc3662e0f1f84000000000090554889e50f10070f50c05dc3
++</bytechunk>
++<symbol space="ram" offset="0x100000" name="rootdiv"/>
++<symbol space="ram" offset="0x100020" name="signs"/>
++</binaryimage>
++<script>
++  <com>parse line extern void rootdiv(float4 *out, float4 *a, float4 *b);</com>
++  <com>parse line extern int4 signs(float4 *a);</com>
++  <com>lo fu rootdiv</com>
++  <com>decompile</com>
++  <com>print C</com>
++  <com>lo fu signs</com>
++  <com>decompile</com>
++  <com>print C</com>
++</script>
++<stringmatch name="SimdLanes #1" min="1" max="1">\*out = SQRT\(\*a\) / \*b;</stringmatch>
++<stringmatch name="SimdLanes #2" min="1" max="1">out\[3\] = SQRT\(fVar3\) / fVar6;</stringmatch>
++<stringmatch name="SimdLanes #3" min="0" max="0">sqrtps\(</stringmatch>
++<stringmatch name="SimdLanes #4" min="0" max="0">divps\(</stringmatch>
++<stringmatch name="SimdLanes #5" min="0" max="0">movmskps\(</stringmatch>
++<stringmatch name="SimdLanes #6" min="1" max="1">\(uint4\)\*a >> 0x1f</stringmatch>
++<stringmatch name="SimdLanes #7" min="1" max="1">\(\(uint4\)a\[3\] >> 0x1f\) &lt;&lt; 3</stringmatch>
++<stringmatch name="SimdLanes #8" min="0" max="0">in_EAX</stringmatch>
++</decompilertest>
+diff --git a/Ghidra/Processors/x86/data/languages/ia.sinc b/Ghidra/Processors/x86/data/languages/ia.sinc
+index 6583fac414..c7118b24ff 100644
+--- a/Ghidra/Processors/x86/data/languages/ia.sinc
++++ b/Ghidra/Processors/x86/data/languages/ia.sinc
+@@ -9103,9 +9103,21 @@ define pcodeop divpd;
+ :DIVPD        XmmReg, m128     is vexMode=0 & $(PRE_66) & byte=0x0F; byte=0x5E; XmmReg ... & m128 { XmmReg = divpd(XmmReg, m128); }
+ :DIVPD        XmmReg1, XmmReg2 is vexMode=0 & $(PRE_66) & byte=0x0F; byte=0x5E; xmmmod=3 & XmmReg1 & XmmReg2 { XmmReg1 = divpd(XmmReg1, XmmReg2); }
+ 
+-define pcodeop divps;
+-:DIVPS        XmmReg, m128     is vexMode=0 & mandover=0 & byte=0x0F; byte=0x5E; XmmReg ... & m128 { XmmReg = divps(XmmReg, m128); }
+-:DIVPS        XmmReg1, XmmReg2 is vexMode=0 & mandover=0 & byte=0x0F; byte=0x5E; xmmmod=3 & XmmReg1 & XmmReg2 { XmmReg1 = divps(XmmReg1, XmmReg2); }
++:DIVPS        XmmReg, m128     is vexMode=0 & mandover=0 & byte=0x0F; byte=0x5E; XmmReg ... & m128
++{
++    local m:16 = m128;
++    XmmReg[0,32] = XmmReg[0,32] f/ m[0,32];
++    XmmReg[32,32] = XmmReg[32,32] f/ m[32,32];
++    XmmReg[64,32] = XmmReg[64,32] f/ m[64,32];
++    XmmReg[96,32] = XmmReg[96,32] f/ m[96,32];
++}
++:DIVPS        XmmReg1, XmmReg2 is vexMode=0 & mandover=0 & byte=0x0F; byte=0x5E; xmmmod=3 & XmmReg1 & XmmReg2
++{
++    XmmReg1[0,32] = XmmReg1[0,32] f/ XmmReg2[0,32];
++    XmmReg1[32,32] = XmmReg1[32,32] f/ XmmReg2[32,32];
++    XmmReg1[64,32] = XmmReg1[64,32] f/ XmmReg2[64,32];
++    XmmReg1[96,32] = XmmReg1[96,32] f/ XmmReg2[96,32];
++}
+                 
+ :DIVSD        XmmReg, m64      is vexMode=0 & $(PRE_F2) & byte=0x0F; byte=0x5E; m64 & XmmReg ...
+ {
+@@ -9443,8 +9455,15 @@ define pcodeop movdq2q;
+ define pcodeop movmskpd;
+ :MOVMSKPD     Reg32, XmmReg2      is vexMode=0 &  $(PRE_66) & byte=0x0F; byte=0x50; XmmReg2 & Reg32 & check_Reg32_dest { Reg32 = movmskpd(Reg32, XmmReg2); build check_Reg32_dest; }
+ 
+-define pcodeop movmskps;
+-:MOVMSKPS     Reg32, XmmReg2      is vexMode=0 &  mandover=0 & byte=0x0F; byte=0x50; XmmReg2 & Reg32 & check_Reg32_dest { Reg32 = movmskps(Reg32, XmmReg2); build check_Reg32_dest; }
++:MOVMSKPS     Reg32, XmmReg2      is vexMode=0 &  mandover=0 & byte=0x0F; byte=0x50; XmmReg2 & Reg32 & check_Reg32_dest
++{
++    local l0:4 = XmmReg2[0,32];
++    local l1:4 = XmmReg2[32,32];
++    local l2:4 = XmmReg2[64,32];
++    local l3:4 = XmmReg2[96,32];
++    Reg32 = (l0 >> 31) | ((l1 >> 31) << 1) | ((l2 >> 31) << 2) | ((l3 >> 31) << 3);
++    build check_Reg32_dest;
++}
+ 
+ :MOVNTQ       m64, mmxreg      is vexMode=0 & mandover=0 & byte=0x0F; byte=0xE7; mmxreg ... & m64   { m64 = mmxreg; }
+ 
+@@ -11465,9 +11484,21 @@ define pcodeop sqrtpd;
+ :SQRTPD          XmmReg, m128     is vexMode=0 & $(PRE_66) & byte=0x0F; byte=0x51; XmmReg ... & m128 { XmmReg = sqrtpd(XmmReg, m128); }
+ :SQRTPD          XmmReg1, XmmReg2  is vexMode=0 & $(PRE_66) & byte=0x0F; byte=0x51; xmmmod=3 & XmmReg1 & XmmReg2 { XmmReg1 = sqrtpd(XmmReg1, XmmReg2); }
+ 
+-define pcodeop sqrtps;
+-:SQRTPS          XmmReg, m128     is vexMode=0 & mandover=0 & byte=0x0F; byte=0x51; XmmReg ... & m128 { XmmReg = sqrtps(XmmReg, m128); }
+-:SQRTPS          XmmReg1, XmmReg2  is vexMode=0 & mandover=0 & byte=0x0F; byte=0x51; xmmmod=3 & XmmReg1 & XmmReg2 { XmmReg1 = sqrtps(XmmReg1, XmmReg2); }
++:SQRTPS          XmmReg, m128     is vexMode=0 & mandover=0 & byte=0x0F; byte=0x51; XmmReg ... & m128
++{
++    local m:16 = m128;
++    XmmReg[0,32] = sqrt(m[0,32]);
++    XmmReg[32,32] = sqrt(m[32,32]);
++    XmmReg[64,32] = sqrt(m[64,32]);
++    XmmReg[96,32] = sqrt(m[96,32]);
++}
++:SQRTPS          XmmReg1, XmmReg2  is vexMode=0 & mandover=0 & byte=0x0F; byte=0x51; xmmmod=3 & XmmReg1 & XmmReg2
++{
++    XmmReg1[0,32] = sqrt(XmmReg2[0,32]);
++    XmmReg1[32,32] = sqrt(XmmReg2[32,32]);
++    XmmReg1[64,32] = sqrt(XmmReg2[64,32]);
++    XmmReg1[96,32] = sqrt(XmmReg2[96,32]);
++}
+ 
+ :SQRTSD          XmmReg, m64      is vexMode=0 & $(PRE_F2) & byte=0x0F; byte=0x51; XmmReg ... & m64 { XmmReg[0,64] = sqrt(m64); }
+ :SQRTSD          XmmReg1, XmmReg2  is vexMode=0 & $(PRE_F2) & byte=0x0F; byte=0x51; xmmmod=3 & XmmReg1 & XmmReg2 { XmmReg1[0,64] = sqrt(XmmReg2[0,64]); }
+-- 
+2.45.1
+

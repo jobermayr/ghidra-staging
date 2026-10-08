@@ -1,0 +1,356 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: hay-mon <234499490+hay-mon@users.noreply.github.com>
+Date: Wed, 7 Oct 2026 17:18:11 +0100
+Subject: [PATCH] 9738: Decompiler: Split Out As New Expression
+
+Sub-expressions can be split out of larger expressions.
+Uses the output of the selected operation as the split point.
+---
+ .../src/main/doc/decompileplugin.xml          | 37 ++++++++++
+ .../DecompilePlugin/DecompilerWindow.html     | 53 +++++++++++--
+ .../core/decompile/DecompilerProvider.java    |  4 +
+ .../actions/IsolateExpressionAction.java      | 68 +++++++++++++++++
+ .../actions/IsolateExpressionTask.java        | 74 +++++++++++++++++++
+ .../program/model/pcode/HighFunction.java     | 13 ++++
+ 6 files changed, 242 insertions(+), 7 deletions(-)
+ create mode 100644 Ghidra/Features/Decompiler/src/main/java/ghidra/app/plugin/core/decompile/actions/IsolateExpressionAction.java
+ create mode 100644 Ghidra/Features/Decompiler/src/main/java/ghidra/app/plugin/core/decompile/actions/IsolateExpressionTask.java
+
+diff --git a/Ghidra/Features/Decompiler/src/main/doc/decompileplugin.xml b/Ghidra/Features/Decompiler/src/main/doc/decompileplugin.xml
+index 25289be0fe..00b3f3c024 100644
+--- a/Ghidra/Features/Decompiler/src/main/doc/decompileplugin.xml
++++ b/Ghidra/Features/Decompiler/src/main/doc/decompileplugin.xml
+@@ -5444,6 +5444,43 @@
+   </para>
+ </sect2>
+ 
++<sect2 id="ActionIsolateExpr">
++  <title>Split Out As New Expression</title>
++  <para>
++    Split a high-level expression so that the selected <link linkend="ConceptOperatorTokens">P-code Operator Token</link>
++	becomes encapsulated in a new variable.
++  </para>
++  <para>
++    The output <link linkend="ConceptVarnode">varnode</link> becomes encapsulated in the new variable.
++    So, splitting on the <code>*</code> in
++  </para>
++  <informalexample>
++    <itemizedlist mark='none'>
++      <listitem>
++		<code>a * b + c</code>
++      </listitem>
++    </itemizedlist>
++  </informalexample>
++  <para>
++	and renaming it to <code>d</code> becomes
++  </para>
++  <informalexample>
++    <itemizedlist mark='none'>
++      <listitem>
++		<code>d = a * b</code>
++      </listitem>
++      <listitem>
++		<code>d + c</code>
++      </listitem>
++    </itemizedlist>
++  </informalexample>
++  <para>
++    This command is only available if the selected operation does not already have a designated
++	<xref linkend="ConceptHighVariable"/> which, for most cases, means the output varnode is in
++	the unique or register <xref linkend="ConceptAddressSpace"/>.
++  </para>
++</sect2>
++
+ </section>
+ 
+ </chapter>
+diff --git a/Ghidra/Features/Decompiler/src/main/help/help/topics/DecompilePlugin/DecompilerWindow.html b/Ghidra/Features/Decompiler/src/main/help/help/topics/DecompilePlugin/DecompilerWindow.html
+index e34880eaac..32582566e3 100644
+--- a/Ghidra/Features/Decompiler/src/main/help/help/topics/DecompilePlugin/DecompilerWindow.html
++++ b/Ghidra/Features/Decompiler/src/main/help/help/topics/DecompilePlugin/DecompilerWindow.html
+@@ -151,14 +151,15 @@
+   
+   <p>
+   	For very large functions, the decompile window can take a significant amount of time to re-decompile
+-  	and update the display as changes are made to the program. This makes using some actions
+-  	frustrating, such as renaming or retyping variables. 
++	and update the display as changes are made to the program. This makes some actions frustrating,
++	such as renaming or retyping variables.
+   </p>
+   <p>
+-  	As a work around, you may use the lock toggle action 
+-  	<img src="images/lock.gif" width="16" height="16">. When selected, this action will prevent
+-  	the decompiler from auto refreshing for each change. This may make the display appear to be
+-  	broken since any changes will not appear to take effect until the display is manually refreshed.
++	As a work around, you may use the lock toggle action
++	<img src="images/lock.gif" width="16" height="16"> .
++	When selected, this action will prevent the decompiler from auto refreshing for each change.
++	This may make the display appear to be broken since any changes will not appear to
++	take effect until the display is manually refreshed.
+ 	</p>
+ </div>
+ 
+@@ -209,7 +210,8 @@
+   	Normally, snapshot windows are completely disconnected from the location and selection 
+   	events that synchronize the main components in the tool. To allow the snapshot window
+   	to export its location and selection, select the 
+-  	<img src="images/locationOut.gif" width="16" height="16"> toolbar action.
++	<img src="images/locationOut.gif" width="16" height="16"> 
++	toolbar action.
+   </p>
+   	
+ </div>
+@@ -1591,6 +1593,43 @@
+   </p>
+ </div>
+ 
++<div class="sect2">
++<div class="titlepage"><div><div><h3 class="title">
++<a name="ActionIsolateExpr"></a>Split Out As New Expression</h3></div></div></div>
++
++  <p>
++    Split a high-level expression so that the selected <a class="link" href="DecompilerConcepts.html#ConceptOperatorTokens" title="Operator Tokens">P-code Operator Token</a>
++	becomes encapsulated in a new variable.
++  </p>
++  <p>
++    The output <a class="link" href="DecompilerConcepts.html#ConceptVarnode" title="Varnodes">varnode</a> becomes encapsulated in the new variable.
++    So, splitting on the <code class="code">*</code> in
++  </p>
++  <div class="informalexample">
++    <div class="itemizedlist"><ul class="itemizedlist" style="list-style-type: none; "><li class="listitem" style="list-style-type: none">
++		<code class="code">a * b + c</code>
++      </li></ul></div>
++  </div>
++  <p>
++	and renaming it to <code class="code">d</code> becomes
++  </p>
++  <div class="informalexample">
++    <div class="itemizedlist"><ul class="itemizedlist" style="list-style-type: none; ">
++<li class="listitem" style="list-style-type: none">
++		<code class="code">d = a * b</code>
++      </li>
++<li class="listitem" style="list-style-type: none">
++		<code class="code">d + c</code>
++      </li>
++</ul></div>
++  </div>
++  <p>
++    This command is only available if the selected operation does not already have a designated
++	<a class="xref" href="DecompilerConcepts.html#ConceptHighVariable" title="HighVariable">HighVariable</a> which, for most cases, means the output varnode is in
++	the unique or register <a class="xref" href="DecompilerConcepts.html#ConceptAddressSpace" title="Address Space">Address Space</a>.
++  </p>
++</div>
++
+ </div>
+ 
+ </div></body>
+diff --git a/Ghidra/Features/Decompiler/src/main/java/ghidra/app/plugin/core/decompile/DecompilerProvider.java b/Ghidra/Features/Decompiler/src/main/java/ghidra/app/plugin/core/decompile/DecompilerProvider.java
+index eb83031e57..daeefbc883 100644
+--- a/Ghidra/Features/Decompiler/src/main/java/ghidra/app/plugin/core/decompile/DecompilerProvider.java
++++ b/Ghidra/Features/Decompiler/src/main/java/ghidra/app/plugin/core/decompile/DecompilerProvider.java
+@@ -1051,6 +1051,9 @@ public class DecompilerProvider extends NavigatableComponentProviderAdapter
+ 		IsolateVariableAction isolateVarAction = new IsolateVariableAction();
+ 		setGroupInfo(isolateVarAction, variableGroup, subGroupPosition++);
+ 
++		IsolateExpressionAction isolateExprAction = new IsolateExpressionAction();
++		setGroupInfo(isolateExprAction, functionGroup, subGroupPosition++);
++
+ 		DecompilerStructureVariableAction decompilerCreateStructureAction =
+ 			new DecompilerStructureVariableAction(owner, tool, controller);
+ 		setGroupInfo(decompilerCreateStructureAction, variableGroup, subGroupPosition++);
+@@ -1256,6 +1259,7 @@ public class DecompilerProvider extends NavigatableComponentProviderAdapter
+ 		addLocalAction(retypeReturnAction);
+ 		addLocalAction(retypeFieldAction);
+ 		addLocalAction(isolateVarAction);
++		addLocalAction(isolateExprAction);
+ 		addLocalAction(decompilerCreateStructureAction);
+ 		tool.addAction(listingCreateStructureAction);
+ 		addLocalAction(editDataTypeAction);
+diff --git a/Ghidra/Features/Decompiler/src/main/java/ghidra/app/plugin/core/decompile/actions/IsolateExpressionAction.java b/Ghidra/Features/Decompiler/src/main/java/ghidra/app/plugin/core/decompile/actions/IsolateExpressionAction.java
+new file mode 100644
+index 0000000000..8be34aeb52
+--- /dev/null
++++ b/Ghidra/Features/Decompiler/src/main/java/ghidra/app/plugin/core/decompile/actions/IsolateExpressionAction.java
+@@ -0,0 +1,68 @@
++/* ###
++ * IP: GHIDRA
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package ghidra.app.plugin.core.decompile.actions;
++
++import docking.action.MenuData;
++import ghidra.app.decompiler.*;
++import ghidra.app.plugin.core.decompile.DecompilerActionContext;
++import ghidra.app.util.HelpTopics;
++import ghidra.program.model.pcode.*;
++import ghidra.program.model.symbol.SourceType;
++import ghidra.util.HelpLocation;
++
++public class IsolateExpressionAction extends AbstractDecompilerAction {
++
++	public IsolateExpressionAction() {
++		super("Split Out As New Expression");
++		setHelpLocation(new HelpLocation(HelpTopics.DECOMPILER, "ActionIsolateExpr"));
++		setPopupMenuData(new MenuData(new String[] { "Split Out As New Expression" }, "Decompile"));
++	}
++
++	@Override
++	protected boolean isEnabledForDecompilerContext(DecompilerActionContext context) {
++		ClangToken tokenAtCursor = context.getTokenAtCursor();
++		if (!(tokenAtCursor instanceof ClangOpToken)) {
++			return false;
++		}
++		ClangOpToken opToken = (ClangOpToken) tokenAtCursor;
++		PcodeOp op = opToken.getPcodeOp();
++		// Is this even possible?
++		if (op == null) {
++			return false;
++		}
++		Varnode ovn = op.getOutput();
++		// Require output varnode to split on
++		if (ovn == null) {
++			return false;
++		}
++		HighVariable hv = ovn.getHigh();
++		// All HighVariables except HighOther have associated storage already
++		if (!(hv instanceof HighOther)) {
++			return false;
++		}
++		return true;
++	}
++
++	@Override
++	protected void decompilerActionPerformed(DecompilerActionContext context) {
++		IsolateExpressionTask newExprTask =
++			new IsolateExpressionTask(context.getTool(),context.getProgram(),
++				context.getComponentProvider(),(ClangOpToken) context.getTokenAtCursor(),SourceType.USER_DEFINED);
++
++		newExprTask.runTask(false);
++	}
++
++}
+diff --git a/Ghidra/Features/Decompiler/src/main/java/ghidra/app/plugin/core/decompile/actions/IsolateExpressionTask.java b/Ghidra/Features/Decompiler/src/main/java/ghidra/app/plugin/core/decompile/actions/IsolateExpressionTask.java
+new file mode 100644
+index 0000000000..0f1c4d1a97
+--- /dev/null
++++ b/Ghidra/Features/Decompiler/src/main/java/ghidra/app/plugin/core/decompile/actions/IsolateExpressionTask.java
+@@ -0,0 +1,74 @@
++/* ###
++ * IP: GHIDRA
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package ghidra.app.plugin.core.decompile.actions;
++
++import ghidra.app.decompiler.ClangOpToken;
++import ghidra.app.plugin.core.decompile.DecompilerProvider;
++import ghidra.framework.plugintool.PluginTool;
++import ghidra.program.model.data.*;
++import ghidra.program.model.listing.*;
++import ghidra.program.model.pcode.*;
++import ghidra.program.model.symbol.SourceType;
++import ghidra.util.exception.*;
++
++public class IsolateExpressionTask extends RenameTask {
++
++	private final Varnode ovn;
++	private final Function function;
++	private final SourceType srcType;
++
++	public IsolateExpressionTask(PluginTool tool, Program program, DecompilerProvider provider,
++			ClangOpToken token, SourceType st) {
++		super(tool, program, provider, token, "");
++		PcodeOp op = token.getPcodeOp();
++		ovn = op.getOutput();
++		function = ovn.getHigh().getHighFunction().getFunction();
++		srcType = st;
++	}
++
++	@Override
++	public String getTransactionName() {
++		return "Name New Variable";
++	}
++
++	@Override
++	public boolean isValid(String newNm) {
++		newName = newNm;
++		if (isSymbolInFunction(function, newName)) {
++			errorMsg = "Duplicate name";
++			return false;
++		}
++		return true;
++	}
++
++	@Override
++	public void commit() throws DuplicateNameException, InvalidInputException {
++		HighVariable hv = ovn.getHigh();
++		HighSymbol hs = hv.getHighFunction().uniqueSymbol(hv);
++
++		DataType dt = hv.getDataType();
++		if (Undefined.isUndefined(dt)) {
++			// An undefined datatype will not be considered typelocked. Since the new variable
++			// needs to be typelocked we use an unsigned integer of equivalent size
++			dt = AbstractIntegerDataType.getUnsignedDataType(hv.getSize(),
++				program.getDataTypeManager());
++		}
++
++		// Create the new variable, typelocking in a new data-type
++		HighFunctionDBUtil.updateDBVariable(hs, newName, dt, srcType);
++	}
++
++}
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/HighFunction.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/HighFunction.java
+index 21ef7b438f..7ecf47a040 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/HighFunction.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/HighFunction.java
+@@ -25,6 +25,8 @@ import java.util.List;
+ import ghidra.program.database.function.FunctionDB;
+ import ghidra.program.database.symbol.CodeSymbol;
+ import ghidra.program.model.address.*;
++import ghidra.program.model.data.AbstractIntegerDataType;
++import ghidra.program.model.data.DataType;
+ import ghidra.program.model.lang.CompilerSpec;
+ import ghidra.program.model.lang.Language;
+ import ghidra.program.model.listing.*;
+@@ -415,6 +417,17 @@ public class HighFunction extends PcodeSyntaxTree {
+ 		}
+ 	}
+ 
++	/**
++	 * Produce a HighSymbol for a HighVariable in the unique address space
++	 * @param vn is the HighVariable to convert
++	 * @return a HighSymbol for the HighVariable
++	 */
++	public HighSymbol uniqueSymbol(HighVariable hv) {
++		DynamicHash dh = new DynamicHash(hv.getRepresentative(), hv.getHighFunction());
++		return localSymbols.newDynamicSymbol(0, "", hv.getDataType(),
++				dh.getHash(), dh.getAddress());
++	}
++
+ 	/**
+ 	 * Encode this HighFunction to a stream. The size describes how many bytes starting from the
+ 	 * entry point are used by the function, but this doesn't need to be strictly accurate as it
+-- 
+2.45.1
+

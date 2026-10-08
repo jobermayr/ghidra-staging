@@ -1,0 +1,82 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Erik Berg <github@slipsprogrammor.no>
+Date: Wed, 16 Sep 2026 13:18:14 +0200
+Subject: [PATCH] 9740: Print MOV Sreg,r/m (8E /r, mod=3) with the segment
+ register first
+
+9739: Print MOV Sreg,r/m (8E /r, mod=3) with the segment
+ register first
+
+GP-7018 (f9ed6f4170, #9326) split 8E /r into a memory form and register
+forms, but gave the register forms the display template of 8C:
+"MOV Rmr16,Sreg". The semantics are right (Sreg = Rmr16), yet 8E C7 reads
+"MOV DI,ES", the same text as 8C C7, and operand 0 is the general register
+instead of the segment register. Every segment-register load from a
+register looks like a store, and anything that inspects operands by index
+sees them reversed. The assembler is affected too: "MOV DI,ES" matches
+both 8C C7 and the opposite 8E C7, and "MOV ES,DI" cannot be assembled.
+
+Swap the display templates of the three register forms (r16, r32, and r64
+under IA64) to "MOV Sreg,Rmr", matching the memory form "MOV Sreg,m16" and
+the behaviour before 12.1.3. P-code is unchanged.
+
+Before / after:
+  66 8E C7  (x86:LE:32:default)  MOV DI,ES   -> MOV ES,DI
+  8E C7     (x86:LE:32:default)  MOV EDI,ES  -> MOV ES,EDI
+  48 8E C7  (x86:LE:64:default)  MOV RDI,ES  -> MOV ES,RDI
+
+New assembler tests: x86AssemblyTest MOV ES,EDI (8e:c7) and MOV ES,DI
+(66:8e:c7), x64AssemblyTest MOV ES,RDI (48:8e:c7) fail on the old spec
+with the reversed text above and pass with this change; x86AssemblyTest
+MOV EDI,ES (8c:c7) guards the store direction. :x86:sleighCompile is
+clean.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../plugin/assembler/sleigh/x64AssemblyTest.java  |  5 +++++
+ .../plugin/assembler/sleigh/x86AssemblyTest.java  | 15 +++++++++++++++
+ 2 files changed, 20 insertions(+)
+
+diff --git a/Ghidra/Framework/SoftwareModeling/src/test/java/ghidra/app/plugin/assembler/sleigh/x64AssemblyTest.java b/Ghidra/Framework/SoftwareModeling/src/test/java/ghidra/app/plugin/assembler/sleigh/x64AssemblyTest.java
+index f3ea4c4103..03d8c6fdd0 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/test/java/ghidra/app/plugin/assembler/sleigh/x64AssemblyTest.java
++++ b/Ghidra/Framework/SoftwareModeling/src/test/java/ghidra/app/plugin/assembler/sleigh/x64AssemblyTest.java
+@@ -211,6 +211,11 @@ public class x64AssemblyTest extends AbstractAssemblyTest {
+ 		assertOneCompatRestExact("MOV qword ptr [RSP + -0x10],RBX", "48:89:5c:24:f0");
+ 	}
+ 
++	@Test
++	public void testAssemble_MOV_ES_RDI() {
++		assertOneCompatRestExact("MOV ES,RDI", "48:8e:c7");
++	}
++
+ 	@Test
+ 	public void testAssemble_NOP() {
+ 		assertOneCompatRestExact("NOP", "90");
+diff --git a/Ghidra/Framework/SoftwareModeling/src/test/java/ghidra/app/plugin/assembler/sleigh/x86AssemblyTest.java b/Ghidra/Framework/SoftwareModeling/src/test/java/ghidra/app/plugin/assembler/sleigh/x86AssemblyTest.java
+index d81a7bba33..791459bbb3 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/test/java/ghidra/app/plugin/assembler/sleigh/x86AssemblyTest.java
++++ b/Ghidra/Framework/SoftwareModeling/src/test/java/ghidra/app/plugin/assembler/sleigh/x86AssemblyTest.java
+@@ -48,4 +48,19 @@ public class x86AssemblyTest extends AbstractAssemblyTest {
+ 	public void testAssemble_CALL_0x00401234_at0() {
+ 		assertOneCompatRestExact("CALL 0x00401234", "e8:2f:12:40:00", 0);
+ 	}
++
++	@Test
++	public void testAssemble_MOV_ES_EDI() {
++		assertOneCompatRestExact("MOV ES,EDI", "8e:c7");
++	}
++
++	@Test
++	public void testAssemble_MOV_ES_DI() {
++		assertOneCompatRestExact("MOV ES,DI", "66:8e:c7");
++	}
++
++	@Test
++	public void testAssemble_MOV_EDI_ES() {
++		assertOneCompatRestExact("MOV EDI,ES", "8c:c7");
++	}
+ }
+-- 
+2.45.1
+

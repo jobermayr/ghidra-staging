@@ -1,0 +1,108 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: ai-hakzarov <226896199+ai-hakzarov@users.noreply.github.com>
+Date: Wed, 7 Oct 2026 23:02:48 -0400
+Subject: [PATCH] 9743: x86: PSLLDQ as a single 128-bit shift, matching PSRLDQ
+
+PSLLDQ was written as two 64-bit halves with the carried bits moved across by
+hand, so a float lane that crossed the middle of the register lost its lane
+identity in the decompiler and printed as byte pieces. PSRLDQ is already a
+single 128-bit INT_RIGHT; PSLLDQ is now the matching INT_LEFT, for every shift
+count including 8 and above. Checked against hardware on random register states
+for every count. A datatest compiled from a few lines of C covers a shift by 4
+and a shift by 8.
+---
+ .../Decompiler/certification.manifest         |  1 +
+ .../src/decompile/datatests/pslldq.xml        | 38 +++++++++++++++++++
+ Ghidra/Processors/x86/data/languages/ia.sinc  | 19 ++--------
+ 3 files changed, 43 insertions(+), 15 deletions(-)
+ create mode 100644 Ghidra/Features/Decompiler/src/decompile/datatests/pslldq.xml
+
+diff --git a/Ghidra/Features/Decompiler/certification.manifest b/Ghidra/Features/Decompiler/certification.manifest
+index cb6dac63a2..0ba0282231 100644
+--- a/Ghidra/Features/Decompiler/certification.manifest
++++ b/Ghidra/Features/Decompiler/certification.manifest
+@@ -92,6 +92,7 @@ src/decompile/datatests/piecestruct.xml||GHIDRA||||END|
+ src/decompile/datatests/pointercmp.xml||GHIDRA||||END|
+ src/decompile/datatests/pointerrel.xml||GHIDRA||||END|
+ src/decompile/datatests/pointersub.xml||GHIDRA||||END|
++src/decompile/datatests/pslldq.xml||GHIDRA||||END|
+ src/decompile/datatests/promotecompare.xml||GHIDRA||||END|
+ src/decompile/datatests/ptrtoarray.xml||GHIDRA||||END|
+ src/decompile/datatests/readvolatile.xml||GHIDRA||||END|
+diff --git a/Ghidra/Features/Decompiler/src/decompile/datatests/pslldq.xml b/Ghidra/Features/Decompiler/src/decompile/datatests/pslldq.xml
+new file mode 100644
+index 0000000000..79a63a410f
+--- /dev/null
++++ b/Ghidra/Features/Decompiler/src/decompile/datatests/pslldq.xml
+@@ -0,0 +1,38 @@
++<decompilertest>
++<binaryimage arch="x86:LE:64:default:gcc">
++<!--
++  Two small functions compiled from C with SSE (clang -O1), each sliding float lanes up with a PSLLDQ:
++    void shiftlane(float *out, const float *in, float s) {
++      __m128 v = _mm_loadu_ps(in); asm("pslldq $4, %0" : "+x"(v));
++      _mm_storeu_ps(out, _mm_mul_ps(v, _mm_set1_ps(s)));
++    }
++    void storeshifted(float *out, const float *in) {
++      __m128 v = _mm_loadu_ps(in); asm("pslldq $8, %0" : "+x"(v)); _mm_storeu_ps(out, v);
++    }
++-->
++<bytechunk space="ram" offset="0x100000" readonly="true">
++554889e50f100e660f73f9040fc6c0000f59c10f11075dc30f1f840000000000
++554889e50f1006660f73f8080f11075dc3
++</bytechunk>
++<symbol space="ram" offset="0x100000" name="shiftlane"/>
++<symbol space="ram" offset="0x100020" name="storeshifted"/>
++</binaryimage>
++<script>
++  <com>parse line extern void shiftlane(float4 *out, float4 *in, float4 s);</com>
++  <com>parse line extern void storeshifted(float4 *out, float4 *in);</com>
++  <com>lo fu shiftlane</com>
++  <com>decompile</com>
++  <com>print C</com>
++  <com>lo fu storeshifted</com>
++  <com>decompile</com>
++  <com>print C</com>
++</script>
++<stringmatch name="PSLLDQ #1" min="1" max="1">fVar1 = \*in;</stringmatch>
++<stringmatch name="PSLLDQ #2" min="1" max="1">out\[1\] = s \* fVar1;</stringmatch>
++<stringmatch name="PSLLDQ #3" min="1" max="1">out\[2\] = s \* fVar2;</stringmatch>
++<stringmatch name="PSLLDQ #4" min="1" max="1">out\[3\] = s \* fVar3;</stringmatch>
++<stringmatch name="PSLLDQ #5" min="0" max="0">>> 0x20</stringmatch>
++<stringmatch name="PSLLDQ #6" min="0" max="0">\(uint8\)</stringmatch>
++<stringmatch name="PSLLDQ #7" min="1" max="1">out\[0\] = 0.0;</stringmatch>
++<stringmatch name="PSLLDQ #8" min="1" max="1">out\[1\] = 0.0;</stringmatch>
++</decompilertest>
+diff --git a/Ghidra/Processors/x86/data/languages/ia.sinc b/Ghidra/Processors/x86/data/languages/ia.sinc
+index c7118b24ff..c62638ce04 100644
+--- a/Ghidra/Processors/x86/data/languages/ia.sinc
++++ b/Ghidra/Processors/x86/data/languages/ia.sinc
+@@ -10715,21 +10715,10 @@ define pcodeop psignd;
+ :PSIGND         XmmReg1, XmmReg2 is vexMode=0 &  $(PRE_66) & byte=0x0F; byte=0x38; byte=0x0a; xmmmod = 3 & XmmReg1 & XmmReg2 { XmmReg1=psignd(XmmReg1,XmmReg2); }
+ 
+ #break into two 64-bit chunks so decompiler can follow constants
+-:PSLLDQ         XmmReg2, imm8    is vexMode=0 & $(PRE_66) & byte=0x0F; byte=0x73; xmmmod = 3 & reg_opcode=7 & XmmReg2; imm8 
+-{ 
+-	if (imm8:1 > 15:1) goto <zero>;
+-    local low64copy:8 = XmmReg2[0,64];
+-    XmmReg2[0,64] = XmmReg2[0,64] << (8:1 * imm8:1);
+-    if (imm8:1 > 8:1)  goto <greater>;
+-    XmmReg2[64,64] = (XmmReg2[64,64] << (8:1 * imm8:1)) | (low64copy >> (8:1 * (8 - imm8:1)));
+-    goto <end>;
+-<greater>
+-    XmmReg2[64,64] = low64copy << (8:1 * (imm8 - 8));
+-    goto <end>;
+-<zero>
+-    XmmReg2[0,64] = 0:8;
+-    XmmReg2[64,64] = 0:8;
+-<end>
++:PSLLDQ         XmmReg2, imm8    is vexMode=0 & $(PRE_66) & byte=0x0F; byte=0x73; xmmmod = 3 & reg_opcode=7 & XmmReg2; imm8
++{
++# a count greater than 15 just clears all the bits
++    XmmReg2 = XmmReg2 << (imm8 * 8);
+ }
+ 
+ define pcodeop psllw;
+-- 
+2.45.1
+

@@ -1,0 +1,83 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: ai-hakzarov <226896199+ai-hakzarov@users.noreply.github.com>
+Date: Wed, 7 Oct 2026 23:02:48 -0400
+Subject: [PATCH] 9744: Decompiler: lane split follows a left shift forward
+
+LaneDivide::traceForward handled INT_RIGHT by a whole number of lanes but not
+INT_LEFT, so a vector slid up by a lane (PSLLDQ, or an INT_LEFT the simplifier
+produced) stopped the lane division and the whole register printed as byte
+pieces. INT_LEFT by a lane multiple is now traced forward like INT_RIGHT: the
+output's lanes are the input's shifted up, the vacated low lanes zero. A
+datatest compiled from a few lines of C covers a vector used both lane by lane
+and slid by one lane.
+---
+ .../Decompiler/certification.manifest         |  1 +
+ .../Decompiler/src/decompile/cpp/subflow.cc   |  1 +
+ .../src/decompile/datatests/laneleft.xml      | 31 +++++++++++++++++++
+ 3 files changed, 33 insertions(+)
+ create mode 100644 Ghidra/Features/Decompiler/src/decompile/datatests/laneleft.xml
+
+diff --git a/Ghidra/Features/Decompiler/certification.manifest b/Ghidra/Features/Decompiler/certification.manifest
+index 0ba0282231..bad069cfd2 100644
+--- a/Ghidra/Features/Decompiler/certification.manifest
++++ b/Ghidra/Features/Decompiler/certification.manifest
+@@ -61,6 +61,7 @@ src/decompile/datatests/injectoverride.xml||GHIDRA||||END|
+ src/decompile/datatests/inline.xml||GHIDRA||||END|
+ src/decompile/datatests/inlinetarget.xml||GHIDRA||||END|
+ src/decompile/datatests/inputoverlap.xml||GHIDRA||||END|
++src/decompile/datatests/laneleft.xml||GHIDRA||||END|
+ src/decompile/datatests/loadwidth.xml||GHIDRA||||END|
+ src/decompile/datatests/longdouble.xml||GHIDRA||||END|
+ src/decompile/datatests/loopcomment.xml||GHIDRA||||END|
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/subflow.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/subflow.cc
+index 59753908fe..0af1eb2554 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/subflow.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/subflow.cc
+@@ -4019,6 +4019,7 @@ bool LaneDivide::traceForward(TransformVar *rvn,int4 numLanes,int4 skipLanes)
+ 	break;
+       }
+       case CPUI_INT_RIGHT:
++      case CPUI_INT_LEFT:
+       {
+ 	if (!op->getIn(1)->isConstant()) return false;	// Trace must come through op->getIn(0)
+ 	TransformVar *outRvn = setReplacement(outvn, numLanes, skipLanes);
+diff --git a/Ghidra/Features/Decompiler/src/decompile/datatests/laneleft.xml b/Ghidra/Features/Decompiler/src/decompile/datatests/laneleft.xml
+new file mode 100644
+index 0000000000..e53c32d001
+--- /dev/null
++++ b/Ghidra/Features/Decompiler/src/decompile/datatests/laneleft.xml
+@@ -0,0 +1,31 @@
++<decompilertest>
++<binaryimage arch="x86:LE:64:default:gcc">
++<!--
++  One function compiled from C with SSE (clang -O1): a loaded vector used twice, scaled lane by lane and slid one lane up with PSLLDQ:
++    void scaleandslide(float *out, const float *in, float s) {
++      __m128 v = _mm_loadu_ps(in);
++      __m128 w = _mm_mul_ps(v, _mm_set1_ps(s));
++      asm("pslldq $4, %0" : "+x"(v));
++      _mm_storeu_ps(out, w);
++      _mm_storeu_ps(out + 4, v);
++    }
++-->
++<bytechunk space="ram" offset="0x100000" readonly="true">
++554889e50f100e0fc6c0000f59c1660f73f9040f11070f114f105dc3
++</bytechunk>
++<symbol space="ram" offset="0x100000" name="scaleandslide"/>
++</binaryimage>
++<script>
++  <com>parse line extern void scaleandslide(float4 *out, float4 *in, float4 s);</com>
++  <com>lo fu scaleandslide</com>
++  <com>decompile</com>
++  <com>print C</com>
++</script>
++<stringmatch name="LaneLeft #1" min="1" max="1">out\[1\] = s \* fVar2;</stringmatch>
++<stringmatch name="LaneLeft #2" min="1" max="1">out\[4\] = 0.0;</stringmatch>
++<stringmatch name="LaneLeft #3" min="1" max="1">out\[5\] = fVar1;</stringmatch>
++<stringmatch name="LaneLeft #4" min="1" max="1">out\[7\] = fVar3;</stringmatch>
++<stringmatch name="LaneLeft #5" min="0" max="0">&lt;&lt; 0x20</stringmatch>
++<stringmatch name="LaneLeft #6" min="0" max="0">_0_4_</stringmatch>
++<stringmatch name="LaneLeft #7" min="0" max="0">axVar</stringmatch>
++</decompilertest>
+-- 
+2.45.1
+
