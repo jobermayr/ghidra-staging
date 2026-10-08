@@ -6,13 +6,13 @@ Subject: [PATCH] 9738: Decompiler: Split Out As New Expression
 Sub-expressions can be split out of larger expressions.
 Uses the output of the selected operation as the split point.
 ---
- .../src/main/doc/decompileplugin.xml          | 37 ++++++++++
+ .../src/main/doc/decompileplugin.xml          | 37 +++++++++
  .../DecompilePlugin/DecompilerWindow.html     | 53 +++++++++++--
  .../core/decompile/DecompilerProvider.java    |  4 +
- .../actions/IsolateExpressionAction.java      | 68 +++++++++++++++++
- .../actions/IsolateExpressionTask.java        | 74 +++++++++++++++++++
- .../program/model/pcode/HighFunction.java     | 13 ++++
- 6 files changed, 242 insertions(+), 7 deletions(-)
+ .../actions/IsolateExpressionAction.java      | 75 ++++++++++++++++++
+ .../actions/IsolateExpressionTask.java        | 79 +++++++++++++++++++
+ .../program/model/pcode/HighFunction.java     | 17 ++++
+ 6 files changed, 258 insertions(+), 7 deletions(-)
  create mode 100644 Ghidra/Features/Decompiler/src/main/java/ghidra/app/plugin/core/decompile/actions/IsolateExpressionAction.java
  create mode 100644 Ghidra/Features/Decompiler/src/main/java/ghidra/app/plugin/core/decompile/actions/IsolateExpressionTask.java
 
@@ -168,10 +168,10 @@ index eb83031e57..daeefbc883 100644
  		addLocalAction(editDataTypeAction);
 diff --git a/Ghidra/Features/Decompiler/src/main/java/ghidra/app/plugin/core/decompile/actions/IsolateExpressionAction.java b/Ghidra/Features/Decompiler/src/main/java/ghidra/app/plugin/core/decompile/actions/IsolateExpressionAction.java
 new file mode 100644
-index 0000000000..8be34aeb52
+index 0000000000..6ea98afc31
 --- /dev/null
 +++ b/Ghidra/Features/Decompiler/src/main/java/ghidra/app/plugin/core/decompile/actions/IsolateExpressionAction.java
-@@ -0,0 +1,68 @@
+@@ -0,0 +1,75 @@
 +/* ###
 + * IP: GHIDRA
 + *
@@ -227,14 +227,21 @@ index 0000000000..8be34aeb52
 +		if (!(hv instanceof HighOther)) {
 +			return false;
 +		}
++		// HighOther can have an associated symbol
++		if (hv.getSymbol() != null) {
++			return false;
++		}
 +		return true;
 +	}
 +
 +	@Override
 +	protected void decompilerActionPerformed(DecompilerActionContext context) {
++		final ClangOpToken ot = (ClangOpToken) context.getTokenAtCursor();
++		final HighOther ho = (HighOther) ot.getPcodeOp().getOutput().getHigh();
++
 +		IsolateExpressionTask newExprTask =
 +			new IsolateExpressionTask(context.getTool(),context.getProgram(),
-+				context.getComponentProvider(),(ClangOpToken) context.getTokenAtCursor(),SourceType.USER_DEFINED);
++				context.getComponentProvider(), ot, ho,SourceType.USER_DEFINED);
 +
 +		newExprTask.runTask(false);
 +	}
@@ -242,10 +249,10 @@ index 0000000000..8be34aeb52
 +}
 diff --git a/Ghidra/Features/Decompiler/src/main/java/ghidra/app/plugin/core/decompile/actions/IsolateExpressionTask.java b/Ghidra/Features/Decompiler/src/main/java/ghidra/app/plugin/core/decompile/actions/IsolateExpressionTask.java
 new file mode 100644
-index 0000000000..0f1c4d1a97
+index 0000000000..3ff9835c8d
 --- /dev/null
 +++ b/Ghidra/Features/Decompiler/src/main/java/ghidra/app/plugin/core/decompile/actions/IsolateExpressionTask.java
-@@ -0,0 +1,74 @@
+@@ -0,0 +1,79 @@
 +/* ###
 + * IP: GHIDRA
 + *
@@ -270,26 +277,26 @@ index 0000000000..0f1c4d1a97
 +import ghidra.program.model.listing.*;
 +import ghidra.program.model.pcode.*;
 +import ghidra.program.model.symbol.SourceType;
++import ghidra.util.Msg;
 +import ghidra.util.exception.*;
 +
 +public class IsolateExpressionTask extends RenameTask {
 +
-+	private final Varnode ovn;
++	private final HighOther highOther;
 +	private final Function function;
 +	private final SourceType srcType;
 +
 +	public IsolateExpressionTask(PluginTool tool, Program program, DecompilerProvider provider,
-+			ClangOpToken token, SourceType st) {
++			ClangOpToken token, HighOther ho, SourceType st) {
 +		super(tool, program, provider, token, "");
-+		PcodeOp op = token.getPcodeOp();
-+		ovn = op.getOutput();
-+		function = ovn.getHigh().getHighFunction().getFunction();
++		highOther = ho;
++		function = ho.getHighFunction().getFunction();
 +		srcType = st;
 +	}
 +
 +	@Override
 +	public String getTransactionName() {
-+		return "Name New Variable";
++		return "Name New Expression";
 +	}
 +
 +	@Override
@@ -304,14 +311,19 @@ index 0000000000..0f1c4d1a97
 +
 +	@Override
 +	public void commit() throws DuplicateNameException, InvalidInputException {
-+		HighVariable hv = ovn.getHigh();
-+		HighSymbol hs = hv.getHighFunction().uniqueSymbol(hv);
++		HighSymbol hs;
++		try {
++			hs = highOther.getHighFunction().highOtherSymbol(highOther);
++		} catch (PcodeException e) {
++			Msg.showError(this, tool.getToolFrame(), "New Expression Failed", e.getMessage());
++			return;
++		}
 +
-+		DataType dt = hv.getDataType();
++		DataType dt = highOther.getDataType();
 +		if (Undefined.isUndefined(dt)) {
 +			// An undefined datatype will not be considered typelocked. Since the new variable
 +			// needs to be typelocked we use an unsigned integer of equivalent size
-+			dt = AbstractIntegerDataType.getUnsignedDataType(hv.getSize(),
++			dt = AbstractIntegerDataType.getUnsignedDataType(highOther.getSize(),
 +				program.getDataTypeManager());
 +		}
 +
@@ -321,7 +333,7 @@ index 0000000000..0f1c4d1a97
 +
 +}
 diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/HighFunction.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/HighFunction.java
-index 21ef7b438f..7ecf47a040 100644
+index 21ef7b438f..a814eaac3d 100644
 --- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/HighFunction.java
 +++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/HighFunction.java
 @@ -25,6 +25,8 @@ import java.util.List;
@@ -333,19 +345,23 @@ index 21ef7b438f..7ecf47a040 100644
  import ghidra.program.model.lang.CompilerSpec;
  import ghidra.program.model.lang.Language;
  import ghidra.program.model.listing.*;
-@@ -415,6 +417,17 @@ public class HighFunction extends PcodeSyntaxTree {
+@@ -415,6 +417,21 @@ public class HighFunction extends PcodeSyntaxTree {
  		}
  	}
  
 +	/**
-+	 * Produce a HighSymbol for a HighVariable in the unique address space
-+	 * @param vn is the HighVariable to convert
-+	 * @return a HighSymbol for the HighVariable
++	 * Produce a HighSymbol for a unique HighOther
++	 * @param type is the data type of the new symbol
++	 * @param represent is the Varnode for the new symbol
++	 * @return a HighSymbol for the HighOther
 +	 */
-+	public HighSymbol uniqueSymbol(HighVariable hv) {
-+		DynamicHash dh = new DynamicHash(hv.getRepresentative(), hv.getHighFunction());
-+		return localSymbols.newDynamicSymbol(0, "", hv.getDataType(),
-+				dh.getHash(), dh.getAddress());
++	public HighSymbol highOtherSymbol(HighOther other) throws PcodeException {
++		if (other.getSymbol() != null) {
++			throw new PcodeException(
++					"Variable " + other.getSymbol().getName() + " is not unique and already has symbol");
++		}
++		DynamicHash hash = new DynamicHash(other.getRepresentative(), this);
++		return localSymbols.newDynamicSymbol(0, "", other.getDataType(), hash.getHash(), hash.getAddress());
 +	}
 +
  	/**
