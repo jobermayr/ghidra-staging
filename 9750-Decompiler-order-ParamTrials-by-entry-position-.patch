@@ -1,0 +1,75 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: News <58800634+knewstimek@users.noreply.github.com>
+Date: Thu, 8 Oct 2026 22:41:33 +0900
+Subject: [PATCH] 9750: Decompiler: order ParamTrials by entry position, not by
+ pointer
+
+ParamTrial::operator< ordered trials from different ParamEntry objects
+in the same group by comparing the entry pointers. The entries live in a
+std::list, so their relative addresses depend on heap layout, and
+parameter recovery could change between decompiler processes for the
+same function. Record each entry's position in its owning list and
+compare that instead.
+---
+ Ghidra/Features/Decompiler/src/decompile/cpp/fspec.cc    | 9 +++++++--
+ .../Decompiler/src/decompile/cpp/include/ghidra/fspec.hh | 3 +++
+ 2 files changed, 10 insertions(+), 2 deletions(-)
+
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.cc
+index 61e28f36e6..18876d6280 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.cc
+@@ -1289,6 +1289,7 @@ void ParamListStandard::parsePentry(Decoder &decoder,vector<EffectRecord> &effec
+     lastClass = entry.back().isGrouped() ? TYPECLASS_GENERAL : entry.back().getType();
+   }
+   entry.emplace_back(groupid);
++  entry.back().setPosition(entry.size() - 1);
+   entry.back().decode(decoder,normalstack,grouped,entry);
+   if (splitFloat) {
+     type_class currentClass = grouped ? TYPECLASS_GENERAL : entry.back().getType();
+@@ -1917,6 +1918,10 @@ void ParamListMerged::foldIn(const ParamListStandard &op2)
+     if (typeint == 0)
+       entry.push_back(opentry);
+   }
++  int4 pos = 0;		// Entries were copied from other lists, so renumber them
++  list<ParamEntry>::iterator iter;
++  for(iter=entry.begin();iter!=entry.end();++iter)
++    (*iter).setPosition(pos++);
+ }
+ 
+ ParamList *ParamListMerged::clone(void) const
+@@ -1986,8 +1991,8 @@ bool ParamTrial::operator<(const ParamTrial &b) const
+   int4 grpb = b.entry->getGroup();
+   if (grpa != grpb)
+     return (grpa < grpb);
+-  if (entry != b.entry)		// Compare entry pointers directly
+-    return (entry < b.entry);
++  if (entry != b.entry)		// Compare positions within the list (pointer order is not deterministic)
++    return (entry->getPosition() < b.entry->getPosition());
+   if (entry->isExclusion()) {
+     return (offset < b.offset);
+   }
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/fspec.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/fspec.hh
+index 2c41bc080b..c35d40b5bf 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/fspec.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/fspec.hh
+@@ -116,6 +116,7 @@ private:
+   int4 minsize;			///< Minimum bytes allowed for the logical value
+   int4 alignment;		///< How much alignment (0 means only 1 logical value is allowed)
+   int4 numslots;		///< (Maximum) number of slots that can store separate parameters
++  int4 position;		///< Position of \b this within its owning list of entries
+   JoinRecord *joinrec;		///< Non-null if this is logical variable from joined pieces
+   static const ParamEntry *findEntryByStorage(const list<ParamEntry> &entryList,const VarnodeData &vn);
+   void resolveFirst(list<ParamEntry> &curList);	///< Mark if \b this is the first ParamEntry in its storage class
+@@ -127,6 +128,8 @@ private:
+ public:
+   ParamEntry(int4 grp) { groupSet.push_back(grp); }	///< Constructor for use with decode
+   int4 getGroup(void) const { return groupSet[0]; }	///< Get the group id \b this belongs to
++  int4 getPosition(void) const { return position; }	///< Get the position of \b this within its list
++  void setPosition(int4 pos) { position = pos; }	///< Set the position of \b this within its list
+   const vector<int4> &getAllGroups(void) const { return groupSet; }	///< Get all group numbers \b this overlaps
+   bool groupOverlap(const ParamEntry &op2) const;	///< Check if \b this and op2 occupy any of the same groups
+   int4 getSize(void) const { return size; }		///< Get the size of the memory range in bytes.
+-- 
+2.45.1
+
