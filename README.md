@@ -5,13 +5,11 @@ What is Ghidra Staging?
 
 **Note:** Ghidra Staging is designed for rapid testing and user feedback of upstream Pull Requests. For official architectural discussions, please open an issue, discussion, or PR directly on the [Official NSA Ghidra Repository](https://github.com/NationalSecurityAgency/ghidra) (see Contributing).
 
-Downloading
+Downloads
 -----------
 
 Current builds of Ghidra Staging are available for download:
-1. Go to https://github.com/jobermayr/ghidra-staging/actions/workflows/build-ghidra-multi-platform-artifact.yml
-2. Then choose first item of Build Ghidra Staging
-3. On bottom are artifacts for Linux, macOS and Windows
+https://github.com/jobermayr/ghidra-staging/releases/tag/staging-build
 
 Building
 --------
