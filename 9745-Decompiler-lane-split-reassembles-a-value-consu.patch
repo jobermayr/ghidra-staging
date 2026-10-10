@@ -12,15 +12,19 @@ op is now a terminal: the lanes are concatenated back with PIECE ops placed
 before it and the op's inputs are reattached with the reassembled value; an op
 that takes the value in more than one slot is reattached once. A value that is
 already such a reassembly (defined by a PIECE and read only by the consuming
-op) is left alone, so the division cannot feed itself if it runs more than
-once. A datatest compiled from a few lines of C covers a vector scaled lane by
-lane, stored, and handed whole to PSHUFB.
+op, in any number of its slots) is left alone, and a division that would only
+reassemble the value for ops consuming it whole, meeting no lane read, store or
+lane-wise op anywhere in its trace, is refused as no gain: a 16-byte load handed
+whole to a user-defined op is not split into lane loads only to be concatenated
+again. Both keep the division from feeding itself should the action run more
+than once per function. A datatest compiled from a few lines of C covers a
+vector scaled lane by lane, stored, and handed whole to PSHUFB.
 ---
  .../Decompiler/certification.manifest         |  1 +
- .../decompile/cpp/include/ghidra/subflow.hh   |  3 +
- .../Decompiler/src/decompile/cpp/subflow.cc   | 66 +++++++++++++++++++
- .../src/decompile/datatests/callwhole.xml     | 30 +++++++++
- 4 files changed, 100 insertions(+)
+ .../decompile/cpp/include/ghidra/subflow.hh   |  4 +
+ .../Decompiler/src/decompile/cpp/subflow.cc   | 84 +++++++++++++++++++
+ .../src/decompile/datatests/callwhole.xml     | 30 +++++++
+ 4 files changed, 119 insertions(+)
  create mode 100644 Ghidra/Features/Decompiler/src/decompile/datatests/callwhole.xml
 
 diff --git a/Ghidra/Features/Decompiler/certification.manifest b/Ghidra/Features/Decompiler/certification.manifest
@@ -36,27 +40,46 @@ index bad069cfd2..13888f1cd9 100644
  src/decompile/datatests/concat.xml||GHIDRA||||END|
  src/decompile/datatests/concatsplit.xml||GHIDRA||||END|
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/subflow.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/subflow.hh
-index 0e88b420c9..0ecea03b2e 100644
+index 0e88b420c9..f4faecb9b3 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/subflow.hh
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/subflow.hh
-@@ -446,6 +446,9 @@ class LaneDivide : public TransformManager {
+@@ -446,6 +446,10 @@ class LaneDivide : public TransformManager {
    bool buildMultiequal(PcodeOp *op,TransformVar *outVars,int4 numLanes,int4 skipLanes);
    bool buildIndirect(PcodeOp *op,TransformVar *outVars,int4 numLanes,int4 skipLanes);
    bool buildStore(PcodeOp *op,int4 numLanes,int4 skipLanes);
 +  set<PcodeOp *> wholeInputOps;		///< Ops consuming a traced value whole that have already been reattached
++  bool laneProgress;			///< Set if the trace met an op the lanes change: a lane read, a store, or a lane-wise op
 +  bool buildWholeInput(PcodeOp *op,TransformVar *rvn,int4 numLanes,int4 skipLanes);
 +  static bool isWholeReassembly(Varnode *vn,PcodeOp *op);
    bool buildLoad(PcodeOp *op,TransformVar *outVars,int4 numLanes,int4 skipLanes);
    bool buildRightShift(PcodeOp *op,TransformVar *outVars,int4 numLanes,int4 skipLanes);
    bool buildLeftShift(PcodeOp *op,TransformVar *outVars,int4 numLanes,int4 skipLanes);
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/subflow.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/subflow.cc
-index 0af1eb2554..420e1525d1 100644
+index 0af1eb2554..8186f1fa05 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/subflow.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/subflow.cc
-@@ -4032,6 +4032,18 @@ bool LaneDivide::traceForward(TransformVar *rvn,int4 numLanes,int4 skipLanes)
+@@ -3976,6 +3976,7 @@ bool LaneDivide::traceForward(TransformVar *rvn,int4 numLanes,int4 skipLanes)
+ 	    if (description.getSize(laneIndex) <= outvn->getSize())		// Is the piece smaller than a lane?
+ 	      return false;
+ 	    // Treat SUBPIECE as terminating
++	    laneProgress = true;
+ 	    TransformOp *rop = newPreexistingOp(2, CPUI_SUBPIECE, op);
+ 	    opSetInput(rop, rvn + (laneIndex - skipLanes), 0);
+ 	    opSetInput(rop, newConstant(4, 0, 0), 1);
+@@ -3984,6 +3985,7 @@ bool LaneDivide::traceForward(TransformVar *rvn,int4 numLanes,int4 skipLanes)
+ 	  return false;
+ 	}
+ 	if (outLanes == 1) {
++	  laneProgress = true;
+ 	  TransformOp *rop = newPreexistingOp(1, CPUI_COPY, op);
+ 	  opSetInput(rop,rvn + (outSkip-skipLanes), 0);
+ 	}
+@@ -4031,6 +4033,19 @@ bool LaneDivide::traceForward(TransformVar *rvn,int4 numLanes,int4 skipLanes)
+ 	if (op->getIn(2) != origvn) return false;	// Can only propagate through value being stored
  	if (!buildStore(op,numLanes,skipLanes))
  	  return false;
- 	break;
++	laneProgress = true;
++	break;
 +      case CPUI_CALL:
 +      case CPUI_CALLIND:
 +      case CPUI_CALLOTHER:
@@ -68,19 +91,19 @@ index 0af1eb2554..420e1525d1 100644
 +	if (!buildWholeInput(op,rvn,numLanes,skipLanes))
 +	  return false;
 +	wholeInputOps.insert(op);
-+	break;
+ 	break;
        default:
  	return false;
-     }
-@@ -4039,6 +4051,60 @@ bool LaneDivide::traceForward(TransformVar *rvn,int4 numLanes,int4 skipLanes)
+@@ -4039,6 +4054,66 @@ bool LaneDivide::traceForward(TransformVar *rvn,int4 numLanes,int4 skipLanes)
    return true;
  }
  
 +/// \brief Determine if a Varnode is already the reassembly of lanes feeding one consuming op
 +///
-+/// After buildWholeInput, the consuming op reads a value defined by a PIECE and read by nothing else.
-+/// Dividing such a value again would only rebuild the same PIECEs before the same op, and since the
-+/// reassembled value is itself of a laned size, the division would otherwise repeat on every pass.
++/// After buildWholeInput, the consuming op reads a value defined by a PIECE and read by nothing else,
++/// possibly in more than one of its input slots. Dividing such a value again would only rebuild the
++/// same PIECEs before the same op, and since the reassembled value is itself of a laned size, the
++/// division would otherwise repeat on every pass.
 +/// \param vn is the Varnode being traced
 +/// \param op is the op consuming it whole
 +/// \return \b true if the Varnode is a PIECE result read only by the given op
@@ -89,7 +112,12 @@ index 0af1eb2554..420e1525d1 100644
 +{
 +  if (!vn->isWritten()) return false;
 +  if (vn->getDef()->code() != CPUI_PIECE) return false;
-+  return (vn->loneDescend() == op);
++  list<PcodeOp *>::const_iterator iter;
++  for(iter=vn->beginDescend();iter!=vn->endDescend();++iter) {
++    if (*iter != op)
++      return false;		// Read by another op as well: the reassembly is not for this op alone
++  }
++  return true;
 +}
 +
 +/// \brief Reassemble the lanes into one value for a PcodeOp that consumes it whole
@@ -133,6 +161,58 @@ index 0af1eb2554..420e1525d1 100644
  /// \brief Pull the logical lanes back through the defining PcodeOp of the given variable
  ///
  /// Determine if the logical lanes can be pulled back naturally, and create placeholder
+@@ -4061,6 +4136,8 @@ bool LaneDivide::traceBackward(TransformVar *rvn,int4 numLanes,int4 skipLanes)
+       TransformVar *inVars = setReplacement(op->getIn(0),numLanes,skipLanes);
+       if (inVars == (TransformVar *)0) return false;
+       buildUnaryOp(op->code(), op, inVars, rvn, numLanes);
++      if (op->code() != CPUI_COPY)
++	laneProgress = true;
+       break;
+     }
+     case CPUI_INT_AND:
+@@ -4072,6 +4149,7 @@ bool LaneDivide::traceBackward(TransformVar *rvn,int4 numLanes,int4 skipLanes)
+       TransformVar *in1Vars = setReplacement(op->getIn(1),numLanes,skipLanes);
+       if (in1Vars == (TransformVar *)0) return false;
+       buildBinaryOp(op->code(),op,in0Vars,in1Vars,rvn,numLanes);
++      laneProgress = true;
+       break;
+     }
+     case CPUI_MULTIEQUAL:
+@@ -4105,14 +4183,17 @@ bool LaneDivide::traceBackward(TransformVar *rvn,int4 numLanes,int4 skipLanes)
+     case CPUI_INT_RIGHT:
+       if (!buildRightShift(op, rvn, numLanes, skipLanes))
+ 	return false;
++      laneProgress = true;
+       break;
+     case CPUI_INT_LEFT:
+       if (!buildLeftShift(op, rvn, numLanes, skipLanes))
+ 	return false;
++      laneProgress = true;
+       break;
+     case CPUI_INT_ZEXT:
+       if (!buildZext(op, rvn, numLanes, skipLanes))
+ 	return false;
++      laneProgress = true;
+       break;
+     default:
+       return false;
+@@ -4142,6 +4223,7 @@ LaneDivide::LaneDivide(Funcdata *f,Varnode *root,const LaneDescription &desc,boo
+   : TransformManager(f), description(desc)
+ {
+   allowSubpieceTerminator = allowDowncast;
++  laneProgress = false;
+   setReplacement(root, desc.getNumLanes(), 0);
+ }
+ 
+@@ -4163,6 +4245,8 @@ bool LaneDivide::doTrace(void)
+ 
+   clearVarnodeMarks();
+   if (!retval) return false;
++  if (!laneProgress && !wholeInputOps.empty())
++    return false;		// The lanes are only reassembled for ops that consume the value whole: nothing is gained
+   return true;
+ }
+ 
 diff --git a/Ghidra/Features/Decompiler/src/decompile/datatests/callwhole.xml b/Ghidra/Features/Decompiler/src/decompile/datatests/callwhole.xml
 new file mode 100644
 index 0000000000..659dbb6f01

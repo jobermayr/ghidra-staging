@@ -1,0 +1,119 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: ai-hakzarov <226896199+ai-hakzarov@users.noreply.github.com>
+Date: Wed, 7 Oct 2026 23:02:48 -0400
+Subject: [PATCH] 9755: Decompiler: lane division runs again as laned storage
+ appears
+
+ActionLaneDivide ran once per function and then stopped registering laned
+accesses, so a stack location of a laned size, which only becomes a Varnode
+once the stack analysis has replaced its LOADs and STOREs, was never divided: a
+vector spilled to the stack and read back lane by lane printed as byte pieces
+of a 16-byte local. The pass now runs on each round of the main loop over
+whatever registered since its last run; the access map is still cleared after
+every run, so nothing is retried without a new Varnode. A datatest compiled
+from a few lines of C covers three matrix rows stored to the stack, their
+address passed to a call, and the rows read back a float at a time.
+---
+ .../Decompiler/certification.manifest         |  1 +
+ .../src/decompile/cpp/coreaction.cc           |  4 +-
+ .../cpp/include/ghidra/coreaction.hh          |  2 +-
+ .../src/decompile/datatests/stackmatrix.xml   | 47 +++++++++++++++++++
+ 4 files changed, 52 insertions(+), 2 deletions(-)
+ create mode 100644 Ghidra/Features/Decompiler/src/decompile/datatests/stackmatrix.xml
+
+diff --git a/Ghidra/Features/Decompiler/certification.manifest b/Ghidra/Features/Decompiler/certification.manifest
+index 13888f1cd9..8c3bf437e9 100644
+--- a/Ghidra/Features/Decompiler/certification.manifest
++++ b/Ghidra/Features/Decompiler/certification.manifest
+@@ -111,6 +111,7 @@ src/decompile/datatests/sbyte.xml||GHIDRA||||END|
+ src/decompile/datatests/simdlanes.xml||GHIDRA||||END|
+ src/decompile/datatests/skipnext2.xml||GHIDRA||||END|
+ src/decompile/datatests/stackcorner.xml||GHIDRA||||END|
++src/decompile/datatests/stackmatrix.xml||GHIDRA||||END|
+ src/decompile/datatests/stackobjectalias.xml||GHIDRA||||END|
+ src/decompile/datatests/stackreturn.xml||GHIDRA||||END|
+ src/decompile/datatests/stackspill.xml||GHIDRA||||END|
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
+index 1a97a971c1..10203f61d9 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
+@@ -602,7 +602,9 @@ bool ActionLaneDivide::processVarnode(Funcdata &data,Varnode *vn,const LanedRegi
+ int4 ActionLaneDivide::apply(Funcdata &data)
+ 
+ {
+-  data.setLanedRegGenerated();
++  // Varnodes keep registering as laned accesses after this pass: a stack location of a laned size
++  // only appears once the stack analysis has turned its LOADs and STOREs into Varnodes, so the pass
++  // runs again on each round of the main loop over whatever registered since its last run.
+   map<VarnodeData,const LanedRegister *>::const_iterator iter;
+   for(int4 mode=0;mode<3;++mode) {
+     bool allStorageProcessed = true;
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/coreaction.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/coreaction.hh
+index 457da8cee7..d13a5610ca 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/coreaction.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/coreaction.hh
+@@ -114,7 +114,7 @@ class ActionLaneDivide : public Action {
+   void collectLaneSizes(Varnode *vn,const LanedRegister &allowedLanes,LanedRegister &checkLanes);
+   bool processVarnode(Funcdata &data,Varnode *vn,const LanedRegister &lanedRegister,int4 mode);
+ public:
+-  ActionLaneDivide(const string &g) : Action(rule_onceperfunc,"lanedivide",g) {}	///< Constructor
++  ActionLaneDivide(const string &g) : Action(0,"lanedivide",g) {}	///< Constructor
+   virtual Action *clone(const ActionGroupList &grouplist) const {
+     if (!grouplist.contains(getGroup())) return (Action *)0;
+     return new ActionLaneDivide(getGroup());
+diff --git a/Ghidra/Features/Decompiler/src/decompile/datatests/stackmatrix.xml b/Ghidra/Features/Decompiler/src/decompile/datatests/stackmatrix.xml
+new file mode 100644
+index 0000000000..e21a5f1765
+--- /dev/null
++++ b/Ghidra/Features/Decompiler/src/decompile/datatests/stackmatrix.xml
+@@ -0,0 +1,47 @@
++<decompilertest>
++<binaryimage arch="x86:LE:64:default:gcc">
++<!--
++#include <emmintrin.h>
++#include <math.h>
++/* three rows of a matrix built in a vector register (a scalar zero-extended, then slid a lane at a time) and stored whole to
++   the stack; the matrix's address escapes to a call, and after it the rows are read back a float at a time */
++void fill(float *m);
++float rotate(float a, float s) {
++  float m[12] __attribute__((aligned(16)));
++  __m128 e = _mm_set_ss(s);
++  _mm_store_ps(m, e);
++  _mm_store_ps(m + 4, _mm_castsi128_ps(_mm_slli_si128(_mm_castps_si128(e), 4)));
++  _mm_store_ps(m + 8, _mm_castsi128_ps(_mm_slli_si128(_mm_castps_si128(e), 8)));
++  fill(m);
++  float sn = sinf(a), cs = cosf(a);
++  return m[0] * cs + m[5] * sn + m[10];
++}
++
++  The three calls are to one-byte RET stubs placed after the function.
++-->
++<bytechunk space="ram" offset="0x100000" readonly="true">
++554889e54883ec40f30f1145fc0f57c00f57d2f30f10d10f2955c00f16c2660f73fa04660f7f55d00f2945e0488d7dc0e83b000000f30f1045fce841000000f30f1145f8f30f1045fce842000000f30f104df8f30f594dd4f30f5945c0f30f58c1f30f5845e84883c4405dc390909090c3909090909090909090909090909090c3909090909090909090909090909090c3909090909090909090909090909090
++</bytechunk>
++<symbol space="ram" offset="0x100000" name="rotate"/>
++<symbol space="ram" offset="0x100070" name="fill"/>
++<symbol space="ram" offset="0x100080" name="sinf"/>
++<symbol space="ram" offset="0x100090" name="cosf"/>
++</binaryimage>
++<script>
++  <com>parse line extern float4 rotate(float4 a, float4 s);</com>
++  <com>parse line extern void fill(float4 *m);</com>
++  <com>parse line extern float4 sinf(float4 a);</com>
++  <com>parse line extern float4 cosf(float4 a);</com>
++  <com>lo fu rotate</com>
++  <com>decompile</com>
++  <com>print C</com>
++</script>
++<stringmatch name="StackLanes #1" min="1" max="1">fStack_48 = s;</stringmatch>
++<stringmatch name="StackLanes #2" min="1" max="1">fStack_34 = s;</stringmatch>
++<stringmatch name="StackLanes #3" min="1" max="1">fStack_20 = s;</stringmatch>
++<stringmatch name="StackLanes #4" min="1" max="1">fill\(&amp;fStack_48\);</stringmatch>
++<stringmatch name="StackLanes #5" min="1" max="1">return fVar1 \* fStack_48 \+ fStack_10 \* fStack_34 \+ fStack_20;</stringmatch>
++<stringmatch name="StackLanes #6" min="0" max="0">&lt;&lt; 0x20</stringmatch>
++<stringmatch name="StackLanes #7" min="0" max="0">ZEXT416</stringmatch>
++<stringmatch name="StackLanes #8" min="0" max="0">_4_4_</stringmatch>
++</decompilertest>
+-- 
+2.45.1
+

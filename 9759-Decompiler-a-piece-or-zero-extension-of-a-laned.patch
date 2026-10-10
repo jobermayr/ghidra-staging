@@ -1,0 +1,198 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: ai-hakzarov <226896199+ai-hakzarov@users.noreply.github.com>
+Date: Fri, 9 Oct 2026 13:31:07 -0400
+Subject: [PATCH] 9759: Decompiler: a piece or zero extension of a laned
+ register that is not a lane size suggests the lane size that tiles it
+
+ActionLaneDivide::collectLaneSizes only registered a lane size when a SUBPIECE
+output or a PIECE input had exactly an allowed lane size, so a 12-byte piece of
+a 16-byte vector register (three floats of a four-float vector, taken as one
+piece) suggested nothing, and in mode 2 the default 8-byte lanes failed on it:
+the function kept the whole register and printed the piece as a byte array with
+lane extractions. Such a piece now registers the largest allowed lane size that
+tiles both the piece and its offset within the register, provided the piece
+holds at least two such lanes (12 bytes at offset 0 gives 4).
+
+A vector whose top lane is cleared by shuffling against a zero register is
+simplified into a zero extension of its low three lanes; the extended value
+had no reader or definition suggesting a lane size, so only the default lane
+size was tried and failed. The input of a defining INT_ZEXT now registers the
+lane size that tiles it when the input is not itself a lane size; a single
+extended lane still suggests nothing.
+
+The datatest zerotop.xml builds such a vector with two shuffles against a
+zero register and stores it whole; the top lane must print as a float, not as
+an extraction from a byte array.
+---
+ .../Decompiler/certification.manifest         |  1 +
+ .../src/decompile/cpp/coreaction.cc           | 77 ++++++++++++-------
+ .../cpp/include/ghidra/coreaction.hh          |  1 +
+ .../src/decompile/datatests/zerotop.xml       | 32 ++++++++
+ 4 files changed, 85 insertions(+), 26 deletions(-)
+ create mode 100644 Ghidra/Features/Decompiler/src/decompile/datatests/zerotop.xml
+
+diff --git a/Ghidra/Features/Decompiler/certification.manifest b/Ghidra/Features/Decompiler/certification.manifest
+index 8c3bf437e9..4101ce8f9c 100644
+--- a/Ghidra/Features/Decompiler/certification.manifest
++++ b/Ghidra/Features/Decompiler/certification.manifest
+@@ -132,6 +132,7 @@ src/decompile/datatests/varcross.xml||GHIDRA||||END|
+ src/decompile/datatests/volatilemcs96dup.xml||GHIDRA||||END|
+ src/decompile/datatests/wayoffarray.xml||GHIDRA||||END|
+ src/decompile/datatests/wraprange.xml||GHIDRA||||END|
++src/decompile/datatests/zerotop.xml||GHIDRA||||END|
+ src/decompile/zlib/README.txt||GHIDRA||||END|
+ src/main/doc/commonprofile.xsl||GHIDRA||||END|
+ src/main/doc/cspec.xml||GHIDRA||||END|
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
+index 10203f61d9..064e55ec58 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
+@@ -512,11 +512,42 @@ int4 ActionStackPtrFlow::apply(Funcdata &data)
+   return 0;
+ }
+ 
++/// \brief Register a lane size suggested by a piece of a laned register
++///
++/// If the piece's size is itself an allowed lane size, it is registered. Otherwise the piece
++/// is a run of smaller lanes (three floats taken from a four float vector, for instance) and
++/// the largest allowed lane size that tiles both the piece and its offset within the register
++/// is registered, provided the piece holds at least two such lanes.
++/// \param size is the size of the piece in bytes
++/// \param offset is the byte offset of the piece within the register
++/// \param allowedLanes is used to determine if a putative lane size is allowed
++/// \param checkLanes collects the possible lane sizes
++void ActionLaneDivide::addPieceLaneSize(int4 size,int4 offset,const LanedRegister &allowedLanes,LanedRegister &checkLanes)
++
++{
++  if (allowedLanes.allowedLane(size)) {
++    checkLanes.addLaneSize(size);			// Register this possible size
++    return;
++  }
++  int4 best = 0;
++  LanedRegister::const_iterator enditer = allowedLanes.end();
++  for(LanedRegister::const_iterator iter=allowedLanes.begin();iter!=enditer;++iter) {
++    int4 laneSize = *iter;
++    if (laneSize * 2 > size) break;			// Sizes come smallest first
++    if ((size % laneSize) == 0 && (offset % laneSize) == 0)
++      best = laneSize;
++  }
++  if (best > 0)
++    checkLanes.addLaneSize(best);
++}
++
+ /// \brief Examine the PcodeOps using the given Varnode to determine possible lane sizes
+ ///
+ /// Run through the defining op and any descendant ops of the given Varnode, looking for
+ /// CPUI_PIECE and CPUI_SUBPIECE. Use these to determine possible lane sizes and
+-/// register them with the given LanedRegister object.
++/// register them with the given LanedRegister object. A piece whose size is not itself a lane
++/// size suggests the largest lane size that tiles it (addPieceLaneSize); so does the input of
++/// a defining CPUI_INT_ZEXT when it is not itself a lane size (a run of lanes under zero lanes).
+ /// \param vn is the given Varnode
+ /// \param allowedLanes is used to determine if a putative lane size is allowed
+ /// \param checkLanes collects the possible lane sizes
+@@ -524,32 +555,26 @@ void ActionLaneDivide::collectLaneSizes(Varnode *vn,const LanedRegister &allowed
+ 
+ {
+   list<PcodeOp *>::const_iterator iter = vn->beginDescend();
+-  int4 step = 0;		// 0 = descendants, 1 = def, 2 = done
+-  if (iter == vn->endDescend()) {
+-    step = 1;
++  list<PcodeOp *>::const_iterator enditer = vn->endDescend();
++  while(iter != enditer) {
++    PcodeOp *op = *iter;
++    ++iter;
++    if (op->code() != CPUI_SUBPIECE) continue;	// Is the big register split into pieces
++    addPieceLaneSize(op->getOut()->getSize(),(int4)op->getIn(1)->getOffset(),allowedLanes,checkLanes);
+   }
+-  while(step < 2) {
+-    int4 curSize;		// Putative lane size
+-    if (step == 0) {
+-      PcodeOp *op = *iter;
+-      ++iter;
+-      if (iter == vn->endDescend())
+-	step = 1;
+-      if (op->code() != CPUI_SUBPIECE) continue;	// Is the big register split into pieces
+-      curSize = op->getOut()->getSize();
+-    }
+-    else {
+-      step = 2;
+-      if (!vn->isWritten()) continue;
+-      PcodeOp *op = vn->getDef();
+-      if (op->code() != CPUI_PIECE) continue;		// Is the big register formed from smaller pieces
+-      curSize = op->getIn(0)->getSize();
+-      int4 tmpSize = op->getIn(1)->getSize();
+-      if (tmpSize < curSize)
+-	curSize = tmpSize;
+-    }
+-    if (allowedLanes.allowedLane(curSize))
+-      checkLanes.addLaneSize(curSize);			// Register this possible size
++  if (!vn->isWritten()) return;
++  PcodeOp *op = vn->getDef();
++  if (op->code() == CPUI_PIECE) {			// Is the big register formed from smaller pieces
++    int4 loSize = op->getIn(1)->getSize();
++    addPieceLaneSize(loSize,0,allowedLanes,checkLanes);
++    addPieceLaneSize(op->getIn(0)->getSize(),loSize,allowedLanes,checkLanes);
++  }
++  else if (op->code() == CPUI_INT_ZEXT) {
++    // Is the big register a run of lanes with zero lanes above it. A single lane extended is left alone:
++    // it suggests no lane size on its own.
++    int4 inSize = op->getIn(0)->getSize();
++    if (!allowedLanes.allowedLane(inSize))
++      addPieceLaneSize(inSize,0,allowedLanes,checkLanes);
+   }
+ }
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/coreaction.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/coreaction.hh
+index d13a5610ca..29488c0e55 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/coreaction.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/coreaction.hh
+@@ -111,6 +111,7 @@ public:
+ /// if a particular lane scheme makes sense in terms of the function's data-flow, and then
+ /// rewrites the data-flow so that the lanes become explicit Varnodes.
+ class ActionLaneDivide : public Action {
++  static void addPieceLaneSize(int4 size,int4 offset,const LanedRegister &allowedLanes,LanedRegister &checkLanes);
+   void collectLaneSizes(Varnode *vn,const LanedRegister &allowedLanes,LanedRegister &checkLanes);
+   bool processVarnode(Funcdata &data,Varnode *vn,const LanedRegister &lanedRegister,int4 mode);
+ public:
+diff --git a/Ghidra/Features/Decompiler/src/decompile/datatests/zerotop.xml b/Ghidra/Features/Decompiler/src/decompile/datatests/zerotop.xml
+new file mode 100644
+index 0000000000..d7650c1659
+--- /dev/null
++++ b/Ghidra/Features/Decompiler/src/decompile/datatests/zerotop.xml
+@@ -0,0 +1,32 @@
++<decompilertest>
++<binaryimage arch="x86:LE:64:default:gcc">
++<!--
++#include <xmmintrin.h>
++/* a vector scaled lane by lane, its top lane replaced by zero through two shuffles against a zero register (the way a
++   compiler clears one lane without a mask constant), stored; the decompiler folds the shuffles into a zero extension of
++   the low three lanes, which the lane split must follow forward */
++void zerotop(float *out, const float *in, float s) {
++  __m128 v = _mm_mul_ps(_mm_loadu_ps(in), _mm_set1_ps(s));
++  __m128 t = _mm_shuffle_ps(v, _mm_setzero_ps(), 0x0a);
++  v = _mm_shuffle_ps(v, t, 0x84);
++  _mm_storeu_ps(out, v);
++}
++-->
++<bytechunk space="ram" offset="0x100000" readonly="true">
++554889e50f100e0fc6c0000f59c10f57c90fc6c8200fc6c1240f11075dc3
++</bytechunk>
++<symbol space="ram" offset="0x100000" name="zerotop"/>
++</binaryimage>
++<script>
++  <com>parse line extern void zerotop(float4 *out, float4 *in, float4 s);</com>
++  <com>lo fu zerotop</com>
++  <com>decompile</com>
++  <com>print C</com>
++</script>
++<stringmatch name="ZeroTop #1" min="1" max="1">\*out = s \* \*in;</stringmatch>
++<stringmatch name="ZeroTop #2" min="1" max="1">out\[1\] = s \* fVar1;</stringmatch>
++<stringmatch name="ZeroTop #3" min="1" max="1">out\[2\] = s \* fVar2;</stringmatch>
++<stringmatch name="ZeroTop #4" min="1" max="1">out\[3\] = 0.0;</stringmatch>
++<stringmatch name="ZeroTop #5" min="0" max="0">axVar</stringmatch>
++<stringmatch name="ZeroTop #6" min="0" max="0">_12_4_</stringmatch>
++</decompilertest>
+-- 
+2.45.1
+

@@ -1,0 +1,315 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: ai-hakzarov <226896199+ai-hakzarov@users.noreply.github.com>
+Date: Fri, 9 Oct 2026 21:19:12 -0400
+Subject: [PATCH] 9761: Decompiler: the default lane size guess reads the lanes
+ its storage already uses
+
+A vector value that is only loaded and stored whole gives the lane split
+no lane size of its own, so the default guess divides it by the pointer
+size. When the value is copied into a stack location that the function
+accesses in smaller lanes, that guess is wrong and shapes the location's
+symbols into pointer-size halves, so every real lane then prints as a
+piece of them.
+
+The guess now reads the storage first. Before the stack has been through
+heritage the location is still reached through the stack pointer plus a
+constant, so the STOREs of the value and the LOAD defining it name the
+location, and the other LOADs and STOREs through the stack pointer into it
+are its lanes (RuleLoadVarnode::checkSpacebase is made public for this).
+After heritage the value sits in an address-tied Varnode, reached directly
+or through a COPY or a call's INDIRECT, and the smaller Varnodes inside its
+range are the lanes. The largest allowed lane size that tiles every access
+is tried before the default. A lane size equal to the whole register is
+skipped: one lane is no division.
+
+The slotlanes datatest builds such a stack vector lane by lane, loads it
+whole into a register between calls, rewrites three lanes and overwrites
+it with one 16-byte copy whose address a call takes; it reads as six
+floats, with no pointer-size halves.
+---
+ .../Decompiler/certification.manifest         |   1 +
+ .../src/decompile/cpp/coreaction.cc           | 150 ++++++++++++++++++
+ .../cpp/include/ghidra/coreaction.hh          |   1 +
+ .../cpp/include/ghidra/ruleaction.hh          |   2 +-
+ .../src/decompile/datatests/slotlanes.xml     |  56 +++++++
+ 5 files changed, 209 insertions(+), 1 deletion(-)
+ create mode 100644 Ghidra/Features/Decompiler/src/decompile/datatests/slotlanes.xml
+
+diff --git a/Ghidra/Features/Decompiler/certification.manifest b/Ghidra/Features/Decompiler/certification.manifest
+index 4101ce8f9c..f58db2605f 100644
+--- a/Ghidra/Features/Decompiler/certification.manifest
++++ b/Ghidra/Features/Decompiler/certification.manifest
+@@ -110,6 +110,7 @@ src/decompile/datatests/riscv_isaext_memcpy.xml||GHIDRA||||END|
+ src/decompile/datatests/sbyte.xml||GHIDRA||||END|
+ src/decompile/datatests/simdlanes.xml||GHIDRA||||END|
+ src/decompile/datatests/skipnext2.xml||GHIDRA||||END|
++src/decompile/datatests/slotlanes.xml||GHIDRA||||END|
+ src/decompile/datatests/stackcorner.xml||GHIDRA||||END|
+ src/decompile/datatests/stackmatrix.xml||GHIDRA||||END|
+ src/decompile/datatests/stackobjectalias.xml||GHIDRA||||END|
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
+index 064e55ec58..84d201363f 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
+@@ -578,6 +578,152 @@ void ActionLaneDivide::collectLaneSizes(Varnode *vn,const LanedRegister &allowed
+   }
+ }
+ 
++/// \brief Accumulate one access inside a storage range into the set of lane sizes that still tile every access
++///
++/// \param rel is the byte offset of the access within the storage
++/// \param sz is the size of the access in bytes
++/// \param wholeSize is the size of the storage in bytes
++/// \param mask has bit i set if lane size 1<<i tiles every access seen so far (updated)
++/// \return \b true if the access is contained in the storage and was counted
++static bool accumulateLaneAccess(int4 rel,int4 sz,int4 wholeSize,uint4 &mask)
++
++{
++  if (sz >= wholeSize) return false;
++  if (rel + sz > wholeSize) return false;	// Not contained in the storage
++  for(int4 b=0;b<8;++b) {
++    int4 lane = 1 << b;
++    if ((rel % lane) != 0 || (sz % lane) != 0)
++      mask &= ~((uint4)1 << b);
++  }
++  return true;
++}
++
++/// \brief If the given LOAD or STORE goes through a stack pointer plus a constant, pass back the stack location
++///
++/// \param glb is the Architecture
++/// \param op is the LOAD or STORE
++/// \param spc will hold the stack-like address space
++/// \param off will hold the offset within that space
++/// \return \b true if the op accesses a known stack location
++static bool stackLocationOfAccess(Architecture *glb,PcodeOp *op,AddrSpace *&spc,uintb &off)
++
++{
++  if (op->isDead()) return false;
++  spc = RuleLoadVarnode::checkSpacebase(glb,op,off);
++  if (spc == (AddrSpace *)0) return false;
++  return (spc->getType() == IPTR_SPACEBASE);
++}
++
++/// \brief Find the lane size that the storage of the given Varnode already uses, for the default lane size guess
++///
++/// A value only loaded and stored whole gives no lane size of its own, and the default guess (mode 2) would
++/// divide it by the pointer size. But the memory it is copied into may already be accessed in lanes.
++/// Two kinds of evidence are read. Once the storage has been through heritage, the value sits in an
++/// address-tied Varnode (directly, or reached through a COPY or a call's INDIRECT), and other, smaller Varnodes
++/// in the same storage range are its lanes. Before that, the storage is still reached through a stack pointer
++/// plus a constant, so the STOREs of the value (and the LOAD defining it) name a stack location, and the other
++/// LOADs and STOREs through the stack pointer into that location are its lanes. The largest allowed lane size
++/// that tiles every such access is returned.
++/// \param data is the function being transformed
++/// \param vn is the given Varnode
++/// \param lanedRegister is the set of allowed lane sizes
++/// \return the lane size the storage uses, or 0 if the storage gives no lane size
++int4 ActionLaneDivide::laneSizeFromStorage(Funcdata &data,Varnode *vn,const LanedRegister &lanedRegister)
++
++{
++  Architecture *glb = data.getArch();
++  int4 wholeSize = vn->getSize();
++  uint4 mask = 0;			// Bit i set if lane size 1<<i tiles every overlapping access seen so far
++  for(int4 i=0;i<8;++i) mask |= (1<<i);
++  bool seen = false;
++  vector<Varnode *> tied;		// Address-tied Varnodes holding the value, after heritage of the storage
++  vector<pair<AddrSpace *,uintb> > slots;	// Stack locations holding the value, before heritage of the storage
++  if (vn->isAddrTied())
++    tied.push_back(vn);
++  if (vn->isWritten()) {
++    PcodeOp *def = vn->getDef();
++    if (def->code() == CPUI_COPY && def->getIn(0)->isAddrTied())
++      tied.push_back(def->getIn(0));
++    else if (def->code() == CPUI_LOAD) {
++      AddrSpace *spc;
++      uintb off;
++      if (stackLocationOfAccess(glb,def,spc,off))
++	slots.push_back(pair<AddrSpace *,uintb>(spc,off));
++    }
++  }
++  list<PcodeOp *>::const_iterator iter = vn->beginDescend();
++  list<PcodeOp *>::const_iterator enditer = vn->endDescend();
++  while(iter != enditer) {
++    PcodeOp *op = *iter;
++    ++iter;
++    if (op->code() == CPUI_STORE) {
++      AddrSpace *spc;
++      uintb off;
++      if (op->getIn(2) == vn && stackLocationOfAccess(glb,op,spc,off))
++	slots.push_back(pair<AddrSpace *,uintb>(spc,off));
++      continue;
++    }
++    Varnode *outvn = op->getOut();
++    if (op->code() == CPUI_INDIRECT) {
++      // After the stack analysis, the COPY into the storage may be propagated away and the value,
++      // still in its register, read directly by the INDIRECT that a call puts on the storage
++      if (op->getIn(0) != vn || vn->getSpace() == outvn->getSpace()) continue;
++    }
++    else if (op->code() != CPUI_COPY) continue;
++    if (outvn->isAddrTied())
++      tied.push_back(outvn);
++  }
++  for(int4 i=0;i<tied.size();++i) {
++    Varnode *t = tied[i];
++    AddrSpace *spc = t->getSpace();
++    uintb base = t->getOffset();
++    for(int4 rel=0;rel<wholeSize;++rel) {
++      Address addr(spc,spc->wrapOffset(base + rel));
++      VarnodeLocSet::const_iterator viter = data.beginLoc(addr);
++      VarnodeLocSet::const_iterator venditer = data.endLoc(addr);
++      for(;viter!=venditer;++viter) {
++	Varnode *u = *viter;
++	if (u == t) continue;
++	if (accumulateLaneAccess(rel,u->getSize(),wholeSize,mask))
++	  seen = true;
++      }
++    }
++  }
++  if (!slots.empty()) {
++    for(int4 pass=0;pass<2;++pass) {
++      OpCode opc = (pass == 0) ? CPUI_LOAD : CPUI_STORE;
++      list<PcodeOp *>::const_iterator oiter = data.beginOp(opc);
++      list<PcodeOp *>::const_iterator oenditer = data.endOp(opc);
++      for(;oiter!=oenditer;++oiter) {
++	PcodeOp *op = *oiter;
++	AddrSpace *spc;
++	uintb off;
++	if (!stackLocationOfAccess(glb,op,spc,off)) continue;
++	Varnode *accessed = (pass == 0) ? op->getOut() : op->getIn(2);
++	if (accessed == vn) continue;
++	int4 sz = accessed->getSize();
++	for(int4 i=0;i<slots.size();++i) {
++	  if (slots[i].first != spc) continue;
++	  uintb rel = spc->wrapOffset(off - slots[i].second);
++	  if (rel >= (uintb)wholeSize) continue;
++	  if (accumulateLaneAccess((int4)rel,sz,wholeSize,mask))
++	    seen = true;
++	}
++      }
++    }
++  }
++  if (!seen) return 0;
++  int4 best = 0;
++  for(int4 b=0;b<8;++b) {
++    int4 lane = 1 << b;
++    if (lane >= wholeSize) break;
++    if ((mask & ((uint4)1 << b)) == 0) continue;
++    if (!lanedRegister.allowedLane(lane)) continue;
++    best = lane;
++  }
++  return best;
++}
++
+ /// \brief Search for a likely lane size and try to divide a single Varnode into these lanes
+ ///
+ /// There are different ways to search for a lane size:
+@@ -603,6 +749,9 @@ bool ActionLaneDivide::processVarnode(Funcdata &data,Varnode *vn,const LanedRegi
+     collectLaneSizes(vn,lanedRegister,checkLanes);
+   else {
+     int4 defaultSize = data.getArch()->types->getSizeOfPointer();		// Default lane size
++    int4 storageSize = laneSizeFromStorage(data,vn,lanedRegister);
++    if (storageSize > 0)
++      checkLanes.addLaneSize(storageSize);	// The storage already uses this lane size: tried first, as it is smaller
+     if (defaultSize == 4 && lanedRegister.allowedLane(4))
+       checkLanes.addLaneSize(4);
+     else if (lanedRegister.allowedLane(8))
+@@ -613,6 +762,7 @@ bool ActionLaneDivide::processVarnode(Funcdata &data,Varnode *vn,const LanedRegi
+   LanedRegister::const_iterator enditer = checkLanes.end();
+   for(LanedRegister::const_iterator iter=checkLanes.begin();iter!=enditer;++iter) {
+     int4 curSize = *iter;
++    if (curSize >= lanedRegister.getWholeSize()) continue;	// One lane is no division
+     LaneDescription description(lanedRegister.getWholeSize(),curSize);	// Lane scheme dictated by curSize
+     LaneDivide laneDivide(&data,vn,description,allowDowncast);
+     if (laneDivide.doTrace()) {
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/coreaction.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/coreaction.hh
+index 29488c0e55..2502215d17 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/coreaction.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/coreaction.hh
+@@ -113,6 +113,7 @@ public:
+ class ActionLaneDivide : public Action {
+   static void addPieceLaneSize(int4 size,int4 offset,const LanedRegister &allowedLanes,LanedRegister &checkLanes);
+   void collectLaneSizes(Varnode *vn,const LanedRegister &allowedLanes,LanedRegister &checkLanes);
++  static int4 laneSizeFromStorage(Funcdata &data,Varnode *vn,const LanedRegister &lanedRegister);
+   bool processVarnode(Funcdata &data,Varnode *vn,const LanedRegister &lanedRegister,int4 mode);
+ public:
+   ActionLaneDivide(const string &g) : Action(0,"lanedivide",g) {}	///< Constructor
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/ruleaction.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/ruleaction.hh
+index 1802081432..8b83d1770c 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/ruleaction.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/ruleaction.hh
+@@ -849,8 +849,8 @@ class RuleLoadVarnode : public Rule {
+   friend class RuleStoreVarnode;
+   static AddrSpace *correctSpacebase(Architecture *glb,Varnode *vn,AddrSpace *spc);
+   static AddrSpace *vnSpacebase(Architecture *glb,Varnode *vn,uintb &val,AddrSpace *spc,int4 depth=0);
+-  static AddrSpace *checkSpacebase(Architecture *glb,PcodeOp *op,uintb &offoff);
+ public:
++  static AddrSpace *checkSpacebase(Architecture *glb,PcodeOp *op,uintb &offoff);
+   RuleLoadVarnode(const string &g) : Rule(g, 0, "loadvarnode") {}	///< Constructor
+   virtual Rule *clone(const ActionGroupList &grouplist) const {
+     if (!grouplist.contains(getGroup())) return (Rule *)0;
+diff --git a/Ghidra/Features/Decompiler/src/decompile/datatests/slotlanes.xml b/Ghidra/Features/Decompiler/src/decompile/datatests/slotlanes.xml
+new file mode 100644
+index 0000000000..de7258aac7
+--- /dev/null
++++ b/Ghidra/Features/Decompiler/src/decompile/datatests/slotlanes.xml
+@@ -0,0 +1,56 @@
++<decompilertest>
++<binaryimage arch="x86:LE:64:default:gcc">
++<!--
++/* a four-float vector slot on the stack, as a compiler lays it out for a value it builds lane by lane: two lanes set to
++   zero by integer stores, two by converted ints; a call (a sine) between; the slot loaded whole into a register whose lanes
++   the maths then shuffles out; three lanes rewritten from memory, another call, the slot loaded whole again; at the end
++   the slot overwritten by one 16-byte copy and its address handed to a call */
++__asm__(
++".intel_syntax noprefix\n"
++".text\n.globl slotlanes\n.type slotlanes,@function\nslotlanes:\n"
++"  push rbx\n  push r12\n  push r13\n  push r14\n  sub rsp, 0x48\n"
++"  mov rbx, rdi\n  mov r12, rsi\n  mov r13, rdx\n  mov r14, rcx\n"
++"  mov dword ptr [rsp+0x20], 0\n"
++"  mov dword ptr [rsp+0x2c], 0\n"
++"  movd xmm0, dword ptr [rbx+0x1c]\n  cvtdq2ps xmm0, xmm0\n  movss dword ptr [rsp+0x28], xmm0\n"
++"  movd xmm1, dword ptr [rbx+0x20]\n  cvtdq2ps xmm1, xmm1\n  movss dword ptr [rsp+0x24], xmm1\n"
++"  movss xmm0, dword ptr [rbx+0x40]\n  call r12\n  movss dword ptr [rsp+0x30], xmm0\n"
++"  movss xmm0, dword ptr [rbx+0x40]\n  call r13\n  movss dword ptr [rsp+0x34], xmm0\n"
++"  movaps xmm3, xmmword ptr [rsp+0x20]\n"
++"  movaps xmm1, xmm3\n  shufps xmm1, xmm3, 0x55\n"
++"  movaps xmm2, xmm3\n  shufps xmm2, xmm3, 0xaa\n"
++"  mulss xmm1, dword ptr [rsp+0x30]\n  mulss xmm2, dword ptr [rsp+0x34]\n  addss xmm1, xmm2\n"
++"  movss dword ptr [rbx+0x44], xmm1\n"
++"  movss xmm0, dword ptr [rbx+0x70]\n  movss dword ptr [rsp+0x20], xmm0\n"
++"  movss xmm0, dword ptr [rbx+0x74]\n  movss dword ptr [rsp+0x24], xmm0\n"
++"  movss xmm0, dword ptr [rbx+0x78]\n  movss dword ptr [rsp+0x28], xmm0\n"
++"  movss xmm0, dword ptr [rbx+0x48]\n  call r12\n  movss dword ptr [rsp+0x30], xmm0\n"
++"  movaps xmm3, xmmword ptr [rsp+0x20]\n"
++"  movaps xmm1, xmm3\n  shufps xmm1, xmm3, 0x00\n"
++"  mulss xmm1, dword ptr [rsp+0x30]\n"
++"  movaps xmm2, xmm3\n  shufps xmm2, xmm3, 0xff\n  addss xmm1, xmm2\n"
++"  movss dword ptr [rbx+0x4c], xmm1\n"
++"  movups xmm0, xmmword ptr [rbx+0x10]\n"
++"  lea rdi, [rsp+0x20]\n  movaps xmmword ptr [rsp+0x20], xmm0\n  call r14\n"
++"  add rsp, 0x48\n  pop r14\n  pop r13\n  pop r12\n  pop rbx\n  ret\n"
++".att_syntax prefix\n"
++);
++-->
++<bytechunk space="ram" offset="0x100000" readonly="true">
++534154415541564883ec484889fb4989f44989d54989cec744242000000000c744242c00000000660f6e431c0f5bc0f30f11442428660f6e4b200f5bc9f30f114c2424f30f10434041ffd4f30f11442430f30f10434041ffd5f30f114424340f285c24200f28cb0fc6cb550f28d30fc6d3aaf30f594c2430f30f59542434f30f58caf30f114b44f30f104370f30f11442420f30f104374f30f11442424f30f104378f30f11442428f30f10434841ffd4f30f114424300f285c24200f28cb0fc6cb00f30f594c24300f28d30fc6d3fff30f58caf30f114b4c0f104310488d7c24200f2944242041ffd64883c448415e415d415c5bc3
++</bytechunk>
++<symbol space="ram" offset="0x100000" name="slotlanes"/>
++</binaryimage>
++<script>
++  <com>lo fu slotlanes</com>
++  <com>decompile</com>
++  <com>print C</com>
++</script>
++<stringmatch name="SlotLanes #1" min="1" max="1">fStack_48 = 0.0;</stringmatch>
++<stringmatch name="SlotLanes #2" min="1" max="1">fStack_3c = 0.0;</stringmatch>
++<stringmatch name="SlotLanes #3" min="1" max="1">fStack_40 = \(float4\)\*\(int4 \*\)\(param_1 \+ 0x1c\);</stringmatch>
++<stringmatch name="SlotLanes #4" min="1" max="1">fStack_44 = \*\(float4 \*\)\(param_1 \+ 0x74\);</stringmatch>
++<stringmatch name="SlotLanes #5" min="1" max="1">fStack_3c = \*\(float4 \*\)\(param_1 \+ 0x1c\);</stringmatch>
++<stringmatch name="SlotLanes #6" min="0" max="0">xStack</stringmatch>
++<stringmatch name="SlotLanes #7" min="0" max="0">_4_4_</stringmatch>
++</decompilertest>
+-- 
+2.45.1
+

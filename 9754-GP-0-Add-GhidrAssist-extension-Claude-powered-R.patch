@@ -1,0 +1,2529 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: atulpokharel-gp <atulpokharel12@gmail.com>
+Date: Fri, 9 Oct 2026 00:43:58 -0400
+Subject: [PATCH] 9754: GP-0: Add GhidrAssist extension (Claude-powered RE
+ assistant)
+
+GP-0: Add GhidrAssist extension (Claude-powered RE
+ assistant)
+
+Introduces Ghidra/Extensions/GhidrAssist, a new extension that embeds a
+Claude-powered assistant inside Ghidra:
+
+- Docked chat panel with streaming responses.
+- Decompiler right-click actions: Explain Function, Suggest Renames
+  (confirmed and applied in a single transaction), Suggest Signature,
+  Reconstruct as C.
+- Tools menu action to export the current program as a buildable-ish C
+  project skeleton (per-function .c files, program.h, Makefile, README).
+
+The Anthropic API key, model, and base URL are configured via
+Edit -> Tool Options -> GhidrAssist. The extension depends on :Base and
+:Decompiler and ships a standard distributable zip via :zipExtensions.
+
+Known limits documented in the extension's README and the exported
+project's README: decompilation is lossy; rename and type suggestions are
+hypotheses; and the exported C project is a starting point for manual
+porting, not a byte-exact rebuild pipeline.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+
+GP-0: GhidrAssist Apple-aware context + Prepare Apple Binary action
+
+Adds Apple-binary awareness to the GhidrAssist extension. No new
+decompilation capability -- Ghidra already handles Mach-O, dyld shared
+caches, AARCH64:LE:64:AppleSilicon, and ships the Objective-C and Swift
+feature modules. This change wires the LLM assistant into those
+capabilities more usefully.
+
+- apple/AppleBinaryContext detects Mach-O, Apple Silicon, Objective-C
+  runtime (via __objc_* sections), Swift runtime (via __swift5_*
+  sections), and arm64e hints from the executable path. Pure-string
+  classifier is exposed as AppleBinaryContext.classify(...) for tests.
+- Explain and Reconstruct actions prepend a short Apple preamble when
+  the current program is Apple-flavoured: objc_msgSend dispatch, Swift
+  mangling and metadata sections, Darwin AAPCS64 conventions, and
+  pointer authentication on arm64e.
+- New Tools -> GhidrAssist -> Prepare Apple Binary... action enables
+  the Objective-C Message / Type Metadata and Swift Type Metadata
+  analyzers on the current program and schedules re-analysis, inside a
+  single transaction so Undo rolls everything back.
+- Unit tests under src/test cover ELF vs Mach-O, Apple Silicon vs
+  x86_64 Mach-O, Objective-C and Swift section detection, arm64e path
+  hints, null safety, and preamble content. All 10 tests pass.
+
+End-to-end verification on a real Mach-O binary requires a macOS /
+iOS target and a running Ghidra install, which were not available in
+the development environment. Compilation (:GhidrAssist:compileJava),
+packaging (:GhidrAssist:zipExtensions), and unit tests
+(:GhidrAssist:test) all succeed.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+---
+ Ghidra/Extensions/GhidrAssist/Module.manifest |   0
+ Ghidra/Extensions/GhidrAssist/README.md       |  64 ++++
+ Ghidra/Extensions/GhidrAssist/build.gradle    |  25 ++
+ .../GhidrAssist/certification.manifest        |   5 +
+ .../GhidrAssist/data/ExtensionPoint.manifest  |   0
+ .../GhidrAssist/extension.properties          |   5 +
+ .../java/ghidra/ghidrassist/ClaudeClient.java | 194 ++++++++++++
+ .../ghidra/ghidrassist/ClaudeMessage.java     |  26 ++
+ .../ghidra/ghidrassist/ClaudeOptions.java     | 108 +++++++
+ .../ghidra/ghidrassist/DecompilerHelper.java  |  62 ++++
+ .../ghidra/ghidrassist/GhidrAssistPlugin.java |  85 ++++++
+ .../ghidrassist/GhidrAssistProvider.java      | 285 ++++++++++++++++++
+ .../ghidra/ghidrassist/ProjectExporter.java   | 235 +++++++++++++++
+ .../ghidrassist/actions/ActionSupport.java    |  63 ++++
+ .../actions/ExplainFunctionAction.java        |  84 ++++++
+ .../actions/ExportProjectAction.java          | 113 +++++++
+ .../actions/GhidrAssistAction.java            |  49 +++
+ .../actions/PrepareAppleBinaryAction.java     | 117 +++++++
+ .../actions/ReconstructFunctionAction.java    |  81 +++++
+ .../actions/SuggestRenamesAction.java         | 246 +++++++++++++++
+ .../actions/SuggestSignatureAction.java       |  94 ++++++
+ .../ghidrassist/apple/AppleBinaryContext.java | 211 +++++++++++++
+ .../apple/AppleBinaryContextTest.java         | 132 ++++++++
+ 23 files changed, 2284 insertions(+)
+ create mode 100644 Ghidra/Extensions/GhidrAssist/Module.manifest
+ create mode 100644 Ghidra/Extensions/GhidrAssist/README.md
+ create mode 100644 Ghidra/Extensions/GhidrAssist/build.gradle
+ create mode 100644 Ghidra/Extensions/GhidrAssist/certification.manifest
+ create mode 100644 Ghidra/Extensions/GhidrAssist/data/ExtensionPoint.manifest
+ create mode 100644 Ghidra/Extensions/GhidrAssist/extension.properties
+ create mode 100644 Ghidra/Extensions/GhidrAssist/src/main/java/ghidra/ghidrassist/ClaudeClient.java
+ create mode 100644 Ghidra/Extensions/GhidrAssist/src/main/java/ghidra/ghidrassist/ClaudeMessage.java
+ create mode 100644 Ghidra/Extensions/GhidrAssist/src/main/java/ghidra/ghidrassist/ClaudeOptions.java
+ create mode 100644 Ghidra/Extensions/GhidrAssist/src/main/java/ghidra/ghidrassist/DecompilerHelper.java
+ create mode 100644 Ghidra/Extensions/GhidrAssist/src/main/java/ghidra/ghidrassist/GhidrAssistPlugin.java
+ create mode 100644 Ghidra/Extensions/GhidrAssist/src/main/java/ghidra/ghidrassist/GhidrAssistProvider.java
+ create mode 100644 Ghidra/Extensions/GhidrAssist/src/main/java/ghidra/ghidrassist/ProjectExporter.java
+ create mode 100644 Ghidra/Extensions/GhidrAssist/src/main/java/ghidra/ghidrassist/actions/ActionSupport.java
+ create mode 100644 Ghidra/Extensions/GhidrAssist/src/main/java/ghidra/ghidrassist/actions/ExplainFunctionAction.java
+ create mode 100644 Ghidra/Extensions/GhidrAssist/src/main/java/ghidra/ghidrassist/actions/ExportProjectAction.java
+ create mode 100644 Ghidra/Extensions/GhidrAssist/src/main/java/ghidra/ghidrassist/actions/GhidrAssistAction.java
+ create mode 100644 Ghidra/Extensions/GhidrAssist/src/main/java/ghidra/ghidrassist/actions/PrepareAppleBinaryAction.java
+ create mode 100644 Ghidra/Extensions/GhidrAssist/src/main/java/ghidra/ghidrassist/actions/ReconstructFunctionAction.java
+ create mode 100644 Ghidra/Extensions/GhidrAssist/src/main/java/ghidra/ghidrassist/actions/SuggestRenamesAction.java
+ create mode 100644 Ghidra/Extensions/GhidrAssist/src/main/java/ghidra/ghidrassist/actions/SuggestSignatureAction.java
+ create mode 100644 Ghidra/Extensions/GhidrAssist/src/main/java/ghidra/ghidrassist/apple/AppleBinaryContext.java
+ create mode 100644 Ghidra/Extensions/GhidrAssist/src/test/java/ghidra/ghidrassist/apple/AppleBinaryContextTest.java
+
+diff --git a/Ghidra/Extensions/GhidrAssist/Module.manifest b/Ghidra/Extensions/GhidrAssist/Module.manifest
+new file mode 100644
+index 0000000000..e69de29bb2
+diff --git a/Ghidra/Extensions/GhidrAssist/README.md b/Ghidra/Extensions/GhidrAssist/README.md
+new file mode 100644
+index 0000000000..0a67943f79
+--- /dev/null
++++ b/Ghidra/Extensions/GhidrAssist/README.md
+@@ -0,0 +1,64 @@
++# GhidrAssist
++
++Embeds a Claude-powered AI assistant inside Ghidra.
++
++## What it does
++
++- **Chat panel**: a docked window where you can converse with Claude about the
++  program you are reversing. Chat history is kept for the session.
++- **Decompiler actions** (right-click in the Decompiler window):
++  - *Explain function* — summarises what the current function does.
++  - *Suggest renames* — proposes better names for variables and the function
++    itself, applied via Ghidra's rename APIs after you confirm.
++  - *Suggest signature* — proposes a function signature (return type + typed
++    parameters).
++  - *Reconstruct as C* — produces cleaner, idiomatic C source for the current
++    function.
++- **Export to C project**: batch-decompiles every function in the current
++  program, optionally runs each through Claude for cleanup, and writes a
++  directory containing one `.c` file per function, a shared `program.h`
++  header, and a `Makefile` skeleton. See the honest limits below.
++- **Apple binaries (Mach-O, Apple Silicon, iOS)**:
++  - *What Ghidra already does on its own*: the `MachoLoader`, the
++    `DyldCacheLoader`, the `AARCH64:LE:64:AppleSilicon` processor variant,
++    and the Objective-C and Swift feature modules all ship with Ghidra
++    out of the box. Mach-O / Apple Silicon / iOS binaries decompile with
++    no help from this extension.
++  - *What GhidrAssist adds on top*: when the current program is Mach-O,
++    the Explain and Reconstruct prompts prepend a short preamble telling
++    Claude about `objc_msgSend` dispatch, Swift mangling and metadata
++    sections, Darwin AAPCS64 conventions, and the presence of pointer
++    authentication on arm64e. There is also a one-click
++    `Tools → GhidrAssist → Prepare Apple Binary…` action that enables the
++    Objective-C and Swift analyzers on the current program and schedules
++    a re-analysis. It adds no new decompilation capability; it just
++    toggles analyzers that are off by default on non-Apple binaries.
++
++## Setup
++
++1. Install the extension from `File → Install Extensions…`, then restart
++   Ghidra.
++2. In the CodeBrowser tool, open `Edit → Tool Options… → GhidrAssist`.
++3. Paste your Anthropic API key, pick a model (defaults to a recent Claude),
++   and optionally override the API base URL (useful for proxies).
++4. Open the chat panel from `Window → GhidrAssist`.
++
++## Honest limitations
++
++- **Not a magic decompiler.** Ghidra's SLEIGH-based decompiler handles many
++  architectures but the output is a *reconstruction*, not the original source.
++  Claude only cleans up that reconstruction; it does not recover information
++  the compiler threw away (local names, exact types, inlined logic, macro
++  definitions, …).
++- **Rebuild fidelity is best-effort.** The exported C project is intended to
++  be a starting point for manual porting. For non-trivial binaries it will
++  not compile without edits, and even after it compiles it will not be
++  bit-identical to the original. There is no current reverse-engineering
++  pipeline that produces a byte-exact rebuild of arbitrary binaries.
++- **The LLM can be wrong.** Treat every suggestion — especially renames and
++  types — as a hypothesis to verify against the listing. Rename/retype actions
++  always show a confirmation dialog before touching the program.
++- **The API key leaves your machine.** The plugin calls `api.anthropic.com`
++  directly over HTTPS (or the base URL you configure). The decompiled C of
++  the function or functions you act on is included in the prompt. Do not use
++  this on code you are not allowed to share with a third party.
+diff --git a/Ghidra/Extensions/GhidrAssist/build.gradle b/Ghidra/Extensions/GhidrAssist/build.gradle
+new file mode 100644
+index 0000000000..263287827f
+--- /dev/null
++++ b/Ghidra/Extensions/GhidrAssist/build.gradle
+@@ -0,0 +1,25 @@
++/* ###
++ * IP: GHIDRA
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++apply from: "$rootProject.projectDir/gradle/distributableGhidraExtension.gradle"
++apply from: "$rootProject.projectDir/gradle/javaProject.gradle"
++apply from: "$rootProject.projectDir/gradle/javaTestProject.gradle"
++apply plugin: 'eclipse'
++eclipse.project.name = 'Xtra GhidrAssist'
++
++dependencies {
++	api project(':Base')
++	api project(':Decompiler')
++}
+diff --git a/Ghidra/Extensions/GhidrAssist/certification.manifest b/Ghidra/Extensions/GhidrAssist/certification.manifest
+new file mode 100644
+index 0000000000..95f3880ab8
+--- /dev/null
++++ b/Ghidra/Extensions/GhidrAssist/certification.manifest
+@@ -0,0 +1,5 @@
++##VERSION: 2.0
++Module.manifest||GHIDRA||||END|
++README.md||GHIDRA||||END|
++data/ExtensionPoint.manifest||GHIDRA||||END|
++extension.properties||GHIDRA||||END|
+diff --git a/Ghidra/Extensions/GhidrAssist/data/ExtensionPoint.manifest b/Ghidra/Extensions/GhidrAssist/data/ExtensionPoint.manifest
+new file mode 100644
+index 0000000000..e69de29bb2
+diff --git a/Ghidra/Extensions/GhidrAssist/extension.properties b/Ghidra/Extensions/GhidrAssist/extension.properties
+new file mode 100644
+index 0000000000..3e7b683a9e
+--- /dev/null
++++ b/Ghidra/Extensions/GhidrAssist/extension.properties
+@@ -0,0 +1,5 @@
++name=GhidrAssist
++description=Embeds a Claude-powered AI assistant into Ghidra for real-time decompiler help, rename/retype suggestions, and export of decompiled code to a buildable C project skeleton.
++author=atulpokharel-gp
++createdOn=2026-10-09
++version=@extversion@
+diff --git a/Ghidra/Extensions/GhidrAssist/src/main/java/ghidra/ghidrassist/ClaudeClient.java b/Ghidra/Extensions/GhidrAssist/src/main/java/ghidra/ghidrassist/ClaudeClient.java
+new file mode 100644
+index 0000000000..b036d868b9
+--- /dev/null
++++ b/Ghidra/Extensions/GhidrAssist/src/main/java/ghidra/ghidrassist/ClaudeClient.java
+@@ -0,0 +1,194 @@
++/* ###
++ * IP: GHIDRA
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package ghidra.ghidrassist;
++
++import java.io.IOException;
++import java.net.URI;
++import java.net.http.HttpClient;
++import java.net.http.HttpRequest;
++import java.net.http.HttpRequest.BodyPublishers;
++import java.net.http.HttpResponse;
++import java.net.http.HttpResponse.BodyHandlers;
++import java.time.Duration;
++import java.util.List;
++import java.util.function.Consumer;
++import java.util.stream.Stream;
++
++import com.google.gson.Gson;
++import com.google.gson.JsonArray;
++import com.google.gson.JsonElement;
++import com.google.gson.JsonObject;
++import com.google.gson.JsonParser;
++
++/**
++ * Thin wrapper over the Anthropic Messages API. One instance per plugin;
++ * calls are stateless and safe to issue from a background thread.
++ */
++public final class ClaudeClient {
++
++	private static final String ANTHROPIC_VERSION = "2023-06-01";
++
++	private final HttpClient http;
++	private final Gson gson = new Gson();
++
++	public ClaudeClient() {
++		this.http = HttpClient.newBuilder()
++				.connectTimeout(Duration.ofSeconds(20))
++				.version(HttpClient.Version.HTTP_1_1)
++				.build();
++	}
++
++	/**
++	 * Non-streaming call; blocks until the full response is available.
++	 */
++	public String complete(ClaudeOptions opts, List<ClaudeMessage> history)
++			throws IOException, InterruptedException {
++
++		if (!opts.isConfigured()) {
++			throw new IOException("No Anthropic API key configured. Set it in " +
++				"Edit → Tool Options → GhidrAssist.");
++		}
++
++		JsonObject body = buildRequestBody(opts, history, false);
++		HttpRequest req = HttpRequest.newBuilder()
++				.uri(URI.create(opts.baseUrl() + "/v1/messages"))
++				.timeout(Duration.ofMinutes(5))
++				.header("x-api-key", opts.apiKey())
++				.header("anthropic-version", ANTHROPIC_VERSION)
++				.header("content-type", "application/json")
++				.POST(BodyPublishers.ofString(gson.toJson(body)))
++				.build();
++
++		HttpResponse<String> resp = http.send(req, BodyHandlers.ofString());
++		if (resp.statusCode() / 100 != 2) {
++			throw new IOException("Anthropic API error " + resp.statusCode() + ": " + resp.body());
++		}
++		return extractText(JsonParser.parseString(resp.body()).getAsJsonObject());
++	}
++
++	/**
++	 * Streaming call. {@code onDelta} is invoked for every text fragment as it
++	 * arrives; {@code onDone} is invoked once with the full concatenated text.
++	 * {@code onError} is invoked on any transport or protocol failure.
++	 * All callbacks run on the thread doing the HTTP read, not on the EDT.
++	 */
++	public void stream(ClaudeOptions opts, List<ClaudeMessage> history,
++			Consumer<String> onDelta, Consumer<String> onDone, Consumer<Throwable> onError) {
++
++		try {
++			if (!opts.isConfigured()) {
++				throw new IOException("No Anthropic API key configured. Set it in " +
++					"Edit → Tool Options → GhidrAssist.");
++			}
++
++			JsonObject body = buildRequestBody(opts, history, true);
++			HttpRequest req = HttpRequest.newBuilder()
++					.uri(URI.create(opts.baseUrl() + "/v1/messages"))
++					.timeout(Duration.ofMinutes(5))
++					.header("x-api-key", opts.apiKey())
++					.header("anthropic-version", ANTHROPIC_VERSION)
++					.header("content-type", "application/json")
++					.header("accept", "text/event-stream")
++					.POST(BodyPublishers.ofString(gson.toJson(body)))
++					.build();
++
++			HttpResponse<Stream<String>> resp = http.send(req, BodyHandlers.ofLines());
++			if (resp.statusCode() / 100 != 2) {
++				StringBuilder err = new StringBuilder();
++				resp.body().forEach(l -> err.append(l).append('\n'));
++				throw new IOException(
++					"Anthropic API error " + resp.statusCode() + ": " + err.toString().trim());
++			}
++
++			StringBuilder full = new StringBuilder();
++			try (Stream<String> lines = resp.body()) {
++				lines.forEach(line -> {
++					if (!line.startsWith("data:")) {
++						return;
++					}
++					String payload = line.substring(5).trim();
++					if (payload.isEmpty() || payload.equals("[DONE]")) {
++						return;
++					}
++					try {
++						JsonObject obj = JsonParser.parseString(payload).getAsJsonObject();
++						String type = obj.has("type") ? obj.get("type").getAsString() : "";
++						if ("content_block_delta".equals(type)) {
++							JsonObject delta = obj.getAsJsonObject("delta");
++							if (delta != null && delta.has("text")) {
++								String frag = delta.get("text").getAsString();
++								full.append(frag);
++								onDelta.accept(frag);
++							}
++						}
++						else if ("error".equals(type) && obj.has("error")) {
++							JsonObject e = obj.getAsJsonObject("error");
++							throw new RuntimeException(e.toString());
++						}
++					}
++					catch (RuntimeException parseErr) {
++						// Swallow malformed events — the stream may still recover.
++					}
++				});
++			}
++			onDone.accept(full.toString());
++		}
++		catch (Throwable t) {
++			onError.accept(t);
++		}
++	}
++
++	private JsonObject buildRequestBody(ClaudeOptions opts, List<ClaudeMessage> history,
++			boolean stream) {
++		JsonObject body = new JsonObject();
++		body.addProperty("model", opts.model());
++		body.addProperty("max_tokens", opts.maxTokens());
++		if (opts.systemPrompt() != null && !opts.systemPrompt().isBlank()) {
++			body.addProperty("system", opts.systemPrompt());
++		}
++		if (stream) {
++			body.addProperty("stream", true);
++		}
++		JsonArray msgs = new JsonArray();
++		for (ClaudeMessage m : history) {
++			JsonObject jm = new JsonObject();
++			jm.addProperty("role", m.role());
++			jm.addProperty("content", m.content());
++			msgs.add(jm);
++		}
++		body.add("messages", msgs);
++		return body;
++	}
++
++	private static String extractText(JsonObject response) {
++		JsonElement content = response.get("content");
++		if (content == null || !content.isJsonArray()) {
++			return "";
++		}
++		StringBuilder sb = new StringBuilder();
++		for (JsonElement e : content.getAsJsonArray()) {
++			if (!e.isJsonObject()) {
++				continue;
++			}
++			JsonObject block = e.getAsJsonObject();
++			String type = block.has("type") ? block.get("type").getAsString() : "";
++			if ("text".equals(type) && block.has("text")) {
++				sb.append(block.get("text").getAsString());
++			}
++		}
++		return sb.toString();
++	}
++}
+diff --git a/Ghidra/Extensions/GhidrAssist/src/main/java/ghidra/ghidrassist/ClaudeMessage.java b/Ghidra/Extensions/GhidrAssist/src/main/java/ghidra/ghidrassist/ClaudeMessage.java
+new file mode 100644
+index 0000000000..7852fc2ba2
+--- /dev/null
++++ b/Ghidra/Extensions/GhidrAssist/src/main/java/ghidra/ghidrassist/ClaudeMessage.java
+@@ -0,0 +1,26 @@
++/* ###
++ * IP: GHIDRA
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package ghidra.ghidrassist;
++
++public record ClaudeMessage(String role, String content) {
++	public static ClaudeMessage user(String content) {
++		return new ClaudeMessage("user", content);
++	}
++
++	public static ClaudeMessage assistant(String content) {
++		return new ClaudeMessage("assistant", content);
++	}
++}
+diff --git a/Ghidra/Extensions/GhidrAssist/src/main/java/ghidra/ghidrassist/ClaudeOptions.java b/Ghidra/Extensions/GhidrAssist/src/main/java/ghidra/ghidrassist/ClaudeOptions.java
+new file mode 100644
+index 0000000000..6930dead23
+--- /dev/null
++++ b/Ghidra/Extensions/GhidrAssist/src/main/java/ghidra/ghidrassist/ClaudeOptions.java
+@@ -0,0 +1,108 @@
++/* ###
++ * IP: GHIDRA
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package ghidra.ghidrassist;
++
++import ghidra.framework.options.ToolOptions;
++import ghidra.framework.plugintool.PluginTool;
++import ghidra.util.HelpLocation;
++
++/**
++ * Reads GhidrAssist settings out of Ghidra's Tool Options so the plugin and
++ * all its actions see one authoritative snapshot.
++ */
++public final class ClaudeOptions {
++
++	public static final String OPTIONS_TITLE = "GhidrAssist";
++	public static final String OPT_API_KEY = "Anthropic API Key";
++	public static final String OPT_MODEL = "Model";
++	public static final String OPT_BASE_URL = "API Base URL";
++	public static final String OPT_MAX_TOKENS = "Max Response Tokens";
++	public static final String OPT_SYSTEM_PROMPT = "System Prompt";
++
++	public static final String DEFAULT_MODEL = "claude-sonnet-5-5";
++	public static final String DEFAULT_BASE_URL = "https://api.anthropic.com";
++	public static final int DEFAULT_MAX_TOKENS = 4096;
++	public static final String DEFAULT_SYSTEM_PROMPT =
++		"You are a reverse-engineering assistant embedded in Ghidra. The user is looking at " +
++			"decompiled C produced from a stripped binary. Be concise, accurate, and never invent " +
++			"behavior that is not supported by the code shown. When asked to rename or retype, " +
++			"return only the requested JSON — no prose, no code fences.";
++
++	private final String apiKey;
++	private final String model;
++	private final String baseUrl;
++	private final int maxTokens;
++	private final String systemPrompt;
++
++	private ClaudeOptions(String apiKey, String model, String baseUrl, int maxTokens,
++			String systemPrompt) {
++		this.apiKey = apiKey;
++		this.model = model;
++		this.baseUrl = baseUrl;
++		this.maxTokens = maxTokens;
++		this.systemPrompt = systemPrompt;
++	}
++
++	public static void register(PluginTool tool) {
++		ToolOptions opt = tool.getOptions(OPTIONS_TITLE);
++		HelpLocation help = new HelpLocation("GhidrAssist", "Options");
++		opt.registerOption(OPT_API_KEY, "", help,
++			"Anthropic API key. Stored in your Ghidra user preferences, never transmitted " +
++				"anywhere other than the configured base URL.");
++		opt.registerOption(OPT_MODEL, DEFAULT_MODEL, help,
++			"Claude model id (e.g. claude-sonnet-5-5, claude-opus-5-5, claude-haiku-4-5-20251001).");
++		opt.registerOption(OPT_BASE_URL, DEFAULT_BASE_URL, help,
++			"Base URL for the Anthropic API. Change for a proxy or compatible gateway.");
++		opt.registerOption(OPT_MAX_TOKENS, DEFAULT_MAX_TOKENS, help,
++			"Maximum tokens to request per response.");
++		opt.registerOption(OPT_SYSTEM_PROMPT, DEFAULT_SYSTEM_PROMPT, help,
++			"System prompt sent on every request.");
++	}
++
++	public static ClaudeOptions read(PluginTool tool) {
++		ToolOptions opt = tool.getOptions(OPTIONS_TITLE);
++		return new ClaudeOptions(
++			opt.getString(OPT_API_KEY, ""),
++			opt.getString(OPT_MODEL, DEFAULT_MODEL),
++			opt.getString(OPT_BASE_URL, DEFAULT_BASE_URL),
++			opt.getInt(OPT_MAX_TOKENS, DEFAULT_MAX_TOKENS),
++			opt.getString(OPT_SYSTEM_PROMPT, DEFAULT_SYSTEM_PROMPT));
++	}
++
++	public boolean isConfigured() {
++		return apiKey != null && !apiKey.isBlank();
++	}
++
++	public String apiKey() {
++		return apiKey;
++	}
++
++	public String model() {
++		return model;
++	}
++
++	public String baseUrl() {
++		return baseUrl;
++	}
++
++	public int maxTokens() {
++		return maxTokens;
++	}
++
++	public String systemPrompt() {
++		return systemPrompt;
++	}
++}
+diff --git a/Ghidra/Extensions/GhidrAssist/src/main/java/ghidra/ghidrassist/DecompilerHelper.java b/Ghidra/Extensions/GhidrAssist/src/main/java/ghidra/ghidrassist/DecompilerHelper.java
+new file mode 100644
+index 0000000000..f8b6a79529
+--- /dev/null
++++ b/Ghidra/Extensions/GhidrAssist/src/main/java/ghidra/ghidrassist/DecompilerHelper.java
+@@ -0,0 +1,62 @@
++/* ###
++ * IP: GHIDRA
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package ghidra.ghidrassist;
++
++import ghidra.app.decompiler.DecompInterface;
++import ghidra.app.decompiler.DecompileOptions;
++import ghidra.app.decompiler.DecompileResults;
++import ghidra.app.decompiler.DecompiledFunction;
++import ghidra.program.model.listing.Function;
++import ghidra.program.model.listing.Program;
++import ghidra.util.task.TaskMonitor;
++
++/**
++ * Convenience wrapper around {@link DecompInterface} for the one-shot
++ * "decompile this function to a string" case used by the actions and the
++ * export feature. Not reused across calls because the interface holds a
++ * native subprocess; each call creates and tears one down.
++ */
++public final class DecompilerHelper {
++
++	private DecompilerHelper() {
++	}
++
++	/** Decompiles a single function to C source. Returns null on failure. */
++	public static String decompile(Program program, Function fn, TaskMonitor monitor) {
++		if (program == null || fn == null) {
++			return null;
++		}
++		DecompInterface ifc = new DecompInterface();
++		try {
++			DecompileOptions options = new DecompileOptions();
++			ifc.setOptions(options);
++			ifc.toggleCCode(true);
++			ifc.toggleSyntaxTree(true);
++			if (!ifc.openProgram(program)) {
++				return null;
++			}
++			DecompileResults res = ifc.decompileFunction(fn, 60, monitor);
++			if (res == null || !res.decompileCompleted()) {
++				return null;
++			}
++			DecompiledFunction df = res.getDecompiledFunction();
++			return df == null ? null : df.getC();
++		}
++		finally {
++			ifc.dispose();
++		}
++	}
++}
+diff --git a/Ghidra/Extensions/GhidrAssist/src/main/java/ghidra/ghidrassist/GhidrAssistPlugin.java b/Ghidra/Extensions/GhidrAssist/src/main/java/ghidra/ghidrassist/GhidrAssistPlugin.java
+new file mode 100644
+index 0000000000..8b2b218aed
+--- /dev/null
++++ b/Ghidra/Extensions/GhidrAssist/src/main/java/ghidra/ghidrassist/GhidrAssistPlugin.java
+@@ -0,0 +1,85 @@
++/* ###
++ * IP: GHIDRA
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package ghidra.ghidrassist;
++
++import ghidra.app.CorePluginPackage;
++import ghidra.app.plugin.PluginCategoryNames;
++import ghidra.app.plugin.ProgramPlugin;
++import ghidra.framework.plugintool.PluginInfo;
++import ghidra.framework.plugintool.PluginTool;
++import ghidra.framework.plugintool.util.PluginStatus;
++import ghidra.ghidrassist.actions.ExplainFunctionAction;
++import ghidra.ghidrassist.actions.ExportProjectAction;
++import ghidra.ghidrassist.actions.PrepareAppleBinaryAction;
++import ghidra.ghidrassist.actions.ReconstructFunctionAction;
++import ghidra.ghidrassist.actions.SuggestRenamesAction;
++import ghidra.ghidrassist.actions.SuggestSignatureAction;
++
++//@formatter:off
++@PluginInfo(
++	status = PluginStatus.STABLE,
++	packageName = CorePluginPackage.NAME,
++	category = PluginCategoryNames.ANALYSIS,
++	shortDescription = "GhidrAssist — Claude-powered RE assistant",
++	description = "Embeds a Claude-powered assistant in Ghidra: chat panel, decompiler " +
++		"right-click actions (explain / rename / retype / reconstruct), and export of " +
++		"the current program to a buildable C project skeleton."
++)
++//@formatter:on
++public class GhidrAssistPlugin extends ProgramPlugin {
++
++	private final ClaudeClient claude = new ClaudeClient();
++	private GhidrAssistProvider provider;
++
++	public GhidrAssistPlugin(PluginTool tool) {
++		super(tool);
++		ClaudeOptions.register(tool);
++	}
++
++	@Override
++	protected void init() {
++		super.init();
++		provider = new GhidrAssistProvider(this);
++		provider.addToTool();
++
++		tool.addAction(new ExplainFunctionAction(this));
++		tool.addAction(new SuggestRenamesAction(this));
++		tool.addAction(new SuggestSignatureAction(this));
++		tool.addAction(new ReconstructFunctionAction(this));
++		tool.addAction(new ExportProjectAction(this));
++		tool.addAction(new PrepareAppleBinaryAction(this));
++	}
++
++	@Override
++	protected void dispose() {
++		if (provider != null) {
++			provider.dispose();
++		}
++		super.dispose();
++	}
++
++	public ClaudeClient claude() {
++		return claude;
++	}
++
++	public ClaudeOptions options() {
++		return ClaudeOptions.read(tool);
++	}
++
++	public GhidrAssistProvider getProvider() {
++		return provider;
++	}
++}
+diff --git a/Ghidra/Extensions/GhidrAssist/src/main/java/ghidra/ghidrassist/GhidrAssistProvider.java b/Ghidra/Extensions/GhidrAssist/src/main/java/ghidra/ghidrassist/GhidrAssistProvider.java
+new file mode 100644
+index 0000000000..de06e4ca9e
+--- /dev/null
++++ b/Ghidra/Extensions/GhidrAssist/src/main/java/ghidra/ghidrassist/GhidrAssistProvider.java
+@@ -0,0 +1,285 @@
++/* ###
++ * IP: GHIDRA
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package ghidra.ghidrassist;
++
++import java.awt.BorderLayout;
++import java.awt.Color;
++import java.awt.Dimension;
++import java.awt.FlowLayout;
++import java.awt.Font;
++import java.awt.event.ActionEvent;
++import java.awt.event.KeyEvent;
++import java.util.ArrayList;
++import java.util.List;
++
++import javax.swing.AbstractAction;
++import javax.swing.BorderFactory;
++import javax.swing.JButton;
++import javax.swing.JComponent;
++import javax.swing.JPanel;
++import javax.swing.JScrollPane;
++import javax.swing.JSplitPane;
++import javax.swing.JTextArea;
++import javax.swing.JTextPane;
++import javax.swing.KeyStroke;
++import javax.swing.SwingUtilities;
++import javax.swing.text.AttributeSet;
++import javax.swing.text.BadLocationException;
++import javax.swing.text.SimpleAttributeSet;
++import javax.swing.text.StyleConstants;
++import javax.swing.text.StyledDocument;
++
++import ghidra.framework.plugintool.ComponentProviderAdapter;
++import ghidra.util.Msg;
++
++/**
++ * Docked chat panel for GhidrAssist. Keeps the current conversation in memory
++ * for the session; "Clear" resets it. Streaming responses are rendered as the
++ * tokens arrive.
++ */
++public class GhidrAssistProvider extends ComponentProviderAdapter {
++
++	private final GhidrAssistPlugin plugin;
++	private final List<ClaudeMessage> history = new ArrayList<>();
++
++	private JPanel component;
++	private JTextPane transcript;
++	private StyledDocument doc;
++	private JTextArea input;
++	private JButton sendButton;
++	private JButton clearButton;
++
++	private volatile boolean inflight;
++	private int streamingAnchor = -1;
++
++	private final SimpleAttributeSet userStyle = new SimpleAttributeSet();
++	private final SimpleAttributeSet assistantStyle = new SimpleAttributeSet();
++	private final SimpleAttributeSet systemStyle = new SimpleAttributeSet();
++	private final SimpleAttributeSet labelStyle = new SimpleAttributeSet();
++
++	public GhidrAssistProvider(GhidrAssistPlugin plugin) {
++		super(plugin.getTool(), "GhidrAssist", plugin.getName());
++		this.plugin = plugin;
++		setTitle("GhidrAssist");
++		setWindowMenuGroup("GhidrAssist");
++		setDefaultWindowPosition(docking.WindowPosition.RIGHT);
++		buildStyles();
++		component = buildComponent();
++	}
++
++	private void buildStyles() {
++		StyleConstants.setForeground(userStyle, new Color(0x1E88E5));
++		StyleConstants.setBold(userStyle, false);
++		StyleConstants.setForeground(assistantStyle, new Color(0x2E7D32));
++		StyleConstants.setForeground(systemStyle, new Color(0x9E9E9E));
++		StyleConstants.setItalic(systemStyle, true);
++		StyleConstants.setBold(labelStyle, true);
++	}
++
++	private JPanel buildComponent() {
++		JPanel panel = new JPanel(new BorderLayout());
++
++		transcript = new JTextPane();
++		transcript.setEditable(false);
++		transcript.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
++		doc = transcript.getStyledDocument();
++		JScrollPane transcriptScroll = new JScrollPane(transcript);
++		transcriptScroll.setPreferredSize(new Dimension(560, 360));
++
++		input = new JTextArea(5, 40);
++		input.setLineWrap(true);
++		input.setWrapStyleWord(true);
++		input.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
++		JScrollPane inputScroll = new JScrollPane(input);
++		inputScroll.setBorder(BorderFactory.createTitledBorder("You"));
++
++		input.getInputMap().put(KeyStroke.getKeyStroke(KeyEvent.VK_ENTER,
++			java.awt.Toolkit.getDefaultToolkit().getMenuShortcutKeyMaskEx()), "send");
++		input.getActionMap().put("send", new AbstractAction() {
++			@Override
++			public void actionPerformed(ActionEvent e) {
++				sendCurrent();
++			}
++		});
++
++		sendButton = new JButton("Send");
++		sendButton.addActionListener(e -> sendCurrent());
++		clearButton = new JButton("Clear");
++		clearButton.addActionListener(e -> clearHistory());
++
++		JPanel buttons = new JPanel(new FlowLayout(FlowLayout.RIGHT));
++		buttons.add(clearButton);
++		buttons.add(sendButton);
++
++		JPanel bottom = new JPanel(new BorderLayout());
++		bottom.add(inputScroll, BorderLayout.CENTER);
++		bottom.add(buttons, BorderLayout.SOUTH);
++
++		JSplitPane split =
++			new JSplitPane(JSplitPane.VERTICAL_SPLIT, transcriptScroll, bottom);
++		split.setResizeWeight(0.8);
++		split.setBorder(null);
++		panel.add(split, BorderLayout.CENTER);
++		return panel;
++	}
++
++	void dispose() {
++		removeFromTool();
++	}
++
++	@Override
++	public JComponent getComponent() {
++		return component;
++	}
++
++	private void sendCurrent() {
++		if (inflight) {
++			return;
++		}
++		String text = input.getText().trim();
++		if (text.isEmpty()) {
++			return;
++		}
++		input.setText("");
++		postUser(text);
++		runStreaming(text);
++	}
++
++	private void clearHistory() {
++		history.clear();
++		try {
++			doc.remove(0, doc.getLength());
++		}
++		catch (BadLocationException ignored) {
++		}
++		appendStyled("Conversation cleared.\n", systemStyle);
++	}
++
++	private void runStreaming(String userText) {
++		history.add(ClaudeMessage.user(userText));
++		inflight = true;
++		setSendEnabled(false);
++
++		appendLabel("Claude");
++		streamingAnchor = doc.getLength();
++
++		ClaudeOptions opts = plugin.options();
++		StringBuilder complete = new StringBuilder();
++
++		Thread t = new Thread(() -> {
++			plugin.claude().stream(opts, new ArrayList<>(history),
++				delta -> SwingUtilities.invokeLater(() -> {
++					complete.append(delta);
++					appendStyled(delta, assistantStyle);
++				}),
++				done -> SwingUtilities.invokeLater(() -> {
++					appendStyled("\n\n", assistantStyle);
++					history.add(ClaudeMessage.assistant(complete.toString()));
++					inflight = false;
++					setSendEnabled(true);
++				}),
++				err -> SwingUtilities.invokeLater(() -> {
++					appendStyled("\n[error: " + err.getMessage() + "]\n\n", systemStyle);
++					history.remove(history.size() - 1); // roll back the user turn
++					inflight = false;
++					setSendEnabled(true);
++					Msg.error(this, "Claude request failed", err);
++				}));
++		}, "GhidrAssist-chat");
++		t.setDaemon(true);
++		t.start();
++	}
++
++	private void setSendEnabled(boolean enabled) {
++		sendButton.setEnabled(enabled);
++		input.setEnabled(enabled);
++	}
++
++	private void postUser(String text) {
++		appendLabel("You");
++		appendStyled(text + "\n\n", userStyle);
++	}
++
++	private void appendLabel(String who) {
++		appendStyled(who + ": ", labelStyle);
++	}
++
++	private void appendStyled(String text, AttributeSet style) {
++		try {
++			doc.insertString(doc.getLength(), text, style);
++			transcript.setCaretPosition(doc.getLength());
++		}
++		catch (BadLocationException ignored) {
++		}
++	}
++
++	/** Public hook used by context actions to post results into the chat. */
++	public void postAssistantMessage(String label, String content) {
++		SwingUtilities.invokeLater(() -> {
++			if (!isVisible()) {
++				setVisible(true);
++			}
++			appendLabel("GhidrAssist — " + label);
++			appendStyled("\n" + content + "\n\n", assistantStyle);
++			history.add(ClaudeMessage.assistant("[" + label + "]\n" + content));
++		});
++	}
++
++	/** Also used by actions to inform the user something happened. */
++	public void postSystemMessage(String text) {
++		SwingUtilities.invokeLater(() -> appendStyled(text + "\n", systemStyle));
++	}
++
++	/**
++	 * Open a labeled streaming region in the transcript. Call
++	 * {@link StreamHandle#append(String)} for each delta and
++	 * {@link StreamHandle#close(String)} with the final text when done.
++	 */
++	public StreamHandle beginStream(String label) {
++		SwingUtilities.invokeLater(() -> {
++			if (!isVisible()) {
++				setVisible(true);
++			}
++			appendLabel("GhidrAssist — " + label);
++			appendStyled("\n", assistantStyle);
++		});
++		return new StreamHandle(label);
++	}
++
++	public final class StreamHandle {
++		private final String label;
++
++		private StreamHandle(String label) {
++			this.label = label;
++		}
++
++		public void append(String delta) {
++			SwingUtilities.invokeLater(() -> appendStyled(delta, assistantStyle));
++		}
++
++		public void close(String full) {
++			SwingUtilities.invokeLater(() -> {
++				appendStyled("\n\n", assistantStyle);
++				history.add(ClaudeMessage.assistant("[" + label + "]\n" + full));
++			});
++		}
++
++		public void error(Throwable err) {
++			SwingUtilities.invokeLater(() -> appendStyled(
++				"\n[error: " + err.getMessage() + "]\n\n", systemStyle));
++		}
++	}
++}
+diff --git a/Ghidra/Extensions/GhidrAssist/src/main/java/ghidra/ghidrassist/ProjectExporter.java b/Ghidra/Extensions/GhidrAssist/src/main/java/ghidra/ghidrassist/ProjectExporter.java
+new file mode 100644
+index 0000000000..64c21339b5
+--- /dev/null
++++ b/Ghidra/Extensions/GhidrAssist/src/main/java/ghidra/ghidrassist/ProjectExporter.java
+@@ -0,0 +1,235 @@
++/* ###
++ * IP: GHIDRA
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package ghidra.ghidrassist;
++
++import java.io.IOException;
++import java.nio.charset.StandardCharsets;
++import java.nio.file.Files;
++import java.nio.file.Path;
++import java.util.ArrayList;
++import java.util.List;
++import java.util.regex.Matcher;
++import java.util.regex.Pattern;
++
++import ghidra.program.model.listing.Function;
++import ghidra.program.model.listing.FunctionIterator;
++import ghidra.program.model.listing.Program;
++import ghidra.util.task.TaskMonitor;
++
++/**
++ * Writes a buildable-ish C project reconstruction of the current program.
++ *
++ * <p><b>Honest limits:</b> the Ghidra decompiler's C output is a lossy
++ * reconstruction, not the original source. Even after Claude cleans each
++ * function, the exported project will not compile unmodified for non-trivial
++ * binaries, and even once it does, the resulting binary will not match
++ * byte-for-byte. This is a starting point for manual porting, not a
++ * decompile-and-rebuild pipeline.
++ */
++public final class ProjectExporter {
++
++	private static final Pattern CODE_FENCE =
++		Pattern.compile("```(?:c|C)?\\s*\\n([\\s\\S]*?)```", Pattern.MULTILINE);
++
++	private ProjectExporter() {
++	}
++
++	public static Result export(Program program, Path outputDir, boolean claudeClean,
++			ClaudeClient claude, ClaudeOptions options, TaskMonitor monitor) throws IOException {
++
++		Path srcDir = outputDir.resolve("src");
++		Files.createDirectories(srcDir);
++
++		List<String> prototypes = new ArrayList<>();
++		int ok = 0, failed = 0;
++		FunctionIterator iter = program.getFunctionManager().getFunctions(true);
++		int total = program.getFunctionManager().getFunctionCount();
++		monitor.initialize(total);
++
++		for (Function fn : iter) {
++			if (monitor.isCancelled()) {
++				break;
++			}
++			monitor.incrementProgress(1);
++			if (fn.isExternal() || fn.isThunk()) {
++				continue;
++			}
++			monitor.setMessage("Decompiling " + fn.getName());
++			String c = DecompilerHelper.decompile(program, fn, monitor);
++			if (c == null) {
++				failed++;
++				continue;
++			}
++
++			String body = c;
++			if (claudeClean && options.isConfigured()) {
++				monitor.setMessage("Claude cleaning " + fn.getName());
++				String cleaned = cleanWithClaude(claude, options, c);
++				if (cleaned != null) {
++					body = cleaned;
++				}
++			}
++
++			String safeName = sanitize(fn.getName()) + "_" +
++				Long.toHexString(fn.getEntryPoint().getOffset());
++			Path file = srcDir.resolve(safeName + ".c");
++			Files.writeString(file, buildFileHeader(fn) + body + "\n",
++				StandardCharsets.UTF_8);
++			prototypes.add(extractPrototype(body, fn.getName()));
++			ok++;
++		}
++
++		writeHeader(outputDir, program, prototypes);
++		writeMakefile(outputDir, program);
++		writeReadme(outputDir, program, ok, failed);
++		return new Result(outputDir, ok, failed);
++	}
++
++	private static String cleanWithClaude(ClaudeClient claude, ClaudeOptions opts, String raw) {
++		String prompt = """
++			Rewrite the following decompiler output as idiomatic, portable C that would \
++			plausibly compile with gcc. Preserve semantics. Keep the same function name \
++			and signature. Return ONLY the function in a ```c``` fenced block.
++
++			```c
++			%s
++			```
++			""".formatted(raw);
++		try {
++			String resp = claude.complete(opts, List.of(ClaudeMessage.user(prompt)));
++			Matcher m = CODE_FENCE.matcher(resp);
++			if (m.find()) {
++				return m.group(1);
++			}
++			return resp;
++		}
++		catch (Exception e) {
++			return null;
++		}
++	}
++
++	private static String buildFileHeader(Function fn) {
++		return "/* Auto-generated by GhidrAssist from Ghidra decompilation.\n" +
++			" * Function: " + fn.getName() + "\n" +
++			" * Entry:    " + fn.getEntryPoint() + "\n" +
++			" * This is a reconstruction, not original source. Review before trusting.\n" +
++			" */\n#include \"program.h\"\n\n";
++	}
++
++	private static String extractPrototype(String body, String fallbackName) {
++		String[] lines = body.split("\\r?\\n");
++		for (String line : lines) {
++			String t = line.trim();
++			if (t.isEmpty() || t.startsWith("/*") || t.startsWith("*") || t.startsWith("//")) {
++				continue;
++			}
++			int paren = t.indexOf('(');
++			int brace = t.indexOf('{');
++			if (paren > 0 && (brace < 0 || paren < brace)) {
++				String sig = brace > 0 ? t.substring(0, brace).trim() : t;
++				if (sig.endsWith(";")) {
++					sig = sig.substring(0, sig.length() - 1);
++				}
++				if (!sig.endsWith(")")) {
++					int close = sig.lastIndexOf(')');
++					if (close > 0) {
++						sig = sig.substring(0, close + 1);
++					}
++				}
++				return sig + ";";
++			}
++		}
++		return "/* prototype for " + fallbackName + " not recovered */";
++	}
++
++	private static void writeHeader(Path outputDir, Program program, List<String> prototypes)
++			throws IOException {
++		StringBuilder sb = new StringBuilder();
++		sb.append("/* Auto-generated by GhidrAssist. */\n");
++		sb.append("#ifndef GHIDRASSIST_PROGRAM_H\n#define GHIDRASSIST_PROGRAM_H\n\n");
++		sb.append("#include <stddef.h>\n#include <stdint.h>\n#include <stdbool.h>\n");
++		sb.append("#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n\n");
++		sb.append("/* Source program: ")
++				.append(program.getName())
++				.append(" */\n\n");
++		for (String p : prototypes) {
++			sb.append(p).append('\n');
++		}
++		sb.append("\n#endif\n");
++		Files.writeString(outputDir.resolve("program.h"), sb.toString(), StandardCharsets.UTF_8);
++	}
++
++	private static void writeMakefile(Path outputDir, Program program) throws IOException {
++		String target = sanitize(program.getName());
++		String mk = ""
++			+ "# Auto-generated by GhidrAssist.\n"
++			+ "# This Makefile is a best-effort scaffold. Expect to edit it.\n"
++			+ "CC      ?= gcc\n"
++			+ "CFLAGS  ?= -O2 -g -Wall -Wextra -I.\n"
++			+ "LDFLAGS ?=\n"
++			+ "SRC     := $(wildcard src/*.c)\n"
++			+ "OBJ     := $(SRC:.c=.o)\n"
++			+ "TARGET  := " + target + "\n\n"
++			+ "all: $(TARGET)\n\n"
++			+ "$(TARGET): $(OBJ)\n"
++			+ "\t$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)\n\n"
++			+ "clean:\n"
++			+ "\trm -f $(OBJ) $(TARGET)\n\n"
++			+ ".PHONY: all clean\n";
++		Files.writeString(outputDir.resolve("Makefile"), mk, StandardCharsets.UTF_8);
++	}
++
++	private static void writeReadme(Path outputDir, Program program, int ok, int failed)
++			throws IOException {
++		String msg = ""
++			+ "# " + program.getName() + " — reconstructed by GhidrAssist\n\n"
++			+ "- Functions reconstructed: " + ok + "\n"
++			+ "- Functions skipped or failed: " + failed + "\n\n"
++			+ "## Honest expectations\n\n"
++			+ "This directory is **a decompiler reconstruction**, not the program's\n"
++			+ "original source. For anything beyond trivial binaries you should\n"
++			+ "expect:\n\n"
++			+ "1. The code **will not build** with `make` out of the box. The\n"
++			+ "   decompiler's casts, inlined intrinsics, and PCODE artefacts have\n"
++			+ "   no portable C equivalent and require manual translation.\n"
++			+ "2. Even once it compiles, the resulting binary **will not be\n"
++			+ "   identical** to the one you decompiled. Register allocation,\n"
++			+ "   calling conventions, alignment, link order, and compiler flags\n"
++			+ "   all differ.\n"
++			+ "3. Any identifiers restored by the LLM are **hypotheses**. Treat them\n"
++			+ "   accordingly.\n\n"
++			+ "Use this as a starting point for manual porting, not as a push-button\n"
++			+ "decompile-and-rebuild pipeline.\n";
++		Files.writeString(outputDir.resolve("README.md"), msg, StandardCharsets.UTF_8);
++	}
++
++	private static String sanitize(String name) {
++		StringBuilder sb = new StringBuilder();
++		for (int i = 0; i < name.length(); i++) {
++			char c = name.charAt(i);
++			boolean ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
++				(c >= '0' && c <= '9') || c == '_';
++			sb.append(ok ? c : '_');
++		}
++		if (sb.length() == 0 || Character.isDigit(sb.charAt(0))) {
++			sb.insert(0, '_');
++		}
++		return sb.toString();
++	}
++
++	public record Result(Path outputDir, int reconstructed, int failed) {
++	}
++}
+diff --git a/Ghidra/Extensions/GhidrAssist/src/main/java/ghidra/ghidrassist/actions/ActionSupport.java b/Ghidra/Extensions/GhidrAssist/src/main/java/ghidra/ghidrassist/actions/ActionSupport.java
+new file mode 100644
+index 0000000000..7cbd96a364
+--- /dev/null
++++ b/Ghidra/Extensions/GhidrAssist/src/main/java/ghidra/ghidrassist/actions/ActionSupport.java
+@@ -0,0 +1,63 @@
++/* ###
++ * IP: GHIDRA
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package ghidra.ghidrassist.actions;
++
++import docking.ActionContext;
++import ghidra.app.context.ListingActionContext;
++import ghidra.app.plugin.core.decompile.DecompilerActionContext;
++import ghidra.program.model.listing.Function;
++import ghidra.program.model.listing.Program;
++import ghidra.program.util.ProgramLocation;
++
++/**
++ * Context extraction helpers shared by every GhidrAssist action. These isolate
++ * the actions from the specific context classes used by the Decompiler and
++ * CodeBrowser windows.
++ */
++final class ActionSupport {
++	private ActionSupport() {
++	}
++
++	static Function functionOf(ActionContext ctx) {
++		if (ctx instanceof DecompilerActionContext dac) {
++			return dac.getFunction();
++		}
++		if (ctx instanceof ListingActionContext lac) {
++			Program program = lac.getProgram();
++			ProgramLocation loc = lac.getLocation();
++			if (program == null || loc == null) {
++				return null;
++			}
++			return program.getFunctionManager().getFunctionContaining(loc.getAddress());
++		}
++		return null;
++	}
++
++	static Program programOf(ActionContext ctx) {
++		if (ctx instanceof DecompilerActionContext dac) {
++			Function f = dac.getFunction();
++			return f == null ? null : f.getProgram();
++		}
++		if (ctx instanceof ListingActionContext lac) {
++			return lac.getProgram();
++		}
++		return null;
++	}
++
++	static boolean contextIsSupported(ActionContext ctx) {
++		return ctx instanceof DecompilerActionContext || ctx instanceof ListingActionContext;
++	}
++}
+diff --git a/Ghidra/Extensions/GhidrAssist/src/main/java/ghidra/ghidrassist/actions/ExplainFunctionAction.java b/Ghidra/Extensions/GhidrAssist/src/main/java/ghidra/ghidrassist/actions/ExplainFunctionAction.java
+new file mode 100644
+index 0000000000..e6f28454ce
+--- /dev/null
++++ b/Ghidra/Extensions/GhidrAssist/src/main/java/ghidra/ghidrassist/actions/ExplainFunctionAction.java
+@@ -0,0 +1,84 @@
++/* ###
++ * IP: GHIDRA
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package ghidra.ghidrassist.actions;
++
++import java.util.List;
++
++import docking.ActionContext;
++import ghidra.ghidrassist.ClaudeMessage;
++import ghidra.ghidrassist.ClaudeOptions;
++import ghidra.ghidrassist.DecompilerHelper;
++import ghidra.ghidrassist.GhidrAssistPlugin;
++import ghidra.ghidrassist.GhidrAssistProvider;
++import ghidra.ghidrassist.apple.AppleBinaryContext;
++import ghidra.program.model.listing.Function;
++import ghidra.program.model.listing.Program;
++import ghidra.util.task.Task;
++import ghidra.util.task.TaskLauncher;
++import ghidra.util.task.TaskMonitor;
++
++public class ExplainFunctionAction extends GhidrAssistAction {
++
++	public ExplainFunctionAction(GhidrAssistPlugin plugin) {
++		super(plugin, "GhidrAssist Explain Function", "Explain Function");
++	}
++
++	@Override
++	public void actionPerformed(ActionContext context) {
++		Function fn = ActionSupport.functionOf(context);
++		Program program = ActionSupport.programOf(context);
++		if (fn == null || program == null) {
++			return;
++		}
++
++		TaskLauncher.launch(new Task("GhidrAssist: Explain " + fn.getName(), true, false, true) {
++			@Override
++			public void run(TaskMonitor monitor) {
++				monitor.setMessage("Decompiling " + fn.getName());
++				String c = DecompilerHelper.decompile(program, fn, monitor);
++				if (c == null) {
++					plugin.getProvider().postSystemMessage(
++						"[explain] Could not decompile " + fn.getName() + ".");
++					return;
++				}
++				monitor.setMessage("Asking Claude");
++				String applePreamble = AppleBinaryContext.from(program).promptPreamble();
++				String prompt = """
++					%sExplain the following decompiled C function. Be concise.
++
++					Report:
++					- One-line purpose
++					- Inputs / outputs / side effects
++					- Any suspicious or notable behavior (crypto, networking, parsing, obfuscation, \
++					  unchecked user input, hard-coded constants worth noting)
++
++					Function name in the binary: %s
++					Entry point: %s
++
++					```c
++					%s
++					```
++					""".formatted(applePreamble, fn.getName(), fn.getEntryPoint(), c);
++
++				ClaudeOptions opts = plugin.options();
++				GhidrAssistProvider.StreamHandle out =
++					plugin.getProvider().beginStream("explain " + fn.getName());
++				plugin.claude().stream(opts, List.of(ClaudeMessage.user(prompt)),
++					out::append, out::close, out::error);
++			}
++		});
++	}
++}
+diff --git a/Ghidra/Extensions/GhidrAssist/src/main/java/ghidra/ghidrassist/actions/ExportProjectAction.java b/Ghidra/Extensions/GhidrAssist/src/main/java/ghidra/ghidrassist/actions/ExportProjectAction.java
+new file mode 100644
+index 0000000000..7201fff286
+--- /dev/null
++++ b/Ghidra/Extensions/GhidrAssist/src/main/java/ghidra/ghidrassist/actions/ExportProjectAction.java
+@@ -0,0 +1,113 @@
++/* ###
++ * IP: GHIDRA
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package ghidra.ghidrassist.actions;
++
++import java.io.File;
++import java.nio.file.Path;
++
++import javax.swing.SwingUtilities;
++
++import docking.ActionContext;
++import docking.action.DockingAction;
++import docking.action.MenuData;
++import docking.widgets.OptionDialog;
++import docking.widgets.filechooser.GhidraFileChooser;
++import docking.widgets.filechooser.GhidraFileChooserMode;
++import ghidra.ghidrassist.ClaudeOptions;
++import ghidra.ghidrassist.GhidrAssistPlugin;
++import ghidra.ghidrassist.ProjectExporter;
++import ghidra.program.model.listing.Program;
++import ghidra.util.Msg;
++import ghidra.util.task.Task;
++import ghidra.util.task.TaskLauncher;
++import ghidra.util.task.TaskMonitor;
++
++/**
++ * Tool-menu action that exports the current program as a buildable-ish C
++ * project under a user-selected directory. See
++ * {@link ghidra.ghidrassist.ProjectExporter} for the honest limits of this
++ * feature.
++ */
++public class ExportProjectAction extends DockingAction {
++
++	private final GhidrAssistPlugin plugin;
++
++	public ExportProjectAction(GhidrAssistPlugin plugin) {
++		super("GhidrAssist Export C Project", plugin.getName());
++		this.plugin = plugin;
++		setMenuBarData(new MenuData(new String[] { "Tools", "GhidrAssist", "Export C Project…" },
++			null, "GhidrAssist"));
++	}
++
++	@Override
++	public boolean isEnabledForContext(ActionContext context) {
++		return plugin.getCurrentProgram() != null;
++	}
++
++	@Override
++	public void actionPerformed(ActionContext context) {
++		Program program = plugin.getCurrentProgram();
++		if (program == null) {
++			return;
++		}
++
++		SwingUtilities.invokeLater(() -> {
++			GhidraFileChooser chooser = new GhidraFileChooser(null);
++			chooser.setTitle("GhidrAssist: Choose output directory");
++			chooser.setFileSelectionMode(GhidraFileChooserMode.DIRECTORIES_ONLY);
++			File dir = chooser.getSelectedFile();
++			chooser.dispose();
++			if (dir == null) {
++				return;
++			}
++
++			ClaudeOptions opts = plugin.options();
++			boolean canClean = opts.isConfigured();
++			int cleanChoice = OptionDialog.showYesNoCancelDialog(null,
++				"GhidrAssist — Claude cleanup?",
++				canClean
++						? "Run every function through Claude for a cleanup pass before writing?\n" +
++							"This can take a while and uses API quota.\n\n" +
++							"Yes = Claude-clean every function\nNo = raw decompiler output only"
++						: "No API key configured; functions will be exported as raw " +
++							"decompiler output. Continue?");
++			if (cleanChoice == OptionDialog.CANCEL_OPTION) {
++				return;
++			}
++			boolean claudeClean = canClean && cleanChoice == OptionDialog.YES_OPTION;
++
++			TaskLauncher.launch(new Task("GhidrAssist: Export C project", true, true, true) {
++				@Override
++				public void run(TaskMonitor monitor) {
++					try {
++						ProjectExporter.Result r = ProjectExporter.export(program, dir.toPath(),
++							claudeClean, plugin.claude(), opts, monitor);
++						Path out = r.outputDir();
++						plugin.getProvider().postSystemMessage(
++							"[export] Wrote " + r.reconstructed() +
++								" function(s) to " + out + " (" + r.failed() + " skipped/failed).");
++						Msg.showInfo(this, null, "GhidrAssist",
++							"Exported C project to:\n" + out +
++								"\n\nSee the README in that directory for honest limits.");
++					}
++					catch (Exception e) {
++						Msg.showError(this, null, "GhidrAssist export failed", e.getMessage(), e);
++					}
++				}
++			});
++		});
++	}
++}
+diff --git a/Ghidra/Extensions/GhidrAssist/src/main/java/ghidra/ghidrassist/actions/GhidrAssistAction.java b/Ghidra/Extensions/GhidrAssist/src/main/java/ghidra/ghidrassist/actions/GhidrAssistAction.java
+new file mode 100644
+index 0000000000..4a74c2a4dd
+--- /dev/null
++++ b/Ghidra/Extensions/GhidrAssist/src/main/java/ghidra/ghidrassist/actions/GhidrAssistAction.java
+@@ -0,0 +1,49 @@
++/* ###
++ * IP: GHIDRA
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package ghidra.ghidrassist.actions;
++
++import docking.ActionContext;
++import docking.action.DockingAction;
++import docking.action.MenuData;
++import ghidra.ghidrassist.GhidrAssistPlugin;
++
++/**
++ * Base class for GhidrAssist right-click actions. Handles menu placement and
++ * enablement; subclasses implement {@link #actionPerformed(ActionContext)}.
++ */
++abstract class GhidrAssistAction extends DockingAction {
++
++	protected final GhidrAssistPlugin plugin;
++
++	protected GhidrAssistAction(GhidrAssistPlugin plugin, String name, String menuEntry) {
++		super(name, plugin.getName());
++		this.plugin = plugin;
++		setPopupMenuData(
++			new MenuData(new String[] { "GhidrAssist", menuEntry }, null, "GhidrAssist"));
++		setHelpLocation(new ghidra.util.HelpLocation("GhidrAssist", "Actions"));
++	}
++
++	@Override
++	public boolean isEnabledForContext(ActionContext context) {
++		return ActionSupport.contextIsSupported(context) &&
++			ActionSupport.functionOf(context) != null;
++	}
++
++	@Override
++	public boolean isAddToPopup(ActionContext context) {
++		return ActionSupport.contextIsSupported(context);
++	}
++}
+diff --git a/Ghidra/Extensions/GhidrAssist/src/main/java/ghidra/ghidrassist/actions/PrepareAppleBinaryAction.java b/Ghidra/Extensions/GhidrAssist/src/main/java/ghidra/ghidrassist/actions/PrepareAppleBinaryAction.java
+new file mode 100644
+index 0000000000..727b19e823
+--- /dev/null
++++ b/Ghidra/Extensions/GhidrAssist/src/main/java/ghidra/ghidrassist/actions/PrepareAppleBinaryAction.java
+@@ -0,0 +1,117 @@
++/* ###
++ * IP: GHIDRA
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package ghidra.ghidrassist.actions;
++
++import docking.ActionContext;
++import docking.action.DockingAction;
++import docking.action.MenuData;
++import docking.widgets.OptionDialog;
++import ghidra.app.plugin.core.analysis.AutoAnalysisManager;
++import ghidra.framework.options.Options;
++import ghidra.ghidrassist.GhidrAssistPlugin;
++import ghidra.ghidrassist.apple.AppleBinaryContext;
++import ghidra.program.model.listing.Program;
++import ghidra.util.Msg;
++import ghidra.util.task.Task;
++import ghidra.util.task.TaskLauncher;
++import ghidra.util.task.TaskMonitor;
++
++/**
++ * One-click "prepare Apple binary" convenience: enables the Objective-C and
++ * Swift analyzers on the current program and schedules a re-analysis. This
++ * does NOT add any new decompilation capability — Ghidra already decompiles
++ * Mach-O / AArch64 Apple Silicon / x86_64 Mach-O / dyld-cache images with
++ * the loaders and processors shipped under {@code Ghidra/Processors/AARCH64}
++ * and {@code Ghidra/Features/Base}. This action just toggles on the analyzers
++ * that are off by default on non-Apple binaries and that materially improve
++ * decompiler output for Mach-O.
++ */
++public class PrepareAppleBinaryAction extends DockingAction {
++
++	private static final String OBJC_MESSAGE_ANALYZER = "Objective-C Message Analyzer";
++	private static final String OBJC_METADATA_ANALYZER = "Objective-C Type Metadata Analyzer";
++	private static final String SWIFT_METADATA_ANALYZER = "Swift Type Metadata Analyzer";
++
++	private final GhidrAssistPlugin plugin;
++
++	public PrepareAppleBinaryAction(GhidrAssistPlugin plugin) {
++		super("GhidrAssist Prepare Apple Binary", plugin.getName());
++		this.plugin = plugin;
++		setMenuBarData(
++			new MenuData(new String[] { "Tools", "GhidrAssist", "Prepare Apple Binary…" },
++				null, "GhidrAssist"));
++	}
++
++	@Override
++	public boolean isEnabledForContext(ActionContext context) {
++		Program program = plugin.getCurrentProgram();
++		return program != null && AppleBinaryContext.from(program).isMachO();
++	}
++
++	@Override
++	public void actionPerformed(ActionContext context) {
++		Program program = plugin.getCurrentProgram();
++		if (program == null) {
++			return;
++		}
++		AppleBinaryContext ctx = AppleBinaryContext.from(program);
++		if (!ctx.isMachO()) {
++			Msg.showInfo(this, null, "GhidrAssist",
++				"The current program is not Mach-O (" + ctx.summary() + ").\n" +
++					"This action only applies to macOS / iOS / Apple Silicon binaries.");
++			return;
++		}
++
++		String preview = ""
++			+ "Enable the following analyzers on this program and schedule re-analysis?\n\n"
++			+ "  • " + OBJC_MESSAGE_ANALYZER + "\n"
++			+ "  • " + OBJC_METADATA_ANALYZER + "\n"
++			+ "  • " + SWIFT_METADATA_ANALYZER + "\n\n"
++			+ "Detected: " + ctx.summary() + ".\n\n"
++			+ "These analyzers already ship with Ghidra; this action just toggles them on\n"
++			+ "and re-runs analysis. It does not add new decompilation capability.";
++		int choice =
++			OptionDialog.showYesNoDialog(null, "GhidrAssist — Prepare Apple Binary", preview);
++		if (choice != OptionDialog.YES_OPTION) {
++			return;
++		}
++
++		TaskLauncher.launch(new Task("GhidrAssist: Prepare Apple binary", true, true, false) {
++			@Override
++			public void run(TaskMonitor monitor) {
++				int tx = program.startTransaction("GhidrAssist: enable Apple analyzers");
++				boolean commit = false;
++				try {
++					Options options = program.getOptions(Program.ANALYSIS_PROPERTIES);
++					options.setBoolean(OBJC_MESSAGE_ANALYZER, true);
++					options.setBoolean(OBJC_METADATA_ANALYZER, true);
++					options.setBoolean(SWIFT_METADATA_ANALYZER, true);
++					commit = true;
++				}
++				finally {
++					program.endTransaction(tx, commit);
++				}
++				monitor.setMessage("Scheduling re-analysis");
++				AutoAnalysisManager mgr = AutoAnalysisManager.getAnalysisManager(program);
++				mgr.reAnalyzeAll(null);
++				mgr.startAnalysis(monitor);
++				plugin.getProvider().postSystemMessage(
++					"[apple] Enabled ObjC/Swift analyzers and re-ran analysis on " +
++						program.getName() + " (" + ctx.summary() + ").");
++			}
++		});
++	}
++}
+diff --git a/Ghidra/Extensions/GhidrAssist/src/main/java/ghidra/ghidrassist/actions/ReconstructFunctionAction.java b/Ghidra/Extensions/GhidrAssist/src/main/java/ghidra/ghidrassist/actions/ReconstructFunctionAction.java
+new file mode 100644
+index 0000000000..15598eeb9f
+--- /dev/null
++++ b/Ghidra/Extensions/GhidrAssist/src/main/java/ghidra/ghidrassist/actions/ReconstructFunctionAction.java
+@@ -0,0 +1,81 @@
++/* ###
++ * IP: GHIDRA
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package ghidra.ghidrassist.actions;
++
++import java.util.List;
++
++import docking.ActionContext;
++import ghidra.ghidrassist.ClaudeMessage;
++import ghidra.ghidrassist.ClaudeOptions;
++import ghidra.ghidrassist.DecompilerHelper;
++import ghidra.ghidrassist.GhidrAssistPlugin;
++import ghidra.ghidrassist.GhidrAssistProvider;
++import ghidra.ghidrassist.apple.AppleBinaryContext;
++import ghidra.program.model.listing.Function;
++import ghidra.program.model.listing.Program;
++import ghidra.util.task.Task;
++import ghidra.util.task.TaskLauncher;
++import ghidra.util.task.TaskMonitor;
++
++public class ReconstructFunctionAction extends GhidrAssistAction {
++
++	public ReconstructFunctionAction(GhidrAssistPlugin plugin) {
++		super(plugin, "GhidrAssist Reconstruct Function", "Reconstruct as C");
++	}
++
++	@Override
++	public void actionPerformed(ActionContext context) {
++		Function fn = ActionSupport.functionOf(context);
++		Program program = ActionSupport.programOf(context);
++		if (fn == null || program == null) {
++			return;
++		}
++
++		TaskLauncher.launch(
++			new Task("GhidrAssist: Reconstruct " + fn.getName(), true, false, true) {
++				@Override
++				public void run(TaskMonitor monitor) {
++					monitor.setMessage("Decompiling " + fn.getName());
++					String c = DecompilerHelper.decompile(program, fn, monitor);
++					if (c == null) {
++						plugin.getProvider().postSystemMessage(
++							"[reconstruct] Could not decompile " + fn.getName() + ".");
++						return;
++					}
++					String applePreamble = AppleBinaryContext.from(program).promptPreamble();
++					String prompt = """
++						%sRewrite the following decompiler output as idiomatic, portable C. \
++						Preserve semantics exactly; do not invent calls, structs, or \
++						behavior. Keep the same function name and signature unless the \
++						decompiler produced something clearly nonsensical. Prefer named \
++						constants and clear control flow over the decompiler's goto-heavy \
++						style. Return only the rewritten function in a single ```c``` \
++						fenced block, no commentary.
++
++						```c
++						%s
++						```
++						""".formatted(applePreamble, c);
++
++					ClaudeOptions opts = plugin.options();
++					GhidrAssistProvider.StreamHandle out =
++						plugin.getProvider().beginStream("reconstruct " + fn.getName());
++					plugin.claude().stream(opts, List.of(ClaudeMessage.user(prompt)),
++						out::append, out::close, out::error);
++				}
++			});
++	}
++}
+diff --git a/Ghidra/Extensions/GhidrAssist/src/main/java/ghidra/ghidrassist/actions/SuggestRenamesAction.java b/Ghidra/Extensions/GhidrAssist/src/main/java/ghidra/ghidrassist/actions/SuggestRenamesAction.java
+new file mode 100644
+index 0000000000..07b0a96f87
+--- /dev/null
++++ b/Ghidra/Extensions/GhidrAssist/src/main/java/ghidra/ghidrassist/actions/SuggestRenamesAction.java
+@@ -0,0 +1,246 @@
++/* ###
++ * IP: GHIDRA
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package ghidra.ghidrassist.actions;
++
++import java.util.LinkedHashMap;
++import java.util.List;
++import java.util.Map;
++
++import javax.swing.SwingUtilities;
++
++import com.google.gson.JsonElement;
++import com.google.gson.JsonObject;
++import com.google.gson.JsonParser;
++
++import docking.ActionContext;
++import docking.widgets.OptionDialog;
++import ghidra.ghidrassist.ClaudeMessage;
++import ghidra.ghidrassist.ClaudeOptions;
++import ghidra.ghidrassist.DecompilerHelper;
++import ghidra.ghidrassist.GhidrAssistPlugin;
++import ghidra.program.model.listing.Function;
++import ghidra.program.model.listing.Parameter;
++import ghidra.program.model.listing.Program;
++import ghidra.program.model.listing.Variable;
++import ghidra.program.model.symbol.SourceType;
++import ghidra.util.exception.DuplicateNameException;
++import ghidra.util.exception.InvalidInputException;
++import ghidra.util.task.Task;
++import ghidra.util.task.TaskLauncher;
++import ghidra.util.task.TaskMonitor;
++
++/**
++ * Asks Claude for better names for the current function and its parameters /
++ * locals. The response is parsed as a strict JSON object. The user confirms
++ * the renames in a dialog before any are applied, and application happens
++ * inside a single Ghidra transaction so Undo rolls everything back.
++ */
++public class SuggestRenamesAction extends GhidrAssistAction {
++
++	public SuggestRenamesAction(GhidrAssistPlugin plugin) {
++		super(plugin, "GhidrAssist Suggest Renames", "Suggest Renames");
++	}
++
++	@Override
++	public void actionPerformed(ActionContext context) {
++		Function fn = ActionSupport.functionOf(context);
++		Program program = ActionSupport.programOf(context);
++		if (fn == null || program == null) {
++			return;
++		}
++
++		TaskLauncher.launch(new Task("GhidrAssist: Renames for " + fn.getName(),
++			true, false, true) {
++
++			@Override
++			public void run(TaskMonitor monitor) {
++				String c = DecompilerHelper.decompile(program, fn, monitor);
++				if (c == null) {
++					plugin.getProvider().postSystemMessage(
++						"[rename] Could not decompile " + fn.getName() + ".");
++					return;
++				}
++				String prompt = """
++					Suggest better names for the function and its variables based on \
++					this decompiled C.
++
++					Return ONLY a JSON object matching:
++					{
++					  "function": "<new function name or null>",
++					  "renames": { "<old_name>": "<new_name>", ... }
++					}
++
++					Rules:
++					- Only propose a rename when you are confident. If unsure, omit it.
++					- Keep identifiers valid C: ASCII letters/digits/underscore, not starting \
++					  with a digit.
++					- Preserve calling convention and visibility; do not propose names starting \
++					  with underscore for public-looking functions.
++					- No prose, no code fences. Just the JSON.
++
++					Current function name: %s
++
++					```c
++					%s
++					```
++					""".formatted(fn.getName(), c);
++
++				ClaudeOptions opts = plugin.options();
++				String response;
++				try {
++					response = plugin.claude().complete(opts, List.of(ClaudeMessage.user(prompt)));
++				}
++				catch (Exception e) {
++					plugin.getProvider().postSystemMessage("[rename] error: " + e.getMessage());
++					return;
++				}
++				JsonObject obj = parseJsonObjectLoose(response);
++				if (obj == null) {
++					plugin.getProvider().postAssistantMessage(
++						"renames " + fn.getName(),
++						"Could not parse response as JSON. Raw reply:\n" + response);
++					return;
++				}
++
++				String newFnName = null;
++				if (obj.has("function") && !obj.get("function").isJsonNull()) {
++					JsonElement fe = obj.get("function");
++					if (fe.isJsonPrimitive()) {
++						newFnName = fe.getAsString();
++					}
++				}
++				Map<String, String> renames = new LinkedHashMap<>();
++				if (obj.has("renames") && obj.get("renames").isJsonObject()) {
++					for (Map.Entry<String, JsonElement> e : obj.getAsJsonObject("renames")
++							.entrySet()) {
++						if (e.getValue().isJsonPrimitive()) {
++							renames.put(e.getKey(), e.getValue().getAsString());
++						}
++					}
++				}
++
++				StringBuilder preview = new StringBuilder();
++				if (newFnName != null && !newFnName.equals(fn.getName())) {
++					preview.append("function: ")
++							.append(fn.getName())
++							.append("  →  ")
++							.append(newFnName)
++							.append('\n');
++				}
++				for (Map.Entry<String, String> r : renames.entrySet()) {
++					if (!r.getKey().equals(r.getValue())) {
++						preview.append("  ")
++								.append(r.getKey())
++								.append("  →  ")
++								.append(r.getValue())
++								.append('\n');
++					}
++				}
++				if (preview.length() == 0) {
++					plugin.getProvider().postSystemMessage(
++						"[rename] Claude did not propose any renames.");
++					return;
++				}
++
++				final String finalFnName = newFnName;
++				SwingUtilities.invokeLater(() -> {
++					int choice = OptionDialog.showYesNoDialog(null,
++						"GhidrAssist — Apply Renames?",
++						"Apply the following renames to " + fn.getName() + "?\n\n" + preview);
++					if (choice == OptionDialog.YES_OPTION) {
++						int applied =
++							applyRenames(program, fn, finalFnName, renames);
++						plugin.getProvider().postSystemMessage(
++							"[rename] Applied " + applied + " name change" +
++								(applied == 1 ? "" : "s") + ".");
++					}
++				});
++			}
++		});
++	}
++
++	private static int applyRenames(Program program, Function fn, String newFnName,
++			Map<String, String> renames) {
++		int applied = 0;
++		int tx = program.startTransaction("GhidrAssist: rename " + fn.getName());
++		boolean commit = false;
++		try {
++			if (newFnName != null && !newFnName.isBlank() && !newFnName.equals(fn.getName())) {
++				try {
++					fn.setName(newFnName, SourceType.USER_DEFINED);
++					applied++;
++				}
++				catch (DuplicateNameException | InvalidInputException ignored) {
++				}
++			}
++			applied += applyToVariables(fn.getParameters(), renames);
++			applied += applyToVariables(fn.getLocalVariables(), renames);
++			commit = true;
++		}
++		finally {
++			program.endTransaction(tx, commit);
++		}
++		return applied;
++	}
++
++	private static int applyToVariables(Variable[] vars, Map<String, String> renames) {
++		int count = 0;
++		for (Variable v : vars) {
++			String n = v.getName();
++			String target = renames.get(n);
++			if (target == null || target.isBlank() || target.equals(n)) {
++				continue;
++			}
++			try {
++				if (v instanceof Parameter p) {
++					p.setName(target, SourceType.USER_DEFINED);
++				}
++				else {
++					v.setName(target, SourceType.USER_DEFINED);
++				}
++				count++;
++			}
++			catch (DuplicateNameException | InvalidInputException ignored) {
++			}
++		}
++		return count;
++	}
++
++	private static JsonObject parseJsonObjectLoose(String response) {
++		String s = response == null ? "" : response.trim();
++		if (s.startsWith("```")) {
++			int firstNl = s.indexOf('\n');
++			if (firstNl >= 0) {
++				s = s.substring(firstNl + 1);
++			}
++			if (s.endsWith("```")) {
++				s = s.substring(0, s.length() - 3);
++			}
++			s = s.trim();
++		}
++		int start = s.indexOf('{');
++		int end = s.lastIndexOf('}');
++		if (start < 0 || end <= start) {
++			return null;
++		}
++		try {
++			return JsonParser.parseString(s.substring(start, end + 1)).getAsJsonObject();
++		}
++		catch (Exception e) {
++			return null;
++		}
++	}
++}
+diff --git a/Ghidra/Extensions/GhidrAssist/src/main/java/ghidra/ghidrassist/actions/SuggestSignatureAction.java b/Ghidra/Extensions/GhidrAssist/src/main/java/ghidra/ghidrassist/actions/SuggestSignatureAction.java
+new file mode 100644
+index 0000000000..458bdc1cec
+--- /dev/null
++++ b/Ghidra/Extensions/GhidrAssist/src/main/java/ghidra/ghidrassist/actions/SuggestSignatureAction.java
+@@ -0,0 +1,94 @@
++/* ###
++ * IP: GHIDRA
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package ghidra.ghidrassist.actions;
++
++import java.util.List;
++
++import docking.ActionContext;
++import ghidra.ghidrassist.ClaudeMessage;
++import ghidra.ghidrassist.ClaudeOptions;
++import ghidra.ghidrassist.DecompilerHelper;
++import ghidra.ghidrassist.GhidrAssistPlugin;
++import ghidra.program.model.listing.Function;
++import ghidra.program.model.listing.Program;
++import ghidra.util.task.Task;
++import ghidra.util.task.TaskLauncher;
++import ghidra.util.task.TaskMonitor;
++
++/**
++ * Suggests a cleaner C signature for the current function. The suggestion is
++ * posted into the chat panel for the user to review; applying it to the
++ * program is left as a manual step (parsing arbitrary C declarations and
++ * mapping them to Ghidra data types is error-prone, and we don't want the
++ * assistant silently rewriting function prototypes).
++ */
++public class SuggestSignatureAction extends GhidrAssistAction {
++
++	public SuggestSignatureAction(GhidrAssistPlugin plugin) {
++		super(plugin, "GhidrAssist Suggest Signature", "Suggest Signature");
++	}
++
++	@Override
++	public void actionPerformed(ActionContext context) {
++		Function fn = ActionSupport.functionOf(context);
++		Program program = ActionSupport.programOf(context);
++		if (fn == null || program == null) {
++			return;
++		}
++
++		TaskLauncher.launch(
++			new Task("GhidrAssist: Signature for " + fn.getName(), true, false, true) {
++				@Override
++				public void run(TaskMonitor monitor) {
++					String c = DecompilerHelper.decompile(program, fn, monitor);
++					if (c == null) {
++						plugin.getProvider().postSystemMessage(
++							"[signature] Could not decompile " + fn.getName() + ".");
++						return;
++					}
++					String prompt = """
++						Based on this decompiled function, propose a cleaner C signature \
++						(return type + typed, named parameters). Rules:
++						- Keep the function name %s.
++						- Use common libc / POSIX types where they clearly apply (size_t, \
++						  ssize_t, const char *, FILE *, etc.).
++						- If a parameter's role is unclear, keep its original name.
++						- Return exactly one line: just the prototype, ending with a \
++						  semicolon. No prose, no code fences.
++
++						```c
++						%s
++						```
++						""".formatted(fn.getName(), c);
++
++					ClaudeOptions opts = plugin.options();
++					try {
++						String sig = plugin.claude()
++								.complete(opts, List.of(ClaudeMessage.user(prompt)));
++						plugin.getProvider().postAssistantMessage(
++							"signature " + fn.getName(),
++							sig.trim() +
++								"\n\n(Apply manually via Edit Function Signature; the plugin " +
++								"will not rewrite prototypes automatically.)");
++					}
++					catch (Exception e) {
++						plugin.getProvider().postSystemMessage(
++							"[signature] error: " + e.getMessage());
++					}
++				}
++			});
++	}
++}
+diff --git a/Ghidra/Extensions/GhidrAssist/src/main/java/ghidra/ghidrassist/apple/AppleBinaryContext.java b/Ghidra/Extensions/GhidrAssist/src/main/java/ghidra/ghidrassist/apple/AppleBinaryContext.java
+new file mode 100644
+index 0000000000..590d3981bb
+--- /dev/null
++++ b/Ghidra/Extensions/GhidrAssist/src/main/java/ghidra/ghidrassist/apple/AppleBinaryContext.java
+@@ -0,0 +1,211 @@
++/* ###
++ * IP: GHIDRA
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package ghidra.ghidrassist.apple;
++
++import ghidra.app.util.opinion.MachoLoader;
++import ghidra.program.model.listing.Program;
++import ghidra.program.model.mem.MemoryBlock;
++
++/**
++ * Detects whether the current {@link Program} is an Apple-flavored binary
++ * (Mach-O, Apple Silicon, Objective-C runtime, Swift runtime). GhidrAssist
++ * uses this to enrich prompts and to decide when the Apple-specific
++ * convenience action is enabled.
++ *
++ * <p>Nothing in this class decompiles anything new — Ghidra already handles
++ * Mach-O / AARCH64 / x86_64 Mach-O binaries natively. This is purely context
++ * detection for prompt enrichment and for the one-click analyzer toggle.
++ */
++public final class AppleBinaryContext {
++
++	private final boolean machO;
++	private final boolean appleSilicon;
++	private final boolean aarch64;
++	private final boolean x86_64;
++	private final boolean objectiveC;
++	private final boolean swift;
++	private final boolean arm64e;
++	private final String languageId;
++
++	private AppleBinaryContext(boolean machO, boolean appleSilicon, boolean aarch64,
++			boolean x86_64, boolean objectiveC, boolean swift, boolean arm64e,
++			String languageId) {
++		this.machO = machO;
++		this.appleSilicon = appleSilicon;
++		this.aarch64 = aarch64;
++		this.x86_64 = x86_64;
++		this.objectiveC = objectiveC;
++		this.swift = swift;
++		this.arm64e = arm64e;
++		this.languageId = languageId;
++	}
++
++	public static AppleBinaryContext from(Program program) {
++		if (program == null) {
++			return empty();
++		}
++		String fmt = program.getExecutableFormat();
++		String lid = program.getLanguageID() == null ? "" :
++			program.getLanguageID().getIdAsString();
++		java.util.List<String> blockNames = new java.util.ArrayList<>();
++		for (MemoryBlock block : program.getMemory().getBlocks()) {
++			blockNames.add(block.getName() == null ? "" : block.getName());
++		}
++		return classify(fmt, lid, blockNames, program.getExecutablePath());
++	}
++
++	/**
++	 * Pure-logic classifier used by {@link #from(Program)}; exposed for tests
++	 * so detection can be validated without constructing a {@link Program}.
++	 */
++	public static AppleBinaryContext classify(String executableFormat, String languageId,
++			java.util.List<String> blockNames, String executablePath) {
++		boolean machO = MachoLoader.MACH_O_NAME.equals(executableFormat);
++		String lid = languageId == null ? "" : languageId;
++		boolean appleSilicon = lid.contains(":AppleSilicon");
++		boolean aarch64 = lid.startsWith("AARCH64:");
++		boolean x86_64 = lid.startsWith("x86:LE:64");
++
++		boolean objc = false;
++		boolean swift = false;
++		if (blockNames != null) {
++			for (String n : blockNames) {
++				if (n == null) {
++					continue;
++				}
++				if (n.startsWith("__objc_") || n.equals("__objc") ||
++					n.contains("objc_classlist") || n.contains("objc_catlist") ||
++					n.contains("objc_selrefs")) {
++					objc = true;
++				}
++				if (n.startsWith("__swift5_") || n.startsWith("__swift_") ||
++					n.contains("swift5_types")) {
++					swift = true;
++				}
++			}
++		}
++		// arm64e is reported through CPU subtype; the SLEIGH variant currently
++		// doesn't distinguish it from AppleSilicon, so we fall back to a name hint
++		// on the executable path. Pointer-authentication of indirect branches is
++		// what matters for the LLM — we just flag that it may be present.
++		boolean arm64e = executablePath != null &&
++			(executablePath.contains("arm64e") || executablePath.contains("arm64_e"));
++
++		return new AppleBinaryContext(machO, appleSilicon, aarch64, x86_64, objc, swift,
++			arm64e, lid);
++	}
++
++	private static AppleBinaryContext empty() {
++		return new AppleBinaryContext(false, false, false, false, false, false, false, "");
++	}
++
++	public boolean isMachO() {
++		return machO;
++	}
++
++	public boolean isAppleSilicon() {
++		return appleSilicon;
++	}
++
++	public boolean isAARCH64() {
++		return aarch64;
++	}
++
++	public boolean isX86_64() {
++		return x86_64;
++	}
++
++	public boolean hasObjectiveC() {
++		return objectiveC;
++	}
++
++	public boolean hasSwift() {
++		return swift;
++	}
++
++	public boolean mayBeArm64e() {
++		return arm64e;
++	}
++
++	public String languageId() {
++		return languageId;
++	}
++
++	/**
++	 * One-line summary suitable for a status bar or chat system message.
++	 */
++	public String summary() {
++		if (!machO) {
++			return "non-Mach-O (" + (languageId.isEmpty() ? "unknown" : languageId) + ")";
++		}
++		StringBuilder sb = new StringBuilder("Mach-O");
++		if (appleSilicon) {
++			sb.append(", Apple Silicon");
++		}
++		else if (aarch64) {
++			sb.append(", AArch64");
++		}
++		else if (x86_64) {
++			sb.append(", x86_64");
++		}
++		if (objectiveC) {
++			sb.append(", Objective-C runtime");
++		}
++		if (swift) {
++			sb.append(", Swift runtime");
++		}
++		if (arm64e) {
++			sb.append(", possibly arm64e (PAC)");
++		}
++		return sb.toString();
++	}
++
++	/**
++	 * Returns a short block of guidance to prepend to Claude prompts when the
++	 * program is Apple-flavored. Empty if nothing Apple-specific was detected.
++	 */
++	public String promptPreamble() {
++		if (!machO && !appleSilicon && !objectiveC && !swift) {
++			return "";
++		}
++		StringBuilder sb = new StringBuilder("Context: this binary is ");
++		sb.append(summary()).append(".\n");
++		if (objectiveC) {
++			sb.append(
++				"- Objective-C: calls go through `objc_msgSend` / `_objc_msgSendSuper2`. " +
++					"The first argument is `self`, the second is the SEL (as a C string in " +
++					"`__objc_methname`). Treat `objc_msgSend(x, sel_foo, a, b)` as `[x foo:a b]`.\n");
++		}
++		if (swift) {
++			sb.append(
++				"- Swift: expect mangled names starting with `$s` or `_$s`. Metadata lives in " +
++					"`__swift5_types`, `__swift5_proto`, `__swift5_fieldmd`. Error returns use " +
++					"a context register, not a C return value.\n");
++		}
++		if (appleSilicon || arm64e) {
++			sb.append(
++				"- Apple Silicon ABI (AAPCS64 + Apple's variants): x0..x7 pass args, x8 holds " +
++					"the indirect return address for large returns, x16/x17 are scratch used by " +
++					"PLT/stub veneers, x18 is reserved on Darwin. ");
++			if (arm64e) {
++				sb.append("`braa`/`blraa`/`autia` and friends indicate pointer authentication; " +
++					"treat them as validated indirect branches/calls.");
++			}
++			sb.append('\n');
++		}
++		return sb.toString();
++	}
++}
+diff --git a/Ghidra/Extensions/GhidrAssist/src/test/java/ghidra/ghidrassist/apple/AppleBinaryContextTest.java b/Ghidra/Extensions/GhidrAssist/src/test/java/ghidra/ghidrassist/apple/AppleBinaryContextTest.java
+new file mode 100644
+index 0000000000..1269675562
+--- /dev/null
++++ b/Ghidra/Extensions/GhidrAssist/src/test/java/ghidra/ghidrassist/apple/AppleBinaryContextTest.java
+@@ -0,0 +1,132 @@
++/* ###
++ * IP: GHIDRA
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package ghidra.ghidrassist.apple;
++
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertFalse;
++import static org.junit.Assert.assertTrue;
++
++import java.util.List;
++
++import org.junit.Test;
++
++public class AppleBinaryContextTest {
++
++	private static final String MACH_O = "Mac OS X Mach-O";
++	private static final String ELF = "Executable and Linking Format (ELF)";
++
++	@Test
++	public void linuxElfIsNotApple() {
++		AppleBinaryContext ctx = AppleBinaryContext.classify(ELF, "x86:LE:64:default",
++			List.of(".text", ".rodata", ".data"), "/bin/ls");
++		assertFalse(ctx.isMachO());
++		assertFalse(ctx.isAppleSilicon());
++		assertFalse(ctx.hasObjectiveC());
++		assertFalse(ctx.hasSwift());
++		assertFalse(ctx.mayBeArm64e());
++		assertTrue(ctx.isX86_64());
++	}
++
++	@Test
++	public void appleSiliconMachOIsDetected() {
++		AppleBinaryContext ctx = AppleBinaryContext.classify(MACH_O,
++			"AARCH64:LE:64:AppleSilicon", List.of("__TEXT", "__text", "__DATA"),
++			"/Applications/Example.app/Contents/MacOS/Example");
++		assertTrue(ctx.isMachO());
++		assertTrue(ctx.isAppleSilicon());
++		assertTrue(ctx.isAARCH64());
++		assertFalse(ctx.isX86_64());
++		assertFalse(ctx.hasObjectiveC());
++		assertFalse(ctx.hasSwift());
++	}
++
++	@Test
++	public void objectiveCRuntimeIsDetectedFromSectionNames() {
++		AppleBinaryContext ctx = AppleBinaryContext.classify(MACH_O,
++			"AARCH64:LE:64:AppleSilicon",
++			List.of("__TEXT", "__objc_classlist", "__objc_methname", "__objc_selrefs"), "");
++		assertTrue(ctx.hasObjectiveC());
++		assertFalse(ctx.hasSwift());
++	}
++
++	@Test
++	public void swiftRuntimeIsDetectedFromSectionNames() {
++		AppleBinaryContext ctx = AppleBinaryContext.classify(MACH_O,
++			"AARCH64:LE:64:AppleSilicon",
++			List.of("__TEXT", "__swift5_types", "__swift5_proto"), "");
++		assertFalse(ctx.hasObjectiveC());
++		assertTrue(ctx.hasSwift());
++	}
++
++	@Test
++	public void arm64eIsHintedFromPath() {
++		AppleBinaryContext ctx = AppleBinaryContext.classify(MACH_O,
++			"AARCH64:LE:64:AppleSilicon", List.of("__TEXT"),
++			"/System/Library/dyld/arm64e/dyld_shared_cache_arm64e");
++		assertTrue(ctx.mayBeArm64e());
++	}
++
++	@Test
++	public void x86_64MachOIsStillMachO() {
++		AppleBinaryContext ctx = AppleBinaryContext.classify(MACH_O, "x86:LE:64:default",
++			List.of("__TEXT", "__text"), "/usr/bin/x86tool");
++		assertTrue(ctx.isMachO());
++		assertFalse(ctx.isAppleSilicon());
++		assertFalse(ctx.isAARCH64());
++		assertTrue(ctx.isX86_64());
++	}
++
++	@Test
++	public void nullInputsDoNotCrash() {
++		AppleBinaryContext ctx =
++			AppleBinaryContext.classify(null, null, null, null);
++		assertFalse(ctx.isMachO());
++		assertFalse(ctx.isAppleSilicon());
++		assertFalse(ctx.hasObjectiveC());
++		assertFalse(ctx.hasSwift());
++		assertFalse(ctx.mayBeArm64e());
++		assertEquals("", ctx.languageId());
++	}
++
++	@Test
++	public void summaryIsHumanReadable() {
++		AppleBinaryContext ctx = AppleBinaryContext.classify(MACH_O,
++			"AARCH64:LE:64:AppleSilicon",
++			List.of("__TEXT", "__objc_classlist", "__swift5_types"),
++			"/path/to/arm64e/binary");
++		String s = ctx.summary();
++		assertTrue(s, s.contains("Mach-O"));
++		assertTrue(s, s.contains("Apple Silicon"));
++		assertTrue(s, s.contains("Objective-C"));
++		assertTrue(s, s.contains("Swift"));
++		assertTrue(s, s.contains("arm64e"));
++	}
++
++	@Test
++	public void promptPreambleEmptyForNonAppleBinary() {
++		AppleBinaryContext ctx = AppleBinaryContext.classify(ELF, "x86:LE:64:default",
++			List.of(".text"), "/bin/ls");
++		assertEquals("", ctx.promptPreamble());
++	}
++
++	@Test
++	public void promptPreambleMentionsObjcMsgSendWhenObjcIsPresent() {
++		AppleBinaryContext ctx = AppleBinaryContext.classify(MACH_O,
++			"AARCH64:LE:64:AppleSilicon", List.of("__objc_classlist"), "");
++		String p = ctx.promptPreamble();
++		assertTrue(p, p.contains("objc_msgSend"));
++	}
++}
+-- 
+2.45.1
+

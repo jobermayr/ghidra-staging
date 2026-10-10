@@ -1,0 +1,84 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Obermayr <johannesobermayr@gmx.de>
+Date: Sat, 10 Oct 2026 16:56:52 +0200
+Subject: [PATCH] 9763: Gradle: Make distributableGhidraExtensions available at
+ assembleAll
+
+This places extension ZIPs directly in ${DISTRIBUTION_DIR}/${ZIP_DIR_PREFIX}/Extensions/Ghidra, making them available after assembleAll completes.
+
+Previously, extension ZIPs were generated as part of the createInstallationZip task.
+---
+ Ghidra/Extensions/bundle_examples/build.gradle | 15 +--------------
+ gradle/distributableGhidraExtension.gradle     |  8 ++------
+ gradle/root/distribution.gradle                |  8 ++++++++
+ 3 files changed, 11 insertions(+), 20 deletions(-)
+
+diff --git a/Ghidra/Extensions/bundle_examples/build.gradle b/Ghidra/Extensions/bundle_examples/build.gradle
+index 2a85314b96..0af14644eb 100644
+--- a/Ghidra/Extensions/bundle_examples/build.gradle
++++ b/Ghidra/Extensions/bundle_examples/build.gradle
+@@ -110,7 +110,7 @@ eclipse {
+ task zipExtensions(type: Zip, dependsOn:jarTasks) {
+ 	def p = this.project
+ 	archiveFileName = "${rootProject.ext.ZIP_NAME_PREFIX}_${p.name}.zip"
+-	destinationDirectory = rootProject.ext.DISTRIBUTION_DIR
++	destinationDirectory = file("${rootProject.ext.DISTRIBUTION_DIR}/${rootProject.ZIP_DIR_PREFIX}/Extensions/Ghidra")
+ 
+ 	duplicatesStrategy = 'exclude'
+ 
+@@ -129,16 +129,3 @@ task zipExtensions(type: Zip, dependsOn:jarTasks) {
+ 
+ 	into p.name
+ }
+-
+-// Registratino with rootProject.createInstallationZip is ususally done in
+-// "$rootProject.projectDir/gradle/distributableGhidraExtension.gradle", but
+-// since we define a custom zipExtensions task (and can't overwrite it), we do
+-// the registration here.
+-rootProject.createInstallationZip {
+-	from (this.project.zipExtensions) {
+-		into  {
+-			rootProject.ZIP_DIR_PREFIX + "/Extensions/Ghidra"
+-		}
+-	}
+-}
+-
+diff --git a/gradle/distributableGhidraExtension.gradle b/gradle/distributableGhidraExtension.gradle
+index 9bdf2c2220..c0db58db92 100644
+--- a/gradle/distributableGhidraExtension.gradle
++++ b/gradle/distributableGhidraExtension.gradle
+@@ -27,10 +27,6 @@
+ apply from: "$rootProject.projectDir/gradle/support/distributionCommon.gradle"
+ apply from: "$rootProject.projectDir/gradle/support/extensionCommon.gradle"
+ 
+-rootProject.createInstallationZip {
+-	from (this.project.zipExtensions) {
+-		into  {
+-			rootProject.ZIP_DIR_PREFIX + "/Extensions/Ghidra"
+-		}
+-	}
++this.project.tasks.named('zipExtensions', Zip) {
++	destinationDirectory = rootProject.file("${rootProject.ext.DISTRIBUTION_DIR}/${rootProject.ZIP_DIR_PREFIX}/Extensions/Ghidra")
+ }
+diff --git a/gradle/root/distribution.gradle b/gradle/root/distribution.gradle
+index 4368fc1071..dadd28b265 100644
+--- a/gradle/root/distribution.gradle
++++ b/gradle/root/distribution.gradle
+@@ -678,6 +678,14 @@ task assembleAll() {
+ 	}
+ }
+ 
++gradle.projectsEvaluated {
++	rootProject.tasks.named('assembleAll') {
++		dependsOn rootProject.subprojects.collect { p ->
++			p.tasks.matching { it.name == 'zipExtensions' }
++		}
++	}
++}
++
+ /*********************************************************************************
+  *
+  * Creates the local installation zip.
+-- 
+2.45.1
+
