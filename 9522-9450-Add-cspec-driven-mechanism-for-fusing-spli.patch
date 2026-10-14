@@ -78,20 +78,20 @@ recognize <farpointerjoin> when a cspec is validated/loaded.
 
 Fixes #9450
 ---
- .../src/decompile/cpp/coreaction.cc           | 43 ++++++++++++++
- .../Decompiler/src/decompile/cpp/fspec.cc     | 57 ++++++++++++++++++
- .../cpp/include/ghidra/coreaction.hh          | 22 ++++++-
- .../src/decompile/cpp/include/ghidra/fspec.hh | 18 ++++++
- .../Decompiler/src/decompile/cpp/marshal.cc   |  4 +-
- .../src/decompile/unittests/testfuncproto.cc  | 57 ++++++++++++++++++
- .../data/languages/compiler_spec.rxg          | 15 +++++
- .../program/model/lang/PrototypeModel.java    | 58 +++++++++++++++++++
- .../program/model/pcode/AttributeId.java      | 10 +++-
- .../ghidra/program/model/pcode/ElementId.java |  9 ++-
- 10 files changed, 287 insertions(+), 6 deletions(-)
+ .../src/decompile/cpp/coreaction.cc           |  43 +++++++
+ .../Decompiler/src/decompile/cpp/fspec.cc     |  57 +++++++++
+ .../cpp/include/ghidra/coreaction.hh          |  22 +++-
+ .../src/decompile/cpp/include/ghidra/fspec.hh |  18 +++
+ .../Decompiler/src/decompile/cpp/marshal.cc   |   4 +-
+ .../src/decompile/unittests/testfuncproto.cc  |  57 +++++++++
+ .../data/languages/compiler_spec.rxg          |  15 +++
+ .../program/model/lang/PrototypeModel.java    | 118 +++++++++++++-----
+ .../program/model/pcode/AttributeId.java      |   6 +-
+ .../ghidra/program/model/pcode/ElementId.java |   4 +-
+ 10 files changed, 308 insertions(+), 36 deletions(-)
 
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
-index c1df546d52..15b5a0d177 100644
+index fffdedf05a..c728410dca 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
 @@ -1930,6 +1930,48 @@ int4 ActionParamDouble::apply(Funcdata &data)
@@ -152,7 +152,7 @@ index c1df546d52..15b5a0d177 100644
        actmainloop->addAction( new ActionInternalStorage("base") );
        actmainloop->addAction( new ActionForceGoto("blockrecovery") );
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.cc
-index 85ff77e29c..cb52976853 100644
+index 85ff77e29c..e0a275fa90 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.cc
 @@ -51,6 +51,9 @@ ElementId ELEM_RETURNSYM = ElementId("returnsym",172);
@@ -160,8 +160,8 @@ index 85ff77e29c..cb52976853 100644
  ElementId ELEM_INTERNAL_STORAGE = ElementId("internal_storage",286);
  ElementId ELEM_SHARESTACK = ElementId("sharestack",291);
 +ElementId ELEM_FARPOINTERJOIN = ElementId("farpointerjoin",293);
-+AttributeId ATTRIB_HISLOT = AttributeId("hislot",162);
-+AttributeId ATTRIB_JOINSIZE = AttributeId("joinsize",163);
++AttributeId ATTRIB_HISLOT = AttributeId("hislot",163);
++AttributeId ATTRIB_JOINSIZE = AttributeId("joinsize",164);
  
  /// \brief Find a ParamEntry matching the given storage Varnode
  ///
@@ -349,15 +349,15 @@ index ff21429acc..ee778ae0bb 100644
    void setInternal(ProtoModel *m,Datatype *vt);				///< Set internal backing storage for \b this
    void setModel(ProtoModel *m);						///< Set the prototype model for \b this
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/marshal.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/marshal.cc
-index 5a256236b5..3b00ea3ee6 100644
+index c4c1618190..e36c10ccb6 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/marshal.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/marshal.cc
-@@ -1336,7 +1336,7 @@ AttributeId ATTRIB_RENAME = AttributeId("rename",27);
- AttributeId ATTRIB_STORAGE = AttributeId("storage",149);
+@@ -1336,7 +1336,7 @@ AttributeId ATTRIB_STORAGE = AttributeId("storage",149);
  AttributeId ATTRIB_STACKSPILL = AttributeId("stackspill",150);
+ AttributeId ATTRIB_RENAME = AttributeId("rename",162);
  
--AttributeId ATTRIB_UNKNOWN = AttributeId("XMLunknown",162); // Number serves as next open index
-+AttributeId ATTRIB_UNKNOWN = AttributeId("XMLunknown",164); // Number serves as next open index
+-AttributeId ATTRIB_UNKNOWN = AttributeId("XMLunknown",163); // Number serves as next open index
++AttributeId ATTRIB_UNKNOWN = AttributeId("XMLunknown",165); // Number serves as next open index
  
  
  ElementId ELEM_DATA = ElementId("data",1);
@@ -462,7 +462,7 @@ index 42c5653d66..c270f01706 100644
            returnaddress describes where the return address is stored upon entry to
            a function with this prototype.
 diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/PrototypeModel.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/PrototypeModel.java
-index 27cf360dff..839edecbf5 100644
+index 27cf360dff..2adea82be0 100644
 --- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/PrototypeModel.java
 +++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/PrototypeModel.java
 @@ -20,6 +20,7 @@ import static ghidra.program.model.pcode.ElementId.*;
@@ -500,6 +500,138 @@ index 27cf360dff..839edecbf5 100644
  	private AddressSet paramRange;	// Range on the stack considered for parameter storage
  	private InputListType inputListType = InputListType.STANDARD;
  	private boolean hasThis;		// Convention has a this (auto-parameter)
+@@ -263,7 +284,7 @@ public class PrototypeModel {
+ 	 * <br>
+ 	 * Note: storage will not be assigned to the {@link DataType#DEFAULT default undefined} datatype
+ 	 * or zero-length datatype.
+-	 * 
++	 *
+ 	 * @param dataType first parameter dataType or null for an undefined type.
+ 	 * @param program is the Program
+ 	 * @return return location or {@link VariableStorage#UNASSIGNED_STORAGE} if
+@@ -312,12 +333,12 @@ public class PrototypeModel {
+ 	 * conjunction with the {@link #getStorageLocations(Program, DataType[], boolean, boolean)}
+ 	 * method.  Parameter storage allocation may be affected by the return datatype
+ 	 * specified (e.g., hidden return storage parameter).
+-	 *  
++	 *
+ 	 * @param params existing set parameters to which the next parameter will
+-	 * be appended (may be null). Element-0 corresponds to the return datatype. 
++	 * be appended (may be null). Element-0 corresponds to the return datatype.
+ 	 * @param dataType dataType associated with next parameter location or null
+ 	 * for a default undefined type.  If null the speculative first parameter storage
+-	 * is returned. 
++	 * is returned.
+ 	 * @param program is the Program
+ 	 * @return next parameter location or {@link VariableStorage#UNASSIGNED_STORAGE} if
+ 	 * unable to determine suitable location
+@@ -344,20 +365,20 @@ public class PrototypeModel {
+ 	 * conjunction with the {@link #getStorageLocations(Program, DataType[], boolean)}
+ 	 * method.  Parameter storage allocation may be affected by the return datatype
+ 	 * specified (e.g., hidden return storage parameter).
+-	 *  
++	 *
+ 	 * @param argIndex is the index (0: return storage, 1..n: parameter storage)
+ 	 * @param params existing set parameters to which the parameter specified by
+ 	 * argIndex will be added/inserted be appended. Element-0 corresponds to the return
+-	 * datatype. Parameter elements prior to the argIndex are required for an accurate 
+-	 * storage determination to be made.  Any preceeding parameters not specified will be assumed 
+-	 * as a 1-byte integer type which could cause an erroneous storage result to be returned.  
++	 * datatype. Parameter elements prior to the argIndex are required for an accurate
++	 * storage determination to be made.  Any preceeding parameters not specified will be assumed
++	 * as a 1-byte integer type which could cause an erroneous storage result to be returned.
+ 	 * A null params list will cause all preceeding params to be assumed in a similar fashion.
+ 	 * @param dataType dataType associated with next parameter location or null
+ 	 * for a default undefined type.
+ 	 * @param program is the Program
+ 	 * @return parameter location or {@link VariableStorage#UNASSIGNED_STORAGE} if
+ 	 * unable to determine suitable location
+-	 * @deprecated This method does not apply any storage rules specific to varags functions. 
++	 * @deprecated This method does not apply any storage rules specific to varags functions.
+ 	 * Use {@link #getStorageLocations(Program,DataType[],boolean,boolean)} instead.
+ 	 */
+ 	@Deprecated(since = "12.2")
+@@ -388,13 +409,13 @@ public class PrototypeModel {
+ 
+ 	/**
+ 	 * Calculate input and output storage locations given a function prototype
+-	 * 
++	 *
+ 	 * The data-types of the function prototype are passed in. Based on this model, a
+ 	 * location is selected for each (input and output) parameter and passed back to the
+ 	 * caller.  The passed back storage locations are ordered with the output storage
+ 	 * as the first entry, followed by the input storage locations.  The model has the option
+ 	 * of inserting a hidden return value pointer in the input storage locations.
+-	 * 
++	 *
+ 	 * If the model cannot assign storage, the ParameterPieces will have a null Address.
+ 	 * @param proto is the function prototype parameter data-types
+ 	 * @param dtManager is the manager used to create indirect data-types
+@@ -415,17 +436,17 @@ public class PrototypeModel {
+ 	}
+ 
+ 	/**
+-	 * Compute the variable storage for a given array of return/parameter datatypes.  
+-	 * The first array element is the return datatype, which is followed by any input parameter 
+-	 * datatypes in order. If addAutoParams is true, pointer datatypes will automatically be 
+-	 * inserted for "this" or "hidden return"input parameters, if needed.  In this case, the 
+-	 * dataTypes array should not include explicit entries for these parameters.  If addAutoParams 
+-	 * is false, the dataTypes array is assumed to already contain explicit entries for any of 
++	 * Compute the variable storage for a given array of return/parameter datatypes.
++	 * The first array element is the return datatype, which is followed by any input parameter
++	 * datatypes in order. If addAutoParams is true, pointer datatypes will automatically be
++	 * inserted for "this" or "hidden return"input parameters, if needed.  In this case, the
++	 * dataTypes array should not include explicit entries for these parameters.  If addAutoParams
++	 * is false, the dataTypes array is assumed to already contain explicit entries for any of
+ 	 * these parameters.
+ 	 * <br>
+ 	 * Note: storage will not be assigned to the {@link DataType#DEFAULT default undefined} datatype
+ 	 * or zero-length datatypes or any subsequent parameter following such a parameter.
+-	 * 
++	 *
+ 	 * @param program is the Program
+ 	 * @param dataTypes return/parameter datatypes (first element is always the return datatype,
+ 	 * i.e., minimum array length is 1)
+@@ -443,27 +464,27 @@ public class PrototypeModel {
+ 	}
+ 
+ 	/**
+-	 * Compute the variable storage for a given array of return/parameter datatypes.  
+-	 * The first array element is the return datatype, which is followed by any input parameter 
+-	 * datatypes in order. If addAutoParams is true, pointer datatypes will automatically be 
+-	 * inserted for "this" or "hidden return"input parameters, if needed.  In this case, the 
+-	 * dataTypes array should not include explicit entries for these parameters.  If addAutoParams 
+-	 * is false, the dataTypes array is assumed to already contain explicit entries for any of 
+-	 * these parameters.  
++	 * Compute the variable storage for a given array of return/parameter datatypes.
++	 * The first array element is the return datatype, which is followed by any input parameter
++	 * datatypes in order. If addAutoParams is true, pointer datatypes will automatically be
++	 * inserted for "this" or "hidden return"input parameters, if needed.  In this case, the
++	 * dataTypes array should not include explicit entries for these parameters.  If addAutoParams
++	 * is false, the dataTypes array is assumed to already contain explicit entries for any of
++	 * these parameters.
+ 	 * <br>
+ 	 * Note: storage will not be assigned to the {@link DataType#DEFAULT default undefined} datatype
+ 	 * or zero-length datatypes or any subsequent parameter following such a parameter.
+-	 * 
++	 *
+ 	 * @param program is the Program
+-	 * @param dataTypes return/parameter datatypes (first element is always the return datatype, 
++	 * @param dataTypes return/parameter datatypes (first element is always the return datatype,
+ 	 * i.e., minimum array length is 1)
+ 	 * @param addAutoParams true if auto-parameter storage locations can be generated
+ 	 * @param isVarArgs If true, the last input parameter will be treated as the last fixed argument
+ 	 * of a varargs function (via {@link PrototypePieces#firstVarArgSlot}).
+ 	 * @return dynamic storage locations orders by ordinal where first element corresponds to
+-	 * return storage. The returned array may also include additional auto-parameter storage 
+-	 * locations. 
+-	 * 
++	 * return storage. The returned array may also include additional auto-parameter storage
++	 * locations.
++	 *
+ 	 */
+ 	public VariableStorage[] getStorageLocations(Program program, DataType[] dataTypes,
+ 			boolean addAutoParams, boolean isVarArgs) {
 @@ -612,6 +633,13 @@ public class PrototypeModel {
  			encodeAddressSet(encoder, paramRange);
  			encoder.closeElement(ELEM_PARAMRANGE);
@@ -559,40 +691,32 @@ index 27cf360dff..839edecbf5 100644
  	 * Determine if the given address range is possible return value storage for this model.
  	 * If it is, "true" is returned, and additional information about the storage
 diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/AttributeId.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/AttributeId.java
-index d522b84578..b734737baf 100644
+index 0479971090..b12aeff228 100644
 --- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/AttributeId.java
 +++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/AttributeId.java
-@@ -259,5 +259,13 @@ public record AttributeId(String name, int id) {
- 	// edge
- 	public static final AttributeId ATTRIB_EDGE_LABEL = new AttributeId("edgelabel", 161);
+@@ -261,5 +261,9 @@ public record AttributeId(String name, int id) {
  
--	public static final AttributeId ATTRIB_UNKNOWN = new AttributeId("XMLunknown", 162);
+ 	public static final AttributeId ATTRIB_RENAME = new AttributeId("rename", 162);
+ 
+-	public static final AttributeId ATTRIB_UNKNOWN = new AttributeId("XMLunknown", 163);
 +	// far-pointer call-argument fusion (H8/539F segmented-memory support)
-+	// NOTE: the C++ side (fspec.cc) originally registered these as ids 130/131,
-+	// which collide with ATTRIB_VECTOR_LANE_SIZES/ATTRIB_LABEL. 160/161 are the
-+	// next free ids on this (Java) side; fspec.cc must be updated to match
-+	// before this is used over the packed binary decompiler-communication protocol.
-+	public static final AttributeId ATTRIB_HISLOT = new AttributeId("hislot", 162);
-+	public static final AttributeId ATTRIB_JOINSIZE = new AttributeId("joinsize", 163);
++	public static final AttributeId ATTRIB_HISLOT = new AttributeId("hislot", 163);
++	public static final AttributeId ATTRIB_JOINSIZE = new AttributeId("joinsize", 164);
 +
-+	public static final AttributeId ATTRIB_UNKNOWN = new AttributeId("XMLunknown", 164);
++	public static final AttributeId ATTRIB_UNKNOWN = new AttributeId("XMLunknown", 165);
  }
 diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/ElementId.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/ElementId.java
-index f65ac144e5..167b71bf54 100644
+index f65ac144e5..0a568443dd 100644
 --- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/ElementId.java
 +++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/ElementId.java
-@@ -465,5 +465,12 @@ public record ElementId(String name, int id) {
+@@ -464,6 +464,8 @@ public record ElementId(String name, int id) {
+ 
  	// option to allow comments to align with code
  	public static final ElementId ELEM_COMMENTINDENTALIGN = new ElementId("commentindentalign", 292);
++	// far-pointer call-argument fusion (H8/539F segmented-memory support)
++	public static final ElementId ELEM_FARPOINTERJOIN = new ElementId("farpointerjoin", 293);
  
 -	public static final ElementId ELEM_UNKNOWN = new ElementId("XMLunknown", 293);
-+	// far-pointer call-argument fusion (H8/539F segmented-memory support)
-+	// NOTE: the C++ side (fspec.cc) originally registered this element as id 287,
-+	// which collides with ELEM_EXTRA_STACK above. 292 is the next free id on
-+	// this (Java) side; fspec.cc must be updated to match before this is used
-+	// over the packed binary decompiler-communication protocol.
-+	public static final ElementId ELEM_FARPOINTERJOIN = new ElementId("farpointerjoin", 293);
-+
 +	public static final ElementId ELEM_UNKNOWN = new ElementId("XMLunknown", 294);
  }
 -- 

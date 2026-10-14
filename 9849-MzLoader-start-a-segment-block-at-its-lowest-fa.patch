@@ -1,0 +1,356 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Erik Berg <github@slipsprogrammor.no>
+Date: Mon, 12 Oct 2026 12:49:59 +0200
+Subject: [PATCH] 9849: MzLoader: start a segment block at its lowest far
+ CALL/JMP target
+
+MzLoader: add tests for segment block starts
+
+adjustSegmentStarts() cuts a segment block after the last FAR RETURN
+(CB) in its first paragraph. That misses a previous segment ending in
+RETF n or a jump, and cuts into a far-called function that returns
+within the paragraph. The tests for those cases fail until the next
+commit.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+MzLoader: start a segment block at its lowest far CALL/JMP target
+
+Code segments are often only word aligned, so a segment's code can
+start a few bytes into its paragraph, and the bytes before it belong
+to the previous segment. adjustSegmentStarts() moved them only after
+a FAR RETURN (CB) in the block's first 16 bytes. It missed segments
+whose predecessor ends in RETF n or a jump, and cut into far-called
+functions that return within 16 bytes.
+
+The target of a relocated CALLF/JMPF ptr16:16 (9A/EA) is code of its
+segment. Take the lowest per segment, and cut after the last CB
+before it in the first paragraph, or at it when it lies in that
+paragraph and no CB precedes it. A target at offset 0 keeps the
+block whole.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../ghidra/app/util/opinion/MzLoader.java     | 112 +++++++++++++----
+ .../ghidra/app/util/opinion/MzLoaderTest.java | 116 +++++++++++++++++-
+ 2 files changed, 201 insertions(+), 27 deletions(-)
+
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/opinion/MzLoader.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/opinion/MzLoader.java
+index cfba27855e..668f9b04ec 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/opinion/MzLoader.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/opinion/MzLoader.java
+@@ -56,6 +56,9 @@ public class MzLoader extends AbstractLibrarySupportLoader {
+ 	private final static String ENTRY_NAME = "entry";
+ 	private final static int INITIAL_SEGMENT_VAL = 0x1000;
+ 	private final static int FAR_RETURN_OPCODE = 0xCB;
++	private final static int FAR_CALL_OPCODE = 0x9A;
++	private final static int FAR_JUMP_OPCODE = 0xEA;
++	private final static int PARAGRAPH_SIZE = 0x10;
+ 	private final static byte MOVW_DS_OPCODE = (byte) 0xba;
+ 	private static final long MIN_BYTE_LENGTH = 4;
+ 
+@@ -103,7 +106,7 @@ public class MzLoader extends AbstractLibrarySupportLoader {
+ 			Set<RelocationFixup> relocationFixups = getRelocationFixups(space, mz, log, monitor);
+ 
+ 			processMemoryBlocks(program, fileBytes, space, mz, relocationFixups, log, monitor);
+-			adjustSegmentStarts(program, monitor);
++			adjustSegmentStarts(program, mz, relocationFixups, monitor);
+ 			processRelocations(program, space, mz, relocationFixups, log, monitor);
+ 			processEntryPoint(program, space, mz, log, monitor);
+ 			processRegisters(program, mz, log, monitor);
+@@ -295,47 +298,54 @@ public class MzLoader extends AbstractLibrarySupportLoader {
+ 		}
+ 	}
+ 
+-	private void adjustSegmentStarts(Program program, TaskMonitor monitor) throws Exception {
++	/**
++	 * Moves bytes at the start of each segment's block that belong to the previous segment to the
++	 * previous block. The cut goes after the last FAR RETURN in the block's first paragraph, but
++	 * not past the segment's lowest far CALL/JMP target; if that target lies in the paragraph and
++	 * no FAR RETURN precedes it, the cut goes at the target.
++	 *
++	 * @param program The program
++	 * @param mz The {@link MzExecutable}
++	 * @param relocationFixups The relocation fixups
++	 * @param monitor A monitor
++	 * @throws Exception If a block could not be split or joined
++	 */
++	private void adjustSegmentStarts(Program program, MzExecutable mz,
++			Set<RelocationFixup> relocationFixups, TaskMonitor monitor) throws Exception {
+ 		monitor.setMessage("Adjusting segments...");
+ 
+ 		if (!program.hasExclusiveAccess()) {
+ 			return;
+ 		}
+ 
++		Map<Integer, Integer> farTargets = getFarTargets(mz, relocationFixups);
+ 		Memory memory = program.getMemory();
+ 		MemoryBlock[] blocks = memory.getBlocks();
+ 
+ 		for (int i = 1; i < blocks.length; i++) {
+ 			monitor.checkCancelled();
+ 			MemoryBlock block = blocks[i];
+-			if (!block.isInitialized()) {
++			if (!block.isInitialized() ||
++				!(block.getStart() instanceof SegmentedAddress start)) {
+ 				continue;
+ 			}
+-			//scan the first 0x10 bytes of this block
+-			//if a FAR RETURN exists, then move that code
+-			//to the preceding block...
+-			int mIndex = 15;
+-			if (block.getSize() <= 16) {
+-				mIndex = (int) block.getSize() - 2;
++			int farTarget = farTargets.getOrDefault(start.getSegment(), PARAGRAPH_SIZE);
++			int limit = Math.min(farTarget, PARAGRAPH_SIZE);
++			int cut = farReturnEnd(block, limit);
++			if (cut < 0 && limit < PARAGRAPH_SIZE) {
++				cut = limit;
+ 			}
+-			for (; mIndex >= 0; mIndex--) {
+-				monitor.checkCancelled();
+-				Address offAddr = block.getStart().add(mIndex);
+-				int val = block.getByte(offAddr);
+-				val &= 0xff;
+-				if (val == FAR_RETURN_OPCODE) {
+-					// split here and join to previous
+-					Address splitAddr = offAddr.add(1);
+-					String oldName = block.getName();
+-					String oldSourceName = block.getSourceName();
+-					memory.split(block, splitAddr);
+-					memory.join(blocks[i - 1], blocks[i]);
+-					blocks = memory.getBlocks();
+-					blocks[i].setName(oldName);
+-					blocks[i].setSourceName(oldSourceName);
+-					break;
+-				}
++			if (cut <= 0 || cut >= block.getSize()) {
++				continue;
+ 			}
++			// split here and join to previous
++			String oldName = block.getName();
++			String oldSourceName = block.getSourceName();
++			memory.split(block, start.add(cut));
++			memory.join(blocks[i - 1], blocks[i]);
++			blocks = memory.getBlocks();
++			blocks[i].setName(oldName);
++			blocks[i].setSourceName(oldSourceName);
+ 		}
+ 
+ 		// Recreate the Program Tree since it may now be out of sync
+@@ -343,6 +353,56 @@ public class MzLoader extends AbstractLibrarySupportLoader {
+ 		program.getListing().createRootModule(TreeManager.DEFAULT_TREE_NAME);
+ 	}
+ 
++	/**
++	 * {@return the offset just past the last FAR RETURN in the first {@code limit} bytes of the
++	 * block, leaving at least one byte in the block, or -1 if there is none}
++	 *
++	 * @param block The block
++	 * @param limit How many bytes to scan
++	 * @throws MemoryAccessException If the block's bytes cannot be read
++	 */
++	private int farReturnEnd(MemoryBlock block, int limit) throws MemoryAccessException {
++		int last = (int) Math.min(limit, block.getSize() - 1) - 1;
++		for (int index = last; index >= 0; index--) {
++			int val = block.getByte(block.getStart().add(index)) & 0xff;
++			if (val == FAR_RETURN_OPCODE) {
++				return index + 1;
++			}
++		}
++		return -1;
++	}
++
++	/**
++	 * {@return the lowest far CALL/JMP (ptr16:16) target offset in each relocated segment}
++	 *
++	 * @param mz The {@link MzExecutable}
++	 * @param relocationFixups The relocation fixups
++	 */
++	private Map<Integer, Integer> getFarTargets(MzExecutable mz,
++			Set<RelocationFixup> relocationFixups) {
++		Map<Integer, Integer> farTargets = new HashMap<>();
++		BinaryReader reader = mz.getBinaryReader();
++		int imageStart = paragraphsToBytes(Short.toUnsignedInt(mz.getHeader().e_cparhdr()));
++		for (RelocationFixup fixup : relocationFixups) {
++			// the opcode and target offset precede the relocated segment word
++			int opcodeOffset = fixup.fileOffset() - 3;
++			if (!fixup.valid() || opcodeOffset < imageStart) {
++				continue;
++			}
++			try {
++				int opcode = reader.readUnsignedByte(opcodeOffset);
++				if (opcode == FAR_CALL_OPCODE || opcode == FAR_JUMP_OPCODE) {
++					farTargets.merge(fixup.segment(), reader.readUnsignedShort(opcodeOffset + 1),
++						Math::min);
++				}
++			}
++			catch (IOException e) {
++				// not readable, so no evidence
++			}
++		}
++		return farTargets;
++	}
++
+ 	private void processRelocations(Program program, SegmentedAddressSpace space, MzExecutable mz,
+ 			Set<RelocationFixup> relocationFixups, MessageLog log, TaskMonitor monitor)
+ 			throws Exception {
+diff --git a/Ghidra/Features/Base/src/test/java/ghidra/app/util/opinion/MzLoaderTest.java b/Ghidra/Features/Base/src/test/java/ghidra/app/util/opinion/MzLoaderTest.java
+index 2fdccf6046..7f95bf2eb0 100644
+--- a/Ghidra/Features/Base/src/test/java/ghidra/app/util/opinion/MzLoaderTest.java
++++ b/Ghidra/Features/Base/src/test/java/ghidra/app/util/opinion/MzLoaderTest.java
+@@ -18,17 +18,26 @@ package ghidra.app.util.opinion;
+ import static org.junit.Assert.*;
+ 
+ import java.io.IOException;
++import java.math.BigInteger;
+ import java.nio.ByteBuffer;
+ import java.nio.ByteOrder;
++import java.util.Arrays;
+ import java.util.HexFormat;
+ 
++import org.junit.After;
+ import org.junit.Test;
+ 
+ import ghidra.app.util.bin.ByteArrayProvider;
++import ghidra.app.util.importer.ProgramLoader;
++import ghidra.program.model.address.Address;
++import ghidra.program.model.lang.Register;
++import ghidra.program.model.listing.Program;
++import ghidra.program.model.mem.MemoryBlock;
+ import ghidra.test.AbstractGhidraHeadlessIntegrationTest;
+ 
+ /**
+- * Tests for {@link MzLoader}.
++ * Tests for {@link MzLoader}. Load tests place the image at 1000:0000; a relocated segment word
++ * 0003 becomes segment 1003, whose block starts at image offset 0x30.
+  */
+ public class MzLoaderTest extends AbstractGhidraHeadlessIntegrationTest {
+ 
+@@ -36,6 +45,15 @@ public class MzLoaderTest extends AbstractGhidraHeadlessIntegrationTest {
+ 	private static final int RELOCATION_TABLE = 0x1c;
+ 	private static final int E_LFANEW = 0x3c;
+ 
++	private Program program;
++
++	@After
++	public void tearDown() {
++		if (program != null) {
++			program.release(this);
++		}
++	}
++
+ 	/**
+ 	 * {@return an MZ file: a 0x40-byte header, then the image; each relocation is the image offset
+ 	 * of a segment word in segment 0}
+@@ -97,6 +115,42 @@ public class MzLoaderTest extends AbstractGhidraHeadlessIntegrationTest {
+ 		}
+ 	}
+ 
++	/** {@return an image of {@code length} NOPs} */
++	private static byte[] nops(int length) {
++		byte[] image = new byte[length];
++		Arrays.fill(image, (byte) 0x90);
++		return image;
++	}
++
++	private void load(byte[] file) throws Exception {
++		try (LoadResults<Program> results = ProgramLoader.builder()
++				.source(file)
++				.name("mz")
++				.loaders(MzLoader.class)
++				.language("x86:LE:16:Real Mode")
++				.compiler("default")
++				.load()) {
++			program = results.getPrimaryDomainObject(this);
++		}
++	}
++
++	private Address addr(String at) {
++		return program.getAddressFactory().getAddress(at);
++	}
++
++	private String blockStart(String at) {
++		MemoryBlock block = program.getMemory().getBlock(addr(at));
++		assertNotNull("no block at " + at, block);
++		return block.getStart().toString();
++	}
++
++	private long cs(String at) {
++		Register cs = program.getRegister("CS");
++		BigInteger value = program.getProgramContext().getValue(cs, addr(at), false);
++		assertNotNull("no CS at " + at, value);
++		return value.longValue();
++	}
++
+ 	@Test
+ 	public void testAcceptsMz() throws IOException {
+ 		assertTrue(accepts(new MzLoader(), mz(new byte[0x10])));
+@@ -129,4 +183,64 @@ public class MzLoaderTest extends AbstractGhidraHeadlessIntegrationTest {
+ 		assertTrue(accepts(new NeLoader(), file));
+ 		assertFalse(accepts(new MzLoader(), file));
+ 	}
++
++	/** With no far call into the second segment, a FAR RETURN still ends the first one. */
++	@Test
++	public void testSegmentStartsAfterFarReturn() throws Exception {
++		byte[] image = nops(0x46);
++		put(image, 0x00, "b8 03 00"); // MOV AX,0003 (a segment reference, not a call)
++		put(image, 0x03, "cb"); // RETF
++		put(image, 0x34, "cb"); // 1003:0004, the first segment's last RETF
++		put(image, 0x45, "cb"); // 1003:0015, past the paragraph
++		load(mz(image, 0x01));
++		assertEquals("1003:0005", blockStart("1003:0005"));
++		assertEquals("1000:0000", blockStart("1000:0034"));
++	}
++
++	/**
++	 * The first segment ends in RETF 2, not a FAR RETURN; the second segment's code starts at
++	 * its lowest far CALL/JMP target.
++	 */
++	@Test
++	public void testSegmentStartsAtLowestFarTarget() throws Exception {
++		byte[] image = nops(0x50);
++		put(image, 0x00, "9a 12 00 03 00"); // CALLF 0003:0012
++		put(image, 0x05, "ea 04 00 03 00"); // JMPF 0003:0004
++		put(image, 0x30, "ca 02 00"); // 1003:0000: RETF 2, the first segment's last instruction
++		load(mz(image, 0x03, 0x08));
++		assertEquals("1003:0004", blockStart("1003:0004"));
++		assertEquals("1000:0000", blockStart("1000:0032"));
++		assertEquals(0x1000, cs("1000:0032"));
++	}
++
++	/**
++	 * A FAR RETURN before the lowest far target ends the first segment; one inside the called
++	 * function does not.
++	 */
++	@Test
++	public void testSegmentStartsAfterFarReturnBeforeFarTarget() throws Exception {
++		byte[] image = nops(0x50);
++		put(image, 0x00, "9a 06 00 03 00"); // CALLF 0003:0006
++		put(image, 0x05, "cb"); // RETF
++		put(image, 0x31, "cb"); // 1003:0001, the first segment's last RETF
++		put(image, 0x39, "cb"); // 1003:0009, a RETF inside the called function
++		load(mz(image, 0x03));
++		assertEquals("1003:0002", blockStart("1003:0002"));
++	}
++
++	/**
++	 * A far call to 1003:0000 keeps the block whole, so a FAR RETURN in its first function does
++	 * not move that function to the previous block.
++	 */
++	@Test
++	public void testFarCallToParagraphStartKeepsBlock() throws Exception {
++		byte[] image = nops(0x40);
++		put(image, 0x00, "9a 00 00 03 00"); // CALLF 0003:0000
++		put(image, 0x05, "cb"); // RETF
++		put(image, 0x2f, "cb"); // the first segment's last RETF
++		put(image, 0x35, "cb"); // 1003:0005, a RETF inside the called function
++		load(mz(image, 0x03));
++		assertEquals("1003:0000", blockStart("1003:0005"));
++		assertEquals(0x1003, cs("1003:0005"));
++	}
+ }
+-- 
+2.45.1
+
