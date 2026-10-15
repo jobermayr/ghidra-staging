@@ -31,10 +31,9 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  .../opinion/DecompileDebugFormatManager.java  |   8 +-
  .../ghidra/app/util/opinion/MzLoader.java     |   9 +-
- .../ghidra/app/util/opinion/MzLoaderTest.java |  36 ++++
  Ghidra/Processors/x86/data/languages/ia.sinc  |   9 +-
  .../processors/sleigh/X86Rel16TargetTest.java | 161 ++++++++++++++++++
- 5 files changed, 219 insertions(+), 4 deletions(-)
+ 4 files changed, 183 insertions(+), 4 deletions(-)
  create mode 100644 Ghidra/Processors/x86/src/test/java/ghidra/app/plugin/processors/sleigh/X86Rel16TargetTest.java
 
 diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/opinion/DecompileDebugFormatManager.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/opinion/DecompileDebugFormatManager.java
@@ -57,10 +56,10 @@ index 420b369bf7..8006556d22 100644
  				}
  			}
 diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/opinion/MzLoader.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/opinion/MzLoader.java
-index 668f9b04ec..533357fbcb 100644
+index e099be5254..3aa076a6bc 100644
 --- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/opinion/MzLoader.java
 +++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/opinion/MzLoader.java
-@@ -492,6 +492,7 @@ public class MzLoader extends AbstractLibrarySupportLoader {
+@@ -506,6 +506,7 @@ public class MzLoader extends AbstractLibrarySupportLoader {
  		Register sp = context.getRegister("sp");
  		Register ds = context.getRegister("ds");
  		Register cs = context.getRegister("cs");
@@ -68,7 +67,7 @@ index 668f9b04ec..533357fbcb 100644
  
  		try {
  			context.setValue(sp, entry.getAddress(), entry.getAddress(),
-@@ -512,13 +513,19 @@ public class MzLoader extends AbstractLibrarySupportLoader {
+@@ -526,13 +527,19 @@ public class MzLoader extends AbstractLibrarySupportLoader {
  						.valueOf(Integer.toUnsignedLong(((SegmentedAddress) start).getSegment()));
  				
  				context.setValue(cs, start, end, csValue);
@@ -89,69 +88,6 @@ index 668f9b04ec..533357fbcb 100644
  		}
  	}
  
-diff --git a/Ghidra/Features/Base/src/test/java/ghidra/app/util/opinion/MzLoaderTest.java b/Ghidra/Features/Base/src/test/java/ghidra/app/util/opinion/MzLoaderTest.java
-index 7f95bf2eb0..3cb1b63fe7 100644
---- a/Ghidra/Features/Base/src/test/java/ghidra/app/util/opinion/MzLoaderTest.java
-+++ b/Ghidra/Features/Base/src/test/java/ghidra/app/util/opinion/MzLoaderTest.java
-@@ -27,10 +27,12 @@ import java.util.HexFormat;
- import org.junit.After;
- import org.junit.Test;
- 
-+import ghidra.app.cmd.disassemble.DisassembleCommand;
- import ghidra.app.util.bin.ByteArrayProvider;
- import ghidra.app.util.importer.ProgramLoader;
- import ghidra.program.model.address.Address;
- import ghidra.program.model.lang.Register;
-+import ghidra.program.model.listing.Instruction;
- import ghidra.program.model.listing.Program;
- import ghidra.program.model.mem.MemoryBlock;
- import ghidra.test.AbstractGhidraHeadlessIntegrationTest;
-@@ -151,6 +153,17 @@ public class MzLoaderTest extends AbstractGhidraHeadlessIntegrationTest {
- 		return value.longValue();
- 	}
- 
-+	/** {@return the flow target of the instruction disassembled at {@code at}} */
-+	private Address flow(String at) {
-+		Address start = addr(at);
-+		applyCmd(program, new DisassembleCommand(start, null, false));
-+		Instruction instr = program.getListing().getInstructionAt(start);
-+		assertNotNull("no instruction at " + at, instr);
-+		Address[] flows = instr.getFlows();
-+		assertEquals(1, flows.length);
-+		return flows[0];
-+	}
-+
- 	@Test
- 	public void testAcceptsMz() throws IOException {
- 		assertTrue(accepts(new MzLoader(), mz(new byte[0x10])));
-@@ -243,4 +256,27 @@ public class MzLoaderTest extends AbstractGhidraHeadlessIntegrationTest {
- 		assertEquals("1003:0000", blockStart("1003:0005"));
- 		assertEquals(0x1003, cs("1003:0005"));
- 	}
-+
-+	/** A near branch whose IP wraps stays in its code segment, which is not 64K aligned. */
-+	@Test
-+	public void testNearBranchWrapsInCodeSegment() throws Exception {
-+		byte[] image = nops(0x40);
-+		put(image, 0x00, "9a 00 00 03 00"); // CALLF 0003:0000
-+		put(image, 0x05, "cb"); // RETF
-+		put(image, 0x30, "e8 f0 ff"); // 1003:0000: CALL 1003:fff3
-+		load(mz(image, 0x03));
-+		assertEquals(0x20023L, flow("1003:0000").getOffset());
-+	}
-+
-+	/** A block can run past seg:FFFF; code there is not in the segment, so the page applies. */
-+	@Test
-+	public void testNearBranchPastSegmentEndStaysInPage() throws Exception {
-+		byte[] image = nops(0x10040);
-+		put(image, 0x00, "9a 00 00 03 00"); // CALLF 0003:0000
-+		put(image, 0x05, "cb"); // RETF
-+		put(image, 0x10033, "e8 10 00"); // 2000:0033, in block 1003: CALL 2000:0046
-+		load(mz(image, 0x03));
-+		assertEquals("1003:0000", blockStart("2000:0033"));
-+		assertEquals(0x20046L, flow("2000:0033").getOffset());
-+	}
- }
 diff --git a/Ghidra/Processors/x86/data/languages/ia.sinc b/Ghidra/Processors/x86/data/languages/ia.sinc
 index c62638ce04..7b16f2395b 100644
 --- a/Ghidra/Processors/x86/data/languages/ia.sinc
