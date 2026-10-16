@@ -1,0 +1,51 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: ayam04 <ayamullahkhan04@gmail.com>
+Date: Fri, 16 Oct 2026 02:09:49 +0530
+Subject: [PATCH] 9928: FunctionPurgeAnalysisCmd: compute progress without
+ rebuilding the entry-point set
+
+The per-function progress update subtracted a growing address range from a
+copy of the entry-point set (AddressSet.subtract copies every remaining
+range into a new tree on each call), making the analyzer quadratic in the
+number of functions. On large binaries this dominated the run: a 32-bit x86
+PE with ~360k functions spent more than an hour inside AddressSet.subtract.
+
+Instead, remove the processed range from one working copy of the set with
+AddressSet.deleteFromMin, which edits the tree in place, and report progress
+as the count of entry-point addresses consumed so far. Deleting up to each
+function's end also consumes entry-point addresses that do not belong to
+any function, which the subtract-based computation left in the set.
+---
+ .../app/cmd/function/FunctionPurgeAnalysisCmd.java       | 9 ++++++---
+ 1 file changed, 6 insertions(+), 3 deletions(-)
+
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/cmd/function/FunctionPurgeAnalysisCmd.java b/Ghidra/Features/Base/src/main/java/ghidra/app/cmd/function/FunctionPurgeAnalysisCmd.java
+index 8f0ad57ab4..1cb55d8fad 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/cmd/function/FunctionPurgeAnalysisCmd.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/cmd/function/FunctionPurgeAnalysisCmd.java
+@@ -67,7 +67,7 @@ public class FunctionPurgeAnalysisCmd extends BackgroundCommand<Program> {
+ 			setupNearFarModels();
+ 		}
+ 
+-		AddressSetView set = entryPoints;
++		AddressSet set = new AddressSet(entryPoints);
+ 
+ 		long maxCount = set.getNumAddresses();
+ 
+@@ -79,8 +79,11 @@ public class FunctionPurgeAnalysisCmd extends BackgroundCommand<Program> {
+ 				break;
+ 			}
+ 
+-			set = set.subtract(
+-				new AddressSet(program, entryPoints.getMinAddress(), function.getEntryPoint()));
++			// Progress is the number of entry-point addresses consumed so far. Removing the
++			// processed range from one copy of the set avoids the full set copy that
++			// AddressSet.subtract() made on each iteration, which was quadratic in the
++			// number of functions.
++			set.deleteFromMin(function.getBody().getMaxAddress());
+ 			monitor.setProgress(maxCount - set.getNumAddresses());
+ 
+ 			monitor.setMessage("Purge " + function.getName());
+-- 
+2.45.1
+

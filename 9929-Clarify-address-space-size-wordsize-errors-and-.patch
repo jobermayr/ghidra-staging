@@ -1,0 +1,96 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Antonio=20V=C3=A1zquez=20Blanco?=
+ <antoniovazquezblanco@gmail.com>
+Date: Thu, 15 Oct 2026 22:56:07 +0200
+Subject: [PATCH] 9929: Clarify address-space size/wordsize errors and document
+ wordsize
+
+The size, wordsize, and unit-size checks for a 'define space' previously
+reported only the rejected value, with no hint that the valid range is 1-8
+or what the quantity means. State the range and meaning in all three
+messages (SleighCompile size and wordsize; AbstractAddressSpace unit size).
+---
+ .../Decompiler/src/main/doc/sleigh.xml        | 30 +++++++++++++++++++
+ .../slgh_compile/SleighCompile.java           |  7 +++--
+ .../model/address/AbstractAddressSpace.java   |  3 +-
+ 3 files changed, 36 insertions(+), 4 deletions(-)
+
+diff --git a/Ghidra/Features/Decompiler/src/main/doc/sleigh.xml b/Ghidra/Features/Decompiler/src/main/doc/sleigh.xml
+index 3c13aa97d0..4927777ccd 100644
+--- a/Ghidra/Features/Decompiler/src/main/doc/sleigh.xml
++++ b/Ghidra/Features/Decompiler/src/main/doc/sleigh.xml
+@@ -786,6 +786,36 @@ the <emphasis role="bold">wordsize</emphasis> attribute is not
+ specified, the size of a memory location defaults to one byte (8
+ bits).
+ </para>
++<para>
++The <emphasis role="bold">wordsize</emphasis> attribute must be an integer
++between 1 and 8. It is purely a scaling factor between the word-granular
++addresses that appear in a specification and the byte offsets GHIDRA stores
++internally (byte = word * wordsize + sub); it is unrelated to the 8-byte limit
++on the size of a p-code varnode or constant. The only underlying constraint is
++that the largest byte offset in the space still fit in 64 bits, that is,
++ceil(log2(wordsize)) + 8 * size &lt;= 64.
++</para>
++<para>
++A <emphasis role="bold">wordsize</emphasis> greater than one interacts with
++instruction alignment. GHIDRA requires the instruction alignment to be a
++multiple of the <emphasis role="bold">wordsize</emphasis>, and an instruction
++must begin on an aligned boundary. As a result, if the
++<emphasis role="bold">wordsize</emphasis> is as large as a whole instruction,
++only one instruction can begin within each addressable unit. A byte address that
++does not fall on a <emphasis role="bold">wordsize</emphasis> boundary is
++displayed as the word address, a period, and the hexadecimal byte offset within
++the word; for example, with <emphasis role="bold">wordsize</emphasis> four, the
++third byte of word <emphasis role="bold">0x10</emphasis> is shown as
++<emphasis role="bold">0x10.2</emphasis>.
++</para>
++<para>
++A large <emphasis role="bold">wordsize</emphasis> is not the way to model VLIW
++bundles, instruction packets, or horizontal microcode in which several
++sub-instructions share a single architectural address: making the bundle the
++addressable unit collapses it into one instruction. Instead, decode each
++sub-instruction at its own address and track its position within the bundle with
++a context variable, as the Hexagon processor module does.
++</para>
+ </sect2>
+ <sect2 id="sleigh_naming_registers">
+ <title>Naming Registers</title>
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/slgh_compile/SleighCompile.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/slgh_compile/SleighCompile.java
+index a5c81cb2a2..ca0d0ad76a 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/slgh_compile/SleighCompile.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/pcodeCPort/slgh_compile/SleighCompile.java
+@@ -1003,12 +1003,13 @@ public class SleighCompile extends SleighBase {
+ 		}
+ 
+ 		if (qual.size <= 0 || qual.size > 8) {
+-			throw new SleighError("Space '" + qual.name + "' has unsupported size: " + qual.size,
+-				location);
++			throw new SleighError("Space '" + qual.name + "' has unsupported size: " + qual.size +
++				" -- size (bytes needed to address the space) must be between 1 and 8", location);
+ 		}
+ 		if (qual.wordsize < 1 || qual.wordsize > 8) {
+ 			throw new SleighError(
+-				"Space '" + qual.name + "' has unsupported wordsize: " + qual.wordsize, location);
++				"Space '" + qual.name + "' has unsupported wordsize: " + qual.wordsize +
++					" -- wordsize (bytes per addressable unit) must be between 1 and 8", location);
+ 		}
+ 		int addressBits = bitsConsumedByUnitSize(qual.wordsize) + (8 * qual.size);
+ 		if (addressBits > 64) {
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/address/AbstractAddressSpace.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/address/AbstractAddressSpace.java
+index f57ec83561..a2acb438d6 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/address/AbstractAddressSpace.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/address/AbstractAddressSpace.java
+@@ -119,7 +119,8 @@ abstract class AbstractAddressSpace implements AddressSpace {
+ 
+ 	private int bitsConsumedByUnitSize() {
+ 		if (unitSize < 1 || unitSize > 8) {
+-			throw new IllegalArgumentException("Unsupported unit size: " + unitSize);
++			throw new IllegalArgumentException("Unsupported unit size: " + unitSize +
++				" -- unit size (bytes per addressable unit) must be between 1 and 8");
+ 		}
+ 		int cnt = 0;
+ 		for (int test = unitSize - 1; test != 0; test >>= 1) {
+-- 
+2.45.1
+

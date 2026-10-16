@@ -1,0 +1,517 @@
+From 8828e75a7f662ab064b875d7916dcfebe568cb02 Mon Sep 17 00:00:00 2001
+From: Christoph Brill <opensource@christophbrill.de>
+Date: Thu, 15 Oct 2026 16:36:48 +0200
+Subject: [PATCH] GP-0: Add x86-16 Pascal calling conventions
+
+Parameters pushed left-to-right could not be expressed in a
+prototype, so Win16 Pascal functions got reversed parameter order.
+
+Add the "stackltr" attribute on <input>. Stack parameters are
+assigned as usual, then mirrored so the first parameter sits at the
+highest address. The decompiler also reverses recovered stack
+trials. Add __pascal16near and __pascal16far to x86-16.cspec.
+
+ATTRIB_UNKNOWN moves from id 161 to 162 in Java and C++.
+
+Closes #496
+---
+ .../Decompiler/src/decompile/cpp/fspec.cc     | 50 ++++++++++++++++
+ .../Decompiler/src/decompile/cpp/fspec.hh     |  6 +-
+ .../Decompiler/src/decompile/cpp/marshal.cc   |  2 +-
+ .../src/decompile/datatests/pascal.xml        | 59 +++++++++++++++++++
+ .../Decompiler/src/main/doc/cspec.xml         | 11 ++++
+ .../data/languages/compiler_spec.rxg          |  1 +
+ .../program/model/lang/ParamListStandard.java | 45 ++++++++++++++
+ .../program/model/pcode/AttributeId.java      |  5 +-
+ .../x86/data/languages/x86-16.cspec           | 52 ++++++++++++++++
+ .../lang/X86Pascal16PrototypeModelTest.java   | 50 ++++++++++++++++
+ 10 files changed, 278 insertions(+), 3 deletions(-)
+ create mode 100644 Ghidra/Features/Decompiler/src/decompile/datatests/pascal.xml
+ create mode 100644 Ghidra/Test/IntegrationTest/src/test.slow/java/ghidra/program/model/lang/X86Pascal16PrototypeModelTest.java
+
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.cc
+index 9fb9bccaa17..a171c6bc4fe 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.cc
+@@ -30,6 +30,7 @@ AttributeId ATTRIB_MODELLOCK = AttributeId("modellock",122);
+ AttributeId ATTRIB_NORETURN = AttributeId("noreturn",123);
+ AttributeId ATTRIB_POINTERMAX = AttributeId("pointermax",124);
+ AttributeId ATTRIB_SEPARATEFLOAT = AttributeId("separatefloat",125);
++AttributeId ATTRIB_STACKLTR = AttributeId("stackltr",161);
+ AttributeId ATTRIB_STACKSHIFT = AttributeId("stackshift",126);
+ AttributeId ATTRIB_STRATEGY = AttributeId("strategy",127);
+ AttributeId ATTRIB_THISBEFORERETPOINTER = AttributeId("thisbeforeretpointer",128);
+@@ -604,6 +605,7 @@ ParamListStandard::ParamListStandard(const ParamListStandard &op2)
+   maxdelay = op2.maxdelay;
+   thisbeforeret = op2.thisbeforeret;
+   autoKilledByCall = op2.autoKilledByCall;
++  stackLtr = op2.stackLtr;
+   resourceStart = op2.resourceStart;
+   glb = op2.glb;
+   for(list<ModelRule>::const_iterator iter=op2.modelRules.begin();iter!=op2.modelRules.end();++iter) {
+@@ -800,6 +802,33 @@ void ParamListStandard::assignMap(const PrototypePieces &proto,TypeFactory &type
+     if (responseCode == AssignAction::fail || responseCode == AssignAction::no_assignment)
+       throw ParamUnassignedError("Cannot assign parameter address for " + dt->getName());
+   }
++  if (stackLtr)
++    mirrorStack(status,res);
++}
++
++/// Parameters have been assigned in right-to-left order. For a model that pushes parameters
++/// left-to-right, the stack slots occupied by the parameters are mirrored, so that the first
++/// parameter ends up at the highest address. The first element of \b res is the return value
++/// and is left untouched.
++/// \param status is the consumed resource status array, indicating the total number of stack slots used
++/// \param res is the list of assigned parameters
++void ParamListStandard::mirrorStack(const vector<int4> &status,vector<ParameterPieces> &res) const
++
++{
++  const ParamEntry *stackEntry = getStackEntry();
++  if (stackEntry == (const ParamEntry *)0) return;
++  int4 align = stackEntry->getAlign();
++  int4 totalSlots = status[stackEntry->getGroup()];
++  for(int4 i=1;i<res.size();++i) {
++    ParameterPieces &param(res[i]);
++    if (param.addr.isInvalid() || param.addr.getSpace() != stackEntry->getSpace()) continue;
++    int4 startSlot = (param.addr.getOffset() - stackEntry->getBase()) / align;
++    int4 numSlots = (param.type->getAlignSize() + align - 1) / align;
++    int4 newSlot = totalSlots - startSlot - numSlots;
++    // Keep any justification offset within the slot
++    uintb offset = param.addr.getOffset() + (uintb)(newSlot - startSlot) * align;
++    param.addr = Address(param.addr.getSpace(),offset);
++  }
+ }
+ 
+ /// From among the ParamEntrys matching the given \e group, return the one that best matches
+@@ -1297,6 +1326,21 @@ void ParamListStandard::fillinMap(ParamActive *active) const
+     if (paramtrial.isActive())
+       paramtrial.markUsed();
+   }
++
++  if (stackLtr) {
++    // Stack trials were ordered by ascending address, formal parameters go in descending order
++    const ParamEntry *stackEntry = getStackEntry();
++    int4 stackStart = -1;
++    int4 stackStop = -1;
++    for(int4 i=0;i<active->getNumTrials();++i) {
++      if (active->getTrial(i).getEntry() != stackEntry) continue;
++      if (stackStart < 0)
++	stackStart = i;
++      stackStop = i + 1;
++    }
++    if (stackStart >= 0)
++      active->reverseTrials(stackStart,stackStop);
++  }
+ }
+ 
+ bool ParamListStandard::checkJoin(const Address &hiaddr,int4 hisize,const Address &loaddr,int4 losize) const
+@@ -1452,6 +1496,7 @@ void ParamListStandard::decode(Decoder &decoder,vector<EffectRecord> &effectlist
+   int4 pointermax = 0;
+   thisbeforeret = false;
+   autoKilledByCall = false;
++  stackLtr = false;
+   bool splitFloat = true;		// True if we should split FLOAT entries into their own resource section
+   uint4 elemId = decoder.openElement();
+   for(;;) {
+@@ -1469,7 +1514,12 @@ void ParamListStandard::decode(Decoder &decoder,vector<EffectRecord> &effectlist
+     else if (attribId == ATTRIB_SEPARATEFLOAT) {
+       splitFloat = decoder.readBool();
+     }
++    else if (attribId == ATTRIB_STACKLTR) {
++      stackLtr = decoder.readBool();
++    }
+   }
++  if (stackLtr && !normalstack)
++    throw LowlevelError("Attribute stackltr is not supported with a positive growing stack");
+   for(;;) {
+     uint4 subId = decoder.peekElement();
+     if (subId == 0) break;
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.hh
+index efd0d5a3e6e..35e687d7f88 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.hh
+@@ -39,6 +39,7 @@ extern AttributeId ATTRIB_MODELLOCK;	///< Marshaling attribute "modellock"
+ extern AttributeId ATTRIB_NORETURN;	///< Marshaling attribute "noreturn"
+ extern AttributeId ATTRIB_POINTERMAX;	///< Marshaling attribute "pointermax"
+ extern AttributeId ATTRIB_SEPARATEFLOAT;	///< Marshaling attribute "separatefloat"
++extern AttributeId ATTRIB_STACKLTR;	///< Marshaling attribute "stackltr"
+ extern AttributeId ATTRIB_STACKSHIFT;	///< Marshaling attribute "stackshift"
+ extern AttributeId ATTRIB_STRATEGY;	///< Marshaling attribute "strategy"
+ extern AttributeId ATTRIB_THISBEFORERETPOINTER;	///< Marshaling attribute "thisbeforeretpointer"
+@@ -320,6 +321,7 @@ public:
+   void setMaxPass(int4 val) { maxpass = val; }			///< Set the maximum number of passes
+   void finishPass(void) { numpasses += 1; }			///< Mark that an analysis pass has completed
+   void sortTrials(void) { sort(trial.begin(),trial.end()); }	///< Sort the trials in formal parameter order
++  void reverseTrials(int4 start,int4 stop) { reverse(trial.begin()+start,trial.begin()+stop); }	///< Reverse the order of a range of trials
+   void sortFixedPosition(void) {sort(trial.begin(),trial.end(),ParamTrial::fixedPositionCompare);}  ///< sort the trials by fixed position then <
+   void deleteUnusedTrials(void);				///< Remove trials that were found not to be parameters
+   void splitTrial(int4 i,int4 sz);				///< Split the given trial in two
+@@ -605,6 +607,7 @@ protected:
+   int4 maxdelay;			///< Maximum heritage delay across all parameters
+   bool thisbeforeret;			///< Does a \b this parameter come before a hidden return parameter
+   bool autoKilledByCall;		///< Are storage locations in \b this list automatically \e killed \e by \e call
++  bool stackLtr;			///< Are stack parameters pushed left-to-right (first parameter at the highest address)
+   vector<int4> resourceStart;		///< The starting group for each resource section
+   list<ParamEntry> entry;		///< The ordered list of parameter entries
+   vector<ParamEntryResolver *> resolverMap;	///< Map from space id to resolver
+@@ -619,6 +622,7 @@ protected:
+   static void forceExclusionGroup(ParamActive *active);
+   static void forceNoUse(ParamActive *active,int4 start,int4 stop);
+   static void forceInactiveChain(ParamActive *active,int4 maxchain,int4 start,int4 stop,int4 groupstart);
++  void mirrorStack(const vector<int4> &status,vector<ParameterPieces> &res) const;	///< Reverse the order of assigned stack parameters
+   void calcDelay(void);		///< Calculate the maximum heritage delay for any potential parameter in this list
+   void addResolverRange(AddrSpace *spc,uintb first,uintb last,ParamEntry *paramEntry,int4 position);
+   void populateResolver(void);	///< Build the ParamEntry resolver maps
+@@ -627,7 +631,7 @@ protected:
+   void parseGroup(Decoder &decoder,vector<EffectRecord> &effectlist,
+ 		  int4 groupid,bool normalstack,bool splitFloat);
+ public:
+-  ParamListStandard(void) {}						///< Construct for use with decode()
++  ParamListStandard(void) { stackLtr = false; }				///< Construct for use with decode()
+   ParamListStandard(const ParamListStandard &op2);			///< Copy constructor
+   virtual ~ParamListStandard(void);
+   const list<ParamEntry> &getEntry(void) const { return entry; }	///< Get the list of parameter entries
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/marshal.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/marshal.cc
+index 72a823df983..ed7d51aa11c 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/marshal.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/marshal.cc
+@@ -1336,7 +1336,7 @@ AttributeId ATTRIB_WORDSIZE = AttributeId("wordsize",26);
+ AttributeId ATTRIB_STORAGE = AttributeId("storage",149);
+ AttributeId ATTRIB_STACKSPILL = AttributeId("stackspill",150);
+ 
+-AttributeId ATTRIB_UNKNOWN = AttributeId("XMLunknown",161); // Number serves as next open index
++AttributeId ATTRIB_UNKNOWN = AttributeId("XMLunknown",162); // Number serves as next open index
+ 
+ 
+ ElementId ELEM_DATA = ElementId("data",1);
+diff --git a/Ghidra/Features/Decompiler/src/decompile/datatests/pascal.xml b/Ghidra/Features/Decompiler/src/decompile/datatests/pascal.xml
+new file mode 100644
+index 00000000000..5685a85667c
+--- /dev/null
++++ b/Ghidra/Features/Decompiler/src/decompile/datatests/pascal.xml
+@@ -0,0 +1,59 @@
++<decompilertest>
++<!--
++    Functions using a Pascal style calling convention, where parameters are pushed left-to-right.
++    The first parameter is at the highest stack address.  Functions pascalsub and sub3 have locked
++    prototypes. For pascalsub2, the parameters are recovered from data-flow, both in the function
++    and at the call site.
++-->
++<binaryimage arch="x86:LE:16:Real Mode:default">
++<bytechunk space="ram" offset="0x100" readonly="true">
++  5589e58b4606 2b46045dc20400
++</bytechunk>
++<bytechunk space="ram" offset="0x200" readonly="true">
++  683412 687856 e8f7fe c3
++</bytechunk>
++<bytechunk space="ram" offset="0x300" readonly="true">
++  5589e58b4606 2b46045dc20400
++</bytechunk>
++<bytechunk space="ram" offset="0x400" readonly="true">
++  683412 687856 e8f7fe c3
++</bytechunk>
++<bytechunk space="ram" offset="0x500" readonly="true">
++  5589e58b4608 2b4606 2b46045d c20600
++</bytechunk>
++<symbol space="ram" offset="0x100" name="pascalsub"/>
++<symbol space="ram" offset="0x200" name="caller"/>
++<symbol space="ram" offset="0x300" name="pascalsub2"/>
++<symbol space="ram" offset="0x400" name="caller2"/>
++<symbol space="ram" offset="0x500" name="sub3"/>
++</binaryimage>
++<script>
++  <com>parse line extern int2 __pascal16near pascalsub(int2 a,int2 b);</com>
++  <com>parse line extern int2 caller(void);</com>
++  <com>lo fu pascalsub</com>
++  <com>decompile</com>
++  <com>print C</com>
++  <com>lo fu caller</com>
++  <com>decompile</com>
++  <com>print C</com>
++  <com>parse line extern int2 __pascal16near pascalsub2(int2 a,int2 b);</com>
++  <com>parse line extern int2 caller2(void);</com>
++  <com>lo fu pascalsub2</com>
++  <com>prototype unlock</com>
++  <com>decompile</com>
++  <com>print C</com>
++  <com>lo fu caller2</com>
++  <com>decompile</com>
++  <com>print C</com>
++  <com>parse line extern int2 __pascal16near sub3(int2 a,int2 b,int2 c);</com>
++  <com>lo fu sub3</com>
++  <com>decompile</com>
++  <com>print C</com>
++  <com>quit</com>
++</script>
++<stringmatch name="Pascal #1" min="1" max="1">return a - b;</stringmatch>
++<stringmatch name="Pascal #2" min="1" max="1">pascalsub\(0x1234,0x5678\)</stringmatch>
++<stringmatch name="Pascal #3" min="1" max="1">return param_1 - param_2;</stringmatch>
++<stringmatch name="Pascal #4" min="1" max="1">pascalsub2\(0x1234,0x5678\)</stringmatch>
++<stringmatch name="Pascal #5" min="1" max="1">return \(a - b\) - c;</stringmatch>
++</decompilertest>
+diff --git a/Ghidra/Features/Decompiler/src/main/doc/cspec.xml b/Ghidra/Features/Decompiler/src/main/doc/cspec.xml
+index 98af4807945..bac93afd2d3 100644
+--- a/Ghidra/Features/Decompiler/src/main/doc/cspec.xml
++++ b/Ghidra/Features/Decompiler/src/main/doc/cspec.xml
+@@ -1433,6 +1433,11 @@ to proceed.
+   <td><code>killedbycall</code></td>
+   <td>(Optional) <emphasis>true</emphasis> indicates all input storage locations are considered killed by call</td>
+ </tr>
++<tr>
++  <td/>
++  <td><code>stackltr</code></td>
++  <td>(Optional) <emphasis>true</emphasis> if stack parameters are pushed left-to-right</td>
++</tr>
+ <tr>
+   <td/>
+   <td><code>&lt;pentry&gt;</code></td>
+@@ -1544,6 +1549,12 @@ the attribute is true, the <emphasis>this</emphasis> pointer comes first. By def
+ the hidden return will come first.
+ </para>
+ <para>
++The <emphasis>stackltr</emphasis> attribute indicates that parameters passed on the stack are pushed
++left-to-right, as in the Pascal calling convention. The first parameter then sits at the highest
++address, and the last parameter is closest to the return address. Parameters passed in
++registers are not affected. This attribute is not supported when the stack grows positively.
++</para>
++<para>
+ The following is an example tag using the standard allocation strategy with 3 integer registers and 2
+ floating-point registers. If there are more parameters of either type, the compiler allocates storage from
+ the stack.
+diff --git a/Ghidra/Framework/SoftwareModeling/data/languages/compiler_spec.rxg b/Ghidra/Framework/SoftwareModeling/data/languages/compiler_spec.rxg
+index 1b26bf05ccc..67379bdac81 100644
+--- a/Ghidra/Framework/SoftwareModeling/data/languages/compiler_spec.rxg
++++ b/Ghidra/Framework/SoftwareModeling/data/languages/compiler_spec.rxg
+@@ -524,6 +524,7 @@
+         <optional> <attribute name="thisbeforeretpointer"/> </optional>
+         <optional> <attribute name="killedbycall"/> </optional>
+         <optional> <attribute name="separatefloat"/> </optional>
++        <optional> <attribute name="stackltr"/> </optional>
+         <interleave>
+           <zeroOrMore>
+             <element name="pentry">
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/ParamListStandard.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/ParamListStandard.java
+index 3cb642e45d4..326479d8753 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/ParamListStandard.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/ParamListStandard.java
+@@ -45,6 +45,7 @@ public class ParamListStandard implements ParamList {
+ 	protected boolean thisbeforeret;	// Do hidden return pointers usurp the storage of the this pointer
+ 	protected boolean autoKilledByCall;	// Is storage in this list automatically "killed by call"
+ 	protected boolean splitMetatype;	// Are metatyped entries in separate resource sections
++	protected boolean stackLtr;			// Are stack parameters pushed left-to-right (first parameter at highest address)
+ //	protected int[] resourceStart;		// The starting group for each resource section
+ 	protected ParamEntry[] entry;
+ 	protected ModelRule[] modelRules;	// Rules to apply when assigning addresses
+@@ -206,6 +207,39 @@ public void assignMap(PrototypePieces proto, DataTypeManager dtManager, int[] st
+ 				return;
+ 			}
+ 		}
++		if (stackLtr) {
++			mirrorStack(status, res);
++		}
++	}
++
++	/**
++	 * Parameters have been assigned in right-to-left order. For a model that pushes parameters
++	 * left-to-right, mirror the stack slots occupied by the parameters, so that the first
++	 * parameter ends up at the highest address.  The first element of the list is the return
++	 * value and is left untouched.
++	 * @param status is the consumed resource status array, indicating the total number of stack slots used
++	 * @param res is the list of assigned parameters
++	 */
++	private void mirrorStack(int[] status, ArrayList<ParameterPieces> res) {
++		ParamEntry stackEntry = getStackEntry();
++		if (stackEntry == null) {
++			return;
++		}
++		int align = stackEntry.getAlign();
++		int totalSlots = status[stackEntry.getGroup()];
++		for (int i = 1; i < res.size(); ++i) {
++			ParameterPieces param = res.get(i);
++			if (param.address == null || param.joinPieces != null ||
++				param.address.getAddressSpace() != stackEntry.getSpace()) {
++				continue;
++			}
++			int startSlot = (int) ((param.address.getOffset() - stackEntry.getAddressBase()) / align);
++			int numSlots = (param.type.getAlignedLength() + align - 1) / align;
++			int newSlot = totalSlots - startSlot - numSlots;
++			// Keep any justification offset within the slot
++			long offset = param.address.getOffset() + (long) (newSlot - startSlot) * align;
++			param.address = param.address.getAddressSpace().getAddress(offset);
++		}
+ 	}
+ 
+ 	@Override
+@@ -242,6 +276,9 @@ public void encode(Encoder encoder, boolean isInput) throws IOException {
+ 			encoder.writeBool(ATTRIB_THISBEFORERETPOINTER, true);
+ 		}
+ 		encoder.writeBool(ATTRIB_KILLEDBYCALL, autoKilledByCall);
++		if (stackLtr) {
++			encoder.writeBool(ATTRIB_STACKLTR, true);
++		}
+ 		if (isInput && !splitMetatype) {
+ 			encoder.writeBool(ATTRIB_SEPARATEFLOAT, false);
+ 		}
+@@ -336,6 +373,7 @@ public void restoreXml(XmlPullParser parser, CompilerSpec cspec) throws XmlParse
+ 		int pointermax = 0;
+ 		thisbeforeret = false;
+ 		autoKilledByCall = false;
++		stackLtr = false;
+ 		splitMetatype = true;
+ 		XmlElement mainel = parser.start();
+ 		String attribute = mainel.getAttribute(ATTRIB_POINTERMAX.name());
+@@ -354,6 +392,10 @@ public void restoreXml(XmlPullParser parser, CompilerSpec cspec) throws XmlParse
+ 		if (attribute != null) {
+ 			splitMetatype = SpecXmlUtils.decodeBoolean(attribute);
+ 		}
++		attribute = mainel.getAttribute(ATTRIB_STACKLTR.name());
++		if (attribute != null) {
++			stackLtr = SpecXmlUtils.decodeBoolean(attribute);
++		}
+ //		resourceStart = new int[0];
+ 		for (;;) {
+ 			XmlElement el = parser.peek();
+@@ -502,6 +544,9 @@ public boolean isEquivalent(ParamList obj) {
+ 		if (autoKilledByCall != op2.autoKilledByCall) {
+ 			return false;
+ 		}
++		if (stackLtr != op2.stackLtr) {
++			return false;
++		}
+ 		return true;
+ 	}
+ 
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/AttributeId.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/AttributeId.java
+index cafc03d0512..92b7cd28238 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/AttributeId.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/AttributeId.java
+@@ -256,6 +256,9 @@ public record AttributeId(String name, int id) {
+ 	public static final AttributeId ATTRIB_MINELEMENTS = new AttributeId("minelements", 159);
+ 	public static final AttributeId ATTRIB_MAXELEMENTS = new AttributeId("maxelements", 160);
+ 
+-	public static final AttributeId ATTRIB_UNKNOWN = new AttributeId("XMLunknown", 161);
++	// pascal-style stack ordering
++	public static final AttributeId ATTRIB_STACKLTR = new AttributeId("stackltr", 161);
++
++	public static final AttributeId ATTRIB_UNKNOWN = new AttributeId("XMLunknown", 162);
+ 
+ }
+diff --git a/Ghidra/Processors/x86/data/languages/x86-16.cspec b/Ghidra/Processors/x86/data/languages/x86-16.cspec
+index f07cea0b16a..df950ec4124 100644
+--- a/Ghidra/Processors/x86/data/languages/x86-16.cspec
++++ b/Ghidra/Processors/x86/data/languages/x86-16.cspec
+@@ -134,6 +134,58 @@
+       <register name="DF"/>
+     </unaffected>
+   </prototype>
++  <prototype name="__pascal16near" extrapop="unknown" stackshift="2">
++    <input stackltr="true">
++      <pentry minsize="1" maxsize="500" align="2">
++        <addr offset="2" space="stack"/>
++      </pentry>
++    </input>
++    <output>
++        <pentry minsize="1" maxsize="2">
++          <register name="AX"/>
++        </pentry>
++        <pentry minsize="3" maxsize="4">
++          <addr space="join" piece1="DX" piece2="AX"/>
++        </pentry>
++    </output>
++    <unaffected>
++      <register name="SP"/>
++      <register name="BP"/>
++      <register name="SI"/>
++      <register name="DI"/>
++      <register name="DS"/>
++      <register name="CS"/>
++      <register name="ES"/>
++      <register name="SS"/>
++      <register name="DF"/>
++    </unaffected>
++  </prototype>
++  <prototype name="__pascal16far" extrapop="unknown" stackshift="4">
++    <input stackltr="true">
++      <pentry minsize="1" maxsize="500" align="2">
++        <addr offset="4" space="stack"/>
++      </pentry>
++    </input>
++    <output>
++        <pentry minsize="1" maxsize="2">
++          <register name="AX"/>
++        </pentry>
++        <pentry minsize="3" maxsize="4">
++          <addr space="join" piece1="DX" piece2="AX"/>
++        </pentry>
++    </output>
++    <unaffected>
++      <register name="SP"/>
++      <register name="BP"/>
++      <register name="SI"/>
++      <register name="DI"/>
++      <register name="DS"/>
++      <register name="CS"/>
++      <register name="ES"/>
++      <register name="SS"/>
++      <register name="DF"/>
++    </unaffected>
++  </prototype>
+   <prototype name="__regcall" extrapop="2" stackshift="2">
+     <input>
+       <pentry minsize="1" maxsize="2">
+diff --git a/Ghidra/Test/IntegrationTest/src/test.slow/java/ghidra/program/model/lang/X86Pascal16PrototypeModelTest.java b/Ghidra/Test/IntegrationTest/src/test.slow/java/ghidra/program/model/lang/X86Pascal16PrototypeModelTest.java
+new file mode 100644
+index 00000000000..7fa5b2751ac
+--- /dev/null
++++ b/Ghidra/Test/IntegrationTest/src/test.slow/java/ghidra/program/model/lang/X86Pascal16PrototypeModelTest.java
+@@ -0,0 +1,50 @@
++/* ###
++ * IP: GHIDRA
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package ghidra.program.model.lang;
++
++import org.junit.Before;
++import org.junit.Test;
++
++public class X86Pascal16PrototypeModelTest extends AbstractProtoModelTest {
++
++	@Before
++	public void setUp() throws Exception {
++		buildArchitecture("x86:LE:16:Real Mode:default");
++	}
++
++	@Test
++	public void testPascalNear() throws Exception {
++		PrototypeModel model = cspec.getCallingConvention("__pascal16near");
++
++		test(model, "void func(short a)", "void,stack2:2");
++		test(model, "void func(short a,short b)", "void,stack4:2,stack2:2");
++		test(model, "void func(short a,short b,short c)", "void,stack6:2,stack4:2,stack2:2");
++	}
++
++	@Test
++	public void testPascalFar() throws Exception {
++		PrototypeModel model = cspec.getCallingConvention("__pascal16far");
++
++		test(model, "void func(short a,short b)", "void,stack6:2,stack4:2");
++	}
++
++	@Test
++	public void testStdcallNear() throws Exception {
++		PrototypeModel model = cspec.getCallingConvention("__stdcall16near");
++
++		test(model, "void func(short a,short b)", "void,stack2:2,stack4:2");
++	}
++}

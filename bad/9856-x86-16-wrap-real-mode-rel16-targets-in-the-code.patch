@@ -4,18 +4,6 @@ Date: Mon, 12 Oct 2026 12:49:59 +0200
 Subject: [PATCH] 9856: x86-16: wrap real-mode rel16 targets in the code
  segment
 
-x86-16: add tests for rel16 branch targets
-
-A 16-bit near branch goes to CS:((IP_next + rel16) mod 0x10000), but
-rel16 wraps the target in the instruction's linear 64K page, which is
-exact only for a 64K-aligned CS (#981, #4074). The tests with an
-unaligned code segment, and the one with an instruction ending on a
-page boundary, fail until the next commit.
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
-
-x86-16: wrap real-mode rel16 targets in the code segment
-
 SLEIGH only sees the linear inst_next, so rel16 wrapped a near branch
 in the instruction's 64K page rather than in CS. Add a noflow context
 field, cseg, in the reserved high bits: the real-mode CS of the
@@ -29,12 +17,10 @@ the language does not define, with a log message.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
- .../opinion/DecompileDebugFormatManager.java  |   8 +-
- .../ghidra/app/util/opinion/MzLoader.java     |   9 +-
- Ghidra/Processors/x86/data/languages/ia.sinc  |   8 +-
- .../processors/sleigh/X86Rel16TargetTest.java | 161 ++++++++++++++++++
- 4 files changed, 183 insertions(+), 3 deletions(-)
- create mode 100644 Ghidra/Processors/x86/src/test/java/ghidra/app/plugin/processors/sleigh/X86Rel16TargetTest.java
+ .../app/util/opinion/DecompileDebugFormatManager.java  |  8 +++++++-
+ .../main/java/ghidra/app/util/opinion/MzLoader.java    | 10 +++++++++-
+ Ghidra/Processors/x86/data/languages/ia.sinc           |  8 +++++++-
+ 3 files changed, 23 insertions(+), 3 deletions(-)
 
 diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/opinion/DecompileDebugFormatManager.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/opinion/DecompileDebugFormatManager.java
 index 420b369bf7..8006556d22 100644
@@ -56,7 +42,7 @@ index 420b369bf7..8006556d22 100644
  				}
  			}
 diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/opinion/MzLoader.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/opinion/MzLoader.java
-index e099be5254..3aa076a6bc 100644
+index 4d9c929da3..9749ba6c38 100644
 --- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/opinion/MzLoader.java
 +++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/opinion/MzLoader.java
 @@ -506,6 +506,7 @@ public class MzLoader extends AbstractLibrarySupportLoader {
@@ -67,13 +53,14 @@ index e099be5254..3aa076a6bc 100644
  
  		try {
  			context.setValue(sp, entry.getAddress(), entry.getAddress(),
-@@ -526,13 +527,19 @@ public class MzLoader extends AbstractLibrarySupportLoader {
+@@ -526,13 +527,20 @@ public class MzLoader extends AbstractLibrarySupportLoader {
  						.valueOf(Integer.toUnsignedLong(((SegmentedAddress) start).getSegment()));
  				
  				context.setValue(cs, start, end, csValue);
 +				if (cseg != null) {
 +					// a block may run past seg:FFFF, which this CS cannot reach
-+					Address csegEnd = start.add(Math.min(block.getSize(), 0x10000) - 1);
++					int reach = 0x10000 - ((SegmentedAddress) start).getSegmentOffset();
++					Address csegEnd = start.add(Math.min(block.getSize(), reach) - 1);
 +					context.setValue(cseg, start, csegEnd, csValue);
 +				}
  				if (shouldSetDS) {
@@ -89,7 +76,7 @@ index e099be5254..3aa076a6bc 100644
  	}
  
 diff --git a/Ghidra/Processors/x86/data/languages/ia.sinc b/Ghidra/Processors/x86/data/languages/ia.sinc
-index e0c02f0df0..0e20db9dbe 100644
+index e0c02f0df0..76039706dc 100644
 --- a/Ghidra/Processors/x86/data/languages/ia.sinc
 +++ b/Ghidra/Processors/x86/data/languages/ia.sinc
 @@ -376,7 +376,7 @@ define register offset=0x3000 size=1024  [
@@ -121,173 +108,6 @@ index e0c02f0df0..0e20db9dbe 100644
  rel16: reloc is simm16      [ reloc=((inst_next >> 16) << 16) | ((inst_next + simm16) & 0xFFFF); ] { export *[ram]:$(SIZE) reloc; }
  rel32: reloc is simm32      [ reloc=inst_next+simm32; ] { export *[ram]:$(SIZE) reloc; }
  
-diff --git a/Ghidra/Processors/x86/src/test/java/ghidra/app/plugin/processors/sleigh/X86Rel16TargetTest.java b/Ghidra/Processors/x86/src/test/java/ghidra/app/plugin/processors/sleigh/X86Rel16TargetTest.java
-new file mode 100644
-index 0000000000..153d845b74
---- /dev/null
-+++ b/Ghidra/Processors/x86/src/test/java/ghidra/app/plugin/processors/sleigh/X86Rel16TargetTest.java
-@@ -0,0 +1,161 @@
-+/* ###
-+ * IP: GHIDRA
-+ *
-+ * Licensed under the Apache License, Version 2.0 (the "License");
-+ * you may not use this file except in compliance with the License.
-+ * You may obtain a copy of the License at
-+ *
-+ *      http://www.apache.org/licenses/LICENSE-2.0
-+ *
-+ * Unless required by applicable law or agreed to in writing, software
-+ * distributed under the License is distributed on an "AS IS" BASIS,
-+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-+ * See the License for the specific language governing permissions and
-+ * limitations under the License.
-+ */
-+package ghidra.app.plugin.processors.sleigh;
-+
-+import static org.junit.Assert.*;
-+
-+import org.junit.After;
-+import org.junit.Test;
-+
-+import generic.test.AbstractGenericTest;
-+import ghidra.app.plugin.assembler.Assembler;
-+import ghidra.app.plugin.assembler.Assemblers;
-+import ghidra.program.database.ProgramBuilder;
-+import ghidra.program.model.address.Address;
-+import ghidra.program.model.listing.Instruction;
-+
-+/** Flow targets of near rel16 branches, which go to CS:((IP_next + rel16) mod 0x10000). */
-+public class X86Rel16TargetTest extends AbstractGenericTest {
-+
-+	private static final String REAL = ProgramBuilder._X86_16_REAL_MODE;
-+	private static final String PROTECTED = "x86:LE:16:Protected Mode";
-+
-+	private ProgramBuilder builder;
-+
-+	@After
-+	public void tearDown() {
-+		if (builder != null) {
-+			builder.dispose();
-+		}
-+	}
-+
-+	private long target(String language, String at, String bytes) throws Exception {
-+		return target(language, at, bytes, null);
-+	}
-+
-+	/**
-+	 * {@return the flow target of {@code bytes} disassembled at {@code at} without following flows,
-+	 * with {@code segment} as the code segment unless it is null}
-+	 */
-+	private long target(String language, String at, String bytes, Integer segment)
-+			throws Exception {
-+		builder = new ProgramBuilder("Rel16", language);
-+		builder.createMemory("code", at, 0x10);
-+		builder.setBytes(at, bytes);
-+		if (segment != null) {
-+			setCodeSegment(at, segment);
-+		}
-+		builder.disassemble(at, bytes.split(" ").length, false);
-+		Instruction instr = builder.getProgram().getListing().getInstructionAt(builder.addr(at));
-+		assertNotNull("no instruction at " + at, instr);
-+		Address[] flows = instr.getFlows();
-+		assertEquals(1, flows.length);
-+		return flows[0].getOffset();
-+	}
-+
-+	/** Sets CS and cseg at {@code at}, as MzLoader does. */
-+	private void setCodeSegment(String at, int segment) throws Exception {
-+		builder.setRegisterValue("CS", at, at, segment);
-+		builder.setRegisterValue("cseg", at, at, segment);
-+	}
-+
-+	/** Unaligned segment, the branch crosses a linear 64K page, IP does not wrap (#981). */
-+	@Test
-+	public void testRealModeUnalignedSegmentCrossingPage() throws Exception {
-+		// 1d1d:2f5b JMP -> 1d1d:1515
-+		assertEquals(0x1E6E5L, target(REAL, "1d1d:2f5b", "e9 b7 e5", 0x1d1d));
-+	}
-+
-+	/** Unaligned segment, IP wraps (the #4074 example). */
-+	@Test
-+	public void testRealModeUnalignedSegmentWrap() throws Exception {
-+		// 01ed:0003 CALL -> 01ed:e4ad
-+		assertEquals(0x1037DL, target(REAL, "01ed:0003", "e8 a7 e4", 0x01ed));
-+	}
-+
-+	/** As above for a conditional jump, which reaches rel16 through jccRel16. */
-+	@Test
-+	public void testRealModeUnalignedSegmentWrapJcc() throws Exception {
-+		// 01ed:0003 JZ -> 01ed:e4ad
-+		assertEquals(0x1037DL, target(REAL, "01ed:0003", "0f 84 a6 e4", 0x01ed));
-+	}
-+
-+	/** Unaligned segment, the instruction ends at seg:FFFF, so inst_next is past the segment. */
-+	@Test
-+	public void testRealModeUnalignedSegmentEndWrap() throws Exception {
-+		// 01ed:fffd JMP -> 01ed:0010
-+		assertEquals(0x1EE0L, target(REAL, "01ed:fffd", "e9 10 00", 0x01ed));
-+	}
-+
-+	/** 64K-aligned segment, IP wraps: a span over 32K, as in small-model code at 1000:0000. */
-+	@Test
-+	public void testRealModeAlignedSegmentWrap() throws Exception {
-+		// 1000:1000 CALL -> 1000:f000
-+		assertEquals(0x1F000L, target(REAL, "1000:1000", "e8 fd df", 0x1000));
-+	}
-+
-+	/** Segment 0, IP wraps, no code segment set: the page is exact (the #981 report). */
-+	@Test
-+	public void testRealModeSegmentZeroWrap() throws Exception {
-+		// 0000:1ee6 CALL -> 0000:cd87
-+		assertEquals(0xCD87L, target(REAL, "0000:1ee6", "e8 9e ae"));
-+	}
-+
-+	/** Without a code segment the target stays in the instruction's 64K page. */
-+	@Test
-+	public void testRealModeWithoutCodeSegment() throws Exception {
-+		// 1d1d:2f5b JMP -> linear 0x2e6e5, wrapped in page 0x20000
-+		assertEquals(0x2E6E5L, target(REAL, "1d1d:2f5b", "e9 b7 e5"));
-+	}
-+
-+	/**
-+	 * Without a code segment, an instruction ending on a page boundary wraps in its own page, as
-+	 * in the 64K-aligned segment the page formula assumes.
-+	 */
-+	@Test
-+	public void testRealModeWithoutCodeSegmentAtPageEnd() throws Exception {
-+		// 1000:fffd JMP -> 1000:0010 if the segment is 1000
-+		assertEquals(0x10010L, target(REAL, "1000:fffd", "e9 10 00"));
-+	}
-+
-+	/** Protected mode puts every selector on a 64K page, so a wrap stays in the segment. */
-+	@Test
-+	public void testProtectedModeWrap() throws Exception {
-+		// 1000:1000 CALL -> 1000:f000
-+		assertEquals(0x1000F000L, target(PROTECTED, "1000:1000", "e8 fd df"));
-+	}
-+
-+	/** 32-bit code has protectedMode=0 too and keeps the page formula (EIP is truncated, #7418). */
-+	@Test
-+	public void testOperandSizePrefixIn32BitCode() throws Exception {
-+		// 0040fff0 JMP -> 00400004
-+		assertEquals(0x00400004L, target(ProgramBuilder._X86, "0040fff0", "66 e9 10 00"));
-+	}
-+
-+	/** The assembler encodes a rel16 that reaches its target in an unaligned code segment. */
-+	@Test
-+	public void testAssembleRealModeUnalignedSegmentWrap() throws Exception {
-+		// 01ed:0003 CALL -> 01ed:e4ad
-+		builder = new ProgramBuilder("Rel16", REAL);
-+		builder.createMemory("code", "01ed:0003", 0x10);
-+		setCodeSegment("01ed:0003", 0x01ed);
-+		Address at = builder.addr("01ed:0003");
-+		Assembler asm = Assemblers.getAssembler(builder.getProgram());
-+		// assembleLine(at, line) would ignore the context at the address
-+		byte[] bytes = asm.assembleLine(at, "CALL 0x1037d", asm.getContextAt(at).fillMask());
-+		assertArrayEquals(new byte[] { (byte) 0xe8, (byte) 0xa7, (byte) 0xe4 }, bytes);
-+	}
-+}
 -- 
 2.45.1
 
