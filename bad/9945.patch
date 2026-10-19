@@ -1,0 +1,90 @@
+From bc8bda175f602a9f29193895500af621fbf62d80 Mon Sep 17 00:00:00 2001
+From: Confidential <28762372+0L1v3DaD@users.noreply.github.com>
+Date: Sun, 18 Oct 2026 18:44:24 -0500
+Subject: [PATCH] 9945: Framework: update lazySortedDataTypes in O(log N) on DataType rename
+
+---
+ .../database/data/DataTypeManagerDB.java      | 63 ++++++++++++++++++-
+ 1 file changed, 62 insertions(+), 1 deletion(-)
+
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/data/DataTypeManagerDB.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/data/DataTypeManagerDB.java
+index 4ce587e1308..bda6905f4d5 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/data/DataTypeManagerDB.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/data/DataTypeManagerDB.java
+@@ -3615,6 +3615,67 @@ protected void dataTypeMoved(DataType dt, DataTypePath oldDataTypePath,
+ 		defaultListener.dataTypeMoved(this, oldDataTypePath, newDataTypePath);
+ 	}
+ 
++	private void updateSortedListOnRename(DataType dt, String oldName) {
++		int size = lazySortedDataTypes.size();
++		if (size <= 1) {
++			return;
++		}
++		int low = 0;
++		int high = size - 1;
++		int found = -1;
++		while (low <= high) {
++			int mid = (low + high) >>> 1;
++			DataType midDt = lazySortedDataTypes.get(mid);
++			if (midDt == dt) {
++				found = mid;
++				break;
++			}
++			String midName = midDt.getName();
++			int c = midName.compareToIgnoreCase(oldName);
++			if (c < 0) {
++				low = mid + 1;
++			}
++			else if (c > 0) {
++				high = mid - 1;
++			}
++			else {
++				for (int i = mid - 1; i >= low; --i) {
++					DataType cand = lazySortedDataTypes.get(i);
++					if (cand == dt) {
++						found = i;
++						break;
++					}
++					if (!cand.getName().equalsIgnoreCase(oldName)) {
++						break;
++					}
++				}
++				if (found < 0) {
++					for (int i = mid + 1; i <= high; ++i) {
++						DataType cand = lazySortedDataTypes.get(i);
++						if (cand == dt) {
++							found = i;
++							break;
++						}
++						if (!cand.getName().equalsIgnoreCase(oldName)) {
++							break;
++						}
++					}
++				}
++				break;
++			}
++		}
++		if (found < 0) {
++			Collections.sort(lazySortedDataTypes, nameComparator);
++			return;
++		}
++		lazySortedDataTypes.remove(found);
++		int ins = Collections.binarySearch(lazySortedDataTypes, dt, nameComparator);
++		if (ins < 0) {
++			ins = -ins - 1;
++		}
++		lazySortedDataTypes.add(ins, dt);
++	}
++
+ 	protected void dataTypeNameChanged(DataType dt, String oldName) {
+ 		CategoryDB category = (CategoryDB) getCategory(dt.getCategoryPath());
+ 		category.dataTypeRenamed(dt, oldName);
+@@ -3624,7 +3685,7 @@ protected void dataTypeNameChanged(DataType dt, String oldName) {
+ 			throw new AssertException("Attempted to modify sorted datatypes without write lock");
+ 		}
+ 		if (lazySortedDataTypes != null) {
+-			Collections.sort(lazySortedDataTypes, nameComparator);
++			updateSortedListOnRename(dt, oldName);
+ 		}
+ 		updateLastChangeTime();
+ 		setDirtyFlag(dt);

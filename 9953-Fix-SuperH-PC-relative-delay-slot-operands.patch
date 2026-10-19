@@ -1,0 +1,717 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Kevin Blackburn-Matzen <kmatzen@gmail.com>
+Date: Sun, 18 Oct 2026 23:27:56 -0700
+Subject: [PATCH] 9953: Fix SuperH PC-relative delay-slot operands
+
+---
+ Ghidra/Processors/SuperH/build.gradle         |   6 +
+ .../SuperH/data/languages/superh.sinc         |  79 ++++++++---
+ .../lang/SuperHDelaySlotPcRelativeTest.java   | 129 ++++++++++++++++++
+ .../SuperH4/data/languages/SuperH4.sinc       |  96 +++++++++----
+ .../lang/SuperH4DelaySlotPcRelativeTest.java  | 114 ++++++++++++++++
+ 5 files changed, 373 insertions(+), 51 deletions(-)
+ create mode 100644 Ghidra/Processors/SuperH/src/test.slow/java/ghidra/program/model/lang/SuperHDelaySlotPcRelativeTest.java
+ create mode 100644 Ghidra/Processors/SuperH4/src/test.slow/java/ghidra/program/model/lang/SuperH4DelaySlotPcRelativeTest.java
+
+diff --git a/Ghidra/Processors/SuperH/build.gradle b/Ghidra/Processors/SuperH/build.gradle
+index ac2896e57c..6ab979776a 100644
+--- a/Ghidra/Processors/SuperH/build.gradle
++++ b/Ghidra/Processors/SuperH/build.gradle
+@@ -14,8 +14,14 @@
+  * limitations under the License.
+  */
+ apply from: "$rootProject.projectDir/gradle/distributableGhidraModule.gradle"
++apply from: "$rootProject.projectDir/gradle/javaProject.gradle"
+ apply from: "$rootProject.projectDir/gradle/processorProject.gradle"
++apply from: "$rootProject.projectDir/gradle/jacocoProject.gradle"
++apply from: "$rootProject.projectDir/gradle/javaTestProject.gradle"
+ apply plugin: 'eclipse'
+ 
+ eclipse.project.name = 'Processors SuperH'
+ 
++dependencies {
++	api project(':Base')
++}
+diff --git a/Ghidra/Processors/SuperH/data/languages/superh.sinc b/Ghidra/Processors/SuperH/data/languages/superh.sinc
+index 55d318fba8..cdf22c1e0f 100644
+--- a/Ghidra/Processors/SuperH/data/languages/superh.sinc
++++ b/Ghidra/Processors/SuperH/data/languages/superh.sinc
+@@ -10,13 +10,19 @@ define space register type=register_space size=4;
+ define register offset=0 size=4
+ [r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15];
+ 
+-define register offset=0x100 size=4 [sr gbr vbr mach macl pr pc];
++define register offset=0x100 size=4 [sr gbr vbr mach macl pr pc delay_pc];
+ 
+ 
+ @if SH_VERSION == "2A"
+ define register offset=0x180 size=4 [tbr];
+ @endif
+ 
++define register offset=0x400 size=4 contextreg;
++define context contextreg
++	pc_relative_delay_slot = (0,1) noflow
++	pc_relative_delay_disp = (2,13) signed noflow
++;
++
+ # SR Flags
+ @define T_FLAG   "sr[0,1]"
+ @define S_FLAG   "sr[1,1]"
+@@ -173,7 +179,10 @@ target00_07: target is sdisp_00_07 [ target = (sdisp_00_07 << 1) + inst_start +
+     export *:4 target;
+ }
+ 
+-target00_11: target is sdisp_00_11 [ target = (sdisp_00_11 << 1) + inst_start + 4; ] {
++target00_11_delay: target is sdisp_00_11
++    [ target = (sdisp_00_11 << 1) + inst_start + 4;
++      pc_relative_delay_slot=2; pc_relative_delay_disp=sdisp_00_11;
++      globalset(inst_next, pc_relative_delay_slot); globalset(inst_next, pc_relative_delay_disp); ] {
+     export *:4 target;
+ }
+ 
+@@ -194,14 +203,30 @@ imm8: "#"^simm_00_07 is simm_00_07 { export *[const]:4 simm_00_07; }
+     rn_08_11 = imm8;
+ }
+ 
+-disppc4: @(disp,pc) is disp_00_07 & pc
++disppc4: @(disp,pc) is disp_00_07 & pc & pc_relative_delay_slot=0
+     [ disp = (disp_00_07 << 2) + ((inst_start + 4) & 0xfffffffc); ]
+     { local tmp:4 = disp; export tmp; }
+ 
+-disppc2: @(disp,pc) is disp_00_07 & pc
++disppc2: @(disp,pc) is disp_00_07 & pc & pc_relative_delay_slot=0
+     [ disp = (disp_00_07 << 1) + (inst_start + 4); ]
+     { local tmp:4 = disp; export tmp; }
+ 
++disppc4: @(disp,pc) is disp_00_07 & pc & pc_relative_delay_slot=1
++    [ disp = (disp_00_07 << 2); ]
++    { local tmp:4 = (disp_00_07 << 2) + ((delay_pc + 2) & 0xfffffffc); export tmp; }
++
++disppc2: @(disp,pc) is disp_00_07 & pc & pc_relative_delay_slot=1
++    [ disp = (disp_00_07 << 1); ]
++    { local tmp:4 = (disp_00_07 << 1) + (delay_pc + 2); export tmp; }
++
++disppc4: @(disp,pc) is disp_00_07 & pc & pc_relative_delay_slot=2 & pc_relative_delay_disp
++    [ disp = (disp_00_07 << 2) + ((inst_start + 4 + pc_relative_delay_disp*2) & 0xfffffffc); ]
++    { local tmp:4 = disp; export tmp; }
++
++disppc2: @(disp,pc) is disp_00_07 & pc & pc_relative_delay_slot=2 & pc_relative_delay_disp
++    [ disp = (disp_00_07 << 1) + inst_start + 4 + pc_relative_delay_disp*2; ]
++    { local tmp:4 = disp; export tmp; }
++
+ :mova   disppc4,r0  is r0 & opcode_08_15=0b11000111 & disppc4
+ {
+     r0 = disppc4;
+@@ -1601,8 +1626,10 @@ MovMUReg2: MovMUReg2_15 is MovMUReg2_15 {
+ 
+ @if (SH_VERSION == "2") || (SH_VERSION == "2A")
+ :bf"/s" target00_07  is opcode_08_15=0b10001111 & target00_07  
++[ pc_relative_delay_slot=1; globalset(inst_next, pc_relative_delay_slot); ]
+ {
+     local cond = $(T_FLAG);
++	delay_pc = (zext(!cond) * &target00_07) + (zext(cond) * (inst_next + 2));
+     delayslot(1);
+     if (cond==0) goto target00_07;
+ }
+@@ -1615,76 +1642,83 @@ MovMUReg2: MovMUReg2_15 is MovMUReg2_15 {
+ 
+ @if (SH_VERSION == "2") || (SH_VERSION == "2A")
+ :bt"/s" target00_07  is opcode_08_15=0b10001101 & target00_07
++[ pc_relative_delay_slot=1; globalset(inst_next, pc_relative_delay_slot); ]
+ {
+     local cond = $(T_FLAG);
++	delay_pc = (zext(cond) * &target00_07) + (zext(!cond) * (inst_next + 2));
+     delayslot(1);
+     if (cond==1) goto target00_07;
+ }
+ @endif
+ 
+-:bra    target00_11  is opcode_12_15=0b1010 & target00_11  
++:bra    target00_11_delay  is opcode_12_15=0b1010 & target00_11_delay
+ {
+     delayslot(1);
+-    goto target00_11;
++    goto target00_11_delay;
+ }
+ 
+ @if (SH_VERSION == "2") || (SH_VERSION == "2A")
+ :braf rm_08_11  is opcode_12_15=0b0000 & rm_08_11 & opcode_00_07=0b00100011 
++[ pc_relative_delay_slot=1; globalset(inst_next, pc_relative_delay_slot); ]
+ {
+-    local dest:4 = inst_start + 4 + rm_08_11;
++	delay_pc = inst_start + 4 + rm_08_11;
+     delayslot(1);
+-    goto [dest];
++    goto [delay_pc];
+ }
+ @endif
+ 
+-:bsr    target00_11  is opcode_12_15=0b1011 & target00_11  
++:bsr    target00_11_delay  is opcode_12_15=0b1011 & target00_11_delay
+ {
+     local _pr:4 = inst_start + 4;
+ 
+     delayslot(1);
+ 
+     pr = _pr;
+-    call target00_11;
++    call target00_11_delay;
+ }
+ 
+ @if (SH_VERSION == "2") || (SH_VERSION == "2A")
+ :bsrf   rm_08_11  is opcode_12_15=0b0000 & rm_08_11 & opcode_00_07=0b00000011 
++[ pc_relative_delay_slot=1; globalset(inst_next, pc_relative_delay_slot); ]
+ {
+     local _pr = inst_start + 4;
+-    local dest = rm_08_11 + inst_start + 4;
++	delay_pc = rm_08_11 + inst_start + 4;
+ 
+     delayslot(1);
+ 
+     pr = _pr;
+-    call [dest];
++    call [delay_pc];
+ }
+ @endif
+ 
+ :jmp    @rm_08_11  is opcode_12_15=0b0100 & rm_08_11 & opcode_00_07=0b00101011 
++[ pc_relative_delay_slot=1; globalset(inst_next, pc_relative_delay_slot); ]
+ {
+-    local _pc:4 = rm_08_11;
++	delay_pc = rm_08_11;
+     delayslot(1);
+-    pc = _pc;
++    pc = delay_pc;
+     goto [pc];
+ }
+ 
+ :jsr    @rm_08_11  is opcode_12_15=0b0100 & rm_08_11 & opcode_00_07=0b00001011 
++[ pc_relative_delay_slot=1; globalset(inst_next, pc_relative_delay_slot); ]
+ {
+     local _pr:4 = inst_start + 4;
+-    local _pc:4 = rm_08_11;
++	delay_pc = rm_08_11;
+ 
+     delayslot(1);
+ 
+     pr = _pr;
+-    pc = _pc;
+-    call [_pc];
++    pc = delay_pc;
++    call [pc];
+ }
+ 
+ :rts  is opcode_00_15=0b0000000000001011 
++[ pc_relative_delay_slot=1; globalset(inst_next, pc_relative_delay_slot); ]
+ {
+-    local _pc = pr;
++	delay_pc = pr;
+     delayslot(1);
+-    pc = _pc;
++    pc = delay_pc;
+     return [pc];
+ }
+ 
+@@ -1861,9 +1895,10 @@ MovMUReg2: MovMUReg2_15 is MovMUReg2_15 {
+     r0 = r0; # do this to suppress warning
+ }
+ 
+-:rte is opcode_00_15=0b0000000000101011 
++:rte is opcode_00_15=0b0000000000101011
++[ pc_relative_delay_slot=1; globalset(inst_next, pc_relative_delay_slot); ]
+ {    
+-    _pc:4 = *r15;
++	delay_pc = *r15;
+     r15 = r15 + 4;
+     
+     _sr:4 = *r15 & 0x000063F3;
+@@ -1871,7 +1906,7 @@ MovMUReg2: MovMUReg2_15 is MovMUReg2_15 {
+     
+     delayslot(1);
+     
+-    pc = _pc;
++    pc = delay_pc;
+     sr = _sr;
+     
+     return [pc];
+diff --git a/Ghidra/Processors/SuperH/src/test.slow/java/ghidra/program/model/lang/SuperHDelaySlotPcRelativeTest.java b/Ghidra/Processors/SuperH/src/test.slow/java/ghidra/program/model/lang/SuperHDelaySlotPcRelativeTest.java
+new file mode 100644
+index 0000000000..c1e3488500
+--- /dev/null
++++ b/Ghidra/Processors/SuperH/src/test.slow/java/ghidra/program/model/lang/SuperHDelaySlotPcRelativeTest.java
+@@ -0,0 +1,129 @@
++/* ###
++ * IP: GHIDRA
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package ghidra.program.model.lang;
++
++import static org.junit.Assert.*;
++
++import org.junit.After;
++import org.junit.Test;
++
++import ghidra.program.database.ProgramBuilder;
++import ghidra.program.model.listing.Instruction;
++import ghidra.program.model.listing.Program;
++import ghidra.program.model.pcode.PcodeOp;
++import ghidra.program.model.symbol.Reference;
++import ghidra.test.AbstractGhidraHeadlessIntegrationTest;
++
++public class SuperHDelaySlotPcRelativeTest extends AbstractGhidraHeadlessIntegrationTest {
++
++	private Program program;
++
++	@After
++	public void tearDown() {
++		if (program != null) {
++			program.release(this);
++		}
++	}
++
++	@Test
++	public void testMovLUsesDirectBranchDestination() throws Exception {
++		assertDelaySlotReference("d3 01", 0xc);
++	}
++
++	@Test
++	public void testMovWUsesDirectBranchDestination() throws Exception {
++		assertDelaySlotReference("93 01", 0xc);
++	}
++
++	@Test
++	public void testMovLUsesDirectCallDestination() throws Exception {
++		ProgramBuilder builder = buildProgram(
++			"b0 02 d3 01 00 09 00 09 00 09 00 09 12 34 56 78");
++		builder.disassemble("0", 16, true);
++		assertOperandReference(builder, 2, 0, 0xc);
++	}
++
++	@Test
++	public void testMovWUsesBackwardBranchDestination() throws Exception {
++		ProgramBuilder builder = buildProgram(
++			"00 09 00 09 00 09 00 09 af fa 93 01 00 09 00 09");
++		builder.disassemble("8", 8, true);
++		assertOperandReference(builder, 0xa, 0, 4);
++	}
++
++	@Test
++	public void testMovaUsesDirectBranchDestination() throws Exception {
++		ProgramBuilder builder = buildProgram(
++			"a0 02 c7 01 00 09 00 09 00 09 00 09 12 34 56 78");
++		builder.disassemble("0", 16, true);
++		Instruction instruction = program.getListing().getInstructionAt(builder.addr(2));
++		assertNotNull(instruction);
++		assertEquals("@(0xc,pc)", instruction.getDefaultOperandRepresentation(0));
++		PcodeOp[] pcode = instruction.getPcode();
++		assertEquals(2, pcode.length);
++		assertEquals(PcodeOp.COPY, pcode[0].getOpcode());
++		assertTrue(pcode[0].getInput(0).isConstant());
++		assertEquals(0xc, pcode[0].getInput(0).getOffset());
++		assertEquals(PcodeOp.COPY, pcode[1].getOpcode());
++	}
++
++	@Test
++	public void testMovLOutsideDelaySlotStillUsesInstructionAddress() throws Exception {
++		ProgramBuilder builder = buildProgram("d3 01 00 09 00 09 00 09 12 34 56 78");
++		builder.disassemble("0", 12, true);
++		assertOperandReference(builder, 0, 0, 8);
++	}
++
++	@Test
++	public void testSh4LittleEndianMovLUsesDirectBranchDestination() throws Exception {
++		ProgramBuilder builder = buildProgram(
++			"02 a0 01 d3 09 00 09 00 09 00 09 00 78 56 34 12",
++			"SuperH4:LE:32:default");
++		builder.disassemble("0", 16, true);
++		assertOperandReference(builder, 2, 0, 0xc);
++	}
++
++	private void assertDelaySlotReference(String delaySlotBytes, long expectedAddress)
++			throws Exception {
++		ProgramBuilder builder = buildProgram(
++			"a0 02 " + delaySlotBytes + " 00 09 00 09 00 09 00 09 12 34 56 78");
++		builder.disassemble("0", 16, true);
++		assertOperandReference(builder, 2, 0, expectedAddress);
++	}
++
++	private ProgramBuilder buildProgram(String bytes) throws Exception {
++		return buildProgram(bytes, "SuperH:BE:32:SH-2A");
++	}
++
++	private ProgramBuilder buildProgram(String bytes, String languageId) throws Exception {
++		ProgramBuilder builder =
++			new ProgramBuilder("SuperH delay-slot PC-relative test", languageId);
++		builder.setBytes("0", bytes);
++		program = builder.getProgram();
++		program.addConsumer(this);
++		return builder;
++	}
++
++	private void assertOperandReference(ProgramBuilder builder, long instructionAddress,
++			int operandIndex, long expectedAddress) {
++		Instruction instruction =
++			program.getListing().getInstructionAt(builder.addr(instructionAddress));
++		assertNotNull(instruction);
++		Reference[] references = instruction.getOperandReferences(operandIndex);
++		assertEquals(1, references.length);
++		assertEquals(builder.addr(expectedAddress), references[0].getToAddress());
++	}
++}
+diff --git a/Ghidra/Processors/SuperH4/data/languages/SuperH4.sinc b/Ghidra/Processors/SuperH4/data/languages/SuperH4.sinc
+index a0dac54792..093fe4c002 100644
+--- a/Ghidra/Processors/SuperH4/data/languages/SuperH4.sinc
++++ b/Ghidra/Processors/SuperH4/data/languages/SuperH4.sinc
+@@ -121,9 +121,15 @@ define register offset=1536 size=1 [
+ 
+ # System registers
+ define register offset=2048 size=4 [
+-	MACH  MACL  PR    PC    FPSCR FPUL
++	MACH  MACL  PR    PC    FPSCR FPUL delay_pc
+ ];
+ 
++define register offset=3072 size=4 contextreg;
++define context contextreg
++	pc_relative_delay_slot = (0,1) noflow
++	pc_relative_delay_disp = (2,13) signed noflow
++;
++
+ # FPSCR component register fields (pseudo)
+ define register offset=2560 size=1 [
+ 	FPSCR_RM
+@@ -474,7 +480,11 @@ U_0t_r0: "#"U_0^","^r0  is U_0 & r0 { tmp:4 = U_0; export tmp; }
+ 
+ I_0tbranch: dest  is I_0 [ dest = inst_start + I_0*2 + 4; ] { export *:4 dest; }
+ 
+-I_1tbranch: dest  is I_1 [ dest = inst_start + I_1*2 + 4; ] { export *:4 dest; }
++I_1tbranch_delay: dest is I_1
++	[ dest = inst_start + I_1*2 + 4;
++	  pc_relative_delay_slot=2; pc_relative_delay_disp=I_1;
++	  globalset(inst_next, pc_relative_delay_slot); globalset(inst_next, pc_relative_delay_disp); ]
++	{ export *:4 dest; }
+ 
+ sr_N_0t:   SR^","^N_0  is N_0 & SR { export N_0; }
+ 
+@@ -618,9 +628,26 @@ U_0t_gbr_at_4: "@("^disp,GBR^")"  is U_0 & GBR [ disp = U_0 * 4; ] { tmp4:4 = di
+ # Note: Only the 4 byte case needs the masking of the PC bottom 2 bits, page 336, paragraph 3:
+ #      "A value with the lower 2 bits adjusted to B00 is used in address calculation."
+ # (The 2 byte case always has the PC LSBit at 0 because all instructions are 2 byte aligned.)
+-U_0t_2pc: dest  is U_0  [ dest =   inst_start                + U_0*2 + 4; ] { export *:2 dest; }
++U_0t_2pc: dest is U_0 & pc_relative_delay_slot=0
++	[ dest = inst_start + U_0*2 + 4; ] { export *:2 dest; }
++
++U_0t_4pc: dest is U_0 & pc_relative_delay_slot=0
++	[ dest = (inst_start & 0xfffffffc) + U_0*4 + 4; ] { export *:4 dest; }
++
++U_0t_2pc: dest is U_0 & pc_relative_delay_slot=1
++	[ dest = U_0*2; ]
++	{ local target:4 = delay_pc + 2 + U_0*2; export *:2 target; }
+ 
+-U_0t_4pc: dest  is U_0  [ dest = ( inst_start & 0xfffffffc ) + U_0*4 + 4; ] { export *:4 dest; }
++U_0t_4pc: dest is U_0 & pc_relative_delay_slot=1
++	[ dest = U_0*4; ]
++	{ local target:4 = ((delay_pc + 2) & 0xfffffffc) + U_0*4; export *:4 target; }
++
++U_0t_2pc: dest is U_0 & pc_relative_delay_slot=2 & pc_relative_delay_disp
++	[ dest = inst_start + 4 + pc_relative_delay_disp*2 + U_0*2; ] { export *:2 dest; }
++
++U_0t_4pc: dest is U_0 & pc_relative_delay_slot=2 & pc_relative_delay_disp
++	[ dest = ((inst_start + 4 + pc_relative_delay_disp*2) & 0xfffffffc) + U_0*4; ]
++	{ export *:4 dest; }
+ 
+ BANKt: BANK  is BANK { export BANK; }
+ 
+@@ -713,9 +740,11 @@ N_0txx: r0",@"^N_0  is r0 & N_0 { tmp:4 = N_0; export tmp; }
+ # pattern 10001111iiiiiiii
+ # text    bf/s <bdisp8>
+ # arch    arch_sh2_up
+-:bf^"/s" I_0tbranch         is OP_2=0x8f & I_0tbranch {
++:bf^"/s" I_0tbranch         is OP_2=0x8f & I_0tbranch
++[ pc_relative_delay_slot=1; globalset(inst_next, pc_relative_delay_slot); ] {
+ 
+ 	local cond = $(T_FLAG);
++	delay_pc = (zext(!cond) * &I_0tbranch) + (zext(cond) * (inst_next + 2));
+ 	delayslot(1);
+ 	if ( cond == 0 ) goto I_0tbranch;
+ } 
+@@ -725,10 +754,10 @@ N_0txx: r0",@"^N_0  is r0 & N_0 { tmp:4 = N_0; export tmp; }
+ # pattern 1010iiiiiiiiiiii
+ # text    bra <bdisp12>
+ # arch    arch_sh_up
+-:bra I_1tbranch             is OP_0=0xa & I_1tbranch {
++:bra I_1tbranch_delay       is OP_0=0xa & I_1tbranch_delay {
+ 
+ 	delayslot(1);
+-	goto I_1tbranch;
++	goto I_1tbranch_delay;
+ }
+ 
+ 
+@@ -736,11 +765,12 @@ N_0txx: r0",@"^N_0  is r0 & N_0 { tmp:4 = N_0; export tmp; }
+ # pattern 0000nnnn00100011
+ # text    braf <REG_N>
+ # arch    arch_sh2_up
+-:braf N_0                   is OP_0=0x0 & N_0 & OP_4=0x23 {
++:braf N_0                   is OP_0=0x0 & N_0 & OP_4=0x23
++[ pc_relative_delay_slot=1; globalset(inst_next, pc_relative_delay_slot); ] {
+ 
+-	local dest = N_0 + inst_next;
++	delay_pc = N_0 + inst_next;
+ 	delayslot(1);
+-	goto [dest];
++	goto [delay_pc];
+ }
+ 
+ 
+@@ -748,10 +778,10 @@ N_0txx: r0",@"^N_0  is r0 & N_0 { tmp:4 = N_0; export tmp; }
+ # pattern 1011iiiiiiiiiiii
+ # text    bsr <bdisp12>
+ # arch    arch_sh_up
+-:bsr I_1tbranch             is OP_0=0xb & I_1tbranch {
++:bsr I_1tbranch_delay       is OP_0=0xb & I_1tbranch_delay {
+ 	PR = inst_next;
+ 	delayslot(1);
+-	call I_1tbranch;
++	call I_1tbranch_delay;
+ }
+ 
+ 
+@@ -759,12 +789,13 @@ N_0txx: r0",@"^N_0  is r0 & N_0 { tmp:4 = N_0; export tmp; }
+ # pattern 0000nnnn00000011
+ # text    bsrf <REG_N>
+ # arch    arch_sh2_up
+-:bsrf N_0                   is OP_0=0x0 & N_0 & OP_4=0x3 {
++:bsrf N_0                   is OP_0=0x0 & N_0 & OP_4=0x3
++[ pc_relative_delay_slot=1; globalset(inst_next, pc_relative_delay_slot); ] {
+ 
+ 	PR = inst_next;
+-	local dest = N_0 + inst_next;
++	delay_pc = N_0 + inst_next;
+ 	delayslot(1);
+-	call [dest];
++	call [delay_pc];
+ }
+ 
+ 
+@@ -782,8 +813,10 @@ N_0txx: r0",@"^N_0  is r0 & N_0 { tmp:4 = N_0; export tmp; }
+ # pattern 10001101iiiiiiii
+ # text    bt/s <bdisp8>
+ # arch    arch_sh2_up
+-:bt^"/s" I_0tbranch         is OP_2=0x8d & I_0tbranch {
++:bt^"/s" I_0tbranch         is OP_2=0x8d & I_0tbranch
++[ pc_relative_delay_slot=1; globalset(inst_next, pc_relative_delay_slot); ] {
+ 	local cond = $(T_FLAG);
++	delay_pc = (zext(cond) * &I_0tbranch) + (zext(!cond) * (inst_next + 2));
+ 	delayslot(1);
+ 	if ( cond == 1 ) goto I_0tbranch;
+ }
+@@ -1629,12 +1662,13 @@ define pcodeop InvalidateCacheBlock;
+ # pattern 0100nnnn00101011
+ # text    jmp @<REG_N>
+ # arch    arch_sh_up
+-:jmp N_0tjmp                is OP_0=0x4 & N_0tjmp & OP_4=0x2b {
++:jmp N_0tjmp                is OP_0=0x4 & N_0tjmp & OP_4=0x2b
++[ pc_relative_delay_slot=1; globalset(inst_next, pc_relative_delay_slot); ] {
+ 
+ 	PC = N_0tjmp;
+-	tmp:4 = PC;
++	delay_pc = PC;
+ 	delayslot(1);
+-	goto [tmp];
++	goto [delay_pc];
+ }
+ 
+ 
+@@ -1642,13 +1676,14 @@ define pcodeop InvalidateCacheBlock;
+ # pattern 0100nnnn00001011
+ # text    jsr @<REG_N>
+ # arch    arch_sh_up
+-:jsr N_0tjmp                is OP_0=0x4 & N_0tjmp & OP_4=0xb {
++:jsr N_0tjmp                is OP_0=0x4 & N_0tjmp & OP_4=0xb
++[ pc_relative_delay_slot=1; globalset(inst_next, pc_relative_delay_slot); ] {
+ 
+ 	PR = inst_next;
+ 	PC = N_0tjmp;
+-	tmp:4 = PC;
++	delay_pc = PC;
+ 	delayslot(1);
+-	call [tmp];
++	call [delay_pc];
+ }
+ 
+ 
+@@ -2528,13 +2563,15 @@ define pcodeop CacheBlockWriteBack;
+ # pattern 0000000000101011
+ # text    rte
+ # arch 
+-:rte                        is OP_3=0x2b {
++:rte                        is OP_3=0x2b
++[ pc_relative_delay_slot=1; globalset(inst_next, pc_relative_delay_slot); ] {
+ 
+ 	SR = SSR;
+ 	splitSRregister();
+-	PC = SPC;
++	delay_pc = SPC;
++	PC = delay_pc;
+ 	delayslot(1);
+-	return [PC];
++	return [delay_pc];
+ }
+ 
+ 
+@@ -2542,11 +2579,13 @@ define pcodeop CacheBlockWriteBack;
+ # pattern 0000000000001011
+ # text    rts
+ # arch 
+-:rts                        is OP_3=0xb {
++:rts                        is OP_3=0xb
++[ pc_relative_delay_slot=1; globalset(inst_next, pc_relative_delay_slot); ] {
+ 
+-	PC = PR;
++	delay_pc = PR;
++	PC = delay_pc;
+ 	delayslot(1);
+-	return [PC];
++	return [delay_pc];
+ }
+ 
+ 
+@@ -3130,4 +3169,3 @@ define pcodeop TrapAlways;
+ 
+ 	N_0t = (M_0t << 16) | (N_0t >> 16);
+ }
+-
+diff --git a/Ghidra/Processors/SuperH4/src/test.slow/java/ghidra/program/model/lang/SuperH4DelaySlotPcRelativeTest.java b/Ghidra/Processors/SuperH4/src/test.slow/java/ghidra/program/model/lang/SuperH4DelaySlotPcRelativeTest.java
+new file mode 100644
+index 0000000000..c7c1137842
+--- /dev/null
++++ b/Ghidra/Processors/SuperH4/src/test.slow/java/ghidra/program/model/lang/SuperH4DelaySlotPcRelativeTest.java
+@@ -0,0 +1,114 @@
++/* ###
++ * IP: GHIDRA
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package ghidra.program.model.lang;
++
++import static org.junit.Assert.*;
++
++import org.junit.After;
++import org.junit.Test;
++
++import ghidra.program.database.ProgramBuilder;
++import ghidra.program.model.listing.Instruction;
++import ghidra.program.model.listing.Program;
++import ghidra.program.model.pcode.PcodeOp;
++import ghidra.program.model.symbol.Reference;
++import ghidra.test.AbstractGhidraHeadlessIntegrationTest;
++
++public class SuperH4DelaySlotPcRelativeTest extends AbstractGhidraHeadlessIntegrationTest {
++
++	private Program program;
++
++	@After
++	public void tearDown() {
++		if (program != null) {
++			program.release(this);
++		}
++	}
++
++	@Test
++	public void testMovLUsesDirectBranchDestination() throws Exception {
++		assertDirectBranchReference("01 d3", 0xc);
++	}
++
++	@Test
++	public void testMovWUsesDirectBranchDestination() throws Exception {
++		assertDirectBranchReference("01 93", 0xc);
++	}
++
++	@Test
++	public void testMovLUsesDirectCallDestination() throws Exception {
++		ProgramBuilder builder = buildProgram(
++			"02 b0 01 d3 09 00 09 00 09 00 09 00 78 56 34 12");
++		builder.disassemble("0", 16, true);
++		assertOperandReference(builder, 2, 0, 0xc);
++	}
++
++	@Test
++	public void testMovWUsesBackwardBranchDestination() throws Exception {
++		ProgramBuilder builder = buildProgram(
++			"09 00 09 00 09 00 09 00 fa af 01 93 09 00 09 00");
++		builder.disassemble("8", 8, true);
++		assertOperandReference(builder, 0xa, 0, 4);
++	}
++
++	@Test
++	public void testMovaUsesDirectBranchDestination() throws Exception {
++		ProgramBuilder builder = buildProgram(
++			"02 a0 01 c7 09 00 09 00 09 00 09 00 78 56 34 12");
++		builder.disassemble("0", 16, true);
++		Instruction instruction = program.getListing().getInstructionAt(builder.addr(2));
++		assertNotNull(instruction);
++		assertEquals("0x0000000c", instruction.getDefaultOperandRepresentation(0));
++		PcodeOp[] pcode = instruction.getPcode();
++		assertEquals(1, pcode.length);
++		assertEquals(PcodeOp.COPY, pcode[0].getOpcode());
++		assertTrue(pcode[0].getInput(0).isConstant());
++		assertEquals(0xc, pcode[0].getInput(0).getOffset());
++	}
++
++	@Test
++	public void testMovLOutsideDelaySlotStillUsesInstructionAddress() throws Exception {
++		ProgramBuilder builder = buildProgram("01 d3 09 00 09 00 09 00 78 56 34 12");
++		builder.disassemble("0", 12, true);
++		assertOperandReference(builder, 0, 0, 8);
++	}
++
++	private void assertDirectBranchReference(String delaySlotBytes, long expectedAddress)
++			throws Exception {
++		ProgramBuilder builder = buildProgram(
++			"02 a0 " + delaySlotBytes + " 09 00 09 00 09 00 09 00 78 56 34 12");
++		builder.disassemble("0", 16, true);
++		assertOperandReference(builder, 2, 0, expectedAddress);
++	}
++
++	private ProgramBuilder buildProgram(String bytes) throws Exception {
++		ProgramBuilder builder =
++			new ProgramBuilder("SuperH4 delay-slot PC-relative test", "SuperH4:LE:32:default");
++		builder.setBytes("0", bytes);
++		program = builder.getProgram();
++		program.addConsumer(this);
++		return builder;
++	}
++
++	private void assertOperandReference(ProgramBuilder builder, long instructionAddress,
++			int operandIndex, long expectedAddress) {
++		Instruction instruction = program.getListing().getInstructionAt(builder.addr(instructionAddress));
++		assertNotNull(instruction);
++		Reference[] references = instruction.getOperandReferences(operandIndex);
++		assertEquals(1, references.length);
++		assertEquals(builder.addr(expectedAddress), references[0].getToAddress());
++	}
++}
+-- 
+2.45.1
+

@@ -1,0 +1,339 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Confidential <28762372+0L1v3DaD@users.noreply.github.com>
+Date: Sun, 18 Oct 2026 19:50:29 -0500
+Subject: [PATCH] 9951: Decompiler: guard 64-bit shift bounds in bitfield,
+ double, and opbehavior
+
+---
+ .../Decompiler/src/decompile/cpp/address.cc   | 19 ++++++++++++++-----
+ .../Decompiler/src/decompile/cpp/bitfield.cc  |  9 +++++----
+ .../Decompiler/src/decompile/cpp/double.cc    | 14 +++++++++-----
+ .../decompile/cpp/include/ghidra/address.hh   | 16 ++++++++++++----
+ .../decompile/cpp/include/ghidra/transform.hh |  4 ++--
+ .../Decompiler/src/decompile/cpp/jumptable.cc |  6 ++----
+ .../src/decompile/cpp/opbehavior.cc           | 18 +++++++++++++-----
+ .../src/decompile/cpp/prefersplit.cc          |  4 ++--
+ .../src/decompile/cpp/slghpatexpress.cc       | 12 ++++++++++--
+ 9 files changed, 69 insertions(+), 33 deletions(-)
+
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/address.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/address.cc
+index b486449b9c..0d6d49efb9 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/address.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/address.cc
+@@ -906,8 +906,10 @@ void BitRange::extendBytes(int4 num)
+ uintb BitRange::getMask(void) const
+ 
+ {
++  if (numBits <= 0 || leastSigBit < 0 || leastSigBit >= (int4)(sizeof(uintb)*8))
++    return 0;
+   uintb res;
+-  if (numBits >= sizeof(uintb)*8)
++  if (numBits >= (int4)(sizeof(uintb)*8))
+     res = 0;
+   else {
+     res = 1;
+@@ -971,6 +973,10 @@ uintb uintbmasks[9] = { 0, 0xff, 0xffff, 0xffffff, 0xffffffff, 0xffffffffffULL,
+ bool signbit_negative(uintb val,int4 size)
+ 
+ {				// Return true if signbit is set (negative)
++  if (size <= 0)
++    return false;
++  if (size > (int4)sizeof(uintb))
++    size = (int4)sizeof(uintb);
+   uintb mask = 0x80;
+   mask <<= 8*(size-1);
+   return ((val&mask) != 0);
+@@ -996,10 +1002,13 @@ uintb uintb_negate(uintb in,int4 size)
+ uintb sign_extend(uintb in,int4 sizein,int4 sizeout)
+ 
+ {
+-  sizein = (sizein < sizeof(uintb)) ? sizein : sizeof(uintb);
+-  sizeout = (sizeout < sizeof(uintb)) ? sizeout : sizeof(uintb);
+-  intb sval = in;
+-  sval <<= (sizeof(intb) - sizein) * 8;
++  if (sizein <= 0 || sizeout <= 0)
++    return 0;
++  sizein = (sizein < (int4)sizeof(uintb)) ? sizein : (int4)sizeof(uintb);
++  sizeout = (sizeout < (int4)sizeof(uintb)) ? sizeout : (int4)sizeof(uintb);
++  intb sval = (intb)(in << ((sizeof(uintb) - sizein) * 8));
++  if (sizeout <= sizein)
++    return ((uintb)sval >> ((sizeof(uintb) - sizein) * 8)) & calc_mask(sizeout);
+   uintb res = (uintb)(sval >> (sizeout - sizein) * 8);
+   res >>= (sizeof(uintb) - sizeout)*8;
+   return res;
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/bitfield.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/bitfield.cc
+index f9c1fca0dc..f9927e2900 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/bitfield.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/bitfield.cc
+@@ -2007,6 +2007,7 @@ int4 RulePullAbsorb::absorbAnd(Funcdata &data,PcodeOp *andOp,PcodeOp *pullOp)
+   Varnode *vn = pullOp->getOut();
+   if (pullOp->code() != CPUI_SPULL) return 0;	// Not signed
+   int4 bitsize = (int4)pullOp->getIn(2)->getOffset();
++  if (bitsize <= 0 || bitsize > 8 * (int4)sizeof(uintb)) return 0;
+   uintb matchVal = 1;
+   matchVal <<= (bitsize-1);			// Mask for sign-bit
+   if (matchVal != maskVn->getOffset()) return 0;
+@@ -2083,9 +2084,9 @@ int4 RulePullAbsorb::absorbCompare(Funcdata &data,PcodeOp *compOp,PcodeOp *leftO
+       return 1;
+     }
+   }
+-  uintb mask = 1;
+-  mask = (mask << sa) -1;
+-  if (sa > 0 && sa < 8*sizeof(uintb) && inVn == lessVn0 && lessVn1->isConstant()) {
++  if (sa <= 0 || sa >= 8 * (int4)sizeof(uintb)) return 0;
++  uintb mask = ((uintb)1 << sa) - 1;
++  if (inVn == lessVn0 && lessVn1->isConstant()) {
+     uintb origVal = lessVn1->getOffset();
+     uintb lowBits = mask & origVal;
+     if (lowBits == 0 || lowBits == 1) {
+@@ -2102,7 +2103,7 @@ int4 RulePullAbsorb::absorbCompare(Funcdata &data,PcodeOp *compOp,PcodeOp *leftO
+       return 1;
+     }
+   }
+-  if (sa > 0 && sa < 8*sizeof(uintb) && inVn == lessVn1 && lessVn0->isConstant()) {
++  if (inVn == lessVn1 && lessVn0->isConstant()) {
+     uintb origVal = lessVn0->getOffset();
+     uintb lowBits = mask & origVal;
+     if (lowBits == 0 || lowBits == mask) {
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/double.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/double.cc
+index 30710a90c1..e6d23b3410 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/double.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/double.cc
+@@ -66,9 +66,9 @@ void SplitVarnode::initPartial(int4 sz,Varnode *l,Varnode *h)
+       lo = l;
+   }
+   else {
+-    if (l->isConstant() && h->isConstant()) {
+-      val = h->getOffset();
+-      val <<= (l->getSize()*8);
++    if (l->isConstant() && h->isConstant() && (sz <= (int4)sizeof(uintb))) {
++      int4 loBits = l->getSize() * 8;
++      val = (loBits <= 0 || loBits >= 8 * (int4)sizeof(uintb)) ? 0 : (h->getOffset() << loBits);
+       val |= l->getOffset();
+       lo = (Varnode *)0;
+       hi = (Varnode *)0;
+@@ -1902,8 +1902,9 @@ bool Equal2Form::replace(Funcdata &data)
+ 
+ {
+   if (hi2->isConstant()&&lo2->isConstant()) {
++    if (lo1->getSize() >= (int4)sizeof(uintb)) return false;
+     uintb val = hi2->getOffset();
+-    val <<= 8*lo1->getSize();
++    val <<= 8 * lo1->getSize();
+     val |= lo2->getOffset();
+     param2.initPartial(in.getSize(),val);
+     return SplitVarnode::prepareBoolOp(in,param2,boolAndOr);
+@@ -2170,6 +2171,7 @@ bool LessThreeWay::normalizeHi(void)
+       hival &= calc_mask(in.getSize());
+       hilessequalform = false;
+     }
++    if (in.getLo()->getSize() >= (int4)sizeof(uintb)) return false;
+     hival >>= in.getLo()->getSize() * 8;
+   }
+   else {
+@@ -2207,7 +2209,8 @@ bool LessThreeWay::normalizeMid(void)
+     if (vnhie2->getSize() == in.getSize()) {
+       // Convert to comparison on high part
+       uintb lopart = midval & calc_mask(in.getLo()->getSize());
+-      midval >>= in.getLo()->getSize()*8;
++      if (in.getLo()->getSize() >= (int4)sizeof(uintb)) return false;
++      midval >>= in.getLo()->getSize() * 8;
+       if (midlessform) {
+ 	if (midlessequal) {
+ 	  if (lopart!=calc_mask(in.getLo()->getSize())) return false;
+@@ -2432,6 +2435,7 @@ bool LessThreeWay::testReplace(void)
+ {
+   setOpCode();
+   if (hiconstform) {
++    if (in.getLo()->getSize() >= (int4)sizeof(uintb)) return false;
+     in2.initPartial(in.getSize(),(hival<<(8*in.getLo()->getSize()))|loval);
+     if (!setBoolOp()) return false;
+   }
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/address.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/address.hh
+index 2ff56c342e..bff70136c3 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/address.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/address.hh
+@@ -554,7 +554,11 @@ inline uintb calc_int_max(int4 size) { return calc_mask(size) >> 1; }
+ 
+ /// \param size of the integer in bytes
+ /// \return smallest signed integer value for given size
+-inline uintb calc_int_min(int4 size) { return (uintb)1 << (size * 8 - 1); }
++inline uintb calc_int_min(int4 size) {
++  if (size <= 0) return 0;
++  int4 shift = (size < (int4)sizeof(uintb) ? size : (int4)sizeof(uintb)) * 8 - 1;
++  return (uintb)1 << shift;
++}
+ 
+ /// Perform a CPUI_INT_RIGHT on the given val
+ /// \param val is the value to shift
+@@ -601,8 +605,10 @@ inline uintb minimalmask(uintb val)
+ inline intb sign_extend(intb val,int4 bit)
+ 
+ {
+-  int4 sa = 8*sizeof(intb) - (bit+1);
+-  val = (val << sa) >> sa;
++  if (bit < 0) return 0;
++  if (bit >= 8*(int4)sizeof(intb) - 1) return val;
++  int4 sa = 8*(int4)sizeof(intb) - (bit+1);
++  val = ((intb)((uintb)val << sa)) >> sa;
+   return val;
+ }
+ 
+@@ -615,7 +621,9 @@ inline intb sign_extend(intb val,int4 bit)
+ inline intb zero_extend(intb val,int4 bit)
+ 
+ {
+-  int4 sa = sizeof(intb)*8 - (bit+1);
++  if (bit < 0) return 0;
++  if (bit >= (int4)sizeof(intb)*8 - 1) return val;
++  int4 sa = (int4)sizeof(intb)*8 - (bit+1);
+   return (intb)(((uintb)val << sa) >> sa);
+ }
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/transform.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/transform.hh
+index ff9c25cc97..27effd2089 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/transform.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/transform.hh
+@@ -117,8 +117,8 @@ public:
+   void parseSizes(int4 registerSize,string laneSizes);			///< Parse a \e vector_lane_sizes attribute
+   int4 getWholeSize(void) const { return wholeSize; }	///< Get the size in bytes of the whole laned register
+   uint4 getSizeBitMask(void) const { return sizeBitMask; }	///< Get the bit mask of possible lane sizes
+-  void addLaneSize(int4 size) { sizeBitMask |= ((uint4)1 << size); }	///< Add a new \e size to the allowed list
+-  bool allowedLane(int4 size) const { return (((sizeBitMask >> size) & 1) != 0); }	///< Is \e size among the allowed lane sizes
++  void addLaneSize(int4 size) { if (size >= 0 && size < 8*(int4)sizeof(uint4)) sizeBitMask |= ((uint4)1 << size); }	///< Add a new \e size to the allowed list
++  bool allowedLane(int4 size) const { return (size >= 0 && size < 8*(int4)sizeof(uint4)) && (((sizeBitMask >> size) & 1) != 0); }	///< Is \e size among the allowed lane sizes
+   const_iterator begin(void) const { return LanedIterator(this); }	///< Starting iterator over possible lane sizes
+   const_iterator end(void) const { return LanedIterator(); }	///< Ending iterator over possible lane sizes
+ };
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/jumptable.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/jumptable.cc
+index ccb8d08e02..9e357bef15 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/jumptable.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/jumptable.cc
+@@ -735,10 +735,8 @@ Varnode *GuardRecord::quasiCopy(Varnode *vn,int4 &bitsPreserved)
+ 
+ {
+   bitsPreserved = mostsigbit_set(vn->getNZMask()) + 1;
+-  if (bitsPreserved == 0) return vn;
+-  uintb mask = 1 << 1;
+-  mask <<= (bitsPreserved - 1);
+-  mask -= 1;
++  if (bitsPreserved <= 0) return vn;
++  uintb mask = (bitsPreserved >= 8 * (int4)sizeof(uintb)) ? ~(uintb)0 : (((uintb)1 << bitsPreserved) - 1);
+   PcodeOp *op = vn->getDef();
+   Varnode *constVn;
+   while(op != (PcodeOp *)0) {
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/opbehavior.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/opbehavior.cc
+index ba3bd1e0a4..d193e97d93 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/opbehavior.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/opbehavior.cc
+@@ -424,9 +424,10 @@ uintb OpBehaviorIntLeft::evaluateBinary(int4 sizeout,int4 sizein,uintb in1,uintb
+ uintb OpBehaviorIntLeft::recoverInputBinary(int4 slot,int4 sizeout,uintb out,int4 sizein,uintb in) const
+ 
+ {
+-  if ((slot!=0) || (in >= sizeout*8))
++  if ((slot!=0) || (sizeout <= 0) || (sizeout > (int4)sizeof(uintb)) || (in >= (uintb)(sizeout*8)))
+     return OpBehavior::recoverInputBinary(slot,sizeout,out,sizein,in);
+-  int4 sa = in;
++  int4 sa = (int4)in;
++  if (sa == 0) return out;
+   if (((out<<(8*sizeout-sa))&calc_mask(sizeout))!=0)
+     throw EvaluationError("Output is not in range of left shift operation");
+   return out >> sa;
+@@ -445,10 +446,15 @@ uintb OpBehaviorIntRight::evaluateBinary(int4 sizeout,int4 sizein,uintb in1,uint
+ uintb OpBehaviorIntRight::recoverInputBinary(int4 slot,int4 sizeout,uintb out,int4 sizein,uintb in) const
+ 
+ {
+-  if ((slot!=0) || (in >= sizeout*8))
++  if ((slot!=0) || (sizeout <= 0) || (sizein <= 0) || (sizein > (int4)sizeof(uintb)) || (in >= (uintb)(sizeout*8)) || (in >= (uintb)(sizein*8)))
+     return OpBehavior::recoverInputBinary(slot,sizeout,out,sizein,in);
+   
+-  int4 sa = in;
++  int4 sa = (int4)in;
++  if (sa == 0) {
++    if ((out & ~calc_mask(sizein)) != 0)
++      throw EvaluationError("Output is not in range of right shift operation");
++    return out;
++  }
+   if ((out>>(8*sizein-sa))!=0)
+     throw EvaluationError("Output is not in range of right shift operation");
+   return out << sa;
+@@ -763,7 +769,9 @@ uintb OpBehaviorFloatRound::evaluateUnary(int4 sizeout,int4 sizein,uintb in1) co
+ uintb OpBehaviorPiece::evaluateBinary(int4 sizeout,int4 sizein,uintb in1,uintb in2) const
+ 
+ {
+-  uintb res = ( in1<<((sizeout-sizein)*8)) | in2;
++  int4 bitShift = (sizeout - sizein) * 8;
++  uintb hi = (bitShift < 0 || bitShift >= 8 * (int4)sizeof(uintb)) ? 0 : (in1 << bitShift);
++  uintb res = hi | in2;
+   return res;
+ }
+ 
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/prefersplit.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/prefersplit.cc
+index 4d2bd5ef3f..5edbb08d3c 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/prefersplit.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/prefersplit.cc
+@@ -53,7 +53,7 @@ void PreferSplitManager::SplitInstance::createPieces(Funcdata *data,bool sethi,b
+     uintb origval = vn->getOffset();
+     
+     uintb loval = origval & calc_mask( losize );// Split the constant into two pieces
+-    uintb hival = (origval >> 8*losize) & calc_mask( hisize );
++    uintb hival = pcode_right(origval, 8*losize) & calc_mask( hisize );
+     if (setlo && (lo == (Varnode *)0))
+       lo = data->newConstant(losize,loval);
+     if (sethi && (hi == (Varnode *)0))
+@@ -214,7 +214,7 @@ void PreferSplitManager::splitZext(SplitInstance &inst,PcodeOp *op)
+   if (ininst.vn->isConstant()) {
+     uintb origval = ininst.vn->getOffset();
+     uintb loval = origval & calc_mask( losize );// Split the constant into two pieces
+-    uintb hival = (origval >> 8*losize) & calc_mask( hisize );
++    uintb hival = pcode_right(origval, 8*losize) & calc_mask( hisize );
+     ininst.lo = data->newConstant(losize,loval);
+     ininst.hi = data->newConstant(hisize,hival);
+   }
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/slghpatexpress.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/slghpatexpress.cc
+index 637d210a34..3c2b179a9d 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/slghpatexpress.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/slghpatexpress.cc
+@@ -997,7 +997,9 @@ intb LeftShiftExpression::getValue(ParserWalker &walker) const
+ {
+   intb leftval = getLeft()->getValue(walker);
+   intb rightval = getRight()->getValue(walker);
+-  return leftval << rightval;
++  if (rightval <= 0) return leftval;
++  if (rightval >= 8 * (intb)sizeof(uintb)) return 0;
++  return (intb)((uintb)leftval << rightval);
+ }
+ 
+ intb LeftShiftExpression::getSubValue(const vector<intb> &replace,int4 &listpos) const
+@@ -1005,7 +1007,9 @@ intb LeftShiftExpression::getSubValue(const vector<intb> &replace,int4 &listpos)
+ {
+   intb leftval = getLeft()->getSubValue(replace,listpos); // Must be left first
+   intb rightval = getRight()->getSubValue(replace,listpos);
+-  return leftval << rightval;
++  if (rightval <= 0) return leftval;
++  if (rightval >= 8 * (intb)sizeof(uintb)) return 0;
++  return (intb)((uintb)leftval << rightval);
+ }
+ 
+ void LeftShiftExpression::encode(Encoder &encoder) const
+@@ -1021,6 +1025,8 @@ intb RightShiftExpression::getValue(ParserWalker &walker) const
+ {
+   intb leftval = getLeft()->getValue(walker);
+   intb rightval = getRight()->getValue(walker);
++  if (rightval <= 0) return leftval;
++  if (rightval >= 8 * (intb)sizeof(intb)) return (leftval < 0) ? (intb)-1 : (intb)0;
+   return leftval >> rightval;
+ }
+ 
+@@ -1029,6 +1035,8 @@ intb RightShiftExpression::getSubValue(const vector<intb> &replace,int4 &listpos
+ {
+   intb leftval = getLeft()->getSubValue(replace,listpos); // Must be left first
+   intb rightval = getRight()->getSubValue(replace,listpos);
++  if (rightval <= 0) return leftval;
++  if (rightval >= 8 * (intb)sizeof(intb)) return (leftval < 0) ? (intb)-1 : (intb)0;
+   return leftval >> rightval;
+ }
+ 
+-- 
+2.45.1
+
