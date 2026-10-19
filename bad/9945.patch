@@ -1,21 +1,46 @@
-From bc8bda175f602a9f29193895500af621fbf62d80 Mon Sep 17 00:00:00 2001
+From 116b1e4ebd7cb438240a6aeab91c760736abd86c Mon Sep 17 00:00:00 2001
 From: Confidential <28762372+0L1v3DaD@users.noreply.github.com>
 Date: Sun, 18 Oct 2026 18:44:24 -0500
 Subject: [PATCH] 9945: Framework: update lazySortedDataTypes in O(log N) on DataType rename
 
 ---
- .../database/data/DataTypeManagerDB.java      | 63 ++++++++++++++++++-
- 1 file changed, 62 insertions(+), 1 deletion(-)
+ .../program/database/data/DataTypeDB.java     |  1 +
+ .../database/data/DataTypeManagerDB.java      | 72 +++++++++++++++++--
+ 2 files changed, 67 insertions(+), 6 deletions(-)
 
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/data/DataTypeDB.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/data/DataTypeDB.java
+index 1dc3232fd62..22933c143e9 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/data/DataTypeDB.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/data/DataTypeDB.java
+@@ -457,6 +457,7 @@ protected void notifyAlignmentChanged(boolean isAutoChange) {
+ 	}
+ 
+ 	protected void notifyNameChanged(String oldName) {
++		dataMgr.updateSortedListOnRename(this, oldName);
+ 		for (DataType dt : dataMgr.getParentDataTypes(key)) {
+ 			dt.dataTypeNameChanged(this, oldName);
+ 		}
 diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/data/DataTypeManagerDB.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/data/DataTypeManagerDB.java
-index 4ce587e1308..bda6905f4d5 100644
+index 4ce587e1308..c7e594ce7c0 100644
 --- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/data/DataTypeManagerDB.java
 +++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/data/DataTypeManagerDB.java
-@@ -3615,6 +3615,67 @@ protected void dataTypeMoved(DataType dt, DataTypePath oldDataTypePath,
+@@ -3615,17 +3615,77 @@ protected void dataTypeMoved(DataType dt, DataTypePath oldDataTypePath,
  		defaultListener.dataTypeMoved(this, oldDataTypePath, newDataTypePath);
  	}
  
-+	private void updateSortedListOnRename(DataType dt, String oldName) {
+-	protected void dataTypeNameChanged(DataType dt, String oldName) {
+-		CategoryDB category = (CategoryDB) getCategory(dt.getCategoryPath());
+-		category.dataTypeRenamed(dt, oldName);
+-
+-		// we assume we have the write lock here
++	void updateSortedListOnRename(DataType dt, String oldName) {
+ 		if (!lock.isWriteLockedByCurrentThread()) {
+ 			throw new AssertException("Attempted to modify sorted datatypes without write lock");
+ 		}
+-		if (lazySortedDataTypes != null) {
++		if (lazySortedDataTypes == null) {
++			return;
++		}
 +		int size = lazySortedDataTypes.size();
 +		if (size <= 1) {
 +			return;
@@ -65,26 +90,21 @@ index 4ce587e1308..bda6905f4d5 100644
 +			}
 +		}
 +		if (found < 0) {
-+			Collections.sort(lazySortedDataTypes, nameComparator);
+ 			Collections.sort(lazySortedDataTypes, nameComparator);
 +			return;
 +		}
 +		lazySortedDataTypes.remove(found);
 +		int ins = Collections.binarySearch(lazySortedDataTypes, dt, nameComparator);
 +		if (ins < 0) {
 +			ins = -ins - 1;
-+		}
+ 		}
 +		lazySortedDataTypes.add(ins, dt);
 +	}
 +
- 	protected void dataTypeNameChanged(DataType dt, String oldName) {
- 		CategoryDB category = (CategoryDB) getCategory(dt.getCategoryPath());
- 		category.dataTypeRenamed(dt, oldName);
-@@ -3624,7 +3685,7 @@ protected void dataTypeNameChanged(DataType dt, String oldName) {
- 			throw new AssertException("Attempted to modify sorted datatypes without write lock");
- 		}
- 		if (lazySortedDataTypes != null) {
--			Collections.sort(lazySortedDataTypes, nameComparator);
-+			updateSortedListOnRename(dt, oldName);
- 		}
++	protected void dataTypeNameChanged(DataType dt, String oldName) {
++		CategoryDB category = (CategoryDB) getCategory(dt.getCategoryPath());
++		category.dataTypeRenamed(dt, oldName);
++
  		updateLastChangeTime();
  		setDirtyFlag(dt);
+ 		defaultListener.dataTypeRenamed(this, new DataTypePath(dt.getCategoryPath(), oldName),

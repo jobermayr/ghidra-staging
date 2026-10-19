@@ -5,12 +5,12 @@ Subject: [PATCH] 9938: Decompiler: fix CircleRange pullBack and pushForward
  soundness
 
 ---
- .../Decompiler/src/decompile/cpp/rangeutil.cc | 120 +++++++++++-------
+ .../Decompiler/src/decompile/cpp/rangeutil.cc | 127 ++++++++++++------
  .../decompile/unittests/testcirclerange.cc    |  23 ++++
- 2 files changed, 100 insertions(+), 43 deletions(-)
+ 2 files changed, 107 insertions(+), 43 deletions(-)
 
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/rangeutil.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/rangeutil.cc
-index 5551d6b3e6..0e4d1faf78 100644
+index 5551d6b3e6..2e910b65cf 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/rangeutil.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/rangeutil.cc
 @@ -475,8 +475,8 @@ bool CircleRange::minimalContainer(const CircleRange &op2,int4 maxStep)
@@ -114,7 +114,8 @@ index 5551d6b3e6..0e4d1faf78 100644
 -      if (in1.getMaxInfo() + in2.getMaxInfo() > wholeSize) {
 +      const CircleRange &varRange = in1.isSingle() ? in2 : in1;
 +      if (varRange.left == varRange.right) {
-+	left = (in1.left * in2.left) % step;
+ 	left = (in1.left * in2.left) % step;
+-	right = left;				// Covered everything
 +	right = left;
 +	normalize();
 +	return true;
@@ -129,8 +130,7 @@ index 5551d6b3e6..0e4d1faf78 100644
 +	return true;
 +      }
 +      if (span > (mask - (uintb)step) / absMag) {
- 	left = (in1.left * in2.left) % step;
--	right = left;				// Covered everything
++	left = (in1.left * in2.left) % step;
 +	right = left;
  	normalize();
  	return true;
@@ -171,7 +171,7 @@ index 5551d6b3e6..0e4d1faf78 100644
  	return true;
        }
 +      uintb span = ((in1.right - in1.step) - in1.left) & mask;
-+      if ((span >> (8 * outSize - sa)) > 0 || ((span << sa) & mask) > (mask - (uintb)step)) {
++      if (span > ((mask - (uintb)step) >> sa)) {
 +	left = (in1.left << sa) % step;
 +	right = left;
 +	normalize();
@@ -183,7 +183,7 @@ index 5551d6b3e6..0e4d1faf78 100644
        break;
      }
      case CPUI_SUBPIECE:
-@@ -1282,18 +1312,22 @@ bool CircleRange::pushForwardBinary(OpCode opc,const CircleRange &in1,const Circ
+@@ -1282,18 +1312,29 @@ bool CircleRange::pushForwardBinary(OpCode opc,const CircleRange &in1,const Circ
        isempty = false;
        int4 sa = (int4)in2.left * 8;
        mask = calc_mask(outSize);
@@ -192,6 +192,12 @@ index 5551d6b3e6..0e4d1faf78 100644
 -
 -      if (range == 0 || ((range >> sa) > mask )) {
 -	left = right = 0;	// We cover everything
++      if (sa < 0 || sa >= 8 * (int4)sizeof(uintb)) {
++	step = 1;
++	left = 0;
++	right = 1;
++	return true;
++      }
 +      step = (sa == 0 && (uintb)in1.step <= mask) ? in1.step : 1;
 +      if (in1.left == in1.right) {
 +	left = right = (step != 1) ? (in1.left % step) : 0;
@@ -204,8 +210,9 @@ index 5551d6b3e6..0e4d1faf78 100644
 -	normalize();
 +	uintb lastIn = (in1.right - in1.step) & in1.mask;
 +	uintb span = (lastIn - in1.left) & in1.mask;
-+	uintb lowOffset = (sa > 0) ? (in1.left & ((1ULL << sa) - 1ULL)) : 0;
-+	if (((lowOffset + span) >> sa) >= mask) {
++	uintb lowMask = (sa > 0) ? (((uintb)1 << sa) - 1) : 0;
++	uintb blocks = (span >> sa) + (((in1.left & lowMask) + (span & lowMask)) >> sa);
++	if (blocks >= mask) {
 +	  left = right = (step != 1) ? (in1.left % step) : 0;
 +	}
 +	else {
@@ -216,7 +223,7 @@ index 5551d6b3e6..0e4d1faf78 100644
        }
        break;
      }
-@@ -1310,7 +1344,7 @@ bool CircleRange::pushForwardBinary(OpCode opc,const CircleRange &in1,const Circ
+@@ -1310,7 +1351,7 @@ bool CircleRange::pushForwardBinary(OpCode opc,const CircleRange &in1,const Circ
        }
        else {
  	left = 0;
