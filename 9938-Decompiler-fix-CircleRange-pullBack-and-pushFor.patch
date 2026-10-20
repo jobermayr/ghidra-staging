@@ -5,12 +5,12 @@ Subject: [PATCH] 9938: Decompiler: fix CircleRange pullBack and pushForward
  soundness
 
 ---
- .../Decompiler/src/decompile/cpp/rangeutil.cc | 127 ++++++++++++------
- .../decompile/unittests/testcirclerange.cc    |  23 ++++
- 2 files changed, 107 insertions(+), 43 deletions(-)
+ .../Decompiler/src/decompile/cpp/rangeutil.cc | 161 ++++++++++++------
+ .../decompile/unittests/testcirclerange.cc    |  27 +++
+ 2 files changed, 135 insertions(+), 53 deletions(-)
 
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/rangeutil.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/rangeutil.cc
-index 5551d6b3e6..2e910b65cf 100644
+index 5551d6b3e6..1248d99d8d 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/rangeutil.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/rangeutil.cc
 @@ -475,8 +475,8 @@ bool CircleRange::minimalContainer(const CircleRange &op2,int4 maxStep)
@@ -106,7 +106,23 @@ index 5551d6b3e6..2e910b65cf 100644
        }
        break;
      case CPUI_INT_RIGHT:
-@@ -1237,21 +1237,37 @@ bool CircleRange::pushForwardBinary(OpCode opc,const CircleRange &in1,const Circ
+@@ -1231,27 +1231,43 @@ bool CircleRange::pushForwardBinary(OpCode opc,const CircleRange &in1,const Circ
+       }
+       else
+ 	return false;
+-      uint4 tmp = (uint4)constVal;
+-      while(step < maxStep) {
++      bool isNeg = ((constVal & (mask ^ (mask >> 1))) != 0);
++      uintb absMag = isNeg ? ((~constVal + 1) & mask) : (constVal & mask);
++      if (absMag == 0) {
++	step = 1;
++	left = 0;
++	right = 1;
++	return true;
++      }
++      uintb tmp = absMag;
++      while(step < maxStep && (uintb)(step << 1) <= mask) {
+ 	if ((tmp & 1) != 0) break;
  	step <<= 1;
  	tmp >>= 1;
        }
@@ -117,25 +133,17 @@ index 5551d6b3e6..2e910b65cf 100644
  	left = (in1.left * in2.left) % step;
 -	right = left;				// Covered everything
 +	right = left;
-+	normalize();
-+	return true;
-+      }
-+      uintb span = ((varRange.right - varRange.step) - varRange.left) & mask;
-+      bool isNeg = ((constVal & (mask ^ (mask >> 1))) != 0);
-+      uintb absMag = isNeg ? ((~constVal + 1) & mask) : (constVal & mask);
-+      if (absMag == 0) {
-+	step = 1;
-+	left = 0;
-+	right = 1;
-+	return true;
-+      }
-+      if (span > (mask - (uintb)step) / absMag) {
-+	left = (in1.left * in2.left) % step;
-+	right = left;
  	normalize();
  	return true;
        }
 -      if ((constVal & (mask ^ (mask >> 1))) != 0) {	// Multiplying by negative number
++      uintb span = ((varRange.right - varRange.step) - varRange.left) & mask;
++      if (span > (mask - (uintb)step) / absMag) {
++	left = (in1.left * in2.left) % step;
++	right = left;
++	normalize();
++	return true;
++      }
 +      if (isNeg) {
  	left = ((in1.right - in1.step) * (in2.right - in2.step)) & mask;
  	right = ((in1.left * in2.left) + step) & mask;
@@ -149,7 +157,21 @@ index 5551d6b3e6..2e910b65cf 100644
        break;
      }
      case CPUI_INT_LEFT:
-@@ -1266,14 +1282,28 @@ bool CircleRange::pushForwardBinary(OpCode opc,const CircleRange &in1,const Circ
+@@ -1259,41 +1275,66 @@ bool CircleRange::pushForwardBinary(OpCode opc,const CircleRange &in1,const Circ
+       if (!in2.isSingle()) return false;
+       isempty = false;
+       mask = in1.mask;
++      if (in2.getMin() >= (uintb)(8 * outSize)) {
++	step = 1;
++	left = 0;
++	right = 1;
++	return true;
++      }
+       step = in1.step;
+       uint4 sa = (uint4)in2.getMin();
+       uint4 tmp = sa;
+-      while(step < maxStep && tmp > 0) {
++      while(step < maxStep && tmp > 0 && (uintb)(step << 1) <= mask) {
  	step <<= 1;
  	tmp -= 1;
        }
@@ -158,46 +180,42 @@ index 5551d6b3e6..2e910b65cf 100644
 -      int4 wholeSize = 8*sizeof(uintb) - count_leading_zeros(mask);
 -      if (in1.getMaxInfo() + sa > wholeSize) {
 -	right = left;	// Covered everything
-+      if (sa >= 8 * outSize) {
-+	step = 1;
-+	left = 0;
-+	right = 1;
-+	return true;
-+      }
 +      if (in1.left == in1.right) {
-+	left = (in1.left << sa) % step;
-+	right = left;
- 	normalize();
- 	return true;
-       }
-+      uintb span = ((in1.right - in1.step) - in1.left) & mask;
-+      if (span > ((mask - (uintb)step) >> sa)) {
 +	left = (in1.left << sa) % step;
 +	right = left;
 +	normalize();
 +	return true;
 +      }
++      uintb span = ((in1.right - in1.step) - in1.left) & mask;
++      if (span > ((mask - (uintb)step) >> sa)) {
++	left = (in1.left << sa) % step;
++	right = left;
+ 	normalize();
+ 	return true;
+       }
 +      left = (in1.left << sa) & mask;
 +      right = (((in1.right - in1.step) << sa) + step) & mask;
 +      normalize();
        break;
      }
      case CPUI_SUBPIECE:
-@@ -1282,18 +1312,29 @@ bool CircleRange::pushForwardBinary(OpCode opc,const CircleRange &in1,const Circ
+     {
+       if (!in2.isSingle()) return false;
        isempty = false;
-       int4 sa = (int4)in2.left * 8;
+-      int4 sa = (int4)in2.left * 8;
        mask = calc_mask(outSize);
 -      step = (sa == 0) ? in1.step : 1;
 -      uintb range = (in1.left < in1.right) ? in1.right-in1.left : in1.left - in1.right;
 -
 -      if (range == 0 || ((range >> sa) > mask )) {
 -	left = right = 0;	// We cover everything
-+      if (sa < 0 || sa >= 8 * (int4)sizeof(uintb)) {
++      if (in2.left >= (uintb)sizeof(uintb)) {
 +	step = 1;
 +	left = 0;
 +	right = 1;
 +	return true;
 +      }
++      int4 sa = (int4)in2.left * 8;
 +      step = (sa == 0 && (uintb)in1.step <= mask) ? in1.step : 1;
 +      if (in1.left == in1.right) {
 +	left = right = (step != 1) ? (in1.left % step) : 0;
@@ -223,20 +241,60 @@ index 5551d6b3e6..2e910b65cf 100644
        }
        break;
      }
-@@ -1310,7 +1351,7 @@ bool CircleRange::pushForwardBinary(OpCode opc,const CircleRange &in1,const Circ
+@@ -1301,27 +1342,41 @@ bool CircleRange::pushForwardBinary(OpCode opc,const CircleRange &in1,const Circ
+     {
+       if (!in2.isSingle()) return false;
+       isempty = false;
+-      int4 sa = (int4)in2.left;
+       mask = calc_mask(outSize);
++      if (in2.left >= (uintb)(8 * inSize)) {
++	step = 1;
++	left = 0;
++	right = 1;
++	return true;
++      }
++      int4 sa = (int4)in2.left;
++      if (sa == 0 && outSize == inSize) {
++	*this = in1;
++	return true;
++      }
+       step = 1;			// Lose any step
+       if (in1.left < in1.right) {
+-	left = in1.left >> sa;
+-	right = ((in1.right - in1.step) >> sa) + 1;
++	left = (in1.left >> sa) & mask;
++	right = (((in1.right - in1.step) >> sa) + 1) & mask;
++	if (left == right)	// Don't truncate accidentally to everything
++	  right = (left + 1)&mask;
        }
        else {
  	left = 0;
 -	right = in1.mask >> sa;
 +	right = ((in1.mask >> sa) + 1) & mask;
        }
-       if (left == right)	// Don't truncate accidentally to everything
- 	right = (left + 1)&mask;
+-      if (left == right)	// Don't truncate accidentally to everything
+-	right = (left + 1)&mask;
+       break;
+     }
+     case CPUI_INT_SRIGHT:
+     {
+       if (!in2.isSingle()) return false;
+       isempty = false;
+-      int4 sa = (int4)in2.left;
+       mask = calc_mask(outSize);
++      int4 sa = (in2.left >= (uintb)(8 * inSize)) ? (8 * inSize - 1) : (int4)in2.left;
++      if (sa == 0 && outSize == inSize) {
++	*this = in1;
++	return true;
++      }
+       step = 1;			// Lose any step
+       int4 bitPos = 8*inSize - 1;
+       intb valLeft = sign_extend(in1.left,bitPos);
 diff --git a/Ghidra/Features/Decompiler/src/decompile/unittests/testcirclerange.cc b/Ghidra/Features/Decompiler/src/decompile/unittests/testcirclerange.cc
-index c4190d696f..6f28c2fb63 100644
+index c4190d696f..cd7ca4c1c1 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/unittests/testcirclerange.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/unittests/testcirclerange.cc
-@@ -581,6 +581,29 @@ TEST(circlerange_pullbacksub6) {
+@@ -581,6 +581,33 @@ TEST(circlerange_pullbacksub6) {
    ASSERT(CircleRangeTest::testPullbackBinary(0, 0x30, 4, 1, CPUI_INT_SUB, 0, 0xfffffffd));
  }
  
@@ -257,6 +315,10 @@ index c4190d696f..6f28c2fb63 100644
 +  ASSERT(valid);
 +  ASSERT_EQUALS(res.getMin(), 0);
 +  ASSERT_EQUALS(res.getEnd(), 0x80);
++  CircleRange zeroShift(0, 1, 1, 1);
++  CircleRange res0;
++  ASSERT(res0.pushForwardBinary(CPUI_INT_RIGHT, range1, zeroShift, 1, 1, 32));
++  ASSERT(res0.contains(0xf5));
 +}
 +
 +TEST(circlerange_pushsubpiece_wrapping) {

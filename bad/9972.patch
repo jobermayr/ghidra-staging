@@ -1,0 +1,153 @@
+From 432c6ee66223ae2f503f596db2fddf95659747cb Mon Sep 17 00:00:00 2001
+From: Wall-AF <Allan.F.Wall@users.noreply.github.com>
+Date: Tue, 20 Oct 2026 14:12:52 +0100
+Subject: [PATCH] 9972: Add 'Pascal Calling Convention' and auto-pointer sizing to support 16-/32-bit pointers based upon calling convention.
+
+---
+ .../program/model/lang/ParamListPascal.java   | 92 +++++++++++++++++++
+ .../model/lang/ParamListPascalOut.java        | 37 ++++++++
+ 2 files changed, 129 insertions(+)
+ create mode 100644 Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/ParamListPascal.java
+ create mode 100644 Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/ParamListPascalOut.java
+
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/ParamListPascal.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/ParamListPascal.java
+new file mode 100644
+index 00000000000..9483a9ee329
+--- /dev/null
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/ParamListPascal.java
+@@ -0,0 +1,92 @@
++/* ###
++ * IP: GHIDRA
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package ghidra.program.model.lang;
++
++import java.util.ArrayList;
++
++import ghidra.program.model.data.DataTypeManager;
++import ghidra.program.model.lang.protorules.AssignAction;
++
++/**
++ * Pascal analysis for parameter lists
++ *
++ */
++public class ParamListPascal extends ParamListStandard {
++
++	@Override
++	public void assignMap(PrototypePieces proto, DataTypeManager dtManager, int[] status,
++			ArrayList<ParameterPieces> res, boolean addAutoParams) {
++
++		boolean hiddenParam = (addAutoParams && res.size() == 2);
++		int paramStart = res.size();
++		ParameterPieces hiddenPtr = res.get(res.size() - 1);
++
++		for (int i = proto.intypes.size() - 1; i > 0; --i) { // Don't do i==0, could be a 'this' and may need allocating after 'hiddenPtr'
++			ParameterPieces store = new ParameterPieces();
++			res.add(paramStart, store);
++			int resCode =
++				assignAddress(proto.intypes.get(i), proto, i, dtManager, status, store);
++			if (resCode == AssignAction.FAIL || resCode == AssignAction.NO_ASSIGNMENT) {
++				// Do not continue to assign after first failure
++				while (--i >= 0) {
++					store = new ParameterPieces();		// Fill out with UNASSIGNED pieces
++					res.add(store);
++				}
++				return;
++			}
++		}
++
++		if (proto.intypes.size() == 0) {
++			allocateHiddenReturn(proto, dtManager, status, hiddenParam, hiddenPtr);
++			return;
++		}
++
++		int thisOrFirstParamPos = paramStart;
++		ParameterPieces store = new ParameterPieces();
++		if (proto.model.hasThisPointer()) {
++			store.isThisPointer = true; // here, proto.intypes.get(0) is a 'this'
++		}
++		if (proto.model.getInputResource().isThisBeforeRetPointer()) { // implies 'hasThis'
++			if (allocateHiddenReturn(proto, dtManager, status, hiddenParam, hiddenPtr)) {
++				--thisOrFirstParamPos;
++			}
++			assignAddress(proto.intypes.get(0), proto, 0, dtManager, status, store);
++		}
++		else {
++			assignAddress(proto.intypes.get(0), proto, 0, dtManager, status, store);
++			allocateHiddenReturn(proto, dtManager, status, hiddenParam, hiddenPtr);
++		}
++		res.add(thisOrFirstParamPos, store);
++	}
++
++	private boolean allocateHiddenReturn(PrototypePieces proto, DataTypeManager dtManager, int[] status,
++			boolean hiddenParam, ParameterPieces hiddenPtr) {
++		if (hiddenParam) {	// Check for hidden parameters defined by the output list
++//			hiddenPtr.hiddenReturnPtr = true;
++			if (hiddenPtr.hiddenReturnPtr) {
++				// Need to pull from registers marked as hiddenret
++				assignAddressFallback(StorageClass.HIDDENRET, hiddenPtr.type, false, status,
++					hiddenPtr);
++			}
++			else {
++				// Assign as a regular first input pointer parameter
++				assignAddress(hiddenPtr.type, proto, 0, dtManager, status, hiddenPtr);
++			}
++			hiddenPtr.hiddenReturnPtr = true;
++		}
++		return hiddenParam;
++	}
++}
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/ParamListPascalOut.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/ParamListPascalOut.java
+new file mode 100644
+index 00000000000..040f2b7c447
+--- /dev/null
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/ParamListPascalOut.java
+@@ -0,0 +1,37 @@
++/* ###
++ * IP: GHIDRA
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package ghidra.program.model.lang;
++
++import java.util.ArrayList;
++
++import ghidra.program.model.data.DataTypeManager;
++
++/**
++ * A list of resources describing possible storage locations for a function's return value,
++ * and a strategy for selecting a storage location based on data-types in a function signature.
++ *
++ * This is based solely upon the strategy than its parent class.  It's inclusion is just to mirror it's
++ * partner class ParamListPascal.
++ */
++public class ParamListPascalOut extends ParamListStandardOut {
++
++	@Override
++	public void assignMap(PrototypePieces proto, DataTypeManager dtManager, int[] status,
++			ArrayList<ParameterPieces> res, boolean addAutoParams) {
++		super.assignMap(proto, dtManager, status, res, addAutoParams);
++	}
++
++}
