@@ -4,10 +4,14 @@ Date: Sun, 18 Oct 2026 21:02:24 -0500
 Subject: [PATCH] 9978: Decompiler: cache parsed .pspec and .cspec XML
  documents in SleighArchitecture
 
+Cache parsed .pspec and .cspec XML Document trees in SleighArchitecture::specxmls
+(protected by specxmls_mutex) and register their root elements via
+DocumentStorage::registerTag, avoiding repeated disk reads and XML parsing
+across SleighArchitecture instances.
 ---
  .../cpp/include/ghidra/sleigh_arch.hh         |  5 ++++
- .../src/decompile/cpp/sleigh_arch.cc          | 29 +++++++++++++++++--
- 2 files changed, 32 insertions(+), 2 deletions(-)
+ .../src/decompile/cpp/sleigh_arch.cc          | 27 +++++++++++++++++--
+ 2 files changed, 30 insertions(+), 2 deletions(-)
 
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/sleigh_arch.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/sleigh_arch.hh
 index aad133e151..b2c4d7d12c 100644
@@ -34,7 +38,7 @@ index aad133e151..b2c4d7d12c 100644
    string filename;					///< Name of active load-image file
    string target;					///< The \e language \e id of the active load-image
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/sleigh_arch.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/sleigh_arch.cc
-index cb2920845c..d4b906c857 100644
+index cb2920845c..3a18745e4c 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/sleigh_arch.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/sleigh_arch.cc
 @@ -34,6 +34,8 @@ ElementId ELEM_LANGUAGE = ElementId("language",234);
@@ -64,14 +68,14 @@ index cb2920845c..d4b906c857 100644
      store.registerTag(doc->getRoot());
    }
    catch(DecoderError &err) {
-@@ -629,9 +631,32 @@ const vector<LanguageDescription> &SleighArchitecture::getDescriptions(void)
+@@ -629,6 +631,27 @@ const vector<LanguageDescription> &SleighArchitecture::getDescriptions(void)
    return description;
  }
  
 +/// Retrieve a parsed immutable XML specification document from the cache, or parse it from disk.
 +/// DocumentStorage::registerTag only stores a non-owning const Element* in tagmap (unlike openDocument
 +/// which transfers ownership to DocumentStorage::doclist), so cached const Documents remain safely owned
-+/// by specxmls across SleighArchitecture instances until SleighArchitecture::shutdown().
++/// by specxmls across SleighArchitecture instances until process exit.
 +const Document *SleighArchitecture::getSpecDocument(const string &filename)
 +
 +{
@@ -92,11 +96,6 @@ index cb2920845c..d4b906c857 100644
  void SleighArchitecture::shutdown(void)
  
  {
-+  std::lock_guard<std::mutex> lock(specxmls_mutex);
-+  specxmls.clear();
-   description.clear();  // static vector is destroyed by the normal exit handler
- }
- 
 -- 
 2.45.1
 
