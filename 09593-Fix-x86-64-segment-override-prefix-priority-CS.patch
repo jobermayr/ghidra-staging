@@ -1,0 +1,71 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: NAVEENKUMARKR777 <naveenkumarkr555@gmail.com>
+Date: Sun, 6 Sep 2026 12:35:48 +0000
+Subject: [PATCH] 09593: Fix x86-64 segment-override prefix priority
+ (CS/SS/DS/ES vs FS/GS)
+
+In 64-bit mode, the CS/SS/DS/ES segment-override prefixes have no
+effect and are treated as null prefixes for purposes of the
+multiple-prefix rules (AMD64 Architecture Programmer's Manual, Vol. 2,
+section on segment-override prefixes; consistent with Intel SDM Vol.
+1 section 3.7.4.1, which forces the CS/DS/ES/SS segment bases to zero
+in 64-bit mode) -- only FS and GS actually change which segment is
+accessed. Sleigh tracked the active override in a single `segover`
+context variable that any of these prefix bytes overwrote
+unconditionally, so a CS/SS/DS/ES byte occurring closer to the opcode
+than an earlier FS/GS override would silently clobber it, e.g.
+`64 26 01 18` (fs; es; add [rax],ebx) was shown as
+`ADD dword ptr ES:[RAX],EBX` instead of `FS:[RAX]`.
+
+This is more than cosmetic: FS/GS-relative addressing is how x86-64
+code reaches thread-local storage and the Windows PEB/TEB, and a
+single redundant prefix byte was enough to hide that access from the
+disassembly.
+
+Add higher-priority 64-bit-only constructors so a CS/SS/DS/ES byte
+becomes a true no-op when an FS/GS override is already active, instead
+of overwriting it. 32-bit mode (where all six overrides are
+meaningful and "last prefix wins" is correct) is untouched.
+
+Verified against the byte sequences from the linked issue using the
+real Sleigh compiler/disassembly engine, confirmed 32-bit mode and the
+unrelated Jcc branch-hint use of the same context variable are
+unaffected, and confirmed a byte-for-byte identical disassembly of
+400K+ real instructions extracted from a live binary before/after the
+change.
+
+Fixes one of the still-open issues from #2033.
+---
+ Ghidra/Processors/x86/data/languages/ia.sinc | 16 ++++++++++++++++
+ 1 file changed, 16 insertions(+)
+
+diff --git a/Ghidra/Processors/x86/data/languages/ia.sinc b/Ghidra/Processors/x86/data/languages/ia.sinc
+index cc47331486..68ed0cd37f 100644
+--- a/Ghidra/Processors/x86/data/languages/ia.sinc
++++ b/Ghidra/Processors/x86/data/languages/ia.sinc
+@@ -2394,6 +2394,22 @@ macro newpos2(pos1, pos2, off) {
+ 
+ # The base level constructors
+ #   The prefixes
++@ifdef IA64
++# In 64-bit mode the CS/SS/DS/ES segment override prefixes are null prefixes: they are
++# still valid bytes to encounter (and are reused elsewhere, e.g. as branch hints or
++# mandatory prefixes), but they must not change which segment is actually accessed.
++# Without the four guards below, a CS/SS/DS/ES byte occurring closer to the opcode than
++# an earlier FS/GS override would incorrectly clobber that FS/GS override, since segover
++# only ever remembers the most recently matched prefix (Intel SDM Vol. 2A section 2.1.1).
++:^instruction is $(LONGMODE_ON) & instrPhase=0 & over=0x2e & segover=5; instruction [ segover=5; ] {} # CS override has no effect in 64-bit mode; FS override stays in effect
++:^instruction is $(LONGMODE_ON) & instrPhase=0 & over=0x2e & segover=6; instruction [ segover=6; ] {} # CS override has no effect in 64-bit mode; GS override stays in effect
++:^instruction is $(LONGMODE_ON) & instrPhase=0 & over=0x36 & segover=5; instruction [ segover=5; ] {} # SS override has no effect in 64-bit mode; FS override stays in effect
++:^instruction is $(LONGMODE_ON) & instrPhase=0 & over=0x36 & segover=6; instruction [ segover=6; ] {} # SS override has no effect in 64-bit mode; GS override stays in effect
++:^instruction is $(LONGMODE_ON) & instrPhase=0 & over=0x3e & segover=5; instruction [ segover=5; ] {} # DS override has no effect in 64-bit mode; FS override stays in effect
++:^instruction is $(LONGMODE_ON) & instrPhase=0 & over=0x3e & segover=6; instruction [ segover=6; ] {} # DS override has no effect in 64-bit mode; GS override stays in effect
++:^instruction is $(LONGMODE_ON) & instrPhase=0 & over=0x26 & segover=5; instruction [ segover=5; ] {} # ES override has no effect in 64-bit mode; FS override stays in effect
++:^instruction is $(LONGMODE_ON) & instrPhase=0 & over=0x26 & segover=6; instruction [ segover=6; ] {} # ES override has no effect in 64-bit mode; GS override stays in effect
++@endif
+ :^instruction is instrPhase=0 & over=0x2e; instruction     [ segover=1; ]  {} # CS override
+ :^instruction is instrPhase=0 & over=0x36; instruction     [ segover=2; ]  {} # SS override
+ :^instruction is instrPhase=0 & over=0x3e; instruction     [ segover=3; ]  {} # DS override
+-- 
+2.45.1
+

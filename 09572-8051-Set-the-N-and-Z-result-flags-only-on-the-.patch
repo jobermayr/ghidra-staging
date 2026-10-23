@@ -1,0 +1,601 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: qatcod <79017227+qatcod@users.noreply.github.com>
+Date: Wed, 2 Sep 2026 20:55:19 +0500
+Subject: [PATCH] 09572: [8051] Set the N and Z result flags only on the
+ MCS-251
+
+#9064 Set the N and Z result flags only on the MCS-251
+
+resultflags writes PSW bit 5 and bit 1 on every variant that includes
+8051_main.sinc. Those are the MCS-251's N and Z flags, read by its JE, JG,
+JLE, JNE, JSG, JSGE, JSL and JSLE branches, all of which live in 80251.sinc
+and are only reachable from 80251.slaspec.
+
+A plain 8051 has neither flag. PSW bit 5 is the user flag F0 and bit 1 is
+user-definable, the CPU leaves both alone, and no 8051 instruction reads
+them: JZ and JNZ test ACC directly. So on the 8051, 80390, CIP-51 and MX51
+the macro was clobbering operator state and putting eight dead p-code
+operations on every instruction that sets result flags.
+
+Guard the body on MCS251. The four affected variants do not include
+80251.sinc, so nothing there can read what is no longer written. ANL Direct,
+Data drops from 19 p-code operations to 10, and the 80251 output is
+unchanged.
+
+#9064 Confine the MCS-251 instructions to phase 1
+
+The two A5-prefix constructors match any instruction in phase 0, which the
+instructions themselves also match, so 80251 fails to build once -l is set in
+sleighArgs.txt:
+
+  ERROR 8051_main.sinc:892: Constructor pattern cannot be distinguished from
+  constructor at 8051_main.sinc:705
+
+Wrap the instructions in `with: phase=1` so only the prefix constructors are
+reachable in phase 0. Guarded on MCS251 in 8051_main.sinc; 80251.sinc is only
+included there, so its constructors are wrapped unconditionally.
+
+The 80251 instruction set is unchanged: same 347 constructors and 70
+mnemonics before and after.
+
+#9064 Note where the MCS-251 N and Z flags actually live
+
+PSW1.5 and PSW1.1 on the 251 are mapped onto the 8051's F0 and UD user
+bits here, which is what the PSW/PSW1 TODO at the top of the file is
+about. Say so at the defines so the mapping is not a surprise.
+
+#9064 Rename resultflags to setNZflags
+
+The old name reads as though the macro applies to the 8051, which has
+neither flag. All 108 uses renamed: 85 in 80251.sinc, 17 in 8051_main.sinc
+and 6 in mx51.sinc.
+
+No semantic change. Every variant still builds with -l, and the emitted
+p-code is identical: 8051 keeps 160 constructors with ANL at 10 and 55
+operations, 80251 keeps 347 with ANL at 22 and 247.
+
+#9064 Drop the comments the macro name now covers
+
+The macro is named setNZflags and carries the flag mapping on the defines
+and on its own body, so the block above it repeated what the code states.
+The phase guard is likewise described by the prefix constructors it sits
+under. Neither block earns its place in a file that is otherwise sparse of
+comments.
+
+No functional change: all five variants still build with -l, and the
+compiled p-code is identical apart from the recorded source line numbers.
+---
+ .../Processors/8051/data/languages/80251.sinc | 174 +++++++++---------
+ .../8051/data/languages/8051_main.sinc        |  50 ++---
+ .../Processors/8051/data/languages/mx51.sinc  |  12 +-
+ 3 files changed, 124 insertions(+), 112 deletions(-)
+
+diff --git a/Ghidra/Processors/8051/data/languages/80251.sinc b/Ghidra/Processors/8051/data/languages/80251.sinc
+index a5acf140c8..25dd3c1c16 100644
+--- a/Ghidra/Processors/8051/data/languages/80251.sinc
++++ b/Ghidra/Processors/8051/data/languages/80251.sinc
+@@ -184,139 +184,141 @@ macro pop24(val) {
+ # NOTE: >>>> Find MCS251 instructions by searching for "Binary Mode = [A5][Encoding]" in PDF manual  <<<<
+ # NOTE: All instructions should include the $(GROUP3) pattern prefix
+ 
++with: phase=1 {
++
+ # ADD Rmd,Rms
+-:ADD rm47,rm03	is $(GROUP3) & ophi=2 & oplo=12; rm47 & rm03  { addflags(rm47,rm03); rm47 = rm47 + rm03; resultflags(rm47); }
++:ADD rm47,rm03	is $(GROUP3) & ophi=2 & oplo=12; rm47 & rm03  { addflags(rm47,rm03); rm47 = rm47 + rm03; setNZflags(rm47); }
+ 
+ # ADD WRjd,WRjs
+-:ADD wrj47,wrj03	is $(GROUP3) & ophi=2 & oplo=13; wrj47 & wrj03  { addflags(wrj47,wrj03); wrj47 = wrj47 + wrj03; resultflags(wrj47); }
++:ADD wrj47,wrj03	is $(GROUP3) & ophi=2 & oplo=13; wrj47 & wrj03  { addflags(wrj47,wrj03); wrj47 = wrj47 + wrj03; setNZflags(wrj47); }
+ 
+ # ADD DRkd,DRks
+-:ADD drk47,drk03  is $(GROUP3) & ophi=2 & oplo=15; $(DRK47) & $(DRK03)   { addflags(drk47,drk03); drk47 = drk47 + drk03; resultflags(drk47); }
++:ADD drk47,drk03  is $(GROUP3) & ophi=2 & oplo=15; $(DRK47) & $(DRK03)   { addflags(drk47,drk03); drk47 = drk47 + drk03; setNZflags(drk47); }
+ 
+ # ADD Rm,#data
+-:ADD rm47,Data	is $(GROUP3) & ophi=2 & oplo=14; rm47 & s03=0; Data    { addflags(rm47,Data); rm47 = rm47 + Data; resultflags(rm47);  }
++:ADD rm47,Data	is $(GROUP3) & ophi=2 & oplo=14; rm47 & s03=0; Data    { addflags(rm47,Data); rm47 = rm47 + Data; setNZflags(rm47);  }
+ 
+ # ADD WRj,#data16
+-:ADD wrj47,Data16	is $(GROUP3) & ophi=2 & oplo=14; wrj47 & s03=4; Data16  { addflags(wrj47,Data16); wrj47 = wrj47 + Data16; resultflags(wrj47); }
++:ADD wrj47,Data16	is $(GROUP3) & ophi=2 & oplo=14; wrj47 & s03=4; Data16  { addflags(wrj47,Data16); wrj47 = wrj47 + Data16; setNZflags(wrj47); }
+ 
+ # ADD DRk,#0data16
+-:ADD drk47,Data16x0	is $(GROUP3) & ophi=2 & oplo=14; $(DRK47) & s03=8; Data16x0  { addflags(drk47,Data16x0); drk47 = drk47 + Data16x0; resultflags(drk47); }
++:ADD drk47,Data16x0	is $(GROUP3) & ophi=2 & oplo=14; $(DRK47) & s03=8; Data16x0  { addflags(drk47,Data16x0); drk47 = drk47 + Data16x0; setNZflags(drk47); }
+ 
+ # ADD Rm,dir8
+-:ADD rm47,Direct	is $(GROUP3) & ophi=2 & oplo=14; rm47 & s03=1; Direct  { addflags(rm47,Direct); rm47 = rm47 + Direct; resultflags(rm47); }
++:ADD rm47,Direct	is $(GROUP3) & ophi=2 & oplo=14; rm47 & s03=1; Direct  { addflags(rm47,Direct); rm47 = rm47 + Direct; setNZflags(rm47); }
+ 
+ # ADD WRj,dir8
+-:ADD wrj47,Direct8w	is $(GROUP3) & ophi=2 & oplo=14; wrj47 & s03=5; Direct8w  { addflags(wrj47,Direct8w); wrj47 = wrj47 + Direct8w; resultflags(wrj47); }
++:ADD wrj47,Direct8w	is $(GROUP3) & ophi=2 & oplo=14; wrj47 & s03=5; Direct8w  { addflags(wrj47,Direct8w); wrj47 = wrj47 + Direct8w; setNZflags(wrj47); }
+ 
+ # ADD Rm,dir16
+-:ADD rm47,Direct16b	is $(GROUP3) & ophi=2 & oplo=14; rm47 & s03=3; Direct16b  { addflags(rm47,Direct16b); rm47 = rm47 + Direct16b; resultflags(rm47); }
++:ADD rm47,Direct16b	is $(GROUP3) & ophi=2 & oplo=14; rm47 & s03=3; Direct16b  { addflags(rm47,Direct16b); rm47 = rm47 + Direct16b; setNZflags(rm47); }
+ 
+ # ADD WRj,dir16
+-:ADD wrj47,Direct16w	is $(GROUP3) & ophi=2 & oplo=14; wrj47 & s03=7; Direct16w  { addflags(wrj47,Direct16w); wrj47 = wrj47 + Direct16w; resultflags(wrj47); }
++:ADD wrj47,Direct16w	is $(GROUP3) & ophi=2 & oplo=14; wrj47 & s03=7; Direct16w  { addflags(wrj47,Direct16w); wrj47 = wrj47 + Direct16w; setNZflags(wrj47); }
+ 
+ # ADD Rm,@WRj
+-:ADD rm47_,AtWRjb	is $(GROUP3) & ophi=2 & oplo=14; AtWRjb & s03=9; rm47_ & s03_=0   { addflags(rm47_,AtWRjb); rm47_ = rm47_ + AtWRjb; resultflags(rm47_); }
++:ADD rm47_,AtWRjb	is $(GROUP3) & ophi=2 & oplo=14; AtWRjb & s03=9; rm47_ & s03_=0   { addflags(rm47_,AtWRjb); rm47_ = rm47_ + AtWRjb; setNZflags(rm47_); }
+ 
+ # ADD Rm,@DRk
+-:ADD rm47_,AtDRkb	is $(GROUP3) & ophi=2 & oplo=14; $(ATDRK) & AtDRkb & s03=11; rm47_ & s03_=0   { addflags(rm47_,AtDRkb); rm47_ = rm47_ + AtDRkb; resultflags(rm47_); }
++:ADD rm47_,AtDRkb	is $(GROUP3) & ophi=2 & oplo=14; $(ATDRK) & AtDRkb & s03=11; rm47_ & s03_=0   { addflags(rm47_,AtDRkb); rm47_ = rm47_ + AtDRkb; setNZflags(rm47_); }
+ 
+ # ANL Rmd,Rms
+-:ANL rm47,rm03	is $(GROUP3) & ophi=5 & oplo=12; rm47 & rm03  { rm47 = rm47 & rm03; resultflags(rm47); }
++:ANL rm47,rm03	is $(GROUP3) & ophi=5 & oplo=12; rm47 & rm03  { rm47 = rm47 & rm03; setNZflags(rm47); }
+ 
+ # ANL WRjd,WRjs
+-:ANL wrj47,wrj03	is $(GROUP3) & ophi=5 & oplo=13; wrj47 & wrj03  { wrj47 = wrj47 & wrj03; resultflags(wrj47); }
++:ANL wrj47,wrj03	is $(GROUP3) & ophi=5 & oplo=13; wrj47 & wrj03  { wrj47 = wrj47 & wrj03; setNZflags(wrj47); }
+ 
+ # ANL Rm,#data
+-:ANL rm47,Data	is $(GROUP3) & ophi=5 & oplo=14; rm47 & s03=0; Data    { rm47 = rm47 & Data; resultflags(rm47); }
++:ANL rm47,Data	is $(GROUP3) & ophi=5 & oplo=14; rm47 & s03=0; Data    { rm47 = rm47 & Data; setNZflags(rm47); }
+ 
+ # ANL WRj,#data16
+-:ANL wrj47,Data16	is $(GROUP3) & ophi=5 & oplo=14; wrj47 & s03=4; Data16  { wrj47 = wrj47 & Data16; resultflags(wrj47); }
++:ANL wrj47,Data16	is $(GROUP3) & ophi=5 & oplo=14; wrj47 & s03=4; Data16  { wrj47 = wrj47 & Data16; setNZflags(wrj47); }
+ 
+ # ANL Rm,dir8
+-:ANL rm47,Direct	is $(GROUP3) & ophi=5 & oplo=14; rm47 & s03=1; Direct  { rm47 = rm47 & Direct; resultflags(rm47); }
++:ANL rm47,Direct	is $(GROUP3) & ophi=5 & oplo=14; rm47 & s03=1; Direct  { rm47 = rm47 & Direct; setNZflags(rm47); }
+ 
+ # ANL WRj,dir8
+-:ANL wrj47,Direct8w	is $(GROUP3) & ophi=5 & oplo=14; wrj47 & s03=5; Direct8w  { wrj47 = wrj47 & Direct8w; resultflags(wrj47); }
++:ANL wrj47,Direct8w	is $(GROUP3) & ophi=5 & oplo=14; wrj47 & s03=5; Direct8w  { wrj47 = wrj47 & Direct8w; setNZflags(wrj47); }
+ 
+ # ANL Rm,dir16
+-:ANL rm47,Direct16b	is $(GROUP3) & ophi=5 & oplo=14; rm47 & s03=3; Direct16b  { rm47 = rm47 & Direct16b; resultflags(rm47); }
++:ANL rm47,Direct16b	is $(GROUP3) & ophi=5 & oplo=14; rm47 & s03=3; Direct16b  { rm47 = rm47 & Direct16b; setNZflags(rm47); }
+ 
+ # ANL WRj,dir16
+-:ANL wrj47,Direct16w	is $(GROUP3) & ophi=5 & oplo=14; wrj47 & s03=7; Direct16w  { wrj47 = wrj47 & Direct16w; resultflags(wrj47); }
++:ANL wrj47,Direct16w	is $(GROUP3) & ophi=5 & oplo=14; wrj47 & s03=7; Direct16w  { wrj47 = wrj47 & Direct16w; setNZflags(wrj47); }
+ 
+ # ANL Rm,@WRj
+-:ANL rm47_,AtWRjb	is $(GROUP3) & ophi=5 & oplo=14; AtWRjb & s03=9; rm47_ & s03_=0   { rm47_ = rm47_ & AtWRjb; resultflags(rm47_); }
++:ANL rm47_,AtWRjb	is $(GROUP3) & ophi=5 & oplo=14; AtWRjb & s03=9; rm47_ & s03_=0   { rm47_ = rm47_ & AtWRjb; setNZflags(rm47_); }
+ 
+ # ANL Rm,@DRk
+-:ANL rm47_,AtDRkb	is $(GROUP3) & ophi=5 & oplo=14; $(ATDRK) & AtDRkb & s03=11; rm47_ & s03_=0   { rm47_ = rm47_ & AtDRkb; resultflags(rm47_); }
++:ANL rm47_,AtDRkb	is $(GROUP3) & ophi=5 & oplo=14; $(ATDRK) & AtDRkb & s03=11; rm47_ & s03_=0   { rm47_ = rm47_ & AtDRkb; setNZflags(rm47_); }
+ 
+ # ANL C,bit
+-:ANL "CY",xBitAddr	is $(GROUP3) & ophi=10 & oplo=9; (d47=8 & s3=0 & bit02; xBitByteAddr) & xBitAddr { $(CY)=$(CY)& ((xBitByteAddr>>bit02)&1); resultflags(xBitByteAddr); }
++:ANL "CY",xBitAddr	is $(GROUP3) & ophi=10 & oplo=9; (d47=8 & s3=0 & bit02; xBitByteAddr) & xBitAddr { $(CY)=$(CY)& ((xBitByteAddr>>bit02)&1); setNZflags(xBitByteAddr); }
+ 
+ # ANL C,/bit
+-:ANL "CY",xBitAddr2	is $(GROUP3) & ophi=10 & oplo=9; (d47=15 & s3=0 & bit02; xBitByteAddr) & xBitAddr2 { $(CY)=$(CY)& (~((xBitByteAddr>>bit02)&1)); resultflags(xBitByteAddr); }
++:ANL "CY",xBitAddr2	is $(GROUP3) & ophi=10 & oplo=9; (d47=15 & s3=0 & bit02; xBitByteAddr) & xBitAddr2 { $(CY)=$(CY)& (~((xBitByteAddr>>bit02)&1)); setNZflags(xBitByteAddr); }
+ 
+ # CLR bit
+-:CLR xBitAddr  is $(GROUP3) & ophi=10 & oplo=9; (d47=12 & s3=0 & bit02; xBitByteAddr) & xBitAddr  { tmp:1 = ~(1<<bit02); xBitByteAddr = xBitByteAddr & tmp; resultflags(xBitByteAddr); }
++:CLR xBitAddr  is $(GROUP3) & ophi=10 & oplo=9; (d47=12 & s3=0 & bit02; xBitByteAddr) & xBitAddr  { tmp:1 = ~(1<<bit02); xBitByteAddr = xBitByteAddr & tmp; setNZflags(xBitByteAddr); }
+ 
+ # CMP Rmd,Rms
+-:CMP rm47,rm03	is $(GROUP3) & ophi=11 & oplo=12; rm47 & rm03  { subflags(rm47,rm03); tmp:1 = rm47 - rm03; resultflags(tmp); }
++:CMP rm47,rm03	is $(GROUP3) & ophi=11 & oplo=12; rm47 & rm03  { subflags(rm47,rm03); tmp:1 = rm47 - rm03; setNZflags(tmp); }
+ 
+ # CMP WRjd,WRjs
+ # NOTE: Encoding in manual conflicts with CMP WRj,#data (ophi=14), modified for consistency with similar insrtuctions (e.g., ADD, SUB)
+-:CMP wrj47,wrj03	is $(GROUP3) & ophi=11 & oplo=13; wrj47 & wrj03  { subflags(wrj47,wrj03); tmp:2 = wrj47 - wrj03; resultflags(tmp); }
++:CMP wrj47,wrj03	is $(GROUP3) & ophi=11 & oplo=13; wrj47 & wrj03  { subflags(wrj47,wrj03); tmp:2 = wrj47 - wrj03; setNZflags(tmp); }
+ 
+ # CMP DRkd,DRks
+-:CMP drk47,drk03	is $(GROUP3) & ophi=11 & oplo=15; $(DRK47) & $(DRK03)  { subflags(drk47,drk03); tmp:4 = drk47 - drk03; resultflags(tmp); }
++:CMP drk47,drk03	is $(GROUP3) & ophi=11 & oplo=15; $(DRK47) & $(DRK03)  { subflags(drk47,drk03); tmp:4 = drk47 - drk03; setNZflags(tmp); }
+ 
+ # CMP Rm,#data
+-:CMP rm47,Data	is $(GROUP3) & ophi=11 & oplo=14; rm47 & s03=0; Data  { subflags(rm47,Data); tmp:1 = rm47 - Data; resultflags(tmp); }
++:CMP rm47,Data	is $(GROUP3) & ophi=11 & oplo=14; rm47 & s03=0; Data  { subflags(rm47,Data); tmp:1 = rm47 - Data; setNZflags(tmp); }
+ 
+ # CMP WRj,#data16
+-:CMP wrj47,Data16	is $(GROUP3) & ophi=11 & oplo=14; wrj47 & s03=4; Data16  { subflags(wrj47,Data16); tmp:2 = wrj47 - Data16; resultflags(tmp); }
++:CMP wrj47,Data16	is $(GROUP3) & ophi=11 & oplo=14; wrj47 & s03=4; Data16  { subflags(wrj47,Data16); tmp:2 = wrj47 - Data16; setNZflags(tmp); }
+ 
+ # CMP DRk,#0data16
+-:CMP drk47,Data16x0	is $(GROUP3) & ophi=11 & oplo=14; $(DRK47) & s03=8; Data16x0  { subflags(drk47,Data16x0); tmp:4 = drk47 - Data16x0; resultflags(tmp); }
++:CMP drk47,Data16x0	is $(GROUP3) & ophi=11 & oplo=14; $(DRK47) & s03=8; Data16x0  { subflags(drk47,Data16x0); tmp:4 = drk47 - Data16x0; setNZflags(tmp); }
+ 
+ # CMP DRk,#1data16
+-:CMP drk47,Data16x1	is $(GROUP3) & ophi=11 & oplo=14; $(DRK47) & s03=12; Data16x1  { subflags(drk47,Data16x1); tmp:4 = drk47 - Data16x1; resultflags(tmp); }
++:CMP drk47,Data16x1	is $(GROUP3) & ophi=11 & oplo=14; $(DRK47) & s03=12; Data16x1  { subflags(drk47,Data16x1); tmp:4 = drk47 - Data16x1; setNZflags(tmp); }
+ 
+ # CMP Rm,dir8
+-:CMP rm47,Direct	is $(GROUP3) & ophi=11 & oplo=14; rm47 & s03=1; Direct  { subflags(rm47,Direct); tmp:1 = rm47 - Direct; resultflags(tmp); }
++:CMP rm47,Direct	is $(GROUP3) & ophi=11 & oplo=14; rm47 & s03=1; Direct  { subflags(rm47,Direct); tmp:1 = rm47 - Direct; setNZflags(tmp); }
+ 
+ # CMP WRj,dir8
+-:CMP wrj47,Direct8w	is $(GROUP3) & ophi=11 & oplo=14; wrj47 & s03=5; Direct8w  { subflags(wrj47,Direct8w); tmp:2 = wrj47 - Direct8w; resultflags(tmp); }
++:CMP wrj47,Direct8w	is $(GROUP3) & ophi=11 & oplo=14; wrj47 & s03=5; Direct8w  { subflags(wrj47,Direct8w); tmp:2 = wrj47 - Direct8w; setNZflags(tmp); }
+ 
+ # CMP Rm,dir16
+-:CMP rm47,Direct16b	is $(GROUP3) & ophi=11 & oplo=14; rm47 & s03=3; Direct16b  { subflags(rm47,Direct16b); tmp:1 = rm47 - Direct16b; resultflags(tmp); }
++:CMP rm47,Direct16b	is $(GROUP3) & ophi=11 & oplo=14; rm47 & s03=3; Direct16b  { subflags(rm47,Direct16b); tmp:1 = rm47 - Direct16b; setNZflags(tmp); }
+ 
+ # CMP WRj,dir16
+-:CMP wrj47,Direct16w	is $(GROUP3) & ophi=11 & oplo=14; wrj47 & s03=7; Direct16w  { subflags(wrj47,Direct16w); tmp:2 = wrj47 - Direct16w; resultflags(tmp); }
++:CMP wrj47,Direct16w	is $(GROUP3) & ophi=11 & oplo=14; wrj47 & s03=7; Direct16w  { subflags(wrj47,Direct16w); tmp:2 = wrj47 - Direct16w; setNZflags(tmp); }
+ 
+ # CMP Rm,@WRj
+-:CMP rm47_,AtWRjb	is $(GROUP3) & ophi=11 & oplo=14; AtWRjb & s03=9; rm47_ & s03_=0   { subflags(rm47_,AtWRjb); tmp:1 = rm47_ - AtWRjb; resultflags(tmp); }
++:CMP rm47_,AtWRjb	is $(GROUP3) & ophi=11 & oplo=14; AtWRjb & s03=9; rm47_ & s03_=0   { subflags(rm47_,AtWRjb); tmp:1 = rm47_ - AtWRjb; setNZflags(tmp); }
+ 
+ # CMP Rm,@DRk
+-:CMP rm47_,AtDRkb	is $(GROUP3) & ophi=11 & oplo=14; $(ATDRK) & AtDRkb & s03=11; rm47_ & s03_=0   { subflags(rm47_,AtDRkb); tmp:1 = rm47_ - AtDRkb; resultflags(tmp); }
++:CMP rm47_,AtDRkb	is $(GROUP3) & ophi=11 & oplo=14; $(ATDRK) & AtDRkb & s03=11; rm47_ & s03_=0   { subflags(rm47_,AtDRkb); tmp:1 = rm47_ - AtDRkb; setNZflags(tmp); }
+ 
+ # CPL bit
+-:CPL xBitAddr  is $(GROUP3) & ophi=10 & oplo=9; (d47=11 & s3=0 & bit02; xBitByteAddr) & xBitAddr  { tmp:1 = ~(1<<bit02); xBitByteAddr = xBitByteAddr ^ tmp; resultflags(xBitByteAddr); }
++:CPL xBitAddr  is $(GROUP3) & ophi=10 & oplo=9; (d47=11 & s3=0 & bit02; xBitByteAddr) & xBitAddr  { tmp:1 = ~(1<<bit02); xBitByteAddr = xBitByteAddr ^ tmp; setNZflags(xBitByteAddr); }
+ 
+ # DEC Rm,#short
+ # NOTE: Encoding in manual conflicts with DEC WRj,#short (s23=1), modified for consistency with similar insrtuctions (e.g., DEC)
+-:DEC rm47,Short		is $(GROUP3) & ophi=1 & oplo=11; rm47 & s23=0 & $(SHORT)  { subflags(rm47,Short); rm47 = rm47 - Short; resultflags(rm47); }
++:DEC rm47,Short		is $(GROUP3) & ophi=1 & oplo=11; rm47 & s23=0 & $(SHORT)  { subflags(rm47,Short); rm47 = rm47 - Short; setNZflags(rm47); }
+ 
+ # DEC WRj,#short
+-:DEC wrj47,Short	is $(GROUP3) & ophi=1 & oplo=11; wrj47 & s23=1 & $(SHORT)  { val:2 = zext(Short); subflags(wrj47,val); wrj47 = wrj47 - val; resultflags(wrj47); }
++:DEC wrj47,Short	is $(GROUP3) & ophi=1 & oplo=11; wrj47 & s23=1 & $(SHORT)  { val:2 = zext(Short); subflags(wrj47,val); wrj47 = wrj47 - val; setNZflags(wrj47); }
+ 
+ # DEC DRk,#short
+-:DEC drk47,Short	is $(GROUP3) & ophi=1 & oplo=11; $(DRK47) & s23=3 & $(SHORT)  { val:4 = zext(Short); subflags(drk47,val); drk47 = drk47 - val; resultflags(drk47); }
++:DEC drk47,Short	is $(GROUP3) & ophi=1 & oplo=11; $(DRK47) & s23=3 & $(SHORT)  { val:4 = zext(Short); subflags(drk47,val); drk47 = drk47 - val; setNZflags(drk47); }
+ 
+ # DIV Rmd,Rms
+-:DIV rm47,rm03		is $(GROUP3) & ophi=8 & oplo=12; rm47 & rm47_d1 & rm47_d2 & rm03  { rm47_d2 = rm47 / rm03; rm47_d1 = rm47 % rm03; resultflags(rm47_d2); }
++:DIV rm47,rm03		is $(GROUP3) & ophi=8 & oplo=12; rm47 & rm47_d1 & rm47_d2 & rm03  { rm47_d2 = rm47 / rm03; rm47_d1 = rm47 % rm03; setNZflags(rm47_d2); }
+ 
+ # DIV WRjd,WRjs
+-:DIV wrj47,wrj03	is $(GROUP3) & ophi=8 & oplo=13; wrj47 & wrj47_d1 & wrj47_d2 & wrj03  { wrj47_d2 = wrj47 / wrj03; wrj47_d1 = wrj47 % wrj03; resultflags(wrj47_d2); }
++:DIV wrj47,wrj03	is $(GROUP3) & ophi=8 & oplo=13; wrj47 & wrj47_d1 & wrj47_d2 & wrj03  { wrj47_d2 = wrj47 / wrj03; wrj47_d1 = wrj47 % wrj03; setNZflags(wrj47_d2); }
+ 
+ # ECALL addr24
+ :ECALL Addr24		is $(GROUP3) & ophi=9 & oplo=10; Addr24	{ ptr:3 = inst_next; push24(ptr); call Addr24; }
+@@ -334,13 +336,13 @@ macro pop24(val) {
+ :ERET 	is $(GROUP3) & ophi=10 & oplo=10  { pc:3 = 0; pop24(pc); return [pc]; }
+ 
+ # INC Rm,#short
+-:INC rm47,Short	is $(GROUP3) & ophi=0 & oplo=11; rm47 & s23=0 & $(SHORT)  { addflags(rm47,Short); rm47 = rm47 + Short; resultflags(rm47); }
++:INC rm47,Short	is $(GROUP3) & ophi=0 & oplo=11; rm47 & s23=0 & $(SHORT)  { addflags(rm47,Short); rm47 = rm47 + Short; setNZflags(rm47); }
+ 
+ # INC WRj,#short
+-:INC wrj47,Short	is $(GROUP3) & ophi=0 & oplo=11; wrj47 & s23=1 & $(SHORT)  { val:2 = zext(Short); addflags(wrj47,val); wrj47 = wrj47 + val; resultflags(wrj47); }
++:INC wrj47,Short	is $(GROUP3) & ophi=0 & oplo=11; wrj47 & s23=1 & $(SHORT)  { val:2 = zext(Short); addflags(wrj47,val); wrj47 = wrj47 + val; setNZflags(wrj47); }
+ 
+ # INC DRk,#short
+-:INC drk47,Short	is $(GROUP3) & ophi=0 & oplo=11; $(DRK47) & s23=3 & $(SHORT)  { val:4 = zext(Short); addflags(drk47,val); drk47 = drk47 + val; resultflags(drk47); }
++:INC drk47,Short	is $(GROUP3) & ophi=0 & oplo=11; $(DRK47) & s23=3 & $(SHORT)  { val:4 = zext(Short); addflags(drk47,val); drk47 = drk47 + val; setNZflags(drk47); }
+ 
+ # JB bit,rel
+ :JB xBitAddr,Rel8	is $(GROUP3) & ophi=10 & oplo=9; (d47=2 & s3=0 & bit02; xBitByteAddr) & xBitAddr; Rel8	{ if (((xBitByteAddr>>bit02)&1) == 1:1) goto Rel8; }
+@@ -514,34 +516,34 @@ macro pop24(val) {
+ :MUL wrj47,wrj03	is $(GROUP3) & ophi=10 & oplo=13; wrj47 & wrj03 & wrj47_d1 & wrj47_d2  { result:4 = zext(wrj47) * zext(wrj03); tmp:4 = result>>16; wrj47_d1 = tmp:2; wrj47_d2 = result:2; }
+ 
+ # ORL Rmd,Rms
+-:ORL rm47,rm03	is $(GROUP3) & ophi=4 & oplo=12; rm47 & rm03  { rm47 = rm47 | rm03; resultflags(rm47); }
++:ORL rm47,rm03	is $(GROUP3) & ophi=4 & oplo=12; rm47 & rm03  { rm47 = rm47 | rm03; setNZflags(rm47); }
+ 
+ # ORL WRjd,WRjs
+-:ORL wrj47,wrj03	is $(GROUP3) & ophi=4 & oplo=13; wrj47 & wrj03  { wrj47 = wrj47 | wrj03; resultflags(wrj47); }
++:ORL wrj47,wrj03	is $(GROUP3) & ophi=4 & oplo=13; wrj47 & wrj03  { wrj47 = wrj47 | wrj03; setNZflags(wrj47); }
+ 
+ # ORL Rm,#data
+-:ORL rm47,Data	is $(GROUP3) & ophi=4 & oplo=14; rm47 & s03=0; Data    { rm47 = rm47 | Data; resultflags(rm47); }
++:ORL rm47,Data	is $(GROUP3) & ophi=4 & oplo=14; rm47 & s03=0; Data    { rm47 = rm47 | Data; setNZflags(rm47); }
+ 
+ # ORL WRj,#data16
+-:ORL wrj47,Data16	is $(GROUP3) & ophi=4 & oplo=14; wrj47 & s03=4; Data16  { wrj47 = wrj47 | Data16; resultflags(wrj47); }
++:ORL wrj47,Data16	is $(GROUP3) & ophi=4 & oplo=14; wrj47 & s03=4; Data16  { wrj47 = wrj47 | Data16; setNZflags(wrj47); }
+ 
+ # ORL Rm,dir8
+-:ORL rm47,Direct	is $(GROUP3) & ophi=4 & oplo=14; rm47 & s03=1; Direct  { rm47 = rm47 | Direct; resultflags(rm47); }
++:ORL rm47,Direct	is $(GROUP3) & ophi=4 & oplo=14; rm47 & s03=1; Direct  { rm47 = rm47 | Direct; setNZflags(rm47); }
+ 
+ # ORL WRj,dir8
+-:ORL wrj47,Direct8w	is $(GROUP3) & ophi=4 & oplo=15; wrj47 & s03=5; Direct8w  { wrj47 = wrj47 | Direct8w; resultflags(wrj47); }
++:ORL wrj47,Direct8w	is $(GROUP3) & ophi=4 & oplo=15; wrj47 & s03=5; Direct8w  { wrj47 = wrj47 | Direct8w; setNZflags(wrj47); }
+ 
+ # ORL Rm,dir16
+-:ORL rm47,Direct16b	is $(GROUP3) & ophi=4 & oplo=14; rm47 & s03=3; Direct16b  { rm47 = rm47 | Direct16b; resultflags(rm47); }
++:ORL rm47,Direct16b	is $(GROUP3) & ophi=4 & oplo=14; rm47 & s03=3; Direct16b  { rm47 = rm47 | Direct16b; setNZflags(rm47); }
+ 
+ # ORL WRj,dir16
+-:ORL wrj47,Direct16w	is $(GROUP3) & ophi=4 & oplo=14; wrj47 & s03=7; Direct16w  { wrj47 = wrj47 | Direct16w; resultflags(wrj47); }
++:ORL wrj47,Direct16w	is $(GROUP3) & ophi=4 & oplo=14; wrj47 & s03=7; Direct16w  { wrj47 = wrj47 | Direct16w; setNZflags(wrj47); }
+ 
+ # ORL Rm,@WRj
+-:ORL rm47_,AtWRjb	is $(GROUP3) & ophi=4 & oplo=14; AtWRjb & s03=9; rm47_ & s03_=0   { rm47_ = rm47_ | AtWRjb; resultflags(rm47_); }
++:ORL rm47_,AtWRjb	is $(GROUP3) & ophi=4 & oplo=14; AtWRjb & s03=9; rm47_ & s03_=0   { rm47_ = rm47_ | AtWRjb; setNZflags(rm47_); }
+ 
+ # ORL Rm,@DRk
+-:ORL rm47_,AtDRkb	is $(GROUP3) & ophi=4 & oplo=14; $(ATDRK) & AtDRkb & s03=11; rm47_ & s03_=0  { rm47_ = rm47_ | AtDRkb; resultflags(rm47_); }
++:ORL rm47_,AtDRkb	is $(GROUP3) & ophi=4 & oplo=14; $(ATDRK) & AtDRkb & s03=11; rm47_ & s03_=0  { rm47_ = rm47_ | AtDRkb; setNZflags(rm47_); }
+ 
+ # ORL C,bit
+ :ORL "CY",xBitAddr	is $(GROUP3) & ophi=10 & oplo=9; (d47=7 & s3=0 & bit02; xBitByteAddr) & xBitAddr { $(CY) = ((xBitByteAddr>>bit02)&1) | $(CY); }
+@@ -578,87 +580,89 @@ macro pop24(val) {
+ :SETB xBitAddr^"."^xBitByteAddr   is $(GROUP3) & ophi=10 & oplo=9; (d47=13 & s3=0 & bit02; xBitByteAddr) & xBitAddr { xBitByteAddr = (xBitByteAddr) | (1 << bit02); }
+ 
+ # SLL Rm
+-:SLL rm47	is $(GROUP3) & ophi=3 & oplo=14; rm47 & s03=0  { $(CY) = ((rm47>>7) & 1); rm47 = rm47 << 1; resultflags(rm47); }
++:SLL rm47	is $(GROUP3) & ophi=3 & oplo=14; rm47 & s03=0  { $(CY) = ((rm47>>7) & 1); rm47 = rm47 << 1; setNZflags(rm47); }
+ 
+ # SLL WRj
+-:SLL wrj47	is $(GROUP3) & ophi=3 & oplo=14; wrj47 & s03=4  { $(CY) = ((wrj47>>15) & 1) == 1; wrj47 = wrj47 << 1; resultflags(wrj47); }
++:SLL wrj47	is $(GROUP3) & ophi=3 & oplo=14; wrj47 & s03=4  { $(CY) = ((wrj47>>15) & 1) == 1; wrj47 = wrj47 << 1; setNZflags(wrj47); }
+ 
+ # SRA Rm
+-:SRA rm47	is $(GROUP3) & ophi=0 & oplo=14; rm47 & s03=0  { $(CY) = rm47 & 1; rm47 = rm47 s>> 1; resultflags(rm47); }
++:SRA rm47	is $(GROUP3) & ophi=0 & oplo=14; rm47 & s03=0  { $(CY) = rm47 & 1; rm47 = rm47 s>> 1; setNZflags(rm47); }
+ 
+ # SRA WRj
+-:SRA wrj47	is $(GROUP3) & ophi=0 & oplo=14; wrj47 & s03=4  { $(CY) = (wrj47 & 1) == 1; wrj47 = wrj47 s>> 1; resultflags(wrj47); }
++:SRA wrj47	is $(GROUP3) & ophi=0 & oplo=14; wrj47 & s03=4  { $(CY) = (wrj47 & 1) == 1; wrj47 = wrj47 s>> 1; setNZflags(wrj47); }
+ 
+ # SRL Rm
+-:SRL rm47	is $(GROUP3) & ophi=1 & oplo=14; rm47 & s03=0  { $(CY) = rm47 & 1; rm47 = rm47 >> 1; resultflags(rm47); }
++:SRL rm47	is $(GROUP3) & ophi=1 & oplo=14; rm47 & s03=0  { $(CY) = rm47 & 1; rm47 = rm47 >> 1; setNZflags(rm47); }
+ 
+ # SRL WRj
+-:SRL wrj47	is $(GROUP3) & ophi=1 & oplo=14; wrj47 & s03=4  { $(CY) = (wrj47 & 1) == 1; wrj47 = wrj47 >> 1; resultflags(wrj47); }
++:SRL wrj47	is $(GROUP3) & ophi=1 & oplo=14; wrj47 & s03=4  { $(CY) = (wrj47 & 1) == 1; wrj47 = wrj47 >> 1; setNZflags(wrj47); }
+ 
+ 
+ # SUB Rmd,Rms
+-:SUB rm47,rm03	is $(GROUP3) & ophi=9 & oplo=12; rm47 & rm03  { subflags(rm47,rm03); rm47 = rm47 - rm03; resultflags(rm47); }
++:SUB rm47,rm03	is $(GROUP3) & ophi=9 & oplo=12; rm47 & rm03  { subflags(rm47,rm03); rm47 = rm47 - rm03; setNZflags(rm47); }
+ 
+ # SUB WRjd,WRjs
+-:SUB wrj47,wrj03	is $(GROUP3) & ophi=9 & oplo=13; wrj47 & wrj03  { subflags(wrj47,wrj03); wrj47 = wrj47 - wrj03; resultflags(wrj47); }
++:SUB wrj47,wrj03	is $(GROUP3) & ophi=9 & oplo=13; wrj47 & wrj03  { subflags(wrj47,wrj03); wrj47 = wrj47 - wrj03; setNZflags(wrj47); }
+ 
+ # SUB DRkd,DRks
+-:SUB drk47,drk03  is $(GROUP3) & ophi=9 & oplo=15; $(DRK47) & $(DRK03)   { subflags(drk47,drk03); drk47 = drk47 - drk03; resultflags(drk47);}
++:SUB drk47,drk03  is $(GROUP3) & ophi=9 & oplo=15; $(DRK47) & $(DRK03)   { subflags(drk47,drk03); drk47 = drk47 - drk03; setNZflags(drk47);}
+ 
+ # SUB Rm,#data
+-:SUB rm47,Data	is $(GROUP3) & ophi=9 & oplo=14; rm47 & s03=0; Data    { subflags(rm47,Data); rm47 = rm47 - Data; resultflags(rm47);}
++:SUB rm47,Data	is $(GROUP3) & ophi=9 & oplo=14; rm47 & s03=0; Data    { subflags(rm47,Data); rm47 = rm47 - Data; setNZflags(rm47);}
+ 
+ # SUB WRj,#data16
+-:SUB wrj47,Data16	is $(GROUP3) & ophi=9 & oplo=14; wrj47 & s03=4; Data16  { subflags(wrj47,Data16); wrj47 = wrj47 - Data16; resultflags(wrj47);}
++:SUB wrj47,Data16	is $(GROUP3) & ophi=9 & oplo=14; wrj47 & s03=4; Data16  { subflags(wrj47,Data16); wrj47 = wrj47 - Data16; setNZflags(wrj47);}
+ 
+ # SUB DRk,#data16
+-:SUB drk47,Data16x0	is $(GROUP3) & ophi=9 & oplo=14; $(DRK47) & s03=8; Data16x0  { subflags(drk47,Data16x0); drk47 = drk47 - Data16x0; resultflags(drk47);}
++:SUB drk47,Data16x0	is $(GROUP3) & ophi=9 & oplo=14; $(DRK47) & s03=8; Data16x0  { subflags(drk47,Data16x0); drk47 = drk47 - Data16x0; setNZflags(drk47);}
+ 
+ # SUB Rm,dir8
+-:SUB rm47,Direct	is $(GROUP3) & ophi=9 & oplo=14; rm47 & s03=1; Direct  { subflags(rm47,Direct); rm47 = rm47 - Direct; resultflags(rm47);}
++:SUB rm47,Direct	is $(GROUP3) & ophi=9 & oplo=14; rm47 & s03=1; Direct  { subflags(rm47,Direct); rm47 = rm47 - Direct; setNZflags(rm47);}
+ 
+ # SUB WRj,dir8
+-:SUB wrj47,Direct8w	is $(GROUP3) & ophi=9 & oplo=14; wrj47 & s03=5; Direct8w  { subflags(wrj47,Direct8w); wrj47 = wrj47 - Direct8w; resultflags(wrj47);}
++:SUB wrj47,Direct8w	is $(GROUP3) & ophi=9 & oplo=14; wrj47 & s03=5; Direct8w  { subflags(wrj47,Direct8w); wrj47 = wrj47 - Direct8w; setNZflags(wrj47);}
+ 
+ # SUB Rm,dir16
+-:SUB rm47,Direct16b	is $(GROUP3) & ophi=9 & oplo=14; rm47 & s03=3; Direct16b  { subflags(rm47,Direct16b); rm47 = rm47 - Direct16b; resultflags(rm47);}
++:SUB rm47,Direct16b	is $(GROUP3) & ophi=9 & oplo=14; rm47 & s03=3; Direct16b  { subflags(rm47,Direct16b); rm47 = rm47 - Direct16b; setNZflags(rm47);}
+ 
+ # SUB WRj,dir16
+-:SUB wrj47,Direct16w	is $(GROUP3) & ophi=9 & oplo=14; wrj47 & s03=7; Direct16w  { subflags(wrj47,Direct16w); wrj47 = wrj47 - Direct16w; resultflags(wrj47);}
++:SUB wrj47,Direct16w	is $(GROUP3) & ophi=9 & oplo=14; wrj47 & s03=7; Direct16w  { subflags(wrj47,Direct16w); wrj47 = wrj47 - Direct16w; setNZflags(wrj47);}
+ 
+ # SUB Rm,@WRj
+-:SUB rm47_,AtWRjb	is $(GROUP3) & ophi=9 & oplo=14; AtWRjb & s03=9; rm47_ & s03_=0   { subflags(rm47_,AtWRjb); rm47_ = rm47_ - AtWRjb; resultflags(rm47_);}
++:SUB rm47_,AtWRjb	is $(GROUP3) & ophi=9 & oplo=14; AtWRjb & s03=9; rm47_ & s03_=0   { subflags(rm47_,AtWRjb); rm47_ = rm47_ - AtWRjb; setNZflags(rm47_);}
+ 
+ # SUB Rm,@DRk
+-:SUB rm47_,AtDRkb	is $(GROUP3) & ophi=9 & oplo=14; $(ATDRK) & AtDRkb & s03=11; rm47_ & s03_=0  { subflags(rm47_,AtDRkb); rm47_ = rm47_ - AtDRkb; resultflags(rm47_);}
++:SUB rm47_,AtDRkb	is $(GROUP3) & ophi=9 & oplo=14; $(ATDRK) & AtDRkb & s03=11; rm47_ & s03_=0  { subflags(rm47_,AtDRkb); rm47_ = rm47_ - AtDRkb; setNZflags(rm47_);}
+ 
+ 
+ # XRL Rmd,Rms
+-:XRL rm47,rm03	is $(GROUP3) & ophi=6 & oplo=12; rm47 & rm03  { rm47 = rm47 ^ rm03; resultflags(rm47); }
++:XRL rm47,rm03	is $(GROUP3) & ophi=6 & oplo=12; rm47 & rm03  { rm47 = rm47 ^ rm03; setNZflags(rm47); }
+ 
+ # XRL WRjd,WRjs
+-:XRL wrj47,wrj03	is $(GROUP3) & ophi=6 & oplo=13; wrj47 & wrj03  { wrj47 = wrj47 ^ wrj03; resultflags(wrj47); }
++:XRL wrj47,wrj03	is $(GROUP3) & ophi=6 & oplo=13; wrj47 & wrj03  { wrj47 = wrj47 ^ wrj03; setNZflags(wrj47); }
+ 
+ # XRL Rm,#data
+-:XRL rm47,Data	is $(GROUP3) & ophi=6 & oplo=14; rm47 & s03=0; Data    { rm47 = rm47 ^ Data; resultflags(rm47); }
++:XRL rm47,Data	is $(GROUP3) & ophi=6 & oplo=14; rm47 & s03=0; Data    { rm47 = rm47 ^ Data; setNZflags(rm47); }
+ 
+ # XRL WRj,#data16
+-:XRL wrj47,Data16	is $(GROUP3) & ophi=6 & oplo=14; wrj47 & s03=4; Data16  { wrj47 = wrj47 ^ Data16; resultflags(wrj47); }
++:XRL wrj47,Data16	is $(GROUP3) & ophi=6 & oplo=14; wrj47 & s03=4; Data16  { wrj47 = wrj47 ^ Data16; setNZflags(wrj47); }
+ 
+ # XRL Rm,dir8
+-:XRL rm47,Direct	is $(GROUP3) & ophi=6 & oplo=14; rm47 & s03=1; Direct  { rm47 = rm47 ^ Direct; resultflags(rm47); }
++:XRL rm47,Direct	is $(GROUP3) & ophi=6 & oplo=14; rm47 & s03=1; Direct  { rm47 = rm47 ^ Direct; setNZflags(rm47); }
+ 
+ # XRL WRj,dir8
+-:XRL wrj47,Direct8w	is $(GROUP3) & ophi=6 & oplo=14; wrj47 & s03=5; Direct8w  { wrj47 = wrj47 ^ Direct8w; resultflags(wrj47); }
++:XRL wrj47,Direct8w	is $(GROUP3) & ophi=6 & oplo=14; wrj47 & s03=5; Direct8w  { wrj47 = wrj47 ^ Direct8w; setNZflags(wrj47); }
+ 
+ # XRL Rm,dir16
+-:XRL rm47,Direct16b	is $(GROUP3) & ophi=6 & oplo=14; rm47 & s03=3; Direct16b  { rm47 = rm47 ^ Direct16b; resultflags(rm47); }
++:XRL rm47,Direct16b	is $(GROUP3) & ophi=6 & oplo=14; rm47 & s03=3; Direct16b  { rm47 = rm47 ^ Direct16b; setNZflags(rm47); }
+ 
+ # XRL WRj,dir16
+-:XRL wrj47,Direct16w	is $(GROUP3) & ophi=6 & oplo=14; wrj47 & s03=7; Direct16w  { wrj47 = wrj47 ^ Direct16w; resultflags(wrj47); }
++:XRL wrj47,Direct16w	is $(GROUP3) & ophi=6 & oplo=14; wrj47 & s03=7; Direct16w  { wrj47 = wrj47 ^ Direct16w; setNZflags(wrj47); }
+ 
+ # XRL Rm,@Wrj
+-:XRL rm47_,AtWRjb	is $(GROUP3) & ophi=6 & oplo=14; AtWRjb & s03=9; rm47_ & s03_=0   { rm47_ = rm47_ ^ AtWRjb; resultflags(rm47_); }
++:XRL rm47_,AtWRjb	is $(GROUP3) & ophi=6 & oplo=14; AtWRjb & s03=9; rm47_ & s03_=0   { rm47_ = rm47_ ^ AtWRjb; setNZflags(rm47_); }
+ 
+ # XRL Rm,@Drk
+-:XRL rm47_,AtDRkb	is $(GROUP3) & ophi=6 & oplo=14; $(ATDRK) & AtDRkb & s03=11; rm47_ & s03_=0  { rm47_ = rm47_ ^ AtDRkb; resultflags(rm47_); }
++:XRL rm47_,AtDRkb	is $(GROUP3) & ophi=6 & oplo=14; $(ATDRK) & AtDRkb & s03=11; rm47_ & s03_=0  { rm47_ = rm47_ ^ AtDRkb; setNZflags(rm47_); }
++
++}
+diff --git a/Ghidra/Processors/8051/data/languages/8051_main.sinc b/Ghidra/Processors/8051/data/languages/8051_main.sinc
+index 1a75612fd7..bf579be20e 100644
+--- a/Ghidra/Processors/8051/data/languages/8051_main.sinc
++++ b/Ghidra/Processors/8051/data/languages/8051_main.sinc
+@@ -8,7 +8,7 @@
+ # restoring of the return value for function calls.
+ #@define OMIT_RETADDR
+ 
+-# TODO !!! need to fully employ resultflags macro after resolving the use of the above BIT_OPS !!!
++# TODO !!! need to fully employ setNZflags macro after resolving the use of the above BIT_OPS !!!
+ # TODO !!! Need to reconcile use of PSW vs. PSW1 for MCS251 !!!
+ # TODO !!! Need to fill-out SFR bits in 80251.pspec !!!
+ 
+@@ -212,11 +212,11 @@ define register offset=$(DPS_REG_NUM) size=1 [ AUXR1 ]; # Bit 0 is DPS
+ 
+ @define CY 		"PSW[7,1]"
+ @define AC  	"PSW[6,1]"
+-@define N   	"PSW[5,1]"
++@define N   	"PSW[5,1]"   # MCS-251 PSW1.5 negative flag, mapped onto the 8051 user flag PSW.F0
+ @define RS1  	"PSW[4,1]"
+ @define RS0  	"PSW[3,1]"
+ @define OV		"PSW[2,1]"
+-@define Z  		"PSW[1,1]"
++@define Z  		"PSW[1,1]"   # MCS-251 PSW1.1 zero flag, mapped onto the 8051 user-definable PSW.UD
+ 
+ @if defined(MX51)
+ # remap these into the normal register file for decompiler use.
+@@ -394,9 +394,11 @@ macro compflags(op1, op2) {  # Flags set by the compare instructions
+ $(CY) = (op1 < op2);        # Check for carry
+ }
+ 
+-macro resultflags(op1) { # Set N,Z flag for results
+- $(N) = op1 s< 0;
+- $(Z) = op1 == 0;
++macro setNZflags(op1) { # Set the MCS-251 N,Z result flags; the 8051 has neither
++@if defined(MCS251)
++ $(N) = op1 s< 0;   # PSW1.5 mapped onto PSW.F0
++ $(Z) = op1 == 0;   # PSW1.1 mapped onto PSW.UD
++@endif
+ }
+ 
+ macro push8(val) {
+@@ -696,6 +698,8 @@ Rel16:   relAddr is rel16		     [ relAddr=inst_next+rel16; ] { export *:1 relAdd
+ # detect A5 prefix
+ :^instruction	is phase=0 & ophi=0xa & oplo=0x5; instruction [ phase=1; A5Prefix=1; ] { }
+ :^instruction	is phase=0 & instruction [ phase=1; A5Prefix=0; ] { }
++
++with: phase=1 {
+ @endif
+ 
+ @if defined(MCS80390)
+@@ -704,15 +708,15 @@ Rel16:   relAddr is rel16		     [ relAddr=inst_next+rel16; ] { export *:1 relAdd
+ :ACALL  Addr11 is  $(GROUP1) & aaddrfill=1 & aoplo=1 & Addr11   { ret:2 = inst_next; push16(ret); call Addr11; }
+ @endif
+ 
+-:ADD Areg,rn      is $(GROUP2) & ophi=2          & Areg & rnfill=1 & rn 	 { addflags(ACC,rn); ACC = ACC + rn; resultflags(ACC); }
+-:ADD Areg,Direct  is $(GROUP1) & ophi=2 & oplo=5 & Areg; Direct  { addflags(ACC,Direct); ACC = ACC + Direct; resultflags(ACC); }
+-:ADD Areg,Ri      is $(GROUP2) & ophi=2          & Areg & rifill=3 & Ri	 { addflags(ACC,Ri); ACC = ACC + Ri; resultflags(ACC); }
+-:ADD Areg,Data    is $(GROUP1) & ophi=2 & oplo=4 & Areg; Data    { addflags(ACC,Data); ACC = ACC + Data; resultflags(ACC); }
++:ADD Areg,rn      is $(GROUP2) & ophi=2          & Areg & rnfill=1 & rn 	 { addflags(ACC,rn); ACC = ACC + rn; setNZflags(ACC); }
++:ADD Areg,Direct  is $(GROUP1) & ophi=2 & oplo=5 & Areg; Direct  { addflags(ACC,Direct); ACC = ACC + Direct; setNZflags(ACC); }
++:ADD Areg,Ri      is $(GROUP2) & ophi=2          & Areg & rifill=3 & Ri	 { addflags(ACC,Ri); ACC = ACC + Ri; setNZflags(ACC); }
++:ADD Areg,Data    is $(GROUP1) & ophi=2 & oplo=4 & Areg; Data    { addflags(ACC,Data); ACC = ACC + Data; setNZflags(ACC); }
+ 
+-:ADDC Areg,rn     is $(GROUP2) & ophi=3          & Areg & rnfill=1 & rn	   { tmp:1 =$(CY)+ rn; addflags(ACC,tmp); ACC = ACC + tmp; resultflags(ACC); }
+-:ADDC Areg,Direct is $(GROUP1) & ophi=3 & oplo=5 & Areg; Direct    { tmp:1 =$(CY)+ Direct; addflags(ACC,tmp); ACC = ACC + tmp; resultflags(ACC); }
+-:ADDC Areg,Ri     is $(GROUP2) & ophi=3          & Areg & rifill=3 & Ri	   { tmp:1 =$(CY)+ Ri; addflags(ACC,tmp); ACC = ACC + tmp; resultflags(ACC); }
+-:ADDC Areg,Data   is $(GROUP1) & ophi=3 & oplo=4 & Areg; Data      {  tmp:1 =$(CY)+ Data; addflags(ACC,tmp); ACC = ACC + tmp; resultflags(ACC); }
++:ADDC Areg,rn     is $(GROUP2) & ophi=3          & Areg & rnfill=1 & rn	   { tmp:1 =$(CY)+ rn; addflags(ACC,tmp); ACC = ACC + tmp; setNZflags(ACC); }
++:ADDC Areg,Direct is $(GROUP1) & ophi=3 & oplo=5 & Areg; Direct    { tmp:1 =$(CY)+ Direct; addflags(ACC,tmp); ACC = ACC + tmp; setNZflags(ACC); }
++:ADDC Areg,Ri     is $(GROUP2) & ophi=3          & Areg & rifill=3 & Ri	   { tmp:1 =$(CY)+ Ri; addflags(ACC,tmp); ACC = ACC + tmp; setNZflags(ACC); }
++:ADDC Areg,Data   is $(GROUP1) & ophi=3 & oplo=4 & Areg; Data      {  tmp:1 =$(CY)+ Data; addflags(ACC,tmp); ACC = ACC + tmp; setNZflags(ACC); }
+ 
+ #TODO: which GROUP does AJMP belong to ??
+ @if defined(MCS80390)
+@@ -721,14 +725,14 @@ Rel16:   relAddr is rel16		     [ relAddr=inst_next+rel16; ] { export *:1 relAdd
+ :AJMP Addr11 is  $(GROUP1) & aaddrfill=0 & aoplo=1 & Addr11			 { goto Addr11; }
+ @endif
+ 
+-:ANL Areg,rn     is $(GROUP2) & ophi=5 & Areg & rnfill=1 & rn					 { ACC = ACC & rn; resultflags(ACC); }
+-:ANL Areg,Direct is $(GROUP1) & ophi=5 & oplo=5 & Areg; Direct		 { ACC = ACC & Direct; resultflags(ACC); }
+-:ANL Areg,Ri     is $(GROUP2) & ophi=5 & Areg & rifill=3 & Ri					 { ACC = ACC & Ri; resultflags(ACC); }
+-:ANL Areg,Data   is $(GROUP1) & ophi=5 & oplo=4 & Areg; Data		 { ACC = ACC & Data; resultflags(ACC); }
+-:ANL Direct,Areg is $(GROUP1) & ophi=5 & oplo=2 & Areg; Direct		 { tmp:1 = Direct & ACC; Direct = tmp; resultflags(tmp); }
+-:ANL Direct,Data is $(GROUP1) & ophi=5 & oplo=3; Direct; Data		 { tmp:1 = Direct & Data; Direct = tmp; resultflags(tmp); }
++:ANL Areg,rn     is $(GROUP2) & ophi=5 & Areg & rnfill=1 & rn					 { ACC = ACC & rn; setNZflags(ACC); }
++:ANL Areg,Direct is $(GROUP1) & ophi=5 & oplo=5 & Areg; Direct		 { ACC = ACC & Direct; setNZflags(ACC); }
++:ANL Areg,Ri     is $(GROUP2) & ophi=5 & Areg & rifill=3 & Ri					 { ACC = ACC & Ri; setNZflags(ACC); }
++:ANL Areg,Data   is $(GROUP1) & ophi=5 & oplo=4 & Areg; Data		 { ACC = ACC & Data; setNZflags(ACC); }
++:ANL Direct,Areg is $(GROUP1) & ophi=5 & oplo=2 & Areg; Direct		 { tmp:1 = Direct & ACC; Direct = tmp; setNZflags(tmp); }
++:ANL Direct,Data is $(GROUP1) & ophi=5 & oplo=3; Direct; Data		 { tmp:1 = Direct & Data; Direct = tmp; setNZflags(tmp); }
+ 
+-:ANL CY,BitAddr   is $(GROUP1) & CY & ophi=8  & oplo=2; BitAddr  & bitaddr57=7 & sfrbit3=0 & sfrbit & BitByteAddr {tmp:1 = BitByteAddr; $(CY)=$(CY)& ((tmp>>sfrbit)&1); resultflags(tmp); }
++:ANL CY,BitAddr   is $(GROUP1) & CY & ophi=8  & oplo=2; BitAddr  & bitaddr57=7 & sfrbit3=0 & sfrbit & BitByteAddr {tmp:1 = BitByteAddr; $(CY)=$(CY)& ((tmp>>sfrbit)&1); setNZflags(tmp); }
+ :ANL CY,BitAddr2  is $(GROUP1) & CY & ophi=11 & oplo=0; BitAddr2 & bitaddr57=7 & sfrbit3=0 & sfrbit & BitByteAddr {tmp:1 = BitByteAddr; $(CY)=$(CY)& (~((tmp>>sfrbit)&1));  }
+ @if BIT_OPS == "BIT_ADDRS"
+ :ANL CY,BitAddr   is $(GROUP1) & CY & ophi=8  & oplo=2; BitAddr  & sfrbit & BitByteAddr {$(CY)=$(CY)& BitAddr; }
+@@ -966,3 +970,7 @@ pc:3 = 0; pop24(pc); return[pc];
+ :XRL Direct,Areg is $(GROUP1) & ophi=6 & oplo=2 & Areg; Direct	{ Direct = Direct ^ ACC; }
+ :XRL Direct,Data is $(GROUP1) & ophi=6 & oplo=3; Direct; Data	{ Direct = Direct ^ Data; }
+ 
++
++@if defined(MCS251)
++}
++@endif
+diff --git a/Ghidra/Processors/8051/data/languages/mx51.sinc b/Ghidra/Processors/8051/data/languages/mx51.sinc
+index 9279c1e5fc..d4c74d3505 100644
+--- a/Ghidra/Processors/8051/data/languages/mx51.sinc
++++ b/Ghidra/Processors/8051/data/languages/mx51.sinc
+@@ -88,16 +88,16 @@ EBitByteAddr: byteaddr 	is bitbank=0 & lowbyte & sfrbit [ byteaddr = lowbyte + 0
+   EDirect = EDirect - 1;
+ }
+ :add Areg,EDirect is opfull=0xa5; opfull=0x25 & Areg; EDirect { 
+-  addflags(ACC,EDirect); ACC = ACC + EDirect; resultflags(ACC);
++  addflags(ACC,EDirect); ACC = ACC + EDirect; setNZflags(ACC);
+ }
+ :addc Areg,EDirect is opfull=0xa5; opfull=0x35 & Areg; EDirect { 
+-  tmp:1 =$(CY)+ EDirect; addflags(ACC,tmp); ACC = ACC + tmp; resultflags(ACC);
++  tmp:1 =$(CY)+ EDirect; addflags(ACC,tmp); ACC = ACC + tmp; setNZflags(ACC);
+ }
+ :orl Areg,EDirect is opfull=0xa5; opfull=0x45 & Areg; EDirect { 
+   ACC = ACC | EDirect;
+ }
+ :anl Areg,EDirect is opfull=0xa5; opfull=0x55 & Areg; EDirect { 
+-  ACC = ACC & EDirect; resultflags(ACC); 
++  ACC = ACC & EDirect; setNZflags(ACC);
+ }
+ :xrl Areg,EDirect is opfull=0xa5; opfull=0x65 & Areg; EDirect { 
+   ACC = ACC ^ EDirect;
+@@ -136,7 +136,7 @@ EBitByteAddr: byteaddr 	is bitbank=0 & lowbyte & sfrbit [ byteaddr = lowbyte + 0
+   EDirect = EDirect | ACC; 
+ }
+ :anl EDirect,Areg is opfull=0xa5; ophi=5 & oplo=2 & Areg; EDirect { 
+-  tmp:1 = EDirect & ACC; EDirect = tmp; resultflags(tmp); 
++  tmp:1 = EDirect & ACC; EDirect = tmp; setNZflags(tmp);
+ }
+ :xrl EDirect,Areg is opfull=0xa5; ophi=6 & oplo=2 & Areg; EDirect { 
+   EDirect = EDirect ^ ACC; 
+@@ -145,7 +145,7 @@ EBitByteAddr: byteaddr 	is bitbank=0 & lowbyte & sfrbit [ byteaddr = lowbyte + 0
+   EDirect = EDirect ^ Data; 
+ }
+ :anl EDirect,Data is opfull=0xa5; ophi=5 & oplo=3; EDirect; Data  { 
+-  tmp:1 = EDirect & Data; EDirect = tmp; resultflags(tmp); 
++  tmp:1 = EDirect & Data; EDirect = tmp; setNZflags(tmp);
+ }
+ :orl EDirect,Data is opfull=0xa5; ophi=4 & oplo=3 & Areg; EDirect; Data { 
+   EDirect = EDirect | Data; 
+@@ -218,7 +218,7 @@ EBitByteAddr: byteaddr 	is bitbank=0 & lowbyte & sfrbit [ byteaddr = lowbyte + 0
+ }
+ 
+ # bit operations
+-:anl CY,EBitAddr   is opfull=0xa5; CY & ophi=8  & oplo=2; EBitAddr  & bitaddr57=7 & sfrbit3=0 & sfrbit & EBitByteAddr {tmp:1 = EBitByteAddr; $(CY)=$(CY)& ((tmp>>sfrbit)&1); resultflags(tmp); }
++:anl CY,EBitAddr   is opfull=0xa5; CY & ophi=8  & oplo=2; EBitAddr  & bitaddr57=7 & sfrbit3=0 & sfrbit & EBitByteAddr {tmp:1 = EBitByteAddr; $(CY)=$(CY)& ((tmp>>sfrbit)&1); setNZflags(tmp); }
+ :anl CY,EBitAddr2  is opfull=0xa5; CY & ophi=11 & oplo=0; EBitAddr2 & bitaddr57=7 & sfrbit3=0 & sfrbit & EBitByteAddr {tmp:1 = EBitByteAddr; $(CY)=$(CY)& (~((tmp>>sfrbit)&1));  }
+ @if BIT_OPS == "BIT_ADDRS"
+ :anl CY,EBitAddr   is opfull=0xa5; CY & ophi=8  & oplo=2; EBitAddr  & sfrbit & EBitByteAddr {$(CY)=$(CY)& EBitAddr; }
+-- 
+2.45.1
+

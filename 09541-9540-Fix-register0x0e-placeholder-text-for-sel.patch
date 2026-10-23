@@ -1,0 +1,735 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Jonathan Brophy <professor_jonny@hotmail.com>
+Date: Sun, 23 Aug 2026 12:08:54 +1200
+Subject: [PATCH] 09541: 9540: Fix "register0x0e" placeholder text for
+ self-referential register arithmetic feeding a SEGMENTOP
+
+Fix "register0x0e" placeholder text for self-referential and
+cross-register register arithmetic feeding a SEGMENTOP
+
+Fixes a print-layer bug where a base/segment register whose value is
+computed from register arithmetic immediately before being used as
+the third input to a SEGMENTOP prints as the raw placeholder text
+"register0x0e" instead of a real expression, even though the
+underlying computed value is correct -- a display-only bug. Two
+related shapes are fixed:
+
+Self-referential: a register reassigned to a value computed from
+itself (e.g. a "SP = SP - 2" stack-adjustment idiom, pcode-
+lowered to INT_ADD(CAST(SP), 0xfffe)).
+Cross-register: a second register derived from a different base
+register (e.g. a frame-pointer setup idiom such as
+"FP = SP - 2", where FP itself is subsequently consumed by a
+SEGMENTOP). On targets where the frame pointer has no independent
+hardware meaning and is purely a software convention derived from
+the stack pointer, resolving FP's SEGMENTOP-consumed value back
+to "SP - 2" is the ABI-correct decompilation, not an
+approximation.
+
+Root cause: the affected Varnode is isImplied()==true but
+isAnnotation()==false. PrintLanguage::recurse() checks isImplied()
+before ever reaching PrintC::pushVnExplicit()'s own
+isAnnotation()-gated annotation-print path (PrintC::pushAnnotation),
+so that path -- and its getRegisterName()/queryContainer() fallback
+logic -- is never invoked for this shape at all; the isImplied()
+branch instead recursively expands the defining INT_ADD op directly,
+which has no real register name to fall back on and previously
+produced "register" + hex(offset) directly.
+
+Two related cosmetic issues were found and fixed as part of the same
+root cause once the print path itself was corrected:
+
+The newly-created Symbol had no name (Scope::addSymbol was called
+with an empty string), producing a "__undefinedN" placeholder
+instead of the register's real name.
+The arithmetic's constant operand is the raw two's-complement
+wraparound value (0xfffe for "- 2"), which printed as "+ 0xfffe"
+instead of "- 2".
+
+printlanguage.hh / printlanguage.cc:
+
+New virtual PrintLanguage::pushSegmentRegisterExpression(vn,op) and
+PrintLanguage::pushCrossRegisterExpression(vn,base,op), default
+implementations return false (no-op) so only PrintC needs to
+override them; other PrintLanguage subclasses are unaffected.
+New static isSelfReferentialRegisterArithmetic(vn) helper: true if
+vn is defined by INT_ADD/INT_SUB against a constant whose base
+operand (unwrapped through an optional CAST) has the same storage
+address as vn itself.
+New static isCrossRegisterArithmetic(vn,&base) helper: same shape
+check, but requires the (CAST-unwrapped) base operand to be a
+genuine register-space Varnode (IPTR_PROCESSOR, not a "unique"
+temporary) at a DIFFERENT storage address from vn.
+PrintLanguage::recurse() now checks, before the isImplied() branch:
+if vn->isImplied() && op->code()==CPUI_SEGMENTOP &&
+isSelfReferentialRegisterArithmetic(vn), call
+pushSegmentRegisterExpression(vn,op); else if vn->isImplied() &&
+op->code()==CPUI_SEGMENTOP && isCrossRegisterArithmetic(vn,&base),
+call pushCrossRegisterExpression(vn,base,op); only fall through to
+the normal isImplied()/pushVnExplicit() branches if both return
+false.
+
+printc.hh / printc.cc:
+
+New PrintC::pushSegmentRegisterExpression(vn,op) override. Finds or
+creates a Symbol for the register's own storage address via the new
+Funcdata::linkAnnotationSymbolAtUsepoint (below), then pushes a
+binary_minus/binary_plus expression using that Symbol and the
+arithmetic op's constant operand -- normalizing an INT_ADD of a
+sign-bit-set constant to a subtraction of the two's-complement-
+negated magnitude (so "+ 0xfffe" prints as "- 2"), and querying the
+register's real name via Architecture::translate->getRegisterName()
+rather than creating an unnamed Symbol.
+New PrintC::pushCrossRegisterExpression(vn,base,op) override. Same
+mechanism, but the Symbol is created/looked-up for base's storage
+(e.g. SP) rather than vn's (e.g. FP) -- reusing base's existing
+HighVariable/Symbol where one already exists, falling back to
+linkAnnotationSymbolAtUsepoint otherwise -- so the printed
+expression correctly names the register the value actually derives
+from.
+
+funcdata.hh / funcdata_varnode.cc:
+
+New Funcdata::linkAnnotationSymbolAtUsepoint(vn,usepoint). Existing
+Funcdata::linkSymbol()/linkSymbolAtUsepoint() both dereference
+vn->getHigh() unconditionally, but annotation Varnodes never have a
+HighVariable assigned (Funcdata::assignHigh() explicitly skips
+isAnnotation() Varnodes by design), so neither can be used here.
+This method does the same queryProperties()/addSymbol()
+lookup-or-create via the Scope API, but never touches vn->getHigh().
+
+datatests/register0x0e_segmentop_fix.xml:
+
+New decompilertest covering the self-referential shape, loading a
+real byte excerpt from a repro function and asserting zero
+occurrences of "register0x0e"-style placeholder text and exactly
+one occurrence of "SP - 2" in the decompiled output.
+
+datatests/register0x0e_crossregister_fix.xml:
+
+New decompilertest covering the cross-register shape, loading a
+real byte excerpt from a repro function containing both a write
+and a subsequent read through a frame-pointer-derived stack slot,
+and asserting zero occurrences of "register0x0e"-style placeholder
+text and exactly two occurrences of "SP - 2" in the decompiled
+output.
+
+Status: fix compiles clean (0 errors, no new warnings) and was
+verified multiple ways:
+
+Live end-to-end via the Ghidra GUI/decompiler against real repro
+functions covering both shapes -- one self-referential repro (1
+affected site) and one cross-register repro (both a write and a
+read through the same frame-pointer-derived stack slot) -- all
+sites now print "SP - 2"-style expressions with zero occurrences
+of "register0x0e" or "__undefined" placeholder text.
+Whole-ROM regression pass against a real production binary:
+"register0x0e" occurrence count confirmed down to a single
+unrelated, out-of-scope call-argument shape (a raw register read
+used directly as a function argument, with no arithmetic feeding
+it) that this fix does not target and is tracked separately.
+Both new datatests, run through a locally-built native data-test
+runner (test.cc + libdecomp.cc + testfunction.cc, linked against
+the same fixed sources) -- all assertions pass: "Total tests
+applied = 4, Total passing tests = 4".
+
+Fixes NationalSecurityAgency#9540
+---
+ .../Decompiler/certification.manifest         |   2 +
+ .../src/decompile/cpp/coreaction.cc           |   2 +-
+ .../src/decompile/cpp/funcdata_varnode.cc     | 103 ++++++++++++-
+ .../cpp/include/ghidra/coreaction.hh          |   2 +-
+ .../decompile/cpp/include/ghidra/funcdata.hh  |   4 +-
+ .../decompile/cpp/include/ghidra/printc.hh    |   2 +
+ .../cpp/include/ghidra/printlanguage.hh       |  18 +++
+ .../Decompiler/src/decompile/cpp/printc.cc    | 135 +++++++++++++++++-
+ .../src/decompile/cpp/printlanguage.cc        |  87 ++++++++++-
+ .../register0x0e_crossregister_fix.xml        |  53 +++++++
+ .../datatests/register0x0e_segmentop_fix.xml  |  38 +++++
+ 11 files changed, 439 insertions(+), 7 deletions(-)
+ create mode 100644 Ghidra/Features/Decompiler/src/decompile/datatests/register0x0e_crossregister_fix.xml
+ create mode 100644 Ghidra/Features/Decompiler/src/decompile/datatests/register0x0e_segmentop_fix.xml
+
+diff --git a/Ghidra/Features/Decompiler/certification.manifest b/Ghidra/Features/Decompiler/certification.manifest
+index 9a73526ad0..c3c7ef749c 100644
+--- a/Ghidra/Features/Decompiler/certification.manifest
++++ b/Ghidra/Features/Decompiler/certification.manifest
+@@ -91,6 +91,8 @@ src/decompile/datatests/pointersub.xml||GHIDRA||||END|
+ src/decompile/datatests/promotecompare.xml||GHIDRA||||END|
+ src/decompile/datatests/ptrtoarray.xml||GHIDRA||||END|
+ src/decompile/datatests/readvolatile.xml||GHIDRA||||END|
++src/decompile/datatests/register0x0e_crossregister_fix.xml||GHIDRA||||END|
++src/decompile/datatests/register0x0e_segmentop_fix.xml||GHIDRA||||END|
+ src/decompile/datatests/retpassthrough.xml||GHIDRA||||END|
+ src/decompile/datatests/retspecial.xml||GHIDRA||||END|
+ src/decompile/datatests/retstruct.xml||GHIDRA||||END|
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
+index c728410dca..738a7de200 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
+@@ -1,4 +1,4 @@
+-/* ###
++﻿/* ###
+  * IP: GHIDRA
+  *
+  * Licensed under the Apache License, Version 2.0 (the "License");
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/funcdata_varnode.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/funcdata_varnode.cc
+index faa1686f10..871819b6df 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/funcdata_varnode.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/funcdata_varnode.cc
+@@ -1,4 +1,4 @@
+-/* ###
++﻿/* ###
+  * IP: GHIDRA
+  *
+  * Licensed under the Apache License, Version 2.0 (the "License");
+@@ -1251,7 +1251,108 @@ Symbol *Funcdata::linkSymbol(Varnode *vn)
+ 
+   return sym;
+ }
++/// \brief Find or create a Symbol for the given Varnode, using an explicit usepoint
++///
++/// Identical to linkSymbol(), except the usepoint used both to query for an
++/// existing overlapping entry and, if none is found, to register a new one,
++/// is passed in explicitly rather than derived from vn->getUsePoint(). This
++/// matters for annotation-style Varnodes (e.g. a SEGMENTOP's raw input) whose
++/// printed representation is resolved by printc.cc's pushAnnotation() via its
++/// own independent symScope->queryContainer(vn->getAddr(), size, op->getAddr())
++/// call, bound to the consuming PcodeOp's address -- not through
++/// vn->getHigh()->getSymbol(). If linkSymbol() borrows a pre-existing entry
++/// registered at a different usepoint, that entry's range may not cover this
++/// op's address, and pushAnnotation()'s lookup then misses even though a
++/// Symbol genuinely exists. Passing the consuming op's own address as
++/// usepoint here guarantees the two lookups agree. (review15.md section 21+)
++/// \param vn is the given Varnode
++/// \param usepoint is the address to use for both the containment query and any new entry
++/// \return the associated Symbol or NULL
++Symbol *Funcdata::linkSymbolAtUsepoint(Varnode *vn,const Address &usepoint)
++
++{
++  if (vn->isProtoPartial())
++    linkProtoPartial(vn);
++  HighVariable *high = vn->getHigh();
++  Symbol *sym = high->getSymbol();
++  if (sym != (Symbol *)0 && vn->getSymbolEntry() != (SymbolEntry *)0)
++    return sym;		// Already assigned to a usable entry
++
++  uint4 fl = 0;
++  SymbolEntry *entry = localmap->queryProperties(vn->getAddr(), 1, usepoint, fl);
++  if (entry != (SymbolEntry *)0 && !entry->isConflict()) {
++    vn->setSymbolEntry(entry);
++    return entry->getSymbol();
++  }
++  if (!vn->isPersist()) {	// Only create local symbol
++    if (detectSymbolConflicts(vn)) {
++      entry = localmap->addSymbolWithConflict("", high->getType(), vn);
++    }
++    else {
++      entry = localmap->addSymbol("", high->getType(), vn->getAddr(), usepoint);
++    }
++    sym = entry->getSymbol();
++    vn->setSymbolEntry(entry);
++  }
++
++  return sym;
++}
++
++/// \brief Find an existing Symbol for an annotation Varnode, using an explicit usepoint
++///
++/// Annotation Varnodes (vn->isAnnotation()) never get a HighVariable
++/// assigned -- Funcdata::assignHigh() explicitly skips them by design,
++/// since they're not meant to be treated as ordinary program variables.
++/// linkSymbol()/linkSymbolAtUsepoint() both start by dereferencing
++/// vn->getHigh(), so neither can be used for an annotation Varnode. This
++/// method does an equivalent lookup using the same Scope API
++/// (queryProperties) but never touches vn->getHigh().
++///
++/// CHANGED 2026-08-25: this method NO LONGER calls addSymbol() to mint a
++/// new Symbol when none is found. The original version did, keyed to
++/// vn->getAddr() -- for a self-referential/cross-register SEGMENTOP input,
++/// that address is the base register's OWN canonical storage address (e.g.
++/// SP's register-space address). That is the exact same address the
++/// separate stack-frame-layout recovery pass uses as its anchor when
++/// resolving a function's local stack variables. Minting a competing
++/// Symbol there caused frame-layout recovery to see two claims on the same
++/// storage and fall back to materializing the ENTIRE stack-frame-adjustment
++/// region as one opaque local array (observed as "auStack_NNN [128]"-style
++/// declarations replacing what should have been compact "stack0xNNNN"
++/// implicit references) across every function using the ordinary
++/// SP-adjustment prologue idiom -- i.e. nearly the whole ROM, not just the
++/// SEGMENTOP-affected functions this fix was meant to touch. See the ROM
++/// regression investigation following the original register0x0e fix
++/// (auStack_ occurrence count: 16 -> 214; stack0x occurrence count:
++/// 355 -> 20 across the full RVR_1998_x3 export, most of the delta in
++/// functions with NO decompiler spacebase-tracking warning at all, i.e. not
++/// explained by any pre-existing issue).
++///
++/// Now: if a Symbol already exists at this address/usepoint (e.g. the base
++/// register happens to already be named elsewhere in the function), it is
++/// still returned and reused -- this is not a regression for that case,
++/// since reusing an existing entry doesn't create a new frame-layout
++/// collision. If none exists, this returns NULL and the caller
++/// (PrintC::pushSegmentRegisterExpression / pushCrossRegisterExpression) is
++/// expected to fall back to printing the register's real name directly
++/// (via Architecture::translate->getRegisterName(), the same call
++/// previously used to build the now-removed addSymbol() call's name
++/// argument) without creating any Scope entry at all.
++/// \param vn is the given annotation Varnode
++/// \param usepoint is the address to use for the containment query
++/// \return the associated Symbol if one already exists, or NULL
++Symbol *Funcdata::linkAnnotationSymbolAtUsepoint(Varnode *vn,const Address &usepoint)
++
++{
++  uint4 fl = 0;
++  SymbolEntry *entry = localmap->queryProperties(vn->getAddr(),1,usepoint,fl);
++  if (entry == (SymbolEntry *)0 || entry->isConflict()) return (Symbol *)0;
++  vn->setSymbolEntry(entry);
++  return entry->getSymbol();
++}
+ 
++/// \brief Reconstruct and link a Symbol from a constant Varnode reference
++///
+ /// A reference to a symbol (i.e. &varname) is typically stored as a PTRSUB operation, where the
+ /// first input Varnode is a \e spacebase Varnode indicating whether the symbol is on the \e stack or at
+ /// a \e global RAM location.  The second input Varnode is a constant encoding the address of the symbol.
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/coreaction.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/coreaction.hh
+index 354b0c96e5..457da8cee7 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/coreaction.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/coreaction.hh
+@@ -1,4 +1,4 @@
+-/* ###
++﻿/* ###
+  * IP: GHIDRA
+  *
+  * Licensed under the Apache License, Version 2.0 (the "License");
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/funcdata.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/funcdata.hh
+index a3f91dafb7..04a18ea462 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/funcdata.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/funcdata.hh
+@@ -435,10 +435,12 @@ public:
+   void clearDeadOps(void) { obank.destroyDead(); }		///< Delete any dead PcodeOps
+   void remapVarnode(Varnode *vn,Symbol *sym,const Address &usepoint);
+   void remapDynamicVarnode(Varnode *vn,Symbol *sym,const Address &usepoint,uint8 hash);
+-  void remapConflictSymbol(Symbol *sym);	///< Convert any MapEntryConflict on the Symbol into a DynamicEntry
++  void remapConflictSymbol(Symbol *sym);			///< Convert any MapEntryConflict on the Symbol into a DynamicEntry
+   bool detectSymbolConflicts(Varnode *vn);			///< Detect potential symbol conflicts
+   void linkProtoPartial(Varnode *vn);				///< Find or create Symbol and a partial mapping
+   Symbol *linkSymbol(Varnode *vn);				///< Find or create Symbol associated with given Varnode
++  Symbol *linkSymbolAtUsepoint(Varnode *vn,const Address &usepoint);	///< Find or create Symbol for given Varnode, using an explicit usepoint rather than vn->getUsePoint()
++  Symbol *linkAnnotationSymbolAtUsepoint(Varnode *vn,const Address &usepoint);	///< Find or create Symbol for an annotation Varnode (bypasses vn->getHigh(), which is always NULL for isAnnotation() Varnodes -- see review16.md)
+   Symbol *linkSymbolReference(Varnode *vn);			///< Discover and attach Symbol to a constant reference
+   Varnode *findLinkedVarnode(SymbolEntry *entry) const;	///< Find a Varnode matching the given Symbol mapping
+   void findLinkedVarnodes(SymbolEntry *entry,vector<Varnode *> &res) const;	///< Find Varnodes that map to the given SymbolEntry
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/printc.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/printc.hh
+index e56e90226d..0c9acb0a27 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/printc.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/printc.hh
+@@ -215,6 +215,8 @@ protected:
+   virtual bool pushEquate(uintb val,int4 sz,const EquateSymbol *sym,
+ 			  const Varnode *vn,const PcodeOp *op);
+   virtual void pushAnnotation(const Varnode *vn,const PcodeOp *op);
++  virtual bool pushSegmentRegisterExpression(const Varnode *vn,const PcodeOp *op);
++  virtual bool pushCrossRegisterExpression(const Varnode *vn,const Varnode *base,const PcodeOp *op);
+   virtual void pushSymbol(const Symbol *sym,const Varnode *vn,const PcodeOp *op);
+   virtual void pushUnnamedLocation(const Address &addr,int4 size,const Varnode *vn,const PcodeOp *op);
+   virtual void pushPartialSymbol(const Symbol *sym,int4 off,int4 sz,
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/printlanguage.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/printlanguage.hh
+index 0561c583cb..1ef773bbe3 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/printlanguage.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/printlanguage.hh
+@@ -358,6 +358,24 @@ protected:
+   /// \param op is the PcodeOp which takes the annotation as input
+   virtual void pushAnnotation(const Varnode *vn,const PcodeOp *op)=0;
+ 
++  /// \brief Push a self-referential register-arithmetic Varnode as a
++  /// binary expression (e.g. "SP - 2") instead of falling through to
++  /// pushAnnotation()'s register0x0e-style fallback name.
++  ///
++  /// Default implementation does nothing and returns \b false,
++  /// \brief Push a cross-register-arithmetic annotation Varnode (e.g. H8's
++  /// "FP = SP - 2") as a binary expression printed in terms of the base
++  /// register it was actually derived from.
++  /// \param vn is the cross-register-arithmetic annotation Varnode (e.g. FP)
++  /// \param base is the register vn was derived from (e.g. SP)
++  /// \param op is the PcodeOp (expected CPUI_SEGMENTOP) consuming vn
++  /// \return \b true if the expression form was successfully pushed
++  virtual bool pushCrossRegisterExpression(const Varnode *vn,const Varnode *base,const PcodeOp *op) { return false; }
++  /// \param vn is the self-referential-arithmetic annotation Varnode
++  /// \param op is the PcodeOp (expected CPUI_SEGMENTOP) consuming it
++  /// \return \b true if the expression form was successfully pushed
++  virtual bool pushSegmentRegisterExpression(const Varnode *vn,const PcodeOp *op) { return false; }
++
+   /// \brief Push a specific Symbol onto the RPN stack
+   ///
+   /// \param sym is the given Symbol
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/printc.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/printc.cc
+index 8dcfcda07d..bf911f1978 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/printc.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/printc.cc
+@@ -1,4 +1,4 @@
+-/* ###
++﻿/* ###
+  * IP: GHIDRA
+  *
+  * Licensed under the Apache License, Version 2.0 (the "License");
+@@ -1945,6 +1945,139 @@ bool PrintC::pushEquate(uintb val,int4 sz,const EquateSymbol *sym,const Varnode
+   return false;
+ }
+ 
++/// \brief Push a self-referential register-arithmetic Varnode as a binary
++/// expression using the base register's real name, falling back to the
++/// register0x0e-style annotation fallback if no Symbol can be found.
++///
++/// Looks up an existing Symbol for the register's storage address, keyed
++/// at the CONSUMING op's address as usepoint (matching pushAnnotation's
++/// own queryContainer call above) rather than vn's own address. Fails
++/// safe (returns false) if no such Symbol is found, letting the caller
++/// fall back to pushAnnotation().
++/// \param vn is the self-referential-arithmetic annotation Varnode
++/// \param op is the PcodeOp (expected CPUI_SEGMENTOP) consuming it
++/// \return \b true if the expression form was successfully pushed
++bool PrintC::pushSegmentRegisterExpression(const Varnode *vn,const PcodeOp *op)
++
++{
++  const PcodeOp *def = vn->getDef();		// already confirmed non-null
++						// by isSelfReferentialRegisterArithmetic
++  Funcdata *fd = const_cast<Funcdata *>(op->getParent()->getFuncdata());
++  Varnode *mutvn = const_cast<Varnode *>(vn);
++
++  // vn is an annotation Varnode -- it deliberately never gets a
++  // HighVariable (Funcdata::assignHigh skips isAnnotation() Varnodes by
++  // design), so linkSymbol()/linkSymbolAtUsepoint() cannot be used here:
++  // both dereference vn->getHigh() unconditionally. Use the dedicated
++  // annotation-safe variant instead.
++  //
++  // CHANGED 2026-08-25: linkAnnotationSymbolAtUsepoint no longer mints a
++  // new Symbol (see its comment in funcdata_varnode.cc for why -- it was
++  // colliding with stack-frame-layout recovery and causing a widespread
++  // "auStack_NNN [128]" regression). It now only returns an EXISTING
++  // Symbol, or NULL. On NULL, fall back to pushing the register's real
++  // name as plain text via pushAtom -- same mechanism pushAnnotation's own
++  // fallback already uses below in this file -- rather than failing back
++  // to the register0x0e-style placeholder this whole fix was written to
++  // eliminate.
++  Symbol *sym = fd->linkAnnotationSymbolAtUsepoint(mutvn, op->getAddr());
++
++  const Varnode *amt = def->getIn(1);		// already confirmed constant
++  OpCode opc = def->code();
++  uintb rawval = amt->getOffset();
++  int4 sz = amt->getSize();
++  uintb mask = calc_mask(sz);
++  uintb signbit = (mask >> 1) + 1;
++  bool showAsSubtract = (opc == CPUI_INT_SUB);
++  uintb dispval = rawval;
++  // An H8 "SP = SP - 2" instruction pcode-lowers to INT_ADD(SP, 0xfffe)
++  // (the two's-complement wraparound constant), not a genuine INT_SUB --
++  // confirmed via analyze_dataflow. Detect that shape
++  // here and print it as a subtraction of the true magnitude instead of
++  // a raw unsigned "+ 0xfffe", matching how a human reads the intent.
++  if (opc == CPUI_INT_ADD && (rawval & signbit) != 0) {
++    showAsSubtract = true;
++    dispval = (~rawval + 1) & mask;	// two's-complement negate to get the magnitude
++  }
++  const OpToken &tok = showAsSubtract ? binary_minus : binary_plus;
++
++  pushOp(&tok,op);
++  if (sym != (Symbol *)0)
++    pushSymbol(sym,vn,op);			// pushes "SP" via an existing Symbol
++  else {
++    string regname = glb->translate->getRegisterName(vn->getSpace(),vn->getOffset(),vn->getSize());
++    if (regname.empty()) return false;		// truly no name available -- let caller fall back
++    pushAtom(Atom(regname,vartoken,EmitMarkup::special_color,op,vn));
++  }
++  push_integer(dispval,sz,false,syntax,amt,op,amt->getType()->getDisplayFormat());
++  return true;
++}
++
++/// \brief Push a cross-register-arithmetic annotation Varnode (e.g. H8's
++/// "FP = SP - 2") as a binary expression printed in terms of the base
++/// register it was actually derived from.
++///
++/// Same mechanism as pushSegmentRegisterExpression, but the Symbol is
++/// created/looked-up for \b base (the register actually holding the value,
++/// e.g. SP) rather than \b vn (the annotation Varnode consumed by the
++/// SEGMENTOP, e.g. FP) -- vn itself has no independent hardware meaning
++/// for this shape (see isCrossRegisterArithmetic), so naming the Symbol
++/// after vn would print the wrong register.
++/// \param vn is the cross-register-arithmetic annotation Varnode (e.g. FP)
++/// \param base is the register vn was derived from (e.g. SP)
++/// \param op is the PcodeOp (expected CPUI_SEGMENTOP) consuming vn
++/// \return \b true if the expression form was successfully pushed
++bool PrintC::pushCrossRegisterExpression(const Varnode *vn,const Varnode *base,const PcodeOp *op)
++
++{
++  const PcodeOp *def = vn->getDef();		// already confirmed non-null
++						// by isCrossRegisterArithmetic
++  Funcdata *fd = const_cast<Funcdata *>(op->getParent()->getFuncdata());
++  Varnode *mutbase = const_cast<Varnode *>(base);
++
++  // Key the Symbol to base's storage (e.g. SP), not vn's (e.g. FP) -- see
++  // function comment above. base is a genuine register Varnode (confirmed
++  // by isCrossRegisterArithmetic), not necessarily an annotation Varnode,
++  // so it may already have a HighVariable/Symbol of its own; fall back to
++  // the annotation-safe linker only if it doesn't.
++  //
++  // CHANGED 2026-08-25: as in pushSegmentRegisterExpression above,
++  // linkAnnotationSymbolAtUsepoint no longer mints a new Symbol -- it only
++  // returns an existing one, or NULL. On NULL, fall back to the register's
++  // plain-text name rather than failing back to register0x0e.
++  Symbol *sym = mutbase->getHigh() != (HighVariable *)0 ? mutbase->getHigh()->getSymbol()
++							 : (Symbol *)0;
++  if (sym == (Symbol *)0)
++    sym = fd->linkAnnotationSymbolAtUsepoint(mutbase, op->getAddr());
++
++  const Varnode *amt = def->getIn(1);		// already confirmed constant
++  OpCode opc = def->code();
++  uintb rawval = amt->getOffset();
++  int4 sz = amt->getSize();
++  uintb mask = calc_mask(sz);
++  uintb signbit = (mask >> 1) + 1;
++  bool showAsSubtract = (opc == CPUI_INT_SUB);
++  uintb dispval = rawval;
++  // Same two's-complement wraparound detection as pushSegmentRegisterExpression --
++  // see that function's comment for the H8 "SP - 2" -> INT_ADD(SP, 0xfffe) rationale.
++  if (opc == CPUI_INT_ADD && (rawval & signbit) != 0) {
++    showAsSubtract = true;
++    dispval = (~rawval + 1) & mask;
++  }
++  const OpToken &tok = showAsSubtract ? binary_minus : binary_plus;
++
++  pushOp(&tok,op);
++  if (sym != (Symbol *)0)
++    pushSymbol(sym,base,op);			// pushes "SP" via an existing Symbol
++  else {
++    string regname = glb->translate->getRegisterName(base->getSpace(),base->getOffset(),base->getSize());
++    if (regname.empty()) return false;		// truly no name available -- let caller fall back
++    pushAtom(Atom(regname,vartoken,EmitMarkup::special_color,op,base));
++  }
++  push_integer(dispval,sz,false,syntax,amt,op,amt->getType()->getDisplayFormat());
++  return true;
++}
++
+ void PrintC::pushAnnotation(const Varnode *vn,const PcodeOp *op)
+ 
+ {
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/printlanguage.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/printlanguage.cc
+index 40aa583e09..1d1dcacaca 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/printlanguage.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/printlanguage.cc
+@@ -1,4 +1,4 @@
+-/* ###
++﻿/* ###
+  * IP: GHIDRA
+  *
+  * Licensed under the Apache License, Version 2.0 (the "License");
+@@ -216,6 +216,72 @@ void PrintLanguage::pushVn(const Varnode *vn,const PcodeOp *op,uint4 m)
+   nodepend.emplace_back(vn,op,m);
+ }
+ 
++/// \brief Check if a Varnode's value was computed by INT_ADD/INT_SUB
++/// against a constant -- the shape produced when a base/segment register
++/// is reassigned to a value computed from itself (e.g. H8 link/unlk's
++/// "SP = SP - 2"), landing back in the register's own storage.
++/// \param vn is the Varnode to test
++/// \return \b true if vn is defined by self-referential arithmetic against a constant
++static bool isSelfReferentialRegisterArithmetic(const Varnode *vn)
++
++{
++  if (vn == (const Varnode *)0 || vn->isConstant()) return false;
++  const PcodeOp *def = vn->getDef();
++  if (def == (const PcodeOp *)0) return false;
++  OpCode opc = def->code();
++  if (opc != CPUI_INT_ADD && opc != CPUI_INT_SUB) return false;
++  if (def->numInput() != 2) return false;
++  const Varnode *amt = def->getIn(1);
++  if (!amt->isConstant()) return false;
++  // The arithmetic's base operand must be the same storage location as vn
++  // itself; otherwise this would match any implied INT_ADD/INT_SUB against
++  // a constant feeding a SEGMENTOP, not just a register reassigned from itself.
++  // The base operand may be wrapped in a CAST (e.g. H8's "link FP,#-0x2:8"
++  // lowers to INT_ADD(CAST(SP), 0xfffe)) -- unwrap through it before
++  // comparing addresses, otherwise this always fails against the CAST's
++  // unique-space output instead of SP's real storage address.
++  const Varnode *base = def->getIn(0);
++  if (base->getDef() != (const PcodeOp *)0 && base->getDef()->code() == CPUI_CAST)
++    base = base->getDef()->getIn(0);
++  if (base->getAddr() != vn->getAddr()) return false;
++  return true;
++}
++
++/// \brief Check if a Varnode's value was computed by INT_ADD/INT_SUB
++/// against a constant, where the base operand is a DIFFERENT register
++/// from \b vn itself -- the shape produced by H8's "link FP,#-2" prologue
++/// idiom (FP = SP - 2), where FP has no independent hardware meaning (per
++/// the H8/300 GCC ABI's -fomit-frame-pointer note, FP-relative and
++/// SP-relative addressing are just two representations of the same stack
++/// location) and so is correctly rendered in terms of the register it was
++/// actually derived from.
++/// \param vn is the Varnode to test (e.g. FP)
++/// \param baseOut receives the resolved base register Varnode (e.g. SP) on success
++/// \return \b true if vn is defined by cross-register arithmetic against a constant
++static bool isCrossRegisterArithmetic(const Varnode *vn,const Varnode **baseOut)
++
++{
++  if (vn == (const Varnode *)0 || vn->isConstant()) return false;
++  const PcodeOp *def = vn->getDef();
++  if (def == (const PcodeOp *)0) return false;
++  OpCode opc = def->code();
++  if (opc != CPUI_INT_ADD && opc != CPUI_INT_SUB) return false;
++  if (def->numInput() != 2) return false;
++  const Varnode *amt = def->getIn(1);
++  if (!amt->isConstant()) return false;
++  const Varnode *base = def->getIn(0);
++  if (base->getDef() != (const PcodeOp *)0 && base->getDef()->code() == CPUI_CAST)
++    base = base->getDef()->getIn(0);
++  // Must be a genuine register (an address in a register-backed space, not a
++  // "unique" temporary) and must be a DIFFERENT register from vn -- the
++  // same-register case is isSelfReferentialRegisterArithmetic's job, not this one.
++  if (base->getSpace()->getType() != IPTR_PROCESSOR) return false;
++  if (base->getAddr() == vn->getAddr()) return false;
++  *baseOut = base;
++  return true;
++}
++
++
+ /// This method pushes a given Varnode as a \b leaf of the current expression.
+ /// It decides how the Varnode should get emitted, as a symbol, constant, etc.,
+ /// and then pushes the resulting leaf Atom onto the stack.
+@@ -548,13 +614,30 @@ void PrintLanguage::recurse(void)
+   uint4 modsave = mods;
+   int4 lastPending = pending;		// Already claimed
+   pending = nodepend.size();	// Lay claim to the rest
++  const Varnode *crossBase;		// Set by isCrossRegisterArithmetic on success
+   while(lastPending < pending) {
+     const Varnode *vn = nodepend.back().vn;
+     const PcodeOp *op = nodepend.back().op;
+     mods = nodepend.back().vnmod;
+     nodepend.pop_back();
+     pending -= 1;
+-    if (vn->isImplied()) {
++    if (vn->isImplied() && op->code()==CPUI_SEGMENTOP && isSelfReferentialRegisterArithmetic(vn) &&
++	pushSegmentRegisterExpression(vn,op)) {
++      // Handled: print as a "SP - 2" style expression instead of taking
++      // the normal isImplied() inline-expansion path below, which would
++      // otherwise print the raw register offset via the arithmetic op's
++      // own push().
++    }
++    else if (vn->isImplied() && op->code()==CPUI_SEGMENTOP &&
++	     isCrossRegisterArithmetic(vn,&crossBase) &&
++	     pushCrossRegisterExpression(vn,crossBase,op)) {
++      // Handled: cross-register case, e.g. H8 "link FP,#-2" -- FP itself
++      // has no independent hardware meaning, so print its SEGMENTOP-consumed
++      // value in terms of the register it was actually derived from
++      // (e.g. "SP - 2") instead of falling through to the register0x0e
++      // annotation fallback below.
++    }
++    else if (vn->isImplied()) {
+       if (vn->hasImpliedField()) {
+ 	pushImpliedField(vn, op);
+       }
+diff --git a/Ghidra/Features/Decompiler/src/decompile/datatests/register0x0e_crossregister_fix.xml b/Ghidra/Features/Decompiler/src/decompile/datatests/register0x0e_crossregister_fix.xml
+new file mode 100644
+index 0000000000..d91cbea818
+--- /dev/null
++++ b/Ghidra/Features/Decompiler/src/decompile/datatests/register0x0e_crossregister_fix.xml
+@@ -0,0 +1,53 @@
++<decompilertest>
++<binaryimage arch="H8:BE:32:H8539F:default">
++<!--
++   Regression test for the cross-register "register0x0e" print-layer bug:
++   a register (e.g. FP) is derived from a DIFFERENT base register via the
++   H8 "link FP,#-2" prologue idiom (pcode-lowered to FP = INT_ADD(CAST(SP),
++   0xfffe)), then FP itself is later used as a SEGMENTOP's third input for
++   a far-pointer memory access. This is distinct from the plain
++   self-referential case (see register0x0e_segmentop_fix.xml)  here the
++   Varnode consuming the SEGMENTOP (FP) is NOT the same storage location as
++   the arithmetic's base operand (SP), so isSelfReferentialRegisterArithmetic
++   correctly declines it, and a separate isCrossRegisterArithmetic helper is
++   required to still resolve it to a real expression ("SP - 2") instead of
++   falling through to the "register0x0e" placeholder fallback.
++
++   FP has no independent hardware meaning on this target  the H8/300 GCC
++   ABI's -fomit-frame-pointer option documents FP as eliminable "in favor
++   of the stack pointer", and this project's own H8 .cspec declares only
++   SP as <stackpointer>, with FP listed in <unaffected> alongside ordinary
++   general registers  so resolving FP's SEGMENTOP-consumed value back to
++   "SP - 2" is the ABI-correct decompilation, not an approximation.
++
++   This exact function (status_word_bit3_conditional_update_via_table) is
++   also the one that surfaced a real regression during whole-ROM testing:
++   an earlier version of the self-referential fix's CAST-unwrap guard
++   caused the SECOND FP-relative access (the "tst.w @(-2,FP)" read at
++   0x23301) to regress from an imprecise-but-non-broken "&stack0xfffe + -2"
++   form into the actual "register0x0e" placeholder, even though the FIRST
++   FP-relative access (the "clr.w @(-2,FP)" write at 0x232d5) printed
++   correctly. This test exercises both sites in the same function so any
++   future regression on either one is caught automatically. See
++   review16.md for the full investigation history (Ghidra-H8-Processor
++   project, printc.cc/printlanguage.cc/funcdata_varnode.cc changes).
++
++   Binary excerpt taken directly from
++   status_word_bit3_conditional_update_via_table, extracted from the real
++   ROM disassembly (RVR_1998_x3 4g63t 21000011 md352553.hex), read via a
++   live MCP read_memory call and hex-encoded programmatically from the raw
++   byte array (not manually transcribed) to avoid transcription errors.
++-->
++<bytechunk space="ram" offset="0x232c3" readonly="true">17febf938806e80a81d9831502f51637004feefe131df1f2f426141d0d60800c0014a8a8131def6a712202a80898fe1df20ef4262c8806e80281d9fb2623eefe16261e1df20ef0271a1df10e801d0d5870230e1df118801d0d5a702304abc32002abd38806e80a81d993cf830f1119
++</bytechunk>
++<symbol space="ram" offset="0x232c3" name="status_word_bit3_conditional_update_via_table"/>
++</binaryimage>
++<script>
++  <com>lo fu status_word_bit3_conditional_update_via_table</com>
++  <com>decompile</com>
++  <com>print C</com>
++  <com>quit</com>
++</script>
++<stringmatch name="No register0x0e placeholder text" min="0" max="0">register0x[0-9a-f]+</stringmatch>
++<stringmatch name="FP-derived write and read sites both print as SP - 2" min="2" max="2">SP - 2</stringmatch>
++</decompilertest>
+diff --git a/Ghidra/Features/Decompiler/src/decompile/datatests/register0x0e_segmentop_fix.xml b/Ghidra/Features/Decompiler/src/decompile/datatests/register0x0e_segmentop_fix.xml
+new file mode 100644
+index 0000000000..091c23c1d7
+--- /dev/null
++++ b/Ghidra/Features/Decompiler/src/decompile/datatests/register0x0e_segmentop_fix.xml
+@@ -0,0 +1,38 @@
++<decompilertest>
++<binaryimage arch="H8:BE:32:H8539F:default">
++<!--
++   Regression test for the "register0x0e" print-layer bug: SP is
++   reassigned to a self-referential arithmetic value (e.g. "SP = SP - 2"
++   from an H8 link/unlk instruction) immediately before being used as a
++   SEGMENTOP's third input for a far-pointer memory access. The Varnode
++   carrying this value is isImplied()==true but isAnnotation()==false;
++   the decompiler's default annotation-print fallback path
++   (PrintC::pushAnnotation, via getRegisterName()/queryContainer()) is
++   NEVER reached for this shape, because PrintLanguage::recurse() takes
++   the isImplied() inline-arithmetic-expansion branch first, which has
++   no real register name to fall back on and previously printed the raw
++   "register0x0e" placeholder text instead. See review16.md for the full
++   investigation history (Ghidra-H8-Processor project,
++   printc.cc/printlanguage.cc/funcdata_varnode.cc changes).
++
++   Binary excerpt taken directly from init_copy_const_block_via_memcpy_banked
++   (the smallest/original repro case for this bug), extracted from the
++   real ROM disassembly.
++-->
++<bytechunk space="ram" offset="0x149c8" readonly="true">
++                17feeefe1388fef8
++f84a13a80998fe48000225f1bf070100
++bf07f862bf0600bf07cf80bf06020301
++72560f1119
++</bytechunk>
++<symbol space="ram" offset="0x149c8" name="init_copy_const_block_via_memcpy_banked"/>
++</binaryimage>
++<script>
++  <com>lo fu init_copy_const_block_via_memcpy_banked</com>
++  <com>decompile</com>
++  <com>print C</com>
++  <com>quit</com>
++</script>
++<stringmatch name="No register0x0e placeholder text" min="0" max="0">register0x[0-9a-f]+</stringmatch>
++<stringmatch name="SP - 2 self-referential arithmetic prints as a real subtraction expression" min="1" max="1">SP - 2</stringmatch>
++</decompilertest>
+-- 
+2.45.1
+

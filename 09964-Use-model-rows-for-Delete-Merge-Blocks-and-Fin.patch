@@ -1,0 +1,303 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Leon Zandman <leon@wirwar.com>
+Date: Mon, 19 Oct 2026 19:18:53 +0200
+Subject: [PATCH] 09964: Use model rows for Delete/Merge Blocks and Find All
+ results when the table is filtered
+
+When the Memory Map or the Find All results table is filtered, some actions use the selected view rows as model rows. They then act on the row at the same position in the unfiltered list instead of the selected row.
+---
+ .../plugin/core/memory/MemoryMapProvider.java |  4 +-
+ .../core/memory/MemoryMapProvider2Test.java   | 37 ++++++++
+ .../core/memory/MemoryMapProvider4Test.java   | 37 ++++++++
+ .../decompile/DecompilerFindDialogTest.java   | 91 +++++++++++++++++++
+ .../widgets/FindDialogResultsProvider.java    |  6 +-
+ 5 files changed, 170 insertions(+), 5 deletions(-)
+
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/memory/MemoryMapProvider.java b/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/memory/MemoryMapProvider.java
+index 10632ea896..8efd916c60 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/memory/MemoryMapProvider.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/memory/MemoryMapProvider.java
+@@ -652,7 +652,7 @@ class MemoryMapProvider extends ComponentProviderAdapter {
+ 		ArrayList<MemoryBlock> delBlocks = new ArrayList<>();
+ 		int delRows[] = table.getSelectedRows();
+ 		for (int element : delRows) {
+-			MemoryBlock block = tableModel.getBlockAt(element);
++			MemoryBlock block = tableModel.getBlockAt(filterPanel.getModelRow(element));
+ 			delBlocks.add(block);
+ 		}
+ 		table.clearSelection();
+@@ -771,7 +771,7 @@ class MemoryMapProvider extends ComponentProviderAdapter {
+ 		ArrayList<MemoryBlock> blocks = new ArrayList<>();
+ 		int rows[] = table.getSelectedRows();
+ 		for (int element : rows) {
+-			MemoryBlock block = tableModel.getBlockAt(element);
++			MemoryBlock block = tableModel.getBlockAt(filterPanel.getModelRow(element));
+ 			blocks.add(block);
+ 		}
+ 		table.clearSelection();
+diff --git a/Ghidra/Features/Base/src/test.slow/java/ghidra/app/plugin/core/memory/MemoryMapProvider2Test.java b/Ghidra/Features/Base/src/test.slow/java/ghidra/app/plugin/core/memory/MemoryMapProvider2Test.java
+index ed1421dff5..28b6e54f59 100644
+--- a/Ghidra/Features/Base/src/test.slow/java/ghidra/app/plugin/core/memory/MemoryMapProvider2Test.java
++++ b/Ghidra/Features/Base/src/test.slow/java/ghidra/app/plugin/core/memory/MemoryMapProvider2Test.java
+@@ -29,6 +29,7 @@ import org.junit.*;
+ import docking.action.DockingActionIf;
+ import docking.widgets.OptionDialog;
+ import docking.widgets.combobox.GhidraComboBox;
++import docking.widgets.table.GTableFilterPanel;
+ import ghidra.app.plugin.core.codebrowser.CodeBrowserPlugin;
+ import ghidra.app.plugin.core.gotoquery.GoToServicePlugin;
+ import ghidra.app.plugin.core.misc.RegisterField;
+@@ -942,6 +943,35 @@ public class MemoryMapProvider2Test extends AbstractGhidraHeadedIntegrationTest
+ 		assertEquals(".text", model.getValueAt(0, MemoryMapModel.NAME));
+ 	}
+ 
++	@Test
++	public void testDeleteBlockWithFilter() {
++		// filter so that the first visible row is not the first block
++		setFilterText(".data");
++		assertEquals(1, table.getRowCount());
++		assertEquals(".data", table.getValueAt(0, MemoryMapModel.NAME));
++
++		// select a row
++		table.addRowSelectionInterval(0, 0);
++
++		DockingActionIf action = getAction(plugin, "Delete Block");
++		performAction(action, false);
++		waitForSwing();
++
++		OptionDialog d = waitForDialogComponent(OptionDialog.class);
++		assertNotNull(d);
++		assertEquals("Delete Memory Block?", d.getTitle());
++		String message = d.getMessage();
++		assertTrue("Wrong block in message: " + message, message.contains(".data"));
++		assertFalse("Wrong block in message: " + message, message.contains(".text"));
++
++		JButton button = findButton(d.getComponent(), "No");
++		assertNotNull(button);
++
++		runSwing(() -> button.getActionListeners()[0].actionPerformed(null));
++		assertNotNull(memory.getBlock(".text"));
++		assertNotNull(memory.getBlock(".data"));
++	}
++
+ 	@Test
+ 	public void testMoveBlockNotAllowed() throws Exception {
+ 		// create an overlay block
+@@ -1302,6 +1332,13 @@ public class MemoryMapProvider2Test extends AbstractGhidraHeadedIntegrationTest
+ 		model = table.getModel();
+ 	}
+ 
++	private void setFilterText(String text) {
++		GTableFilterPanel<?> filterPanel =
++			(GTableFilterPanel<?>) getInstanceField("filterPanel", provider);
++		runSwing(() -> filterPanel.setFilterText(text));
++		waitForSwing();
++	}
++
+ 	private Address getAddr(long offset) {
+ 		return program.getMinAddress().getNewAddress(offset);
+ 	}
+diff --git a/Ghidra/Features/Base/src/test.slow/java/ghidra/app/plugin/core/memory/MemoryMapProvider4Test.java b/Ghidra/Features/Base/src/test.slow/java/ghidra/app/plugin/core/memory/MemoryMapProvider4Test.java
+index 26b62219a5..94e17e6aef 100644
+--- a/Ghidra/Features/Base/src/test.slow/java/ghidra/app/plugin/core/memory/MemoryMapProvider4Test.java
++++ b/Ghidra/Features/Base/src/test.slow/java/ghidra/app/plugin/core/memory/MemoryMapProvider4Test.java
+@@ -30,6 +30,7 @@ import docking.AbstractErrDialog;
+ import docking.action.DockingActionIf;
+ import docking.widgets.MultiLineLabel;
+ import docking.widgets.OptionDialog;
++import docking.widgets.table.GTableFilterPanel;
+ import ghidra.app.plugin.core.codebrowser.CodeBrowserPlugin;
+ import ghidra.app.plugin.core.gotoquery.GoToServicePlugin;
+ import ghidra.app.plugin.core.navigation.NavigationHistoryPlugin;
+@@ -123,6 +124,42 @@ public class MemoryMapProvider4Test extends AbstractGhidraHeadedIntegrationTest
+ 		assertEquals("0000004f", model.getValueAt(0, MemoryMapModel.END));
+ 	}
+ 
++	@Test
++	public void testMergeBlocksWithFilter() throws Exception {
++		// create 4 blocks: 0-0f, 10-1f, 20-20f, 40-4f.
++		tx(program, () -> {
++			memory.createInitializedBlock("first", getAddr(0), 0x10, (byte) 0, TaskMonitor.DUMMY,
++				false);
++			memory.createInitializedBlock("mergeMe2", getAddr(0x10), 0x10, (byte) 0,
++				TaskMonitor.DUMMY, false);
++			memory.createInitializedBlock("mergeMe3", getAddr(0x20), 0x10, (byte) 0,
++				TaskMonitor.DUMMY, false);
++			memory.createInitializedBlock("last", getAddr(0x40), 0x10, (byte) 0,
++				TaskMonitor.DUMMY, false);
++		});
++
++		// filter so that only the middle two blocks are visible
++		GTableFilterPanel<?> filterPanel =
++			(GTableFilterPanel<?>) getInstanceField("filterPanel", provider);
++		runSwing(() -> filterPanel.setFilterText("mergeMe"));
++		waitForSwing();
++		assertEquals(2, table.getRowCount());
++		assertEquals("mergeMe2", table.getValueAt(0, MemoryMapModel.NAME));
++		assertEquals("mergeMe3", table.getValueAt(1, MemoryMapModel.NAME));
++
++		// select both visible rows
++		table.setRowSelectionInterval(0, 1);
++		DockingActionIf action = getAction(plugin, "Merge Blocks");
++		assertTrue(action.isEnabled());
++		performAction(action, false);
++		waitForSwing();
++
++		assertEquals(getAddr(0xf), memory.getBlock("first").getEnd());
++		assertEquals(getAddr(0x10), memory.getBlock("mergeMe2").getStart());
++		assertEquals(getAddr(0x2f), memory.getBlock("mergeMe2").getEnd());
++		assertNull(memory.getBlock("mergeMe3"));
++	}
++
+ 	@Test
+ 	public void testMergeBlocksDisjoint() throws Exception {
+ 		// create 4 blocks: 0-0f, 10-1f, 20-20f, 40-4f.
+diff --git a/Ghidra/Features/Decompiler/src/test.slow/java/ghidra/app/plugin/core/decompile/DecompilerFindDialogTest.java b/Ghidra/Features/Decompiler/src/test.slow/java/ghidra/app/plugin/core/decompile/DecompilerFindDialogTest.java
+index 5c87206a44..d2794d98ce 100644
+--- a/Ghidra/Features/Decompiler/src/test.slow/java/ghidra/app/plugin/core/decompile/DecompilerFindDialogTest.java
++++ b/Ghidra/Features/Decompiler/src/test.slow/java/ghidra/app/plugin/core/decompile/DecompilerFindDialogTest.java
+@@ -28,6 +28,7 @@ import docking.widgets.SearchLocation;
+ import docking.widgets.dialogs.InputDialog;
+ import docking.widgets.fieldpanel.support.FieldLocation;
+ import docking.widgets.table.GTable;
++import docking.widgets.table.GTableFilterPanel;
+ import docking.widgets.table.RowObjectFilterModel;
+ import ghidra.app.decompiler.ClangToken;
+ import ghidra.app.decompiler.component.DecompilerFindDialog;
+@@ -292,6 +293,69 @@ public class DecompilerFindDialogTest extends AbstractDecompilerTest {
+ 		}
+ 	}
+ 
++	@Test
++	public void testSearchAllWithFilter() {
++
++		decompile("1002239");
++
++		String text = "puVar";
++		showFind(text);
++
++		searchAll();
++
++		GTable table = getResultsTable();
++		assertEquals(10, table.getRowCount());
++		SearchLocation firstUnfiltered = getRowObject(table, 0);
++
++		// filter so that the visible rows are not the first rows of the unfiltered list
++		setFilterText("puVar5");
++		int rowCount = table.getRowCount();
++		assertTrue(rowCount > 0 && rowCount < 10);
++		assertNotEquals(firstUnfiltered, getRowObject(table, 0));
++
++		// click the visible rows and verify the cursor location
++		for (int i = 0; i < rowCount; i++) {
++			clickAndVerify(i, table);
++		}
++	}
++
++	@Test
++	public void testSearchAllRemoveItemsWithFilter() {
++
++		decompile("1002239");
++
++		String text = "puVar";
++		showFind(text);
++
++		searchAll();
++
++		GTable table = getResultsTable();
++		assertEquals(10, table.getRowCount());
++
++		setFilterText("puVar5");
++		int rowCount = table.getRowCount();
++		assertTrue(rowCount > 1 && rowCount < 10);
++
++		// remove the last visible row
++		int lastRow = rowCount - 1;
++		runSwing(() -> table.selectRow(lastRow));
++		SearchLocation selected = getRowObject(table, lastRow);
++
++		FindDialogResultsProvider tableProvider =
++			waitForComponentProvider(FindDialogResultsProvider.class);
++		DockingActionIf removeAction = getLocalAction(tableProvider, "Remove Items");
++		performAction(removeAction, tableProvider, true);
++		waitForSwing();
++
++		List<SearchLocation> remaining = tableProvider.getResults();
++		assertEquals(9, remaining.size());
++		assertFalse("Wrong item removed", remaining.contains(selected));
++		assertEquals(rowCount - 1, table.getRowCount());
++
++		// the selection moves to the new last visible row
++		assertEquals(rowCount - 2, table.getSelectedRow());
++	}
++
+ //==================================================================================================
+ // Private Methods
+ //==================================================================================================
+@@ -306,6 +370,33 @@ public class DecompilerFindDialogTest extends AbstractDecompilerTest {
+ 		assertEquals(expectedToken, cursorToken);
+ 	}
+ 
++	private void clickAndVerify(int row, GTable table) {
++
++		runSwing(() -> table.selectRow(row));
++		DecompilerSearchLocation searchLocation =
++			(DecompilerSearchLocation) getRowObject(table, row);
++		FieldLocation fieldLocation = searchLocation.getFieldLocation();
++		ClangToken expectedToken = getToken(fieldLocation);
++		ClangToken cursorToken = getToken();
++		assertEquals(expectedToken, cursorToken);
++	}
++
++	@SuppressWarnings("unchecked")
++	private SearchLocation getRowObject(GTable table, int viewRow) {
++		RowObjectFilterModel<SearchLocation> model =
++			(RowObjectFilterModel<SearchLocation>) table.getModel();
++		return runSwing(() -> model.getRowObject(viewRow));
++	}
++
++	private void setFilterText(String text) {
++		FindDialogResultsProvider tableProvider =
++			waitForComponentProvider(FindDialogResultsProvider.class);
++		GTableFilterPanel<?> filterPanel =
++			(GTableFilterPanel<?>) getInstanceField("filterPanel", tableProvider);
++		runSwing(() -> filterPanel.setFilterText(text));
++		waitForSwing();
++	}
++
+ 	private GTable getResultsTable() {
+ 		FindDialogResultsProvider tableProvider =
+ 			waitForComponentProvider(FindDialogResultsProvider.class);
+diff --git a/Ghidra/Framework/Docking/src/main/java/docking/widgets/FindDialogResultsProvider.java b/Ghidra/Framework/Docking/src/main/java/docking/widgets/FindDialogResultsProvider.java
+index 20f4da6708..a122e7d2eb 100644
+--- a/Ghidra/Framework/Docking/src/main/java/docking/widgets/FindDialogResultsProvider.java
++++ b/Ghidra/Framework/Docking/src/main/java/docking/widgets/FindDialogResultsProvider.java
+@@ -125,7 +125,7 @@ public class FindDialogResultsProvider extends ComponentProvider
+ 			return;
+ 		}
+ 
+-		SearchLocation location = model.getRowObject(row);
++		SearchLocation location = filterPanel.getRowObject(row);
+ 		searchResults.setActiveLocation(location);
+ 	}
+ 
+@@ -141,14 +141,14 @@ public class FindDialogResultsProvider extends ComponentProvider
+ 				int[] rows = table.getSelectedRows();
+ 				List<Object> itemsToRemove = new ArrayList<>();
+ 				for (int row : rows) {
+-					itemsToRemove.add(model.getRowObject(row));
++					itemsToRemove.add(filterPanel.getRowObject(row));
+ 				}
+ 
+ 				removeRowObjects(model, itemsToRemove);
+ 
+ 				// put some selection back
+ 				int restoreRow = rows[0];
+-				selectRow(model, restoreRow);
++				selectRow(table.getModel(), restoreRow);
+ 			}
+ 
+ 			@Override
+-- 
+2.45.1
+

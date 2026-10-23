@@ -1,0 +1,1375 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: designonet <271930877+designonet@users.noreply.github.com>
+Date: Thu, 15 Oct 2026 13:05:35 +0800
+Subject: [PATCH] 09917: Propagate explicitly proven value domains within one
+ decompilation request
+
+Draft dependency composition: byte-index recovery, Swift metadata and request-local domain transport.
+---
+ .../Features/Decompiler/buildNatives.gradle   |   1 +
+ .../Decompiler/src/decompile/cpp/Makefile     |   2 +-
+ .../src/decompile/cpp/funcdata_op.cc          |   3 +
+ .../decompile/cpp/include/ghidra/jumptable.hh |   4 +-
+ .../decompile/cpp/include/ghidra/marshal.hh   |   1 +
+ .../decompile/cpp/include/ghidra/override.hh  |  46 ++++
+ .../cpp/include/ghidra/valuedomain.hh         |  31 +++
+ .../Decompiler/src/decompile/cpp/jumptable.cc |  30 +-
+ .../Decompiler/src/decompile/cpp/marshal.cc   |   3 +-
+ .../Decompiler/src/decompile/cpp/override.cc  | 165 ++++++++++-
+ .../src/decompile/cpp/valuedomain.cc          | 222 +++++++++++++++
+ .../app/decompiler/DecompInterface.java       |  36 ++-
+ .../app/decompiler/DecompileCallback.java     |  18 ++
+ .../format/swift/SwiftEnumValueContext.java   | 120 ++++++++
+ .../ghidra/program/model/pcode/ElementId.java |   4 +-
+ .../program/model/pcode/HighFunction.java     |  37 ++-
+ .../model/pcode/ValueDomainConstraint.java    | 256 ++++++++++++++++++
+ 17 files changed, 961 insertions(+), 18 deletions(-)
+ create mode 100644 Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/valuedomain.hh
+ create mode 100644 Ghidra/Features/Decompiler/src/decompile/cpp/valuedomain.cc
+ create mode 100644 Ghidra/Features/Swift/src/main/java/ghidra/app/util/bin/format/swift/SwiftEnumValueContext.java
+ create mode 100644 Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/ValueDomainConstraint.java
+
+diff --git a/Ghidra/Features/Decompiler/buildNatives.gradle b/Ghidra/Features/Decompiler/buildNatives.gradle
+index c0438240cc..6e9b9b0d9d 100644
+--- a/Ghidra/Features/Decompiler/buildNatives.gradle
++++ b/Ghidra/Features/Decompiler/buildNatives.gradle
+@@ -99,6 +99,7 @@ def decompiler_files = [
+ 	"typeop.cc",
+ 	"unionresolve.cc",
+ 	"userop.cc",
++	"valuedomain.cc",
+ 	"variable.cc",
+ 	"varmap.cc",
+ 	"varnode.cc"
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/Makefile b/Ghidra/Features/Decompiler/src/decompile/cpp/Makefile
+index 32664d0452..ab884fd850 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/Makefile
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/Makefile
+@@ -99,7 +99,7 @@ DECCORE=capability architecture options graph cover block cast typeop database c
+ 	variable varmap jumptable emulate emulateutil flow userop expression multiprecision \
+ 	funcdata funcdata_block funcdata_op funcdata_varnode unionresolve pcodeinject \
+ 	heritage prefersplit rangeutil ruleaction subflow blockaction merge double \
+-	transform constseq bitfield coreaction condexe override dynamic crc32 prettyprint \
++	transform constseq bitfield coreaction condexe override valuedomain dynamic crc32 prettyprint \
+ 	printlanguage printc printjava memstate opbehavior paramid signature $(COREEXT_NAMES)
+ # Files used for any project that use the sleigh decoder
+ SLEIGH=	sleigh pcodeparse pcodecompile sleighbase slghsymbol \
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/funcdata_op.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/funcdata_op.cc
+index b7216667be..1b16bc62b0 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/funcdata_op.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/funcdata_op.cc
+@@ -805,6 +805,9 @@ void Funcdata::truncatedFlow(const Funcdata *fd,const FlowInfo *flow)
+   if (!obank.empty())
+     throw LowlevelError("Trying to do truncated flow on pre-existing pcode");
+ 
++  // Range contracts contain addresses and scalars, never pointers into the original SSA graph.
++  localoverride.copyValueDomainConstraints(fd->localoverride);
++
+   list<PcodeOp *>::const_iterator oiter; // Clone the raw pcode
+   for(oiter=fd->obank.beginDead();oiter!=fd->obank.endDead();++oiter)
+     cloneOp(*oiter,(*oiter)->getSeqNum());
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/jumptable.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/jumptable.hh
+index 8ed01f800d..c301c4d709 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/jumptable.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/jumptable.hh
+@@ -392,9 +392,9 @@ protected:
+   void getInitialRange(Varnode *vn,CircleRange &rng) const;	///< Get initial range of values the given Varnode can take
+   void findDeterminingVarnodes(PcodeOp *op,int4 slot);
+   void analyzeGuards(BlockBasic *bl,int4 pathout);
+-  void calcRange(Varnode *vn,CircleRange &rng) const;
++  bool calcRange(Funcdata *fd,Varnode *vn,CircleRange &rng) const;
+   bool isPreferredRange(int4 pos,const CircleRange &newRange);
+-  void findSmallestNormal(const JumpBasic *previous);
++  void findSmallestNormal(Funcdata *fd,const JumpBasic *previous);
+   void findNormalized(Funcdata *fd,BlockBasic *rootbl,int4 pathout,const JumpModel *previous,uint4 maxtablesize);
+   void markFoldableGuards();
+   void markModel(bool val);		///< Mark (or unmark) all PcodeOps involved in the model
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/marshal.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/marshal.hh
+index a95220cf80..7554b7f8e4 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/marshal.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/marshal.hh
+@@ -774,6 +774,7 @@ extern ElementId ELEM_SYMBOL;		///< Marshaling element \<symbol>
+ extern ElementId ELEM_TARGET;		///< Marshaling element \<target>
+ extern ElementId ELEM_VAL;		///< Marshaling element \<val>
+ extern ElementId ELEM_VALUE;		///< Marshaling element \<value>
++extern ElementId ELEM_VALUEDOMAIN;	///< Marshaling element \<valuedomain>
+ extern ElementId ELEM_VOID;		///< Marshaling element \<void>
+ 
+ } // End namespace ghidra
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/override.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/override.hh
+index 378178838c..0a7f35db71 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/override.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/override.hh
+@@ -33,6 +33,48 @@ extern ElementId ELEM_MULTISTAGEJUMP;	///< Marshaling element \<multistagejump>
+ extern ElementId ELEM_OVERRIDE;		///< Marshaling element \<override>
+ extern ElementId ELEM_PROTOOVERRIDE;	///< Marshaling element \<protooverride>
+ 
++/// \brief An ephemeral unsigned range contract for one LOAD result in one invocation context
++///
++/// Addresses and scalar data survive a function restart without retaining graph pointers.
++/// Provenance is audit information only. A consumer must separately establish that this contract
++/// matches the current owner, SSA LOAD, use point, and (if present) required CBRANCH edge.
++class ValueDomainConstraint {
++  Address ownerEntry;
++  Address loadAddress;
++  int4 outputSize;
++  Address switchAddress;
++  uintb first;
++  uintb last;
++  Address descriptorAddress;
++  string provenance;
++  Address guardAddress;
++  bool guardTrue;
++  ValueDomainConstraint(const Address &owner,const Address &load,int4 size,const Address &use,
++      uintb lo,uintb hi,const Address &descriptor,const string &source,
++      const Address &guard,bool trueEdge,bool useRestricted);
++public:
++  ValueDomainConstraint(const Address &owner,const Address &load,int4 size,const Address &use,
++      uintb lo,uintb hi,const Address &descriptor,const string &source,
++      const Address &guard=Address(),bool trueEdge=false);
++  ValueDomainConstraint(const Address &owner,const Address &load,int4 size,uintb lo,uintb hi,
++      const Address &descriptor,const string &source,
++      const Address &guard=Address(),bool trueEdge=false);
++  const Address &getOwnerEntry(void) const { return ownerEntry; }
++  const Address &getLoadAddress(void) const { return loadAddress; }
++  int4 getOutputSize(void) const { return outputSize; }
++  const Address &getSwitchAddress(void) const { return switchAddress; }
++  bool isUseRestricted(void) const { return !switchAddress.isInvalid(); }
++  uintb getFirst(void) const { return first; }
++  uintb getLast(void) const { return last; }
++  const Address &getDescriptorAddress(void) const { return descriptorAddress; }
++  const string &getProvenance(void) const { return provenance; }
++  const Address &getGuardAddress(void) const { return guardAddress; }
++  bool isGuardTrue(void) const { return guardTrue; }
++  bool hasSameSelector(const ValueDomainConstraint &other) const;
++  void encode(Encoder &encoder) const;
++  static ValueDomainConstraint decodeFromElement(Decoder &decoder);
++};
++
+ /// \brief A container of commands that override the decompiler's default behavior for a single function
+ ///
+ /// Information about a particular function that can be overridden includes:
+@@ -154,10 +196,14 @@ private:
+   map<Address,Address> deindirect;	///< Convert CALLIND into CALL with recovered direct \b addr
+   map<Address,FuncProto *> protoover;	///< Override prototype at \b call-point
+   vector<Address> multistagejump;	///< Addresses of indirect jumps that need multistage recovery
++  vector<ValueDomainConstraint> valueDomains;	///< Context-specific LOAD result/use contracts
+   void clear(void);			///< Clear the entire set of overrides
+   static string generateDeadcodeDelayMessage(int4 index,Architecture *glb);
+ public:
+   ~Override(void) { clear(); }		///< Destructor
++  void insertValueDomainConstraint(const ValueDomainConstraint &constraint);
++  const vector<ValueDomainConstraint> &getValueDomainConstraints(void) const { return valueDomains; }
++  void copyValueDomainConstraints(const Override &other) { valueDomains = other.valueDomains; }
+   void insertForceGoto(const Address &targetpc,const Address &destpc);
+   void insertDeadcodeDelay(AddrSpace *spc,int4 delay);
+   bool hasDeadcodeDelay(AddrSpace *spc) const;
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/valuedomain.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/valuedomain.hh
+new file mode 100644
+index 0000000000..357eda56bc
+--- /dev/null
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/valuedomain.hh
+@@ -0,0 +1,31 @@
++/* ###
++ * IP: GHIDRA
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++/// \file valuedomain.hh
++/// \brief Conservative evaluation of request-local LOAD value domains
++#ifndef __VALUEDOMAIN_HH__
++#define __VALUEDOMAIN_HH__
++#include "rangeutil.hh"
++namespace ghidra {
++class Funcdata;
++class Varnode;
++class PcodeOp;
++class ValueDomainAnalysis {
++public:
++  static bool getRange(Funcdata *fd,Varnode *value,PcodeOp *use,CircleRange &range);
++  static bool preservesGuard(Funcdata *fd,PcodeOp *branch,PcodeOp *use);
++};
++}
++#endif
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/jumptable.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/jumptable.cc
+index 6e9ffb2597..ccb8d08e02 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/jumptable.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/jumptable.cc
+@@ -16,6 +16,7 @@
+ #include "ghidra/jumptable.hh"
+ #include "ghidra/emulate.hh"
+ #include "ghidra/flow.hh"
++#include "ghidra/valuedomain.hh"
+ 
+ namespace ghidra {
+ 
+@@ -1146,7 +1147,7 @@ void JumpBasic::analyzeGuards(BlockBasic *bl,int4 pathout)
+ /// can be restricted. Multiple guards may provide different restrictions.
+ /// \param vn is the given Varnode
+ /// \param rng will hold resulting range of values the Varnode can hold at the switch
+-void JumpBasic::calcRange(Varnode *vn,CircleRange &rng) const
++bool JumpBasic::calcRange(Funcdata *fd,Varnode *vn,CircleRange &rng) const
+ 
+ {
+   getInitialRange(vn,rng);
+@@ -1163,6 +1164,18 @@ void JumpBasic::calcRange(Varnode *vn,CircleRange &rng) const
+     if (rng.intersect(guard.getRange())!=0) continue;
+   }
+ 
++  // Metadata contracts apply only to an exact LOAD SSA value in this request.
++  // Do not reuse GuardRecord's pointer-alias approximation for this evidence.
++  CircleRange domain;
++  bool proven = ValueDomainAnalysis::getRange(fd,vn,jumptable->getIndirectOp(),domain);
++  if (proven) {
++    CircleRange restricted(rng);
++    if (restricted.intersect(domain) == 0 && !restricted.isEmpty())
++      rng = restricted;
++    else
++      proven = false;
++  }
++
+   // It may be an assumption that the switch value is positive
+   // in which case the guard might not check for it. If the
+   // size is too big, we try only positive values
+@@ -1172,6 +1185,7 @@ void JumpBasic::calcRange(Varnode *vn,CircleRange &rng) const
+     if (!positive.isEmpty())
+       rng = positive;
+   }
++  return proven;
+ }
+ 
+ /// \brief Return \b true if the \b newRange is preferred over the current range
+@@ -1200,7 +1214,7 @@ bool JumpBasic::isPreferredRange(int4 pos,const CircleRange &newRange)
+ /// Varnode as the switch variable.  Whatever Varnode is selected,
+ /// the JumpValue object is set up to iterator over its range.
+ /// \param previous (if not NULL) is a previously recovered model for the same switch
+-void JumpBasic::findSmallestNormal(const JumpBasic *previous)
++void JumpBasic::findSmallestNormal(Funcdata *fd,const JumpBasic *previous)
+ 
+ {
+   CircleRange rng;
+@@ -1216,7 +1230,7 @@ void JumpBasic::findSmallestNormal(const JumpBasic *previous)
+   }
+   varnodeIndex = 0;
+   indexBeforeTableLoad = pathMeld.isLoadInPath(varnodeIndex);
+-  calcRange(pathMeld.getVarnode(0),rng);
++  calcRange(fd,pathMeld.getVarnode(0),rng);
+   jrange->setRange(rng,pathMeld.getVarnode(0),pathMeld.getOp(0));
+   maxsize = rng.getSize();
+   for(uint4 i=1;i<pathMeld.numCommonVarnode();++i) {
+@@ -1224,7 +1238,7 @@ void JumpBasic::findSmallestNormal(const JumpBasic *previous)
+     // table value can have the same range without being the same switch input.
+     if (rng == expectedRange && (!expectedLoad || indexBeforeTableLoad))
+       return;
+-    calcRange(pathMeld.getVarnode(i),rng);
++    calcRange(fd,pathMeld.getVarnode(i),rng);
+     sz = rng.getSize();
+     if (sz > maxsize) continue;
+     if (sz == maxsize) {				// If range sizes are the same
+@@ -1242,11 +1256,11 @@ void JumpBasic::findSmallestNormal(const JumpBasic *previous)
+     // between it and the indirect jump.
+     for(uint4 i=varnodeIndex+1;i<pathMeld.numCommonVarnode();++i) {
+       if (!pathMeld.isLoadInPath(i)) continue;
+-      calcRange(pathMeld.getVarnode(i),rng);
++      bool proven = calcRange(fd,pathMeld.getVarnode(i),rng);
+       if (rng.getSize() > maxsize) continue;
+       varnodeIndex = i;
+       indexBeforeTableLoad = true;
+-      validateByteTargets = true;
++      validateByteTargets = !proven;
+       jrange->setRange(rng,pathMeld.getVarnode(i),pathMeld.getEarliestOp(i));
+       return;
+     }
+@@ -1273,7 +1287,7 @@ void JumpBasic::findNormalized(Funcdata *fd,BlockBasic *rootbl,int4 pathout,cons
+   uintb sz;
+ 
+   analyzeGuards(rootbl,pathout);
+-  findSmallestNormal(dynamic_cast<const JumpBasic *>(previous));
++  findSmallestNormal(fd,dynamic_cast<const JumpBasic *>(previous));
+   sz = jrange->getSize();
+   if ((sz > maxtablesize)&&(pathMeld.numCommonVarnode()==1)) {
+     // Check for jump through readonly variable
+@@ -1438,6 +1452,7 @@ bool JumpBasic::foldInOneGuard(Funcdata *fd,GuardRecord &guard,JumpTable *jump)
+ 
+ {
+   PcodeOp *cbranch = guard.getBranch();
++  if (ValueDomainAnalysis::preservesGuard(fd,cbranch,jump->getIndirectOp())) return false;
+   BlockBasic *cbranchblock = cbranch->getParent();
+   // Its possible the guard branch has been converted between the switch recovery and now
+   if (cbranchblock->sizeOut() != 2) return false; // In which case, we can't fold it in
+@@ -1843,6 +1858,7 @@ bool JumpBasic2::foldInOneGuard(Funcdata *fd,GuardRecord &guard,JumpTable *jump)
+   //
+   // So we don't make any special mods, in case there are extra statements in these blocks
+ 
++  if (ValueDomainAnalysis::preservesGuard(fd,guard.getBranch(),jump->getIndirectOp())) return false;
+ 
+   // The final block in the table is the single value produced by the model2 guard
+   jump->setLastAsDefault();	// It should be the default block
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/marshal.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/marshal.cc
+index 929d080888..2ec21dd06a 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/marshal.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/marshal.cc
+@@ -1350,6 +1350,7 @@ ElementId ELEM_VAL = ElementId("val",8);
+ ElementId ELEM_VALUE = ElementId("value",9);
+ ElementId ELEM_VOID = ElementId("void",10);
+ 
+-ElementId ELEM_UNKNOWN = ElementId("XMLunknown",294); // Number serves as next open index
++ElementId ELEM_VALUEDOMAIN = ElementId("valuedomain",294);
++ElementId ELEM_UNKNOWN = ElementId("XMLunknown",295); // Number serves as next open index
+ 
+ } // End namespace ghidra
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/override.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/override.cc
+index 0ab4db6bd7..6c49128667 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/override.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/override.cc
+@@ -26,6 +26,160 @@ ElementId ELEM_MULTISTAGEJUMP = ElementId("multistagejump",222);
+ ElementId ELEM_OVERRIDE = ElementId("override",223);
+ ElementId ELEM_PROTOOVERRIDE = ElementId("protooverride",224);
+ 
++ValueDomainConstraint::ValueDomainConstraint(const Address &owner,const Address &load,int4 size,
++    const Address &use,uintb lo,uintb hi,const Address &descriptor,const string &source,
++    const Address &guard,bool trueEdge)
++  : ValueDomainConstraint(owner,load,size,use,lo,hi,descriptor,source,guard,trueEdge,true)
++{
++}
++
++ValueDomainConstraint::ValueDomainConstraint(const Address &owner,const Address &load,int4 size,
++    uintb lo,uintb hi,const Address &descriptor,const string &source,const Address &guard,bool trueEdge)
++  : ValueDomainConstraint(owner,load,size,Address((AddrSpace *)0,0),lo,hi,descriptor,source,guard,trueEdge,false)
++{
++}
++
++ValueDomainConstraint::ValueDomainConstraint(const Address &owner,const Address &load,int4 size,
++    const Address &use,uintb lo,uintb hi,const Address &descriptor,const string &source,
++    const Address &guard,bool trueEdge,bool useRestricted)
++  : ownerEntry(owner), loadAddress(load), outputSize(size),
++    switchAddress(useRestricted && !use.isInvalid() ? use : Address((AddrSpace *)0,0)), first(lo), last(hi),
++    descriptorAddress(descriptor), provenance(source),
++    guardAddress(guard.isInvalid() ? Address((AddrSpace *)0,0) : guard),
++    guardTrue(!guard.isInvalid() && trueEdge)
++{
++  if (owner.isInvalid() || load.isInvalid() || descriptor.isInvalid() ||
++      (useRestricted && use.isInvalid()) ||
++      owner.getSpace()->getType() != IPTR_PROCESSOR || load.getSpace()->getType() != IPTR_PROCESSOR ||
++      (useRestricted && use.getSpace()->getType() != IPTR_PROCESSOR) ||
++      descriptor.getSpace()->getType() != IPTR_PROCESSOR ||
++      (!guard.isInvalid() && guard.getSpace()->getType() != IPTR_PROCESSOR))
++    throw LowlevelError("Value-domain addresses must be memory addresses");
++  if (size < 1 || size > 8)
++    throw LowlevelError("Value-domain width must be 1 through 8 bytes");
++  uintb maximum = size == 8 ? ~(uintb)0 : (((uintb)1 << (8 * size)) - 1);
++  if (lo > hi || hi > maximum)
++    throw LowlevelError("Value-domain bounds do not fit the unsigned width");
++  if (source.find_first_not_of(" \t\r\n\f\v") == string::npos)
++    throw LowlevelError("Value-domain provenance is required");
++}
++
++bool ValueDomainConstraint::hasSameSelector(const ValueDomainConstraint &other) const
++
++{
++  return ownerEntry == other.ownerEntry && loadAddress == other.loadAddress &&
++      outputSize == other.outputSize && (!isUseRestricted() || !other.isUseRestricted() ||
++      switchAddress == other.switchAddress);
++}
++
++static void encodeDomainAddress(Encoder &encoder,const char *role,const Address &addr)
++
++{
++  encoder.openElement(ELEM_ADDR);
++  encoder.writeString(ATTRIB_TYPE,role);
++  if (!addr.isInvalid()) {
++    encoder.writeSpace(ATTRIB_SPACE,addr.getSpace());
++    encoder.writeUnsignedInteger(ATTRIB_OFFSET,addr.getOffset());
++  }
++  encoder.closeElement(ELEM_ADDR);
++}
++
++void ValueDomainConstraint::encode(Encoder &encoder) const
++
++{
++  encoder.openElement(ELEM_VALUEDOMAIN);
++  encoder.writeSignedInteger(ATTRIB_FORMAT,1);
++  encoder.writeString(ATTRIB_TYPE,"load");
++  encoder.writeSignedInteger(ATTRIB_SIZE,outputSize);
++  encoder.writeUnsignedInteger(ATTRIB_FIRST,first);
++  encoder.writeUnsignedInteger(ATTRIB_LAST,last);
++  encoder.writeString(ATTRIB_NAME,provenance);
++  encoder.writeSignedInteger(ATTRIB_INDEX,guardAddress.isInvalid() ? -1 : guardTrue ? 1 : 0);
++  encodeDomainAddress(encoder,"owner",ownerEntry);
++  encodeDomainAddress(encoder,"load",loadAddress);
++  encodeDomainAddress(encoder,"switch",switchAddress);
++  encodeDomainAddress(encoder,"descriptor",descriptorAddress);
++  if (!guardAddress.isInvalid())
++    encodeDomainAddress(encoder,"guard",guardAddress);
++  encoder.closeElement(ELEM_VALUEDOMAIN);
++}
++
++static Address decodeDomainAddress(Decoder &decoder,const char *expectedRole)
++
++{
++  uint4 element = decoder.openElement(ELEM_ADDR);
++  int4 fields = 0;
++  string role;
++  AddrSpace *space = (AddrSpace *)0;
++  uintb offset = 0;
++  for(uint4 id;(id = decoder.getNextAttributeId()) != 0;) {
++    int4 bit;
++    if (id == ATTRIB_TYPE) { bit = 1; role = decoder.readString(); }
++    else if (id == ATTRIB_SPACE) { bit = 2; space = decoder.readSpace(); }
++    else if (id == ATTRIB_OFFSET) { bit = 4; offset = decoder.readUnsignedInteger(); }
++    else { throw DecoderError("Unknown value-domain address attribute"); }
++    if ((fields & bit) != 0)
++      throw DecoderError("Duplicate value-domain address attribute");
++    fields |= bit;
++  }
++  if (fields == 1 && string(expectedRole) == "switch" && role == expectedRole) {
++    decoder.closeElement(element);
++    return Address((AddrSpace *)0,0);
++  }
++  if (fields != 7 || role != expectedRole || space == (AddrSpace *)0)
++    throw DecoderError("Unexpected value-domain address role");
++  decoder.closeElement(element);
++  if (offset > space->getHighest())
++    throw DecoderError("Value-domain address offset exceeds its address space");
++  return Address(space,offset);
++}
++
++/// The caller has already opened the valuedomain element and closes it after this returns.
++ValueDomainConstraint ValueDomainConstraint::decodeFromElement(Decoder &decoder)
++
++{
++  int4 fields = 0;
++  int8 format = -1, size = 0, edge = -2;
++  uintb first = 0, last = 0;
++  string type, source;
++  for(uint4 id;(id = decoder.getNextAttributeId()) != 0;) {
++    int4 bit;
++    if (id == ATTRIB_FORMAT) { bit = 1; format = decoder.readSignedInteger(); }
++    else if (id == ATTRIB_TYPE) { bit = 2; type = decoder.readString(); }
++    else if (id == ATTRIB_SIZE) { bit = 4; size = decoder.readSignedInteger(); }
++    else if (id == ATTRIB_FIRST) { bit = 8; first = decoder.readUnsignedInteger(); }
++    else if (id == ATTRIB_LAST) { bit = 16; last = decoder.readUnsignedInteger(); }
++    else if (id == ATTRIB_NAME) { bit = 32; source = decoder.readString(); }
++    else if (id == ATTRIB_INDEX) { bit = 64; edge = decoder.readSignedInteger(); }
++    else { throw DecoderError("Unknown value-domain attribute"); }
++    if ((fields & bit) != 0)
++      throw DecoderError("Duplicate value-domain attribute");
++    fields |= bit;
++  }
++  if (fields != 127 || format != 1 || type != "load" || size < 1 || size > 8 || edge < -1 || edge > 1)
++    throw DecoderError("Unsupported value-domain schema");
++  Address owner = decodeDomainAddress(decoder,"owner");
++  Address load = decodeDomainAddress(decoder,"load");
++  Address use = decodeDomainAddress(decoder,"switch");
++  Address descriptor = decodeDomainAddress(decoder,"descriptor");
++  Address guard = edge == -1 ? Address((AddrSpace *)0,0) : decodeDomainAddress(decoder,"guard");
++  if (decoder.peekElement() != 0)
++    throw DecoderError("Unexpected value-domain child");
++  if (use.isInvalid())
++    return ValueDomainConstraint(owner,load,(int4)size,first,last,descriptor,source,guard,edge == 1);
++  return ValueDomainConstraint(owner,load,(int4)size,use,first,last,descriptor,source,guard,edge == 1);
++}
++
++void Override::insertValueDomainConstraint(const ValueDomainConstraint &constraint)
++
++{
++  for(vector<ValueDomainConstraint>::const_iterator iter=valueDomains.begin();iter!=valueDomains.end();++iter) {
++    if (constraint.hasSameSelector(*iter))
++      throw LowlevelError("Duplicate value-domain result/use selector");
++  }
++  valueDomains.push_back(constraint);
++}
++
+ void Override::clear(void)
+ 
+ {
+@@ -42,6 +196,7 @@ void Override::clear(void)
+   deindirect.clear();
+   protoover.clear();
+   multistagejump.clear();
++  valueDomains.clear();
+ }
+ 
+ /// \brief Generate \e warning message related to a dead code delay
+@@ -309,7 +464,7 @@ void Override::encode(Encoder &encoder,Architecture *glb) const
+ 
+ {
+   if (forcegoto.empty() && deadcodedelay.empty() && deindirect.empty() && protoover.empty() &&
+-      multistagejump.empty() && pcodeover.empty())
++      multistagejump.empty() && pcodeover.empty() && valueDomains.empty())
+     return;
+   encoder.openElement(ELEM_OVERRIDE);
+ 
+@@ -345,6 +500,9 @@ void Override::encode(Encoder &encoder,Architecture *glb) const
+   for(map<Address,Record *>::const_iterator titer=pcodeover.begin();titer!=pcodeover.end();++titer)
+     (*titer).second->encode(encoder, (*titer).first);
+ 
++  for(vector<ValueDomainConstraint>::const_iterator iter=valueDomains.begin();iter!=valueDomains.end();++iter)
++    iter->encode(encoder);
++
+   encoder.closeElement(ELEM_OVERRIDE);
+ }
+ 
+@@ -359,7 +517,10 @@ void Override::decode(Decoder &decoder,Architecture *glb)
+   for(;;) {
+     uint4 subId = decoder.openElement();
+     if (subId == 0) break;
+-    if (subId == ELEM_PROTOOVERRIDE) {
++    if (subId == ELEM_VALUEDOMAIN) {
++      insertValueDomainConstraint(ValueDomainConstraint::decodeFromElement(decoder));
++    }
++    else if (subId == ELEM_PROTOOVERRIDE) {
+       Address callpoint = Address::decode(decoder);
+       unique_ptr<FuncProto> fp(new FuncProto());
+       fp->setInternal(glb->defaultfp,glb->types->getTypeVoid());
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/valuedomain.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/valuedomain.cc
+new file mode 100644
+index 0000000000..00c2c14cb1
+--- /dev/null
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/valuedomain.cc
+@@ -0,0 +1,222 @@
++/* ###
++ * IP: GHIDRA
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++#include "ghidra/valuedomain.hh"
++#include "ghidra/funcdata.hh"
++#include "ghidra/architecture.hh"
++#include "ghidra/typeop.hh"
++#include <limits>
++
++namespace ghidra {
++namespace {
++struct DomainValue {
++  uintb value;
++  bool rooted;
++  DomainValue(uintb v=0,bool r=false) : value(v),rooted(r) {}
++};
++
++// A source is one exact SSA LOAD result. In particular, a second LOAD from an
++// equal-looking pointer is not evidence that the values or lifetimes agree.
++class DomainEvaluator {
++  Architecture *arch;
++  Varnode *source;
++  uintb seed;
++  int4 fuel;
++  map<Varnode *,DomainValue> memo;
++  set<Varnode *> pending;
++public:
++  DomainEvaluator(Architecture *a,Varnode *s,uintb v) : arch(a),source(s),seed(v),fuel(256) {}
++  bool evaluate(Varnode *vn,DomainValue &result,int4 depth=0) {
++    if (vn == (Varnode *)0 || vn->getSize() > sizeof(uintb) || vn->getSize() <= 0) return false;
++    if (vn == source) { result = DomainValue(seed,true); return true; }
++    if (vn->isConstant()) { result = DomainValue(vn->getOffset(),false); return true; }
++    map<Varnode *,DomainValue>::const_iterator found = memo.find(vn);
++    if (found != memo.end()) { result = (*found).second; return true; }
++    if (!vn->isWritten() || depth >= 32 || --fuel < 0 || !pending.insert(vn).second) return false;
++    PcodeOp *op = vn->getDef();
++    bool unary = false;
++    switch(op->code()) {
++      case CPUI_COPY: case CPUI_INT_ZEXT: case CPUI_INT_SEXT:
++      case CPUI_INT_NEGATE: case CPUI_INT_2COMP: case CPUI_BOOL_NEGATE:
++        unary = true; break;
++      case CPUI_INT_AND: case CPUI_INT_OR: case CPUI_INT_XOR:
++      case CPUI_INT_LEFT: case CPUI_INT_RIGHT: case CPUI_INT_SRIGHT:
++      case CPUI_INT_ADD: case CPUI_INT_SUB: case CPUI_SUBPIECE:
++      case CPUI_INT_EQUAL: case CPUI_INT_NOTEQUAL:
++      case CPUI_INT_LESS: case CPUI_INT_LESSEQUAL:
++      case CPUI_INT_SLESS: case CPUI_INT_SLESSEQUAL:
++      case CPUI_BOOL_AND: case CPUI_BOOL_OR: case CPUI_BOOL_XOR:
++        break;
++      default: return false;
++    }
++    if (op->numInput() != (unary ? 1 : 2)) return false;
++    DomainValue left,right;
++    if (!evaluate(op->getIn(0),left,depth+1)) return false;
++    if (!unary && !evaluate(op->getIn(1),right,depth+1)) return false;
++    TypeOp *behavior = arch->inst[op->code()];
++    uintb output = unary
++        ? behavior->evaluateUnary(vn->getSize(),op->getIn(0)->getSize(),left.value)
++        : behavior->evaluateBinary(vn->getSize(),op->getIn(0)->getSize(),left.value,right.value);
++    result = DomainValue(output & calc_mask(vn->getSize()),left.rooted || right.rooted);
++    pending.erase(vn);
++    memo[vn] = result;
++    return true;
++  }
++};
++
++static bool matchesUse(const ValueDomainConstraint &domain,Funcdata *fd,PcodeOp *use)
++{
++  return domain.getOwnerEntry() == fd->getAddress() &&
++      (!domain.isUseRestricted() || domain.getSwitchAddress() == use->getAddr());
++}
++
++static PcodeOp *uniqueOperation(Funcdata *fd,const Address &address,OpCode opcode)
++{
++  PcodeOp *result = (PcodeOp *)0;
++  for(list<PcodeOp *>::const_iterator it=fd->beginOpAlive();it!=fd->endOpAlive();++it) {
++    PcodeOp *op = *it;
++    if (op->getAddr() != address || op->code() != opcode) continue;
++    if (result != (PcodeOp *)0) return (PcodeOp *)0;
++    result = op;
++  }
++  return result;
++}
++
++// Removing the required edge must disconnect entry from the use. Dominance of
++// the guard block alone would also admit the opposite arm or an arm with a bypass.
++static bool requiredEdge(Funcdata *fd,PcodeOp *branch,PcodeOp *use,bool truth)
++{
++  BlockBasic *guard = branch->getParent();
++  BlockBasic *target = use->getParent();
++  const BlockGraph &graph = fd->getBasicBlocks();
++  if (guard == (BlockBasic *)0 || target == (BlockBasic *)0 || graph.getSize() == 0 ||
++      guard->sizeOut() != 2) return false;
++  // The contract names the original taken/fall-through edge. The current
++  // condition may have been negated and boolean_flip normalized away.
++  int4 slot = (truth != branch->isFallthruTrue()) ? 1 : 0;
++  FlowBlock *successor = guard->getOut(slot);
++  if (successor == guard) return false;
++  FlowBlock *entry = graph.getBlock(0);
++  vector<FlowBlock *> work(1,target);
++  set<FlowBlock *> seen;
++  bool encountered = false;
++  while(!work.empty()) {
++    FlowBlock *block = work.back(); work.pop_back();
++    if (!seen.insert(block).second) continue;
++    if (block == entry) return false;
++    for(int4 i=0;i<block->sizeIn();++i) {
++      FlowBlock *predecessor = block->getIn(i);
++      if (predecessor == guard && block == successor && block->getInRevIndex(i) == slot) {
++        encountered = true;
++        continue;
++      }
++      work.push_back(predecessor);
++    }
++  }
++  return encountered;
++}
++
++static bool makeRange(const set<uintb> &values,int4 size,CircleRange &range)
++{
++  if (values.empty()) return false;
++  if (values.size() == 1) { range.setRange(*values.begin(),size); return true; }
++  set<uintb>::const_iterator it = values.begin();
++  uintb first = *it++;
++  uintb step = *it - first;
++  if (step == 0 || (step & (step-1)) != 0 || step > std::numeric_limits<int4>::max()) return false;
++  uintb previous = *it++;
++  for(;it!=values.end();++it) {
++    if (*it - previous != step) return false;
++    previous = *it;
++  }
++  CircleRange result(first,(previous+step)&calc_mask(size),size,(int4)step);
++  if (result.getSize() != values.size()) return false;
++  range = result;
++  return true;
++}
++}
++
++bool ValueDomainAnalysis::getRange(Funcdata *fd,Varnode *value,PcodeOp *use,CircleRange &range)
++{
++  bool found = false;
++  const vector<ValueDomainConstraint> &domains = fd->getOverride().getValueDomainConstraints();
++  for(vector<ValueDomainConstraint>::const_iterator it=domains.begin();it!=domains.end();++it) {
++    const ValueDomainConstraint &domain = *it;
++    if (!matchesUse(domain,fd,use) || domain.getLast()-domain.getFirst() >= 65536) continue;
++    PcodeOp *load = uniqueOperation(fd,domain.getLoadAddress(),CPUI_LOAD);
++    if (load == (PcodeOp *)0 || load->getOut() == (Varnode *)0 ||
++        load->getOut()->getSize() != domain.getOutputSize()) continue;
++    PcodeOp *guard = (PcodeOp *)0;
++    if (!domain.getGuardAddress().isInvalid()) {
++      guard = uniqueOperation(fd,domain.getGuardAddress(),CPUI_CBRANCH);
++      if (guard == (PcodeOp *)0 || guard->numInput() != 2 ||
++          !requiredEdge(fd,guard,use,domain.isGuardTrue())) continue;
++    }
++    set<uintb> values;
++    bool valid = true;
++    try {
++      for(uintb seed=domain.getFirst();;) {
++        DomainEvaluator evaluator(fd->getArch(),load->getOut(),seed);
++        DomainValue result;
++        if (!evaluator.evaluate(value,result) || !result.rooted) { valid=false; break; }
++        if (guard != (PcodeOp *)0) {
++          DomainValue condition;
++          if (!evaluator.evaluate(guard->getIn(1),condition) || !condition.rooted) { valid=false; break; }
++          bool currentTrueEdge = (condition.value != 0) != guard->isBooleanFlip();
++          bool requiredTrueEdge = domain.isGuardTrue() != guard->isFallthruTrue();
++          if (currentTrueEdge == requiredTrueEdge) values.insert(result.value);
++        }
++        else values.insert(result.value);
++        if (seed == domain.getLast()) break; // Inclusive unsigned bounds, including UINT64_MAX
++        ++seed;
++      }
++    }
++    catch (LowlevelError &error) { valid = false; }
++    CircleRange candidate;
++    if (!valid || !makeRange(values,value->getSize(),candidate)) continue;
++    if (found && !(candidate == range)) return false;
++    range = candidate;
++    found = true;
++  }
++  return found;
++}
++
++bool ValueDomainAnalysis::preservesGuard(Funcdata *fd,PcodeOp *branch,PcodeOp *use)
++{
++  const vector<ValueDomainConstraint> &domains = fd->getOverride().getValueDomainConstraints();
++  for(vector<ValueDomainConstraint>::const_iterator it=domains.begin();it!=domains.end();++it) {
++    if (matchesUse(*it,fd,use) && !it->getGuardAddress().isInvalid() &&
++        it->getGuardAddress() == branch->getAddr()) {
++      // Normalization has already replaced BRANCHIND's target expression with
++      // the switch selector. A rejected contract must not alter guard folding.
++      PcodeOp *load = uniqueOperation(fd,it->getLoadAddress(),CPUI_LOAD);
++      PcodeOp *guard = uniqueOperation(fd,it->getGuardAddress(),CPUI_CBRANCH);
++      if (load == (PcodeOp *)0 || load->getOut() == (Varnode *)0 ||
++          load->getOut()->getSize() != it->getOutputSize() || guard != branch) continue;
++      // The aggregate range query below may also see other LOAD contracts.
++      // Establish this record's selector dependency before consulting it.
++      DomainEvaluator evaluator(fd->getArch(),load->getOut(),it->getFirst());
++      DomainValue selector;
++      try {
++        if (!evaluator.evaluate(use->getIn(0),selector) || !selector.rooted) continue;
++      }
++      catch (LowlevelError &error) { continue; }
++      CircleRange proven;
++      if (getRange(fd,use->getIn(0),use,proven)) return true;
++    }
++  }
++  return false;
++}
++} // End namespace ghidra
+diff --git a/Ghidra/Features/Decompiler/src/main/java/ghidra/app/decompiler/DecompInterface.java b/Ghidra/Features/Decompiler/src/main/java/ghidra/app/decompiler/DecompInterface.java
+index 788e69b67e..8369917731 100644
+--- a/Ghidra/Features/Decompiler/src/main/java/ghidra/app/decompiler/DecompInterface.java
++++ b/Ghidra/Features/Decompiler/src/main/java/ghidra/app/decompiler/DecompInterface.java
+@@ -21,6 +21,7 @@ import static ghidra.program.model.pcode.ElementId.*;
+ 
+ import java.io.*;
+ import java.util.ArrayList;
++import java.util.List;
+ 
+ import generic.jar.ResourceFile;
+ import ghidra.app.decompiler.signature.DebugSignature;
+@@ -768,6 +769,30 @@ public class DecompInterface {
+ 	 */
+ 	public synchronized DecompileResults decompileFunction(Function func, int timeoutSecs,
+ 			TaskMonitor monitor) {
++		return decompileFunction(func, timeoutSecs, monitor, List.of());
++	}
++
++	/**
++	 * Decompile in an explicit valid-value context. These contracts apply only to this request;
++	 * they do not change the program or establish a declaration for other callers. The producer
++	 * must prove each type-to-LOAD binding and any payload edge before supplying a contract.
++	 * Native analysis independently matches the value and its use before narrowing a range.
++	 *
++	 * @param func function to decompile
++	 * @param timeoutSecs maximum time in seconds
++	 * @param monitor optional cancellation monitor
++	 * @param constraints proven constraints for this function and invocation context
++	 * @return the decompilation result
++	 */
++	public synchronized DecompileResults decompileFunction(Function func, int timeoutSecs,
++			TaskMonitor monitor, List<ValueDomainConstraint> constraints) {
++
++		List<ValueDomainConstraint> domains = List.copyOf(constraints);
++		for (ValueDomainConstraint domain : domains) {
++			if (!domain.getOwnerEntry().equals(func.getEntryPoint())) {
++				throw new IllegalArgumentException("Value-domain owner differs from requested function");
++			}
++		}
+ 
+ 		dtmanage.clearTemporaryIds();
+ 		errorMessage = "";
+@@ -776,6 +801,10 @@ public class DecompInterface {
+ 			return new DecompileResults(func, pcodelanguage, compilerSpec, dtmanage,
+ 				errorMessage, null, DecompileProcess.DisposeState.DISPOSED_ON_CANCEL);
+ 		}
++		if (!domains.isEmpty()) {
++			// A prior symbol query may have cached an unconstrained description of this function.
++			flushCache();
++		}
+ 
+ 		if (monitor != null) {
+ 			monitor.addCancelledListener(monitorListener);
+@@ -787,7 +816,7 @@ public class DecompInterface {
+ 			if (debug != null) {
+ 				debug.setFunction(func);
+ 			}
+-			decompCallback.setFunction(func, funcEntry, debug);
++			decompCallback.setFunction(func, funcEntry, debug, domains);
+ 			EncodeDecodeSet activeSet = setupEncodeDecode(funcEntry);
+ 			decoder = activeSet.mainResponse;
+ 			verifyProcess();
+@@ -797,11 +826,14 @@ public class DecompInterface {
+ 			errorMessage = decompCallback.getErrorMessage();
+ 		}
+ 		catch (Exception ex) {
+-			decoder.clear(); 	// Clear any partial result
++			if (decoder != null) {
++				decoder.clear(); // Clear any partial result
++			}
+ 			errorMessage = "Exception while decompiling " + func.getEntryPoint() + ": " +
+ 				ex.getMessage() + '\n';
+ 		}
+ 		finally {
++			decompCallback.clearValueDomainConstraints();
+ 			if (monitor != null) {
+ 				monitor.removeCancelledListener(monitorListener);
+ 			}
+diff --git a/Ghidra/Features/Decompiler/src/main/java/ghidra/app/decompiler/DecompileCallback.java b/Ghidra/Features/Decompiler/src/main/java/ghidra/app/decompiler/DecompileCallback.java
+index 2bec272820..8efbb2bd48 100644
+--- a/Ghidra/Features/Decompiler/src/main/java/ghidra/app/decompiler/DecompileCallback.java
++++ b/Ghidra/Features/Decompiler/src/main/java/ghidra/app/decompiler/DecompileCallback.java
+@@ -111,6 +111,7 @@ public class DecompileCallback {
+ 	private ConstantPool cpool;
+ 	private PcodeDataTypeManager dtmanage;
+ 	private String errorMessage;
++	private List<ValueDomainConstraint> valueDomainConstraints = List.of();
+ 
+ 	private InstructionBlock lastPseudoInstructionBlock;
+ 	private Disassembler pseudoDisassembler;
+@@ -137,6 +138,13 @@ public class DecompileCallback {
+ 	 * @param dbg is the debugging context (or null)
+ 	 */
+ 	public void setFunction(Function func, Address entry, DecompileDebug dbg) {
++		setFunction(func, entry, dbg, List.of());
++	}
++
++	/** Establish a request-local context without changing the stored function signature. */
++	public void setFunction(Function func, Address entry, DecompileDebug dbg,
++			List<ValueDomainConstraint> constraints) {
++		valueDomainConstraints = List.copyOf(constraints);
+ 		cachedFunction = func;
+ 		undefinedBody = null;
+ 		if (func instanceof UndefinedFunction) {
+@@ -154,6 +162,10 @@ public class DecompileCallback {
+ 		}
+ 	}
+ 
++	void clearValueDomainConstraints() {
++		valueDomainConstraints = List.of();
++	}
++
+ 	/**
+ 	 * @return the last error message from the decompiler, or an empty string
+ 	 */
+@@ -800,6 +812,9 @@ public class DecompileCallback {
+ 
+ 		int extrapop = getExtraPopOverride(func, addr);
+ 		hfunc.grabFromFunction(extrapop, false, (extrapop != default_extrapop));
++		if (func.getEntryPoint().equals(funcEntry)) {
++			hfunc.setValueDomainConstraints(valueDomainConstraints);
++		}
+ 
+ 		HighSymbol funcSymbol = new HighFunctionSymbol(addr, 2, hfunc);
+ 		Namespace namespc = funcSymbol.getNamespace();
+@@ -991,6 +1006,9 @@ public class DecompileCallback {
+ 				int extrapop = getExtraPopOverride(func, addr);
+ 				hfunc.grabFromFunction(extrapop, includeDefaultNames,
+ 					(extrapop != default_extrapop));
++				if (entry.equals(funcEntry)) {
++					hfunc.setValueDomainConstraints(valueDomainConstraints);
++				}
+ 
+ 				long size = range.getMaxAddress().getOffset() - entry.getOffset() + 1;
+ 				if (size <= 0) {
+diff --git a/Ghidra/Features/Swift/src/main/java/ghidra/app/util/bin/format/swift/SwiftEnumValueContext.java b/Ghidra/Features/Swift/src/main/java/ghidra/app/util/bin/format/swift/SwiftEnumValueContext.java
+new file mode 100644
+index 0000000000..c2d2b5cc86
+--- /dev/null
++++ b/Ghidra/Features/Swift/src/main/java/ghidra/app/util/bin/format/swift/SwiftEnumValueContext.java
+@@ -0,0 +1,120 @@
++/* ###
++ * IP: GHIDRA
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package ghidra.app.util.bin.format.swift;
++
++import java.util.*;
++
++import ghidra.program.model.address.Address;
++import ghidra.program.model.listing.*;
++import ghidra.program.model.pcode.*;
++
++/**
++ * Binds supported Swift layouts to explicitly typed LOADs in one decompilation context.
++ * A caller must establish that the selected LOAD reads a valid value of the supplied type in
++ * this invocation. Descriptor proximity or a type name alone does not establish that premise.
++ * No declarations or program annotations are changed. Native analysis additionally matches
++ * the LOAD's SSA result and any required branch edge before using the contract.
++ */
++public final class SwiftEnumValueContext {
++
++	private SwiftEnumValueContext() {
++	}
++
++	/**
++	 * @param owner function containing the typed LOAD
++	 * @param loadAddress instruction reading the valid enum storage
++	 * @param descriptor exact enum descriptor identity
++	 * @param typedContextEvidence audit description of the independently established type binding
++	 * @return a request-local contract, or empty for unsupported metadata or an unmatched LOAD
++	 */
++	public static Optional<ValueDomainConstraint> noPayloadLoad(Function owner,
++			Address loadAddress, Address descriptor, String typedContextEvidence) {
++		requireContext(owner, typedContextEvidence);
++		SwiftEnumDomainResolver resolver = new SwiftEnumDomainResolver(owner.getProgram());
++		return resolver.resolveNoPayload(descriptor)
++			.filter(domain -> matchesLoad(owner, loadAddress, domain.getStorageSize()))
++			.map(domain -> new ValueDomainConstraint(owner.getEntryPoint(), loadAddress,
++				domain.getStorageSize(), 0, domain.getCaseCount() - 1, descriptor,
++				"Swift no-payload enum; " + typedContextEvidence));
++	}
++
++	/**
++	 * The type premise applies only on the indicated original raw p-code branch outcome. The native
++	 * consumer must prove that edge is required to reach a use and its condition refers to this LOAD.
++	 *
++	 * @param owner function containing the LOAD and required edge
++	 * @param loadAddress instruction reading the valid enum storage
++	 * @param metadata exact payload enum metadata identity
++	 * @param ordinal selected payload's declaration-order ordinal
++	 * @param guardAddress instruction of the required conditional branch
++	 * @param guardTrue required outcome of the original raw CBRANCH condition, before optimization
++	 * @param typedContextEvidence audit description of the independently established type binding
++	 * @return a request-local contract, or empty when the layout or instructions are unsupported
++	 */
++	public static Optional<ValueDomainConstraint> payloadLoad(Function owner, Address loadAddress,
++			Address metadata, int ordinal, Address guardAddress, boolean guardTrue,
++			String typedContextEvidence) {
++		requireContext(owner, typedContextEvidence);
++		if (!matchesOpcode(owner, guardAddress, PcodeOp.CBRANCH)) {
++			return Optional.empty();
++		}
++		SwiftEnumDomainResolver resolver = new SwiftEnumDomainResolver(owner.getProgram());
++		return resolver.resolvePayload(metadata, ordinal)
++			.filter(domain -> matchesLoad(owner, loadAddress, domain.getStorageSize()))
++			.map(domain -> new ValueDomainConstraint(owner.getEntryPoint(), loadAddress,
++				domain.getStorageSize(), domain.getEncodedFirst(), domain.getEncodedLast(),
++				domain.getDescriptorAddress(), "Swift payload witnesses sha256=" +
++					domain.getEvidenceSha256() + "; " + typedContextEvidence,
++				guardAddress, guardTrue));
++	}
++
++	private static void requireContext(Function owner, String evidence) {
++		Objects.requireNonNull(owner);
++		if (evidence == null || evidence.isBlank()) {
++			throw new IllegalArgumentException("An explicit typed invocation context is required");
++		}
++	}
++
++	private static boolean matchesLoad(Function owner, Address address, int size) {
++		PcodeOp op = uniqueOp(owner, address, PcodeOp.LOAD);
++		return op != null && op.getOutput() != null && op.getOutput().getSize() == size;
++	}
++
++	private static boolean matchesOpcode(Function owner, Address address, int opcode) {
++		return uniqueOp(owner, address, opcode) != null;
++	}
++
++	private static PcodeOp uniqueOp(Function owner, Address address, int opcode) {
++		if (address == null || !address.isMemoryAddress() || !owner.getBody().contains(address)) {
++			return null;
++		}
++		Instruction instruction = owner.getProgram().getListing().getInstructionAt(address);
++		if (instruction == null) {
++			return null;
++		}
++		PcodeOp match = null;
++		for (PcodeOp op : instruction.getPcode()) {
++			if (op.getOpcode() != opcode) {
++				continue;
++			}
++			if (match != null) {
++				return null;
++			}
++			match = op;
++		}
++		return match;
++	}
++}
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/ElementId.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/ElementId.java
+index 0a568443dd..38123a2313 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/ElementId.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/ElementId.java
+@@ -467,5 +467,7 @@ public record ElementId(String name, int id) {
+ 	// far-pointer call-argument fusion (H8/539F segmented-memory support)
+ 	public static final ElementId ELEM_FARPOINTERJOIN = new ElementId("farpointerjoin", 293);
+ 
+-	public static final ElementId ELEM_UNKNOWN = new ElementId("XMLunknown", 294);
++	public static final ElementId ELEM_VALUEDOMAIN = new ElementId("valuedomain", 294);
++
++	public static final ElementId ELEM_UNKNOWN = new ElementId("XMLunknown", 295);
+ }
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/HighFunction.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/HighFunction.java
+index a814eaac3d..887625b8ab 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/HighFunction.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/HighFunction.java
+@@ -53,6 +53,7 @@ public class HighFunction extends PcodeSyntaxTree {
+ 	private List<JumpTable> jumpTables;
+ 	private List<DataTypeSymbol> protoOverrides;
+ 	private Address entryPoint;
++	private List<ValueDomainConstraint> valueDomainConstraints = List.of();
+ 
+ 	/**
+ 	 * @param function  function associated with the higher level function abstraction.
+@@ -123,6 +124,34 @@ public class HighFunction extends PcodeSyntaxTree {
+ 		return jumpTables.toArray(res);
+ 	}
+ 
++	/**
++	 * Supply ephemeral LOAD-result contracts for this decompilation context. These are not read
++	 * from datatypes or persisted function annotations. Competing records for the same selector
++	 * must be resolved by the producer rather than implicitly intersected by the decompiler.
++	 * @param constraints the contracts, or an empty list to clear them
++	 * @throws IllegalArgumentException for a different owner or duplicate result/use selector
++	 */
++	public void setValueDomainConstraints(List<ValueDomainConstraint> constraints) {
++		List<ValueDomainConstraint> copy = List.copyOf(constraints);
++		for (int i = 0; i < copy.size(); ++i) {
++			ValueDomainConstraint constraint = copy.get(i);
++			if (!entryPoint.equals(constraint.getOwnerEntry())) {
++				throw new IllegalArgumentException("Value-domain owner does not match this function");
++			}
++			for (int j = 0; j < i; ++j) {
++				if (constraint.hasSameSelector(copy.get(j))) {
++					throw new IllegalArgumentException("Duplicate value-domain result/use selector");
++				}
++			}
++		}
++		valueDomainConstraints = copy;
++	}
++
++	/** @return the immutable contracts for this decompilation context */
++	public List<ValueDomainConstraint> getValueDomainConstraints() {
++		return valueDomainConstraints;
++	}
++
+ 	/**
+ 	 * @return the local variable map describing the defined local variables
+ 	 */
+@@ -479,12 +508,13 @@ public class HighFunction extends PcodeSyntaxTree {
+ 			}
+ 			encoder.closeElement(ELEM_JUMPTABLELIST);
+ 		}
+-		boolean hasOverrideTag = ((protoOverrides != null) && (protoOverrides.size() > 0));
++		boolean hasOverrideTag = ((protoOverrides != null) && (protoOverrides.size() > 0)) ||
++			!valueDomainConstraints.isEmpty();
+ 		if (hasOverrideTag) {
+ 			encoder.openElement(ELEM_OVERRIDE);
+ 			PcodeDataTypeManager dtmanage = getDataTypeManager();
+ 			Program prog = func.getProgram();
+-			for (DataTypeSymbol sym : protoOverrides) {
++			for (DataTypeSymbol sym : protoOverrides == null ? List.<DataTypeSymbol>of() : protoOverrides) {
+ 				Address addr = sym.getAddress();
+ 				int firstVarArg = HighFunctionDBUtil.getFirstVarArg(prog, addr);
+ 				FunctionPrototype fproto = new FunctionPrototype(
+@@ -494,6 +524,9 @@ public class HighFunction extends PcodeSyntaxTree {
+ 				fproto.encodePrototype(encoder, dtmanage, firstVarArg);
+ 				encoder.closeElement(ELEM_PROTOOVERRIDE);
+ 			}
++			for (ValueDomainConstraint constraint : valueDomainConstraints) {
++				constraint.encode(encoder);
++			}
+ 			encoder.closeElement(ELEM_OVERRIDE);
+ 		}
+ 		encoder.closeElement(ELEM_FUNCTION);
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/ValueDomainConstraint.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/ValueDomainConstraint.java
+new file mode 100644
+index 0000000000..4e6217ecf6
+--- /dev/null
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/ValueDomainConstraint.java
+@@ -0,0 +1,256 @@
++/* ###
++ * IP: GHIDRA
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package ghidra.program.model.pcode;
++
++import static ghidra.program.model.pcode.AttributeId.*;
++import static ghidra.program.model.pcode.ElementId.*;
++
++import java.io.IOException;
++import java.util.Objects;
++
++import ghidra.program.model.address.Address;
++import ghidra.program.model.address.AddressSpace;
++
++/**
++ * An ephemeral unsigned value-domain contract for one LOAD result in one invocation context.
++ * The producer must establish the type-to-value binding in the current decompilation context.
++ * Provenance is audit information, not proof that the contract applies to a particular SSA value.
++ * Consumers must independently match the LOAD and, if present, its required control-flow edge.
++ * This record neither changes a datatype nor persists an assumption in the program database.
++ */
++public final class ValueDomainConstraint {
++	private final Address ownerEntry;
++	private final Address loadAddress;
++	private final int outputSize;
++	private final Address switchAddress;
++	private final long first;
++	private final long last;
++	private final Address descriptorAddress;
++	private final String provenance;
++	private final Address guardAddress;
++	private final boolean guardTrue;
++
++	/**
++	 * Construct a LOAD-wide contract in the explicit invocation context, with inclusive unsigned
++	 * bounds. Consumers may follow the matched SSA result to any use, but must still establish
++	 * the owner and LOAD identity. This does not narrow unknown callers of the function.
++	 */
++	public ValueDomainConstraint(Address ownerEntry, Address loadAddress, int outputSize,
++			long first, long last, Address descriptorAddress, String provenance) {
++		this(ownerEntry, loadAddress, outputSize, Address.NO_ADDRESS, first, last,
++			descriptorAddress, provenance, null, false, false);
++	}
++
++	/** Construct a LOAD-wide contract restricted to the required CBRANCH edge, if supplied. */
++	public ValueDomainConstraint(Address ownerEntry, Address loadAddress, int outputSize,
++			long first, long last, Address descriptorAddress, String provenance,
++			Address guardAddress, boolean guardTrue) {
++		this(ownerEntry, loadAddress, outputSize, Address.NO_ADDRESS, first, last,
++			descriptorAddress, provenance, guardAddress, guardTrue, false);
++	}
++
++	/**
++	 * Construct an unconditional contract, with inclusive unsigned bounds.
++	 */
++	public ValueDomainConstraint(Address ownerEntry, Address loadAddress, int outputSize,
++			Address switchAddress, long first, long last, Address descriptorAddress,
++			String provenance) {
++		this(ownerEntry, loadAddress, outputSize, switchAddress, first, last,
++			descriptorAddress, provenance, null, false);
++	}
++
++	/**
++	 * Construct a contract optionally restricted to a CBRANCH edge. A null guard means no edge
++	 * restriction; otherwise {@code guardTrue} identifies the required outcome of the original raw
++	 * p-code CBRANCH condition, before native optimization changes its sense.
++	 * @throws IllegalArgumentException if a bound, size, address, or provenance is invalid
++	 */
++	public ValueDomainConstraint(Address ownerEntry, Address loadAddress, int outputSize,
++			Address switchAddress, long first, long last, Address descriptorAddress,
++			String provenance, Address guardAddress, boolean guardTrue) {
++		this(ownerEntry, loadAddress, outputSize, switchAddress, first, last,
++			descriptorAddress, provenance, guardAddress, guardTrue, true);
++	}
++
++	private ValueDomainConstraint(Address ownerEntry, Address loadAddress, int outputSize,
++			Address switchAddress, long first, long last, Address descriptorAddress,
++			String provenance, Address guardAddress, boolean guardTrue, boolean useRestricted) {
++		this.ownerEntry = requireAddress(ownerEntry);
++		this.loadAddress = requireAddress(loadAddress);
++		this.switchAddress = useRestricted ? requireAddress(switchAddress) : Address.NO_ADDRESS;
++		this.descriptorAddress = requireAddress(descriptorAddress);
++		if (outputSize < 1 || outputSize > 8) {
++			throw new IllegalArgumentException("Value-domain width must be 1 through 8 bytes");
++		}
++		long maximum = outputSize == 8 ? -1L : (1L << (8 * outputSize)) - 1;
++		if (Long.compareUnsigned(first, last) > 0 ||
++			Long.compareUnsigned(last, maximum) > 0) {
++			throw new IllegalArgumentException("Value-domain bounds do not fit the unsigned width");
++		}
++		this.provenance = Objects.requireNonNull(provenance);
++		if (provenance.isBlank()) {
++			throw new IllegalArgumentException("Value-domain provenance is required");
++		}
++		this.outputSize = outputSize;
++		this.first = first;
++		this.last = last;
++		this.guardAddress = guardAddress == null ? null : requireAddress(guardAddress);
++		this.guardTrue = guardAddress != null && guardTrue;
++	}
++
++	private static Address requireAddress(Address address) {
++		if (address == null || !address.isMemoryAddress()) {
++			throw new IllegalArgumentException("Value-domain addresses must be memory addresses");
++		}
++		return address;
++	}
++
++	public Address getOwnerEntry() { return ownerEntry; }
++	public Address getLoadAddress() { return loadAddress; }
++	public int getOutputSize() { return outputSize; }
++	public Address getSwitchAddress() { return switchAddress; }
++	public boolean isUseRestricted() { return switchAddress != Address.NO_ADDRESS; }
++	public long getFirst() { return first; }
++	public long getLast() { return last; }
++	public Address getDescriptorAddress() { return descriptorAddress; }
++	public String getProvenance() { return provenance; }
++	public Address getGuardAddress() { return guardAddress; }
++	public boolean isGuardTrue() { return guardTrue; }
++
++	/**
++	 * Test whether two contracts address overlapping result/use selectors. LOAD-wide and exact-use
++	 * contracts for the same LOAD overlap. Even different guards do not
++	 * make duplicate selectors safe: callers must resolve competing evidence before sending it.
++	 */
++	public boolean hasSameSelector(ValueDomainConstraint other) {
++		return ownerEntry.equals(other.ownerEntry) && loadAddress.equals(other.loadAddress) &&
++			outputSize == other.outputSize && (!isUseRestricted() || !other.isUseRestricted() ||
++			switchAddress.equals(other.switchAddress));
++	}
++
++	/**
++	 * Encode schema 1. The ordered address roles are owner, load, switch, descriptor, then guard
++	 * if present. The switch child has no space/offset for a LOAD-wide contract. The index is -1
++	 * for no guard, 0 for its false edge, and 1 for its true edge.
++	 */
++	public void encode(Encoder encoder) throws IOException {
++		encoder.openElement(ELEM_VALUEDOMAIN);
++		encoder.writeSignedInteger(ATTRIB_FORMAT, 1);
++		encoder.writeString(ATTRIB_TYPE, "load");
++		encoder.writeSignedInteger(ATTRIB_SIZE, outputSize);
++		encoder.writeUnsignedInteger(ATTRIB_FIRST, first);
++		encoder.writeUnsignedInteger(ATTRIB_LAST, last);
++		encoder.writeString(ATTRIB_NAME, provenance);
++		encoder.writeSignedInteger(ATTRIB_INDEX, guardAddress == null ? -1 : guardTrue ? 1 : 0);
++		encodeAddress(encoder, "owner", ownerEntry);
++		encodeAddress(encoder, "load", loadAddress);
++		encodeAddress(encoder, "switch", switchAddress);
++		encodeAddress(encoder, "descriptor", descriptorAddress);
++		if (guardAddress != null) {
++			encodeAddress(encoder, "guard", guardAddress);
++		}
++		encoder.closeElement(ELEM_VALUEDOMAIN);
++	}
++
++	private static void encodeAddress(Encoder encoder, String role, Address address)
++			throws IOException {
++		encoder.openElement(ELEM_ADDR);
++		encoder.writeString(ATTRIB_TYPE, role);
++		if (address != Address.NO_ADDRESS) {
++			AddressXML.encodeAttributes(encoder, address);
++		}
++		encoder.closeElement(ELEM_ADDR);
++	}
++
++	/** Decode a schema-1 contract, rejecting unsupported or malformed records. */
++	public static ValueDomainConstraint decode(Decoder decoder) throws DecoderException {
++		int element = decoder.openElement(ELEM_VALUEDOMAIN);
++		int fields = 0;
++		long format = -1, size = 0, first = 0, last = 0, edge = -2;
++		String type = null, provenance = null;
++		for (int id; (id = decoder.getNextAttributeId()) != 0;) {
++			int bit;
++			if (id == ATTRIB_FORMAT.id()) { bit = 1; format = decoder.readSignedInteger(); }
++			else if (id == ATTRIB_TYPE.id()) { bit = 2; type = decoder.readString(); }
++			else if (id == ATTRIB_SIZE.id()) { bit = 4; size = decoder.readSignedInteger(); }
++			else if (id == ATTRIB_FIRST.id()) { bit = 8; first = decoder.readUnsignedInteger(); }
++			else if (id == ATTRIB_LAST.id()) { bit = 16; last = decoder.readUnsignedInteger(); }
++			else if (id == ATTRIB_NAME.id()) { bit = 32; provenance = decoder.readString(); }
++			else if (id == ATTRIB_INDEX.id()) { bit = 64; edge = decoder.readSignedInteger(); }
++			else { throw new DecoderException("Unknown value-domain attribute"); }
++			if ((fields & bit) != 0) {
++				throw new DecoderException("Duplicate value-domain attribute");
++			}
++			fields |= bit;
++		}
++		if (fields != 127 || format != 1 || !"load".equals(type) ||
++			size < 1 || size > 8 || edge < -1 || edge > 1) {
++			throw new DecoderException("Unsupported value-domain schema");
++		}
++		Address owner = decodeAddress(decoder, "owner");
++		Address load = decodeAddress(decoder, "load");
++		Address use = decodeAddress(decoder, "switch");
++		Address descriptor = decodeAddress(decoder, "descriptor");
++		Address guard = edge == -1 ? null : decodeAddress(decoder, "guard");
++		decoder.closeElement(element);
++		try {
++			if (use == Address.NO_ADDRESS) {
++				return new ValueDomainConstraint(owner, load, (int) size, first, last,
++					descriptor, provenance, guard, edge == 1);
++			}
++			return new ValueDomainConstraint(owner, load, (int) size, use, first, last,
++				descriptor, provenance, guard, edge == 1);
++		}
++		catch (IllegalArgumentException e) {
++			throw new DecoderException(e.getMessage());
++		}
++	}
++
++	private static Address decodeAddress(Decoder decoder, String role) throws DecoderException {
++		int element = decoder.openElement(ELEM_ADDR);
++		int fields = 0;
++		String actualRole = null;
++		AddressSpace space = null;
++		long offset = 0;
++		for (int id; (id = decoder.getNextAttributeId()) != 0;) {
++			int bit;
++			if (id == ATTRIB_TYPE.id()) { bit = 1; actualRole = decoder.readString(); }
++			else if (id == ATTRIB_SPACE.id()) { bit = 2; space = decoder.readSpace(); }
++			else if (id == ATTRIB_OFFSET.id()) { bit = 4; offset = decoder.readUnsignedInteger(); }
++			else { throw new DecoderException("Unknown value-domain address attribute"); }
++			if ((fields & bit) != 0) {
++				throw new DecoderException("Duplicate value-domain address attribute");
++			}
++			fields |= bit;
++		}
++		if (fields == 1 && "switch".equals(role) && role.equals(actualRole)) {
++			decoder.closeElement(element);
++			return Address.NO_ADDRESS;
++		}
++		if (fields != 7 || !role.equals(actualRole) || space == null) {
++			throw new DecoderException("Unexpected value-domain address role");
++		}
++		decoder.closeElement(element);
++		Address address;
++		try {
++			address = space.getAddress(offset);
++		}
++		catch (IllegalArgumentException e) {
++			throw new DecoderException(e.getMessage());
++		}
++		return address;
++	}
++}
+-- 
+2.45.1
+

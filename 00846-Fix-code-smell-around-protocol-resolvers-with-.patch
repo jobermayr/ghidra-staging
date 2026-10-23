@@ -1,0 +1,82 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Gregory Morse <gregory.morse@live.com>
+Date: Sat, 27 Jul 2019 00:53:22 +0200
+Subject: [PATCH] 00846: Fix code smell around protocol resolvers with
+ identical uponreturn/uponentry
+
+ Update fspec.cc
+
+FIx code smell: call mechanisms could only all be disabled (-1) as new IDs are always generated with new names so it would be impossible for a protocol resolver with identical uponreturn or uponentry mechanisms to be loaded - though unnecessarily so.  Instead if all the properties are identical then allow it - perhaps with a warning to the user.
+
+If both are dynamic - theoretically they could be different and it could cause issue.
+The body tag is not compared and it could be different and cause issue.
+But nonetheless the feature should not be disabled so quickly as sometimes its useful to have a resolver with identical uponreturn/uponentry which currently is impossible.  The body is not parsed or saved but it could be if it were really an issue.  Dynamic ones would simply need to be designed to be the same or should not be used.
+
+I currently solve CS register tracking bugs with an uponreturn dynamic injection on __stdcall16far but I want a resolver with __stdcall16near.  A real legitimate use case scenario which is why I found this issue in the first place.
+
+Update fspec.cc
+
+Update fspec.cc
+
+Fix formatting and message
+
+Update fspec.cc
+---
+ .../Decompiler/src/decompile/cpp/fspec.cc     | 41 ++++++++++++++++++-
+ 1 file changed, 39 insertions(+), 2 deletions(-)
+
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.cc
+index c9236cd9b6..0229022ee8 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.cc
+@@ -2844,8 +2844,45 @@ void ProtoModelMerged::foldIn(ProtoModel *model)
+     // We assume here that the output models are the same, but we don't check
+     if (extrapop != model->extrapop)
+       extrapop = ProtoModel::extrapop_unknown;
+-    if ((injectUponEntry != model->injectUponEntry)||(injectUponReturn != model->injectUponReturn))
+-      throw LowlevelError("Cannot merge prototype models with different inject ids");
++    //this criterion only allows both to be -1 since impossible to load identical IDs!
++    if ((injectUponEntry != model->injectUponEntry) || (injectUponReturn != model->injectUponReturn)) {
++      bool bDiff = false;
++      InjectPayload* ip1 = nullptr;
++      InjectPayload* ip2 = nullptr;
++      if (injectUponEntry != model->injectUponEntry) {
++        bDiff = ((injectUponEntry == -1) || (model->injectUponEntry == -1));
++        if (!bDiff) {
++          ip1 = glb->pcodeinjectlib->getPayload(injectUponEntry);
++          ip2 = glb->pcodeinjectlib->getPayload(injectUponEntry);
++        }
++      } else {
++        bDiff = ((injectUponReturn == -1) || (model->injectUponReturn == -1));
++        if (!bDiff) {
++          ip1 = glb->pcodeinjectlib->getPayload(injectUponReturn);
++          ip2 = glb->pcodeinjectlib->getPayload(injectUponReturn);
++        }
++      }
++      if (!bDiff) {
++        bDiff = ip1->getParamShift() != ip2->getParamShift() ||
++          ip1->isDynamic() != ip2->isDynamic() ||
++          ip1->sizeInput() != ip2->sizeInput() || ip1->sizeOutput() != ip2->sizeOutput();
++      }
++      if (!bDiff) {
++        for (int i = 0; i < ip1->sizeInput(); i++) {
++          if (ip1->getInput(i).getName() != ip2->getInput(i).getName() ||
++            ip1->getInput(i).getSize() != ip2->getInput(i).getSize()) {
++            bDiff = true; break;
++          }
++        }
++        for (int i = 0; i < ip1->sizeOutput(); i++) {
++          if (ip1->getOutput(i).getName() != ip2->getOutput(i).getName() ||
++            ip1->getOutput(i).getSize() != ip2->getOutput(i).getSize()) {
++            bDiff = true; break;
++          }
++        }
++      }
++      if (bDiff) throw LowlevelError("Cannot merge prototype models with different injections");
++    }
+     intersectEffects(model->effectlist);
+     intersectRegisters(likelytrash,model->likelytrash);
+     intersectRegisters(internalstorage,model->internalstorage);
+-- 
+2.45.1
+

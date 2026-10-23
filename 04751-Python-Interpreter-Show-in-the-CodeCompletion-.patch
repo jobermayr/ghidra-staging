@@ -1,0 +1,426 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: shocoman <shoco13@gmail.com>
+Date: Wed, 16 Nov 2022 01:41:22 +0700
+Subject: [PATCH] 04751: Python Interpreter: Show in the CodeCompletion window
+ all names containing the given string
+
+Include in Python Interpreter's CodeCompletion window all names containing the typed string
+---
+ .../Jython/jython-src/introspect.py           |  35 ++++-
+ .../jython/GhidraJythonInterpreter.java       |  17 ++-
+ .../jython/JythonCodeCompletionFactory.java   | 121 +++++++++++++++++-
+ .../main/java/ghidra/jython/JythonPlugin.java |  22 +++-
+ .../jython/JythonCodeCompletionTest.java      |  17 ++-
+ .../core/interpreter/InterpreterPanel.java    |   7 +-
+ 6 files changed, 206 insertions(+), 13 deletions(-)
+
+diff --git a/Ghidra/Extensions/Jython/jython-src/introspect.py b/Ghidra/Extensions/Jython/jython-src/introspect.py
+index 97096f78ec..ef6809000f 100644
+--- a/Ghidra/Extensions/Jython/jython-src/introspect.py
++++ b/Ghidra/Extensions/Jython/jython-src/introspect.py
+@@ -28,7 +28,8 @@ except NameError:
+ #from java.lang.System.out import println
+     
+ def getAutoCompleteList(command='', locals=None, includeMagic=1,
+-                        includeSingle=1, includeDouble=1):
++                        includeSingle=1, includeDouble=1,
++                        includeOnlyPrefixCompletions=1):
+     """Return list of auto-completion tuples for command.
+     
+     First entry is the possible completions, and second entry is the
+@@ -66,7 +67,13 @@ def getAutoCompleteList(command='', locals=None, includeMagic=1,
+                                            includeSingle, includeDouble)
+     completion_list = []
+     for attribute in attributes:
+-        if attribute.lower().startswith(filter.lower()):
++
++        if includeOnlyPrefixCompletions:
++            to_include = attribute.lower().startswith(filter.lower())
++        else:
++            to_include = filter.lower() in attribute.lower()
++
++        if to_include:
+             try:
+                 if object is not None:
+                     pyObj = getattr(object, attribute)
+@@ -82,9 +89,31 @@ def getAutoCompleteList(command='', locals=None, includeMagic=1,
+                 # inner classes, e.g. access$0, which aren't valid Python
+                 # anyway
+                 pass
+-    completion_list.sort(compare_completions)
++
++    if includeOnlyPrefixCompletions:
++        completion_list.sort(compare_completions)
++    else:
++        compar = get_lexicographical_string_comparator_with_priority(filter)
++        completion_list.sort(compar)
++
+     return completion_list
+ 
++def get_lexicographical_string_comparator_with_priority(prefix):
++    """Returns a simple lexicographical string comparator with one small addition:
++    strings that start with 'prefix' will be placed before those that don't"""
++    def comparator(a, b):
++        a_has_prefix = a.description.startswith(prefix)
++        b_has_prefix = b.description.startswith(prefix)
++        if a_has_prefix and b_has_prefix:
++            return cmp(a.description, b.description)
++        elif a_has_prefix:
++            return -1
++        elif b_has_prefix:
++            return 1
++        else:
++            return cmp(a.description, b.description)
++    return comparator
++
+ def compare_completions(comp1, comp2):
+     return cmp(comp1.description, comp2.description)
+                        
+diff --git a/Ghidra/Extensions/Jython/src/main/java/ghidra/jython/GhidraJythonInterpreter.java b/Ghidra/Extensions/Jython/src/main/java/ghidra/jython/GhidraJythonInterpreter.java
+index c0f8254a72..f467463f8a 100644
+--- a/Ghidra/Extensions/Jython/src/main/java/ghidra/jython/GhidraJythonInterpreter.java
++++ b/Ghidra/Extensions/Jython/src/main/java/ghidra/jython/GhidraJythonInterpreter.java
+@@ -468,10 +468,13 @@ public class GhidraJythonInterpreter extends InteractiveInterpreter {
+ 	 * @param cmd The command line.
+ 	 * @param includeBuiltins True if we should include python built-ins; otherwise, false.
+ 	 * @param caretPos The position of the caret in the input string 'cmd'
++	 * @param includeOnlyPrefixCompletions True if we should only include completions that start
++	 *        with the word we're trying to complete here; otherwise, false.
+ 	 * @return A list of possible command completions.  Could be empty if there aren't any.
+ 	 * @see JythonPlugin#getCompletions
+ 	 */
+-	List<CodeCompletion> getCommandCompletions(String cmd, boolean includeBuiltins, int caretPos) {
++	List<CodeCompletion> getCommandCompletions(String cmd, boolean includeBuiltins, int caretPos,
++			boolean includeOnlyPrefixCompletions) {
+ 		// At this point the caret is assumed to be positioned right after the value we need to
+ 		// complete (example: "[complete.Me<caret>, rest, code]"). To make the completion work
+ 		// in our case, it's sufficient (albeit naive) to just remove the text on the right side
+@@ -482,7 +485,7 @@ public class GhidraJythonInterpreter extends InteractiveInterpreter {
+ 		if ((cmd.length() > 0) && (cmd.charAt(cmd.length() - 1) == '(')) {
+ 			return getMethodCommandCompletions(cmd);
+ 		}
+-		return getPropertyCommandCompletions(cmd, includeBuiltins);
++		return getPropertyCommandCompletions(cmd, includeBuiltins, includeOnlyPrefixCompletions);
+ 	}
+ 
+ 	/**
+@@ -522,10 +525,12 @@ public class GhidraJythonInterpreter extends InteractiveInterpreter {
+ 	 *
+ 	 * @param cmd current command
+ 	 * @param includeBuiltins True if we should include python built-ins; otherwise, false.
++	 * @param includeOnlyPrefixCompletions True if we should only include completions that start
++	 *        with the word we're trying to complete here; otherwise, false.
+ 	 * @return A list of possible command completions.  Could be empty if there aren't any.
+ 	 */
+ 	private List<CodeCompletion> getPropertyCommandCompletions(String cmd,
+-			boolean includeBuiltins) {
++			boolean includeBuiltins, boolean includeOnlyPrefixCompletions) {
+ 		try {
+ 			PyObject getAutoCompleteList = introspectModule.__findattr__("getAutoCompleteList");
+ 			PyString command = new PyString(cmd);
+@@ -534,7 +539,11 @@ public class GhidraJythonInterpreter extends InteractiveInterpreter {
+ 				// Add in the __builtin__ module's contents for the search
+ 				locals.update(builtinModule.__dict__);
+ 			}
+-			List<?> list = (List<?>) getAutoCompleteList.__call__(command, locals);
++
++			PyObject[] args = { command, locals, new PyBoolean(includeOnlyPrefixCompletions)};
++			String[] keywordArgNames = { "includeOnlyPrefixCompletions" };
++			List<?> list = (List<?>) getAutoCompleteList.__call__(args, keywordArgNames);
++
+ 			return CollectionUtils.asList(list, CodeCompletion.class);
+ 		}
+ 		catch (Exception e) {
+diff --git a/Ghidra/Extensions/Jython/src/main/java/ghidra/jython/JythonCodeCompletionFactory.java b/Ghidra/Extensions/Jython/src/main/java/ghidra/jython/JythonCodeCompletionFactory.java
+index 0c45d61c41..0fccaa6394 100644
+--- a/Ghidra/Extensions/Jython/src/main/java/ghidra/jython/JythonCodeCompletionFactory.java
++++ b/Ghidra/Extensions/Jython/src/main/java/ghidra/jython/JythonCodeCompletionFactory.java
+@@ -16,10 +16,22 @@
+ package ghidra.jython;
+ 
+ import java.awt.Color;
++import java.awt.Font;
++import java.awt.FontMetrics;
++import java.awt.Graphics;
++import java.awt.Graphics2D;
++import java.awt.Insets;
++import java.awt.Rectangle;
++import java.awt.RenderingHints;
++import java.awt.Toolkit;
++import java.awt.font.TextAttribute;
+ import java.lang.reflect.Method;
++import java.text.AttributedString;
+ import java.util.*;
+ 
++import javax.swing.Icon;
+ import javax.swing.JComponent;
++import javax.swing.SwingUtilities;
+ 
+ import org.python.core.PyInstance;
+ import org.python.core.PyObject;
+@@ -209,6 +221,7 @@ public class JythonCodeCompletionFactory {
+ 	public static CodeCompletion newCodeCompletion(String description, String insertion,
+ 			PyObject pyObj, String userInput) {
+ 		JComponent comp = null;
++		int charsToRemove = userInput.length();
+ 
+ 		if (pyObj != null) {
+ 			if (includeTypes) {
+@@ -225,7 +238,10 @@ public class JythonCodeCompletionFactory {
+ 				description = description + " (" + className + ")";
+ 			}
+ 
+-			comp = new GDLabel(description);
++			int highlightStart = description.toLowerCase().indexOf(userInput.toLowerCase());
++			int highlightEnd = highlightStart + userInput.length();
++			comp = new CodeCompletionEntryLabel(description, highlightStart, highlightEnd);
++
+ 			Iterator<Class<?>> iter = classes.iterator();
+ 			while (iter.hasNext()) {
+ 				Class<?> testClass = iter.next();
+@@ -236,7 +252,6 @@ public class JythonCodeCompletionFactory {
+ 			}
+ 		}
+ 
+-		int charsToRemove = userInput.length();
+ 		return new CodeCompletion(description, insertion, comp, charsToRemove);
+ 	}
+ 
+@@ -298,4 +313,106 @@ public class JythonCodeCompletionFactory {
+ 
+ 		return callMethodList.toArray();
+ 	}
++
++	/* The class represents a simple JLabel used as an entry in the CodeCompletion pop-up window.
++	 * The main feature is the ability to highlight a certain area of the text in bold.
++	 * (i.e. "some<b>Highlighted</b>Text"). Icons are not supported.
++	 *
++	 * There are two reasons why we use it (and not simply JLabel with HTML):
++	 * 1) Performance. Using JLabel with HTML appears to be too slow for our case when we might
++	 * need to create 200+ labels in a reasonable time (faster than, say, 50 ms).
++	 * 2) Text Visibility. Various Look and Feels may have different background and highlighting
++	 * colors that may not look good enough with and match the text colors that we've selected
++	 * for the entries. This class lets us choose more appropriate colors at runtime.
++	 */
++	private static class CodeCompletionEntryLabel extends GDLabel {
++		private Rectangle paintTextRect = new Rectangle();
++
++		private int highlightStart;
++		private int highlightEnd;
++
++		public CodeCompletionEntryLabel(String description, int highlightStart, int highlightEnd) {
++			super(description);
++
++			int textLength = description.length();
++			this.highlightStart = Math.max(0, Math.min(textLength, highlightStart));
++			this.highlightEnd = Math.max(0, Math.min(textLength, highlightEnd));
++		}
++
++		/* Calculates the final (relative) position of the label and returns its visible text
++		 * (after clipping, if any). This method is effectively a cleaned up copy of the private
++		 * Swing method "javax.swing.plaf.basic.BasicLabelUI.layout" for the "Basic" look and feel.
++		 */
++		private String layoutLabel(FontMetrics fm) {
++			Insets insets = this.getInsets(null);
++			String text = this.getText();
++			Icon icon = this.isEnabled() ? this.getIcon() : this.getDisabledIcon();
++			Rectangle paintIconR = new Rectangle(0, 0, 0, 0);
++			paintTextRect.x = paintTextRect.y = paintTextRect.width = paintTextRect.height = 0;
++
++			int viewWidth = getWidth() - (insets.left + insets.right);
++			int viewHeight = getHeight() - (insets.top + insets.bottom);
++			Rectangle paintViewR = new Rectangle(insets.left, insets.top, viewWidth, viewHeight);
++
++			return SwingUtilities.layoutCompoundLabel((JComponent) this, fm,
++				text, icon, this.getVerticalAlignment(), this.getHorizontalAlignment(),
++				this.getVerticalTextPosition(), this.getHorizontalTextPosition(),
++				paintViewR, paintIconR, paintTextRect, this.getIconTextGap());
++		}
++
++		/* Returns the most appropriate text color (either black or white) for the background
++		 * when the currently selected color is not distinct enough.
++		 */
++		private Color getMostVisibleTextColor(Color bgColor, Color currentTextColor) {
++			float[] bgRgb = bgColor.getRGBColorComponents(null);
++			float[] fgRgb = currentTextColor.getRGBColorComponents(null);
++
++			double bgGrayscale = 0.299 * bgRgb[0] + 0.587 * bgRgb[1] + 0.114 * bgRgb[2];
++			double fgGrayscale = 0.299 * fgRgb[0] + 0.587 * fgRgb[1] + 0.114 * fgRgb[2];
++
++			// very simple method, but it seems enough; the constants are arbitrary
++			Color newColor;
++			if (Math.abs(bgGrayscale - fgGrayscale) < 0.42) {
++				newColor = bgGrayscale > 0.73 ? Color.black : Color.white;
++			}
++			else {
++				newColor = currentTextColor;
++			}
++
++			return newColor;
++		}
++
++		@Override
++		protected void paintComponent(Graphics g) {
++			Graphics2D g2d = (Graphics2D) g.create();
++
++			// apply the standard text anti-aliasing settings for the system
++			var desktopHints = (RenderingHints) Toolkit.getDefaultToolkit()
++					.getDesktopProperty("awt.font.desktophints");
++			if (desktopHints != null) {
++				g2d.setRenderingHints(desktopHints);
++			}
++
++			// the background color depends on the current LookAndFeel and whether this completion
++			// item is selected/highlighted in the CodeCompletion window
++			Color bgColor = getBackground();
++			g2d.setColor(bgColor);
++			g2d.fillRect(0, 0, getWidth(), getHeight());
++
++			Color potentialTextColor = getForeground();
++			Color textColor = getMostVisibleTextColor(bgColor, potentialTextColor);
++			g2d.setColor(textColor);
++
++			FontMetrics fm = g2d.getFontMetrics();
++			String clippedText = layoutLabel(fm);
++			AttributedString text = new AttributedString(clippedText);
++			if (highlightStart < highlightEnd) {
++				Font boldFont = g2d.getFont().deriveFont(Font.BOLD);
++				text.addAttribute(TextAttribute.FONT, boldFont, highlightStart, highlightEnd);
++			}
++			g2d.drawString(text.getIterator(), paintTextRect.x, paintTextRect.y + fm.getAscent());
++
++			g2d.dispose();
++		}
++	}
+ }
+diff --git a/Ghidra/Extensions/Jython/src/main/java/ghidra/jython/JythonPlugin.java b/Ghidra/Extensions/Jython/src/main/java/ghidra/jython/JythonPlugin.java
+index 088df32e2e..f1c15d947a 100644
+--- a/Ghidra/Extensions/Jython/src/main/java/ghidra/jython/JythonPlugin.java
++++ b/Ghidra/Extensions/Jython/src/main/java/ghidra/jython/JythonPlugin.java
+@@ -77,6 +77,16 @@ public class JythonPlugin extends ProgramPlugin
+ 
+ 	private boolean includeBuiltins = INCLUDE_BUILTINS_DEFAULT;
+ 
++	private final static String INCLUDE_ONLY_PREFIX_COMPLETIONS_LABEL =
++		"Only include completions with matching prefix";
++	private final static String INCLUDE_ONLY_PREFIX_COMPLETIONS_DESCRIPTION =
++		"If set, the code completion window will contain only those entries that begin with " +
++			"the entered string. For example, if the string 'add' is entered, the list of " +
++			"possible completions may contain '<i>add</i>EntryPoint' or '<i>Add</i>ressMap' " +
++			"but not 'current<i>Add</i>ress'.";
++	private final static boolean INCLUDE_ONLY_PREFIX_COMPLETIONS_DEFAULT = true;
++	private boolean includeOnlyPrefixCompletions = INCLUDE_ONLY_PREFIX_COMPLETIONS_DEFAULT;
++
+ 	/**
+ 	 * Creates a new {@link JythonPlugin} object.
+ 	 * 
+@@ -200,6 +210,12 @@ public class JythonPlugin extends ProgramPlugin
+ 			includeBuiltins = options.getBoolean(INCLUDE_BUILTINS_LABEL, INCLUDE_BUILTINS_DEFAULT);
+ 			options.registerOption(INCLUDE_BUILTINS_LABEL, INCLUDE_BUILTINS_DEFAULT, null,
+ 				INCLUDE_BUILTINS_DESCRIPTION);
++
++			includeOnlyPrefixCompletions = options.getBoolean(
++				INCLUDE_ONLY_PREFIX_COMPLETIONS_LABEL, INCLUDE_ONLY_PREFIX_COMPLETIONS_DEFAULT);
++			options.registerOption(INCLUDE_ONLY_PREFIX_COMPLETIONS_LABEL,
++				INCLUDE_ONLY_PREFIX_COMPLETIONS_DEFAULT, null,
++				INCLUDE_ONLY_PREFIX_COMPLETIONS_DESCRIPTION);
+ 			options.addOptionsChangeListener(this);
+ 
+ 			interpreter = GhidraJythonInterpreter.get();
+@@ -264,6 +280,9 @@ public class JythonPlugin extends ProgramPlugin
+ 		else if (optionName.equals(INCLUDE_BUILTINS_LABEL)) {
+ 			includeBuiltins = ((Boolean) newValue).booleanValue();
+ 		}
++		else if (optionName.equals(INCLUDE_ONLY_PREFIX_COMPLETIONS_LABEL)) {
++			includeOnlyPrefixCompletions = ((Boolean) newValue).booleanValue();
++		}
+ 	}
+ 
+ 	/**
+@@ -293,7 +312,8 @@ public class JythonPlugin extends ProgramPlugin
+ 				currentSelection, currentHighlight),
+ 			new ScriptControls(console, interactiveTaskMonitor));
+ 
+-		return interpreter.getCommandCompletions(cmd, includeBuiltins, caretPos);
++		return interpreter.getCommandCompletions(cmd, includeBuiltins, caretPos,
++			includeOnlyPrefixCompletions);
+ 	}
+ 
+ 	@Override
+diff --git a/Ghidra/Extensions/Jython/src/test.slow/java/ghidra/jython/JythonCodeCompletionTest.java b/Ghidra/Extensions/Jython/src/test.slow/java/ghidra/jython/JythonCodeCompletionTest.java
+index 090cf8cffa..08b04f9dfa 100644
+--- a/Ghidra/Extensions/Jython/src/test.slow/java/ghidra/jython/JythonCodeCompletionTest.java
++++ b/Ghidra/Extensions/Jython/src/test.slow/java/ghidra/jython/JythonCodeCompletionTest.java
+@@ -60,6 +60,8 @@ public class JythonCodeCompletionTest extends AbstractGhidraHeadedIntegrationTes
+ 			        return self.id
+ 			    def getName(self):
+ 			        return self.name
++			    def getClone(self):
++			        return Employee(self.id, self.name)
+ 
+ 			employee = Employee(42, "Bob")
+ 				""".stripIndent();
+@@ -68,6 +70,7 @@ public class JythonCodeCompletionTest extends AbstractGhidraHeadedIntegrationTes
+ 	public TemporaryFolder tempScriptFolder = new TemporaryFolder();
+ 
+ 	private GhidraJythonInterpreter interpreter;
++	private boolean includeOnlyPrefixCompletions = true;
+ 
+ 	@Before
+ 	public void setUp() throws Exception {
+@@ -128,6 +131,17 @@ public class JythonCodeCompletionTest extends AbstractGhidraHeadedIntegrationTes
+ 		assertCharsToRemoveEqualsTo(testCase, "e".length());
+ 	}
+ 
++	@Test
++	public void testNonPrefixCompletions() {
++		includeOnlyPrefixCompletions = false;
++
++		// In the "non-prefix" mode, the list will include all completions that contain the word
++		// being completed. They won't be restricted to those that only begin with it.
++		assertCompletionsInclude("Bool", List.of("my_bool"));
++		assertCompletionsInclude("employee.ID", List.of("getId", "id"));
++		assertCompletionsInclude("employee.getClone().nam", List.of("getName", "name"));
++	}
++
+ 	private void assertCompletionsInclude(String command, Collection<String> expectedCompletions) {
+ 		Set<String> completions = getCodeCompletions(command)
+ 				.stream()
+@@ -156,7 +170,8 @@ public class JythonCodeCompletionTest extends AbstractGhidraHeadedIntegrationTes
+ 			caretPos = command.length(); 
+ 		}
+ 
+-		return interpreter.getCommandCompletions(command, false, caretPos);
++		return interpreter.getCommandCompletions(command, false, caretPos,
++			includeOnlyPrefixCompletions);
+ 	}
+ 
+ 	private void executeJythonProgram(String code) {
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/interpreter/InterpreterPanel.java b/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/interpreter/InterpreterPanel.java
+index a23ec0db5c..11d91d61cd 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/interpreter/InterpreterPanel.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/interpreter/InterpreterPanel.java
+@@ -847,6 +847,11 @@ public class InterpreterPanel extends JPanel implements OptionsChangeListener {
+ 					completionWindow.setVisible(false);
+ 					e.consume();
+ 					break;
++				case KeyEvent.VK_KP_LEFT, KeyEvent.VK_KP_RIGHT, KeyEvent.VK_HOME:
++				case KeyEvent.VK_LEFT, KeyEvent.VK_RIGHT, KeyEvent.VK_END:
++					// regenerate completions on the caret movement
++					updateCompletionList();
++					break;
+ 				default:
+ 
+ 					// Check for the completion window trigger on input that contains text
+@@ -856,8 +861,6 @@ public class InterpreterPanel extends JPanel implements OptionsChangeListener {
+ 						e.consume();
+ 						break;
+ 					}
+-
+-					updateCompletionList();
+ 					// and let the key go through to the text input field
+ 			}
+ 		}
+-- 
+2.45.1
+

@@ -1,0 +1,95 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Chris Bongaarts <cab@bongalow.net>
+Date: Sat, 10 Oct 2026 01:05:56 -0500
+Subject: [PATCH] 09765: Decompiler: allow wrapped memory ranges in processor
+ spaces (fixes #4148)
+
+Decompiler: allow wrapped memory ranges in processor spaces
+
+GP-6936 added constructWrappingAddress() and the allows_wrapped_range
+flag, but only the SpacebaseSpace constructors ever set the flag, so a
+genuine wrapped access in an ordinary processor space (e.g. a 4-byte
+read at 0xffffffff in ram) still throws "Trying to construct memory
+range beyond end of address space".
+
+Derive the flag in AddrSpace::calcScaleMask(), which every path that
+sets a space's size goes through (both constructors, decode, and
+truncateSpace): a full-size processor space is modular and wraps; a
+truncated one is a logical window and does not.  Spacebase spaces are
+untouched, so datatests/wraprange.xml is unaffected.
+
+Adds datatests/wraprange2.xml (x86:LE:32 `mov eax,[0xffffffff]`),
+which fails on master with the error above.
+
+Fixes #4148.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01CoB4STrwWeNM8AXG1z2wCn
+
+include new decompiler test file in certification.manifest
+---
+ .../Decompiler/certification.manifest         |  1 +
+ .../Decompiler/src/decompile/cpp/space.cc     |  8 ++++++++
+ .../src/decompile/datatests/wraprange2.xml    | 19 +++++++++++++++++++
+ 3 files changed, 28 insertions(+)
+ create mode 100644 Ghidra/Features/Decompiler/src/decompile/datatests/wraprange2.xml
+
+diff --git a/Ghidra/Features/Decompiler/certification.manifest b/Ghidra/Features/Decompiler/certification.manifest
+index d03f9d7ad8..e8296dfe5b 100644
+--- a/Ghidra/Features/Decompiler/certification.manifest
++++ b/Ghidra/Features/Decompiler/certification.manifest
+@@ -133,6 +133,7 @@ src/decompile/datatests/varcross.xml||GHIDRA||||END|
+ src/decompile/datatests/volatilemcs96dup.xml||GHIDRA||||END|
+ src/decompile/datatests/wayoffarray.xml||GHIDRA||||END|
+ src/decompile/datatests/wraprange.xml||GHIDRA||||END|
++src/decompile/datatests/wraprange2.xml||GHIDRA||||END|
+ src/decompile/datatests/zeroload.xml||GHIDRA||||END|
+ src/decompile/datatests/zerotop.xml||GHIDRA||||END|
+ src/decompile/zlib/README.txt||GHIDRA||||END|
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/space.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/space.cc
+index 9dca8be3f6..fef2a3e5dd 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/space.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/space.cc
+@@ -42,6 +42,14 @@ void AddrSpace::calcScaleMask(void)
+   uintb bufferSize = (addressSize < 3) ? 0x100 : 0x1000;
+   pointerLowerBound += bufferSize;
+   pointerUpperBound -= bufferSize;
++  if (type == IPTR_PROCESSOR) {
++    // A full-size processor space is modular, so an access running off its top end
++    // continues at its bottom.  A truncated space is only a logical window and does not.
++    if ((flags & truncated) == 0)
++      flags |= allows_wrapped_range;
++    else
++      flags &= ~allows_wrapped_range;
++  }
+ }
+ 
+ /// Initialize an address space with its basic attributes
+diff --git a/Ghidra/Features/Decompiler/src/decompile/datatests/wraprange2.xml b/Ghidra/Features/Decompiler/src/decompile/datatests/wraprange2.xml
+new file mode 100644
+index 0000000000..3643b1636b
+--- /dev/null
++++ b/Ghidra/Features/Decompiler/src/decompile/datatests/wraprange2.xml
+@@ -0,0 +1,19 @@
++<decompilertest>
++<!--
++    Example of a memory access that wraps from the top of the ram space to the bottom
++-->
++<binaryimage arch="x86:LE:32:default:gcc">
++<bytechunk space="ram" offset="0x401000" readonly="true">
++a1ffffffffc3
++</bytechunk>
++<symbol space="ram" offset="0x401000" name="wrapram"/>
++</binaryimage>
++<script>
++  <com>load function wrapram</com>
++  <com>decompile</com>
++  <com>print raw</com>
++  <com>quit</com>
++</script>
++<stringmatch name="Wrapped ram range #1" min="1" max="1">j\{r0x00000000,r0xffffffff\}.* = CONCAT31\(r0x00000000:3\(i\),r0xffffffff:1\(i\)\)</stringmatch>
++<stringmatch name="Wrapped ram range #2" min="1" max="1">EAX\(.*\) = j\{r0x00000000,r0xffffffff\}</stringmatch>
++</decompilertest>
+-- 
+2.45.1
+

@@ -1,0 +1,48 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Chase <chaseharland@bellsouth.net>
+Date: Sat, 2 May 2026 00:55:52 -0400
+Subject: [PATCH] 09149: fix: Decompiler: Enum values will use their complement
+ representation if simpler expression
+
+Addresses issues #7234 and #5021
+
+Decompiler: Enum values will prefer their complement representation if it is a simpler experession.
+---
+ .../Features/Decompiler/src/decompile/cpp/type.cc  | 14 +++++++++++++-
+ 1 file changed, 13 insertions(+), 1 deletion(-)
+
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/type.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/type.cc
+index 3679ce9b3f..f5b2bbe954 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/type.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/type.cc
+@@ -1467,6 +1467,18 @@ void TypeEnum::getMatches(uintb val,int4 valSize,int shiftDistance,Representatio
+   map<uintb,string>::const_iterator iter;
+   int4 attempt;
+   Representation prevAttempt;  // the successful attempt made for the non-complement (non-~) version of val, for comparing with the attempt for the complement (~) (second) version and choosing the best one
++  bool isComplement = false;
++
++  // First match complement if representation would be cleaner (combination of fewer enums)
++  // We'll do this by counting the number of set bits using Brian Kernighan's Algorithm
++  uintb bitsleft = val;
++  for (attempt=0;bitsleft!=0;++attempt){
++    bitsleft &= (bitsleft - 1);
++  }
++  if (attempt > size * 4) {
++    val = val ^ calc_mask(size);	// Switch value we are trying to represent (to complement)
++    isComplement = true;
++  }
+ 
+   uintb shiftDistanceMask = (1U << shiftDistance) - 1;
+   int sizeToUse = valSize == 0 ? size * 8 : valSize;
+@@ -1554,7 +1566,7 @@ void TypeEnum::getMatches(uintb val,int4 valSize,int shiftDistance,Representatio
+                                // and still not find the enum values we're looking for. The ^= shiftDistanceMask fixes that
+ 
+     representation.matchname.clear();  // Clear out old attempt
+-    representation.complement = true;
++    representation.complement = !isComplement;
+   }  // for(attempt=0;attempt<2;++attempt)
+   // If we reach here, no representation was possible, representation.matchname is empty
+ }
+-- 
+2.45.1
+

@@ -1,0 +1,1256 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Johannes Obermayr <johannesobermayr@gmx.de>
+Date: Tue, 22 Apr 2025 22:56:17 +0200
+Subject: [PATCH] 02266: Better decompilation of DOS era interrupts
+
+---
+ Ghidra/Processors/x86/certification.manifest  |    1 +
+ Ghidra/Processors/x86/data/languages/ia.sinc  | 1087 ++++++++++++++++-
+ .../x86/ghidra_scripts/InterruptContext.java  |  118 ++
+ 3 files changed, 1204 insertions(+), 2 deletions(-)
+ create mode 100644 Ghidra/Processors/x86/ghidra_scripts/InterruptContext.java
+
+diff --git a/Ghidra/Processors/x86/certification.manifest b/Ghidra/Processors/x86/certification.manifest
+index dab7ec0cb1..4d2bac1688 100644
+--- a/Ghidra/Processors/x86/certification.manifest
++++ b/Ghidra/Processors/x86/certification.manifest
+@@ -92,5 +92,6 @@ data/patterns/x86gcc_patterns.xml||GHIDRA||||END|
+ data/patterns/x86gcc_prepatterns.xml||GHIDRA||||END|
+ data/patterns/x86win_patterns.xml||GHIDRA||||END|
+ data/patterns/x86win_prepatterns.xml||GHIDRA||||END|
++ghidra_scripts/InterruptContext.java||GHIDRA||||END|
+ src/main/java/ghidra/app/plugin/core/analysis/DOSInterruptAnalyzer.java||GHIDRA||||END|
+ src/main/java/ghidra/app/plugin/core/analysis/InterruptAnalyzer.java||GHIDRA||||END|
+diff --git a/Ghidra/Processors/x86/data/languages/ia.sinc b/Ghidra/Processors/x86/data/languages/ia.sinc
+index 3c83da1141..f001c9bf03 100644
+--- a/Ghidra/Processors/x86/data/languages/ia.sinc
++++ b/Ghidra/Processors/x86/data/languages/ia.sinc
+@@ -468,8 +468,10 @@ define context contextreg
+   evexBType=(47,47)     # Used for Disp8*N (see table 2-34 in 325462-sdm-vol-1-2abcd-3abcd-4.pdf)
+   evexTType=(44,47)     # Used for Disp8*N (see table 2-35 in 325462-sdm-vol-1-2abcd-3abcd-4.pdf)
+   evexDisp8=(44,46)
+-  reservedHigh=(48,63)  # reserved for future use
+ 
++  ctxAX = (48,63)
++    ctxAH = (48,55)     # Vice-versa since Sleigh is BE
++    ctxAL = (56,63)
+ ;
+ 
+ 
+@@ -3699,7 +3701,1088 @@ define pcodeop ibhf;
+ 
+ :INT1           is vexMode=0 & byte=0xf1                            { tmp:1 = 0x1; intloc:$(SIZE) = swi(tmp); call [intloc]; return [0:1]; }
+ :INT3           is vexMode=0 & byte=0xcc                            { tmp:1 = 0x3; intloc:$(SIZE) = swi(tmp); call [intloc]; return [0:1]; }
+-:INT imm8       is vexMode=0 & byte=0xcd; imm8                      { tmp:1 = imm8; intloc:$(SIZE) = swi(tmp); call [intloc]; }
++
++define pcodeop SET_VIDEO_MODE;
++:INT" 10"  is vexMode=0 & byte=0xcd; byte=0x10 & ctxAH=0x00
++{
++  AL = SET_VIDEO_MODE(AL);
++}
++
++define pcodeop SET_TEXTMODE_CURSOR_SHAPE;
++:INT" 10"  is vexMode=0 & byte=0xcd; byte=0x10 & ctxAH=0x01
++{
++  SET_TEXTMODE_CURSOR_SHAPE(CH, CL);
++}
++
++define pcodeop VESA_SET_SUPERVGA_VIDEO_MODE;
++:INT" 10"  is vexMode=0 & byte=0xcd; byte=0x10 & ctxAX=0x4f02
++{
++  local tmp:4 = segment(ES, DI);
++  AX = VESA_SET_SUPERVGA_VIDEO_MODE(BX, tmp);
++}
++
++define pcodeop VESA_SUPERVGA_CPU_VIDEO_MEMORY_CONTROL;
++:INT" 10"  is vexMode=0 & byte=0xcd; byte=0x10 & ctxAX=0x4f05
++{
++  local res:7 = VESA_SUPERVGA_CPU_VIDEO_MEMORY_CONTROL(BH, DX);
++  AX = res[0,16];
++  BL = res[16,8];
++  DX = res[24,16];
++  ES = res[40,16];
++}
++
++define pcodeop TOPVIEW_UPDATE_SCREEN_FROM_SHADOW_BUFFER;
++:INT" 10"  is vexMode=0 & byte=0xcd; byte=0x10 & ctxAH=0xff
++{
++  local tmp:4 = segment(ES, DI);
++  TOPVIEW_UPDATE_SCREEN_FROM_SHADOW_BUFFER(tmp, CX);
++}
++
++define pcodeop GET_BIOS_TYPE;
++:INT" 15"  is vexMode=0 & byte=0xcd; byte=0x15 & ctxAH=0x49 & ctxAL=0x00
++{
++  local res:5 = GET_BIOS_TYPE();
++  AX = res[0,16];
++  BL = res[16,8];
++  CF = res[24,1];
++}
++
++define pcodeop SELECT_SERIAL_INTERFACE;
++:INT" 15"  is vexMode=0 & byte=0xcd; byte=0x15 & ctxAH=0x49 & ctxAL != 0x00
++{
++  SELECT_SERIAL_INTERFACE(AL);
++}
++
++define pcodeop TERMINATE_PROGRAM;
++:INT" 21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x00
++{
++  # Output: none
++  TERMINATE_PROGRAM();
++  return [0:1];
++}
++
++define pcodeop STDIN_W_ECHO;
++:INT" 21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x01
++{
++  # Output: AL=character
++  AL = STDIN_W_ECHO();
++}
++
++define pcodeop STDOUT;
++:INT" 21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x02
++{
++  # Input: DL=character
++  STDOUT(DL);
++}
++
++define pcodeop AUX_INPUT;
++:INT" 21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x03
++{
++  # OUT: AL
++  AL = AUX_INPUT();
++}
++
++define pcodeop AUX_OUTPUT;
++:INT" 21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x04
++{
++  # IN: DL
++  AUX_OUTPUT(DL);
++}
++
++define pcodeop PRINTER_OUTPUT;
++:INT" 21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x05
++{
++  # IN: DL
++  PRINTER_OUTPUT(DL);
++}
++
++define pcodeop DIRECT_CONSOLE_IO;
++:INT" 21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x06
++{
++  # Input: DL=0xFF(read) or character(write)
++  # Output: AL=character (read), ZF=status
++  AX = DIRECT_CONSOLE_IO(DL);
++}
++
++define pcodeop DIRECT_CONSOLE_INPUT;
++:INT" 21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x07
++{
++  # OUT: AL
++  AL = DIRECT_CONSOLE_INPUT();
++}
++
++define pcodeop STDIN_WO_ECHO;
++:INT" 21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x08
++{
++  # Output: AL=character
++  AL = STDIN_WO_ECHO();
++}
++
++define pcodeop DOS_PRINT_STRING;
++:INT" 21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x09
++{
++  # Input: DS:DX=string ('$'-terminated)
++  local tmp:4 = segment(DS, DX);
++  DOS_PRINT_STRING(tmp);
++}
++
++define pcodeop BUFFERED_INPUT;
++:INT" 21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x0a
++{
++  # Input: DS:DX=input buffer
++  local tmp:4 = segment(DS, DX);
++  BUFFERED_INPUT(tmp);
++}
++
++define pcodeop CHECK_INPUT_STATUS;
++:INT" 21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x0b
++{
++  # Output: AL=0x00(no input) or 0xFF(available)
++  AL = CHECK_INPUT_STATUS();
++}
++
++define pcodeop FLUSH_AND_READ_STDIN;
++:INT" 21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x0c
++{
++  # IN: AL
++  # OUT: AL
++  AL = FLUSH_AND_READ_STDIN(AL);
++}
++
++define pcodeop DISK_RESET;
++:INT" 21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x0d
++{
++  # OUT: none
++  DISK_RESET();
++}
++
++define pcodeop SET_DEFAULT_DRIVE;
++:INT" 21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x0e
++{
++  # Input: DL=drive
++  # Output: AL=number of drives
++  AL = SET_DEFAULT_DRIVE(DL);
++}
++
++define pcodeop OPEN_FCB;
++:INT" 21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x0f
++{
++  # IN: DS:DX
++  # OUT: AL
++  local fcb:4 = segment(DS, DX);
++  AL = OPEN_FCB(fcb);
++}
++
++define pcodeop CLOSE_FCB;
++:INT" 21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x10
++{
++  # IN: DS:DX
++  # OUT: AL
++  local fcb:4 = segment(DS, DX);
++  AL = CLOSE_FCB(fcb);
++}
++
++define pcodeop FIND_FIRST_FCB;
++:INT" 21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x11
++{
++  # IN: DS:DX
++  # OUT: AL
++  local fcb:4 = segment(DS, DX);
++  AL = FIND_FIRST_FCB(fcb);
++}
++
++define pcodeop FIND_NEXT_FCB;
++:INT" 21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x12
++{
++  # IN: DS:DX
++  # OUT: AL
++  local fcb:4 = segment(DS, DX);
++  AL = FIND_NEXT_FCB(fcb);
++}
++
++define pcodeop RETURN_ALLOCATION_INFO;
++:INT" 21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x18
++{
++  # OUT: AX
++  AX = RETURN_ALLOCATION_INFO();
++}
++
++define pcodeop GET_CURRENT_DISK;
++:INT" 21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x19
++{
++  # Output: AL=current drive
++  AL = GET_CURRENT_DISK();
++}
++
++define pcodeop SET_DISK_TRANSFER_AREA;
++:INT" 21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x1a
++{
++  # Input: DS:DX=DTA
++  local tmp:4 = segment(DS, DX);
++  SET_DISK_TRANSFER_AREA(tmp);
++}
++
++define pcodeop GET_DEFAULT_DRIVE_DATA;
++:INT" 21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x1b
++{
++  # OUT: AL, DS:BX
++  local res:5 = GET_DEFAULT_DRIVE_DATA();
++  AL = res[0,8];
++  BX = res[8,16];
++  DS = res[24,16];
++}
++
++define pcodeop GET_DRIVE_DATA;
++:INT" 21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x1c
++{
++  # IN: DL
++  # OUT: AL, DS:BX
++  local res:5 = GET_DRIVE_DATA(DL);
++  AL = res[0,8];
++  BX = res[8,16];
++  DS = res[24,16];
++}
++
++define pcodeop PROGRAM_TERMINATE;
++:INT" 21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x20
++{
++  # OUT: none
++  PROGRAM_TERMINATE();
++}
++
++define pcodeop SET_CTRL_C_HANDLER;
++:INT" 21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x25
++{
++  # Input: AL=interrupt number, DS:DX=handler
++  local tmp:4 = segment(DS, DX);
++  SET_CTRL_C_HANDLER(AL, tmp);
++}
++
++define pcodeop CREATE_PSP;
++:INT" 21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x26
++{
++  # IN: DX
++  CREATE_PSP(DX);
++}
++
++define pcodeop PARSE_FILENAME;
++:INT" 21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x29
++{
++  # Input: ES:DI=FCB, DS:SI=string, AL=flags
++  # Output: AL=status
++  local tmp1:4 = segment(ES, DI);
++  local tmp2:4 = segment(DS, SI);
++  AL = PARSE_FILENAME(tmp1, tmp2, AL);
++}
++
++define pcodeop GET_DATE;
++:INT" 21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x2a
++{
++  # Output: CX=year, DH=month, DL=day, AL=weekday
++  local res:5 = GET_DATE();
++  CX = res[0,16];
++  DH = res[16,8];
++  DL = res[24,8];
++  AL = res[32,8];
++}
++
++define pcodeop SET_DATE;
++:INT" 21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x2b
++{
++  # IN: CX, DH, DL
++  # OUT: AL
++  AL = SET_DATE(CX, DH, DL);
++}
++
++define pcodeop GET_TIME;
++:INT" 21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x2c
++{
++  # Output: CH=hour, CL=minute, DH=second, DL=hundredths
++  local res:4 = GET_TIME();
++  CH = res[0,8];
++  CL = res[8,8];
++  DH = res[16,8];
++  DL = res[24,8];
++}
++
++define pcodeop SET_VERIFY_FLAG;
++:INT" 21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x2e
++{
++  # Input: AL=verify flag
++  SET_VERIFY_FLAG(AL);
++}
++
++define pcodeop GET_DTA;
++:INT" 21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x2f
++{
++  # Output: ES:BX=DTA address
++  local res:4 = GET_DTA();
++  BX = res[0,16];
++  ES = res[16,16];
++}
++
++define pcodeop GET_DOS_VERSION_NUMBER;
++:INT" 21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x30
++{
++  # Output: AX=DOS version
++  AX = GET_DOS_VERSION_NUMBER(AL);
++}
++
++define pcodeop TSR;
++:INT" 21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x31
++{
++  # IN: DX
++  TSR(DX);
++}
++
++define pcodeop CTRL_BREAK_CHECK;
++:INT" 21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x33
++{
++  # IN: AL
++  # OUT: DL
++  DL = CTRL_BREAK_CHECK(AL);
++}
++
++define pcodeop GET_INDOS_FLAG;
++:INT" 21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x34
++{
++  # Output: ES:BX=InDOS flag address
++  local res:4 = GET_INDOS_FLAG();
++  BX = res[0,16];
++  ES = res[16,16];
++}
++
++define pcodeop GET_INTERRUPT_VECTOR;
++:INT" 21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x35
++{
++  # Input: AL=interrupt number
++  # Output: ES:BX=handler address
++  local res:4 = GET_INTERRUPT_VECTOR(AL);
++  BX = res[0,16];
++  ES = res[16,16];
++}
++
++define pcodeop GET_FREE_DISK_SPACE;
++:INT" 21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x36
++{
++  # Input: DL=drive
++  # Output: AX=sectors/cluster, BX=free clusters, CX=bytes/sector, DX=total clusters
++  local res:8 = GET_FREE_DISK_SPACE(DL);
++  AX = res[0,16];
++  BX = res[16,16];
++  CX = res[32,16];
++  DX = res[48,16];
++}
++
++define pcodeop GET_COUNTRY_INFORMATION;
++:INT" 21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x38
++{
++  # Input: AL=country code, DS:DX=buffer
++  # Output: AX=status, BX=country ID, CF=error flag
++  local tmp:4 = segment(DS, DX);
++  local res:5 = GET_COUNTRY_INFORMATION(AL, tmp);
++  AX = res[0,16];
++  BX = res[16,16];
++  CF = res[32,1];
++}
++
++define pcodeop CREATE_DIR;
++:INT" 21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x39
++{
++  # Input: DS:DX=path
++  # Output: AX=error code, CF=status
++  local tmp:4 = segment(DS, DX);
++  local res:3 = CREATE_DIR(tmp);
++  AX = res[0,16];
++  CF = res[16,1];
++}
++
++define pcodeop REMOVE_DIR;
++:INT" 21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x3a
++{
++  # Input: DS:DX=path
++  # Output: AX=error code, CF=status
++  local tmp:4 = segment(DS, DX);
++  local res:3 = REMOVE_DIR(tmp);
++  AX = res[0,16];
++  CF = res[16,1];
++}
++
++define pcodeop SET_CURRENT_DIR;
++:INT" 21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x3b
++{
++  # Input: DS:DX=path
++  # Output: AX=error code, CF=status
++  local tmp:4 = segment(DS, DX);
++  local res:3 = SET_CURRENT_DIR(tmp);
++  AX = res[0,16];
++  CF = res[16,1];
++}
++
++define pcodeop CREATE_FILE;
++:INT" 21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x3c
++{
++  # Input: DS:DX=path, CX=attributes
++  # Output: AX=handle, CF=status
++  local tmp:4 = segment(DS, DX);
++  local res:3 = CREATE_FILE(tmp, CX);
++  AX = res[0,16];
++  CF = res[16,1];
++}
++
++define pcodeop OPEN_FILE;
++:INT" 21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x3d
++{
++  # Input: DS:DX=path, AL=access mode
++  # Output: AX=handle, CF=status
++  local tmp:4 = segment(DS, DX);
++  local res:3 = OPEN_FILE(tmp, AL);
++  AX = res[0,16];
++  CF = res[16,1];
++}
++
++define pcodeop CLOSE_FILE;
++:INT" 21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x3e
++{
++  # Input: BX=handle
++  # Output: AX=error code, CF=status
++  local res:3 = CLOSE_FILE(BX);
++  AX = res[0,16];
++  CF = res[16,1];
++}
++
++define pcodeop READ_FILE;
++:INT" 21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x3f
++{
++  # Input: BX=handle, CX=count, DS:DX=buffer
++  # Output: AX=bytes read, CF=status
++  local tmp:4 = segment(DS, DX);
++  local res:3 = READ_FILE(BX, tmp, CX);
++  AX = res[0,16];
++  CF = res[16,1];
++}
++
++define pcodeop WRITE_FILE;
++:INT" 21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x40
++{
++  # Input: BX=handle, CX=count, DS:DX=buffer
++  # Output: AX=bytes written, CF=status
++  local tmp:4 = segment(DS, DX);
++  local res:3 = WRITE_FILE(BX, tmp, CX);
++  AX = res[0,16];
++  CF = res[16,1];
++}
++
++define pcodeop DELETE_FILE;
++:INT" 21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x41
++{
++  # Input: DS:DX=path
++  # Output: AX=error code, CF=status
++  local tmp:4 = segment(DS, DX);
++  local res:3 = DELETE_FILE(tmp, CL);
++  AX = res[0,16];
++  CF = res[16,1];
++}
++
++define pcodeop LSEEK;
++:INT" 21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x42
++{
++  # Input: BX=handle, AL=origin, CX:DX=offset
++  # Output: DX:AX=new position, CF=status
++  local tmp:4 = segment(DS, DX);
++  local res:5 = LSEEK(BX, AL, tmp);
++  AX = res[0,16];
++  DX = res[16,16];
++  CF = res[32,1];
++}
++
++define pcodeop GET_FILE_ATTRIBUTES;
++:INT" 21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x43
++{
++  local tmp:4 = segment(DS, DX);
++  local res:5 = GET_FILE_ATTRIBUTES(tmp);
++  AX = res[0,16];
++  CX = res[16,16];
++  CF = res[32,1];
++}
++
++define pcodeop GET_DEVICE_INFORMATION;
++:INT" 21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAX=0x4400
++{
++  # Input: BX=handle
++  # Output: AX=status, DX=device info, CF=error flag
++  local res:5 = GET_DEVICE_INFORMATION(BX);
++  AX = res[0,16];
++  DX = res[16,16];
++  CF = res[32,1];
++}
++
++define pcodeop IOCTL_GENERIC;
++:INT" 21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x44 & ctxAL!=0x00
++{
++  # Input: AL=subfunction, BX=handle, CX=count, DS:DX=buffer
++  # Output: AX=status, CF=error flag
++  local tmp:4 = segment(DS, DX);
++  local res:3 = IOCTL_GENERIC(AL, BX, CX, tmp);
++  AX = res[0,16];
++  CF = res[16,1];
++}
++
++define pcodeop DUPLICATE_FILE_HANDLE;
++:INT" 21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x45
++{
++  # Input: BX=handle
++  # Output: AX=new handle, CF=status
++  local res:3 = DUPLICATE_FILE_HANDLE(BX);
++  AX = res[0,16];
++  CF = res[16,1];
++}
++
++define pcodeop FORCE_DUPLICATE_FILE_HANDLE;
++:INT" 21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x46
++{
++  # Input: BX=source handle, CX=target handle
++  # Output: AX=target handle, CF=status
++  local res:3 = FORCE_DUPLICATE_FILE_HANDLE(BX, CX);
++  AX = res[0,16];
++  CF = res[16,1];
++}
++
++define pcodeop GET_CURRENT_DIR;
++:INT" 21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x47
++{
++  # Input: DL=drive
++  # Output: DS:SI=buffer, AX=status, CF=error flag
++  local res:7 = GET_CURRENT_DIR(DL);
++  SI = res[0,16];
++  DS = res[16,16];
++  AX = res[32,16];
++  CF = res[48,1];
++}
++
++define pcodeop ALLOCATE_MEMORY;
++:INT" 21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x48
++{
++  # Input: BX=paragraphs
++  # Output: AX=segment, BX=max paragraphs, CF=status
++  local res:5 = ALLOCATE_MEMORY(BX);
++  AX = res[0,16];
++  BX = res[16,16];
++  CF = res[32,1];
++}
++
++define pcodeop FREE_MEMORY;
++:INT" 21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x49
++{
++  # Input: ES=segment
++  # Output: AX=status, CF=error flag
++  local res:3 = FREE_MEMORY(ES);
++  AX = res[0,16];
++  CF = res[16,1];
++}
++
++define pcodeop RESIZE_MEMORY_BLOCK;
++:INT" 21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x4a
++{
++  # Input: ES=segment, BX=new size (paragraphs)
++  # Output: AX=status, BX=max size, CF=error flag
++  local res:5 = RESIZE_MEMORY_BLOCK(BX, ES);
++  AX = res[0,16];
++  BX = res[16,16];
++  CF = res[32,1];
++}
++
++define pcodeop EXEC_PROGRAM;
++:INT" 21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x4b
++{
++  # Input: AL=mode, DS:DX=path, ES:BX=parameter block
++  # Output: AX=status, CF=error flag
++  local path:4 = segment(DS, DX);
++  local block:4 = segment(ES, BX);
++  local res:3 = EXEC_PROGRAM(path, block, AL);
++  AX = res[0,16];
++  CF = res[16,1];
++}
++
++define pcodeop END_PROCESS;
++:INT" 21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x4c
++{
++  # Input: AL=return code
++  END_PROCESS(AL);
++  return [0:1];
++}
++
++define pcodeop GET_RETURN_CODE;
++:INT" 21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x4d
++{
++  # Output: AX=return code
++  AX = GET_RETURN_CODE();
++}
++
++define pcodeop FIND_FIRST;
++:INT" 21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x4e
++{
++  # Input: DS:DX=pattern, CX=attributes
++  # Output: AX=status, CF=error flag
++  local tmp:4 = segment(DS, DX);
++  local res:3 = FIND_FIRST(tmp, CX);
++  AX = res[0,16];
++  CF = res[16,1];
++}
++
++define pcodeop FIND_NEXT;
++:INT" 21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x4f
++{
++  # Output: AX=status, CF=error flag
++  local res:3 = FIND_NEXT();
++  AX = res[0,16];
++  CF = res[16,1];
++}
++
++define pcodeop GET_VERIFY_FLAG;
++:INT" 21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x54
++{
++  # Output: AL=verify flag
++  AL = GET_VERIFY_FLAG();
++}
++
++define pcodeop RENAME_FILE;
++:INT" 21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x56
++{
++  # Input: DS:DX=old name, ES:DI=new name
++  # Output: AX=status, CF=error flag
++  local src:4 = segment(DS, DX);
++  local dst:4 = segment(ES, DI);
++  local res:3 = RENAME_FILE(src, dst);
++  AX = res[0,16];
++  CF = res[16,1];
++}
++
++define pcodeop GET_SET_FILE_DATE_TIME;
++:INT" 21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x57
++{
++  # Input: AL=0(get)/1(set), BX=handle, CX=time, DX=date
++  # Output: CX=time, DX=date, CF=status
++  local res:5 = GET_SET_FILE_DATE_TIME(AL, BX, CX, DX);
++  CX = res[0,16];
++  DX = res[16,16];
++  CF = res[32,1];
++}
++
++define pcodeop GET_EXTENDED_ERROR;
++:INT" 21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAX=0x5900
++{
++  # Output: AX=error code, BH=class, BL=action, CH=locus
++  local res:5 = GET_EXTENDED_ERROR();
++  AX = res[0,16];
++  BH = res[16,8];
++  BL = res[24,8];
++  CH = res[32,8];
++}
++
++define pcodeop SET_EXTENDED_ERROR_HANDLER;
++:INT" 21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x59 & ctxAL!=0x00
++{
++  # Input: DS:DX=handler
++  local tmp:4 = segment(DS, DX);
++  SET_EXTENDED_ERROR_HANDLER(tmp);
++}
++
++define pcodeop CREATE_TEMP_FILE;
++:INT" 21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x5a
++{
++  # Input: DS:DX=template, CX=attributes
++  # Output: AX=handle, DS:DX=filename, CF=status
++  local tmp:4 = segment(DS, DX);
++  local res:5 = CREATE_TEMP_FILE(tmp, CX);
++  AX = res[0,16];
++  DX = res[16,16];
++  CF = res[32,1];
++}
++
++define pcodeop CREATE_NEW_FILE;
++:INT" 21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x5b
++{
++  # Input: DS:DX=path, CX=attributes
++  # Output: AX=handle, CF=status
++  local tmp:4 = segment(DS, DX);
++  local res:3 = CREATE_NEW_FILE(tmp, CX);
++  AX = res[0,16];
++  CF = res[16,1];
++}
++
++define pcodeop NETWORK_REDIRECTOR;
++:INT" 21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x5d
++{
++  # Input: AL=subfunction, DS:DX=data
++  # Output: AX=status, CF=error flag
++  local tmp:4 = segment(DS, DX);
++  local res:3 = NETWORK_REDIRECTOR(AL, tmp);
++  AX = res[0,16];
++  CF = res[16,1];
++}
++
++define pcodeop SERVER_FUNCTION;
++:INT" 21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x5e
++{
++  # Input: AL=subfunction, DS:DX=data
++  # Output: AX=status, CF=error flag
++  local tmp:4 = segment(DS, DX);
++  local res:3 = SERVER_FUNCTION(AL, tmp);
++  AX = res[0,16];
++  CF = res[16,1];
++}
++
++define pcodeop TRUENAME;
++:INT" 21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x60
++{
++  # Input: DS:SI=path, ES:DI=buffer
++  # Output: CF=status
++  local src:4 = segment(DS, SI);
++  local dst:4 = segment(ES, DI);
++  CF = TRUENAME(src, dst);
++}
++
++define pcodeop GET_PSP_ADDRESS;
++:INT" 21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x62
++{
++  # Output: BX=PSP segment
++  BX = GET_PSP_ADDRESS();
++}
++
++define pcodeop GET_EXTENDED_COUNTRY_INFORMATION;
++:INT" 21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x65
++{
++  # Input: AL=info type, BX=country, DX=codepage, ES:DI=buffer, CX=length
++  # Output: AX=status, CF=error flag
++  local tmp:4 = segment(ES, DI);
++  local res:3 = GET_EXTENDED_COUNTRY_INFORMATION(AL, BX, DX, tmp, CX);
++  AX = res[0,16];
++  CF = res[16,1];
++}
++
++define pcodeop GET_SET_CODEPAGE;
++:INT" 21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x66
++{
++  # Input: AL=0(get)/1(set), BX=codepage
++  # Output: BX=active codepage, CF=status
++  local res:3 = GET_SET_CODEPAGE(AL, BX);
++  BX = res[0,16];
++  CF = res[16,1];
++}
++
++define pcodeop SET_HANDLE_COUNT;
++:INT" 21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x67
++{
++  # Input: BX=number of handles
++  # Output: CF=status
++  CF = SET_HANDLE_COUNT(BX);
++}
++
++define pcodeop COMMIT_FILE;
++:INT" 21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x68
++{
++  # Input: BX=handle
++  # Output: AX=status, CF=error flag
++  local res:3 = COMMIT_FILE(BX);
++  AX = res[0,16];
++  CF = res[16,1];
++}
++
++define pcodeop EXTENDED_OPEN_CREATE;
++:INT" 21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0x6c
++{
++  # Input: DS:SI=path, BX=mode, CX=attributes, DX=action
++  # Output: AX=handle, CF=status
++  local tmp:4 = segment(DS, SI);
++  local res:3 = EXTENDED_OPEN_CREATE(tmp, BX, CX, DX);
++  AX = res[0,16];
++  CF = res[16,1];
++}
++
++define pcodeop FILE_SERVER_FILE_COPY;
++:INT" 21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAH=0xf3
++{
++  # Input: ES:DI=buffer, AX/BX/CX/DX=parameters
++  # Output: DX=status
++  local tmp:4 = segment(ES, DI);
++  DX = FILE_SERVER_FILE_COPY(tmp, AX, BX, CX, DX);
++}
++
++define pcodeop TOPWARE_GET_SYSTEM_INFORMATION;
++:INT" 21"  is vexMode=0 & byte=0xcd; byte=0x21 & ctxAX=0xff00
++{
++  # Input: CL=info selector
++  # Output: BX=information
++  BX = TOPWARE_GET_SYSTEM_INFORMATION(CL);
++}
++
++define pcodeop CDROM_INSTALLATION_CHECK;
++:INT" 2f"  is vexMode=0 & byte=0xcd; byte=0x2f & ctxAX=0x1500
++{
++  BX = CDROM_INSTALLATION_CHECK();
++}
++
++define pcodeop WINDOWS_ENHANCED_MODE_INSTALLATION_CHECK;
++:INT" 2f"  is vexMode=0 & byte=0xcd; byte=0x2f & ctxAX=0x1600
++{
++  # Input: none
++  # Output AL = status, AH = win minor version
++  AX = WINDOWS_ENHANCED_MODE_INSTALLATION_CHECK();
++}
++
++define pcodeop UNKNOWN_DOS_CALL_2f_fa00;
++:INT" 2f"  is vexMode=0 & byte=0xcd; byte=0x2f & ctxAX=0xfa00
++{
++  AX = UNKNOWN_DOS_CALL_2f_fa00();
++}
++
++define pcodeop UNKNOWN_DOS_CALL_2f_fa22;
++:INT" 2f"  is vexMode=0 & byte=0xcd; byte=0x2f & ctxAX=0xfa22
++{
++  AX = UNKNOWN_DOS_CALL_2f_fa22();
++}
++
++define pcodeop ALLOCATE_LDT_DESCRIPTORS;
++:INT" 31"  is vexMode=0 & byte=0xcd; byte=0x31 & ctxAX=0x0000
++{
++  # Input: CX=number of descriptors to allocate
++  # Output: AX=base selector, CF=depends on error
++  local res:3 = ALLOCATE_LDT_DESCRIPTORS(CX);
++  AX = res[0,16];
++  CF = res[16,1];
++}
++
++define pcodeop FREE_LDT_DESCRIPTOR;
++:INT" 31"  is vexMode=0 & byte=0xcd; byte=0x31 & ctxAX=0x0001
++{
++  # Input: BX=selector to free
++  # Output: CF=depends on error, AX=error code
++  res:3 = FREE_LDT_DESCRIPTOR(CX);
++  AX = res[0,16];
++  CF = res[16,1];
++}
++
++define pcodeop SEGMENT_TO_DESCRIPTOR;
++:INT" 31"  is vexMode=0 & byte=0xcd; byte=0x31 & ctxAX=0x0002
++{
++  # Input: BX = real mode segment
++  # Output: AX = selector corresponding to real mode segment (64K limit), CF depends on error
++  local res:3 = SEGMENT_TO_DESCRIPTOR(BX);
++  AX = res[0,16];
++  CF = res[16,1];
++}
++
++define pcodeop GET_NEXT_SELECTOR_INCREMENT_VALUE;
++:INT" 31"  is vexMode=0 & byte=0xcd; byte=0x31 & ctxAX=0x0003
++{
++  # Input: None
++  # Output CF=clear, AX=value to add to get next sequential selector
++  AX=GET_NEXT_SELECTOR_INCREMENT_VALUE();
++  CF=0;
++}
++
++define pcodeop LOCK_SELECTOR;
++:INT" 31"  is vexMode=0 & byte=0xcd; byte=0x31 & ctxAX=0x0004
++{
++  # Input: BX=selector to lock (prevent paging)
++  # Output: ???
++  LOCK_SELECTOR(BX);
++}
++
++define pcodeop UNLOCK_SELECTOR;
++:INT" 31"  is vexMode=0 & byte=0xcd; byte=0x31 & ctxAX=0x0005
++{
++  # Input: BX=selector to unlock (permit paging)
++  # Output: ???
++  UNLOCK_SELECTOR(BX);
++}
++
++define pcodeop DPMI_GET_SEGMENT_BASE_ADDRESS;
++:INT" 31"  is vexMode=0 & byte=0xcd; byte=0x31 & ctxAX=0x0006
++{
++  local res:4 = DPMI_GET_SEGMENT_BASE_ADDRESS(BX);
++  DX = res[0,16];
++  CX = res[16,16];
++}
++
++define pcodeop SET_SEGMENT_BASE_ADDRESS;
++:INT" 31" is vexMode=0 & byte=0xcd; byte=0x31 & ctxAX=0x0007
++{
++  # Input: BX = selector, CX:DX = linear base address
++  # CF = error; AX=error code
++  local tmp:4 = segment(CX, DX);
++  res:3 = SET_SEGMENT_BASE_ADDRESS(BX, tmp);
++  AX = res[0,16];
++  CF = res[16,1];
++}
++
++define pcodeop SET_SEGMENT_LIMIT;
++:INT" 31" is vexMode=0 & byte=0xcd; byte=0x31 & ctxAX=0x0008
++{
++  # Input: BX = selector, CX:DX = segment limit
++  # Output: CF = error, AX = error code
++  local tmp:4 = segment(CX, DX);
++  res:3 = SET_SEGMENT_LIMIT(BX, tmp);
++  AX = res[0,16];
++  CF = res[16,1];
++}
++
++define pcodeop SET_DESCRIPTOR_ACCESS_RIGHTS;
++:INT" 31" is vexMode=0 & byte=0xcd; byte=0x31 & ctxAX=0x0009
++{
++  # Input: BX = selector, CL = access rights, CH = extended rights
++  # Output: CF = error, AX = error code
++  res:3 = SET_DESCRIPTOR_ACCESS_RIGHTS(BX, CL, CH);
++  AX = res[0,16];
++  CF = res[16,1];
++}
++
++define pcodeop ALLOCATE_DOS_MEMORY_BLOCK;
++:INT" 31" is vexMode=0 & byte=0xcd; byte=0x31 & ctxAX=0x0100
++{
++  # Input: BX = number of paragraphs to allocate
++  # Output: AX = real mode segment of allocated block
++  #         DX = first selector for allocated block
++  #         BX = size (in paragraphs) of largest available block
++  #         CF = error, AX = error code
++  res:7 = ALLOCATE_DOS_MEMORY_BLOCK(BX);
++  AX = res[0,16];
++  BX = res[16,16];
++  DX = res[32,16];
++  CF = res[48,1];
++}
++
++define pcodeop FREE_DOS_MEMORY_BLOCK;
++:INT" 31" is vexMode=0 & byte=0xcd; byte=0x31 & ctxAX=0x0101
++{
++  # Input: DX = selector
++  # Output: CF = error, AX = error code
++  res:3 = FREE_DOS_MEMORY_BLOCK(DX);
++  AX = res[0,16];
++  CF = res[16,1];
++}
++
++define pcodeop GET_PROTECTED_MODE_INTERRUPT_VECTOR;
++:INT" 31" is vexMode=0 & byte=0xcd; byte=0x31 & ctxAX=0x0204
++{
++  # Input: BL = interrupt number
++  # Output: CF = 0, CX:(E)DX = selector:offset of handler
++  tmp:4 = segment(CX, DX);
++  tmp = GET_PROTECTED_MODE_INTERRUPT_VECTOR(BL);
++  CF = 0;
++}
++
++define pcodeop SET_PROTECTED_MODE_INTERRUPT_VECTOR;
++:INT" 31" is vexMode=0 & byte=0xcd; byte=0x31 & ctxAX=0x0205
++{
++  # Input: BL = interrupt number
++  #        CX:(E)DX = selector:offset of handler
++  # Output: CF = error, AX = error code
++  tmp:4 = segment(CX, DX);
++  res:3 = SET_PROTECTED_MODE_INTERRUPT_VECTOR(BL, tmp);
++  AX = res[0,16];
++  CF = res[16,1];
++}
++
++define pcodeop SIMULATE_REAL_MODE_INTERRUPT;
++:INT" 31" is vexMode=0 & byte=0xcd; byte=0x31 & eseDI4 & ctxAX=0x0300
++{
++  # Input: BL = interrupt number, BH = flags
++  #        CX = number of words to copy from protected mode to real mode stack
++  #        ES:(E)DI = selector:offset of real mode call structure
++  # Output: ES:(E)DI call structure modified except SS:SP, CS:IP
++  #         CF = error, AX = error code
++  res:7 = SIMULATE_REAL_MODE_INTERRUPT(BL, eseDI4, CX, BH);
++  AX = res[0,16];
++  eseDI4 = zext(res[16,32]);
++  CF = res[48,1];
++}
++
++define pcodeop ALLOCATE_MEMORY_BLOCK;
++:INT" 31" is vexMode=0 & byte=0xcd; byte=0x31 & ctxAX=0x0501
++{
++  # Input: BX:CX = size in bytes
++  # Output: BX:CX = linear address of block
++  #         SI:DI = memory block handle for resizing and freeing block
++  #         CF = error, AX = error code
++  tmp:4 = segment(BX, CX);
++  res:11 = ALLOCATE_MEMORY_BLOCK(tmp);
++  AX = res[0,16];
++  BX = res[16,16];
++  CX = res[32,16];
++  SI = res[48,16];
++  DI = res[64,16];
++  CF = res[80,1];
++}
++
++define pcodeop FREE_MEMORY_BLOCK;
++:INT" 31" is vexMode=0 & byte=0xcd; byte=0x31 & ctxAX=0x0502
++{
++  # Input: SI:DI = handle of memory block
++  # Output: CF = error, AX = error code
++  tmp:4 = segment(SI, DI);
++  res:3 = FREE_MEMORY_BLOCK(tmp);
++  AX = res[0,16];
++  CF = res[16,1];
++}
++
++define pcodeop PHYSICAL_ADDRESS_MAPPING;
++:INT" 31" is vexMode=0 & byte=0xcd; byte=0x31 & ctxAX=0x0800
++{
++  # Input: BX:CX = physical address (should be above 1 MB)
++  #        SI:DI = size in bytes
++  # Output: BX:CX= linear address which maps the requested pyhsical memory
++  #         CF = error, AX = error code
++  tmp1:4 = segment(BX, CX);
++  tmp2:4 = segment(SI, DI);
++  res:7 = PHYSICAL_ADDRESS_MAPPING(tmp1, tmp2);
++  AX = res[0,16];
++  BX = res[16,16];
++  CX = res[32,16];
++  CF = res[48,1];
++}
++
++define pcodeop GET_VENDOR_SPECIFIC_API_ENTRY_POINT;
++:INT" 31" is vexMode=0 & addrsize & byte=0xcd; byte=0x31 & dseSI1 & ctxAX=0x0a00
++{
++  # Input: DS:(E)SI = case-sensitive ASCIZ vendor name or identifier
++  # Output: ES:(E)DI = FAR extended API entry point
++  # DS, FS, GS, EAX, EBX, ECX, EDX, ESI, EBP destroyed
++  # CF = error
++  # AX = error code;
++  res:7 = GET_VENDOR_SPECIFIC_API_ENTRY_POINT(dseSI1);
++  if (addrsize:1 == 0) goto <s0>;
++@ifdef IA64
++  if (addrsize:1 == 1) goto <s1>;
++  RDI = zext(res[0,32]);
++  goto <end>;
++<s1>
++@endif
++  EDI = res[0,32];
++  goto <end>;
++<s0>
++  DI = res[0,16];
++  ES = res[16,16];
++<end>
++  DS = 0;
++  FS = 0;
++  GS = 0;
++  EAX = 0;
++  EBX = 0;
++  EDX = 0;
++  ESI = 0;
++  EBP = 0;
++  AX = res[32,16];
++  CF = res[48,1];
++}
++
++:INT imm8 is vexMode=0 & byte=0xcd; imm8
++{
++  local tmp:1 = imm8;
++  swi(tmp, AH, AL);
++}
++
+ :INTO           is vexMode=0 & byte=0xce & bit64=0
+ {
+   tmp:1 = 0x4;
+diff --git a/Ghidra/Processors/x86/ghidra_scripts/InterruptContext.java b/Ghidra/Processors/x86/ghidra_scripts/InterruptContext.java
+new file mode 100644
+index 0000000000..79197fe972
+--- /dev/null
++++ b/Ghidra/Processors/x86/ghidra_scripts/InterruptContext.java
+@@ -0,0 +1,118 @@
++// @category Analysis
++// @author Johannes Obermayr <johannesobermayr@gmx.de> (with Google Gemini)
++
++import ghidra.app.script.GhidraScript;
++import ghidra.program.model.lang.Register;
++import ghidra.program.model.lang.RegisterValue;
++import ghidra.program.model.listing.Instruction;
++import ghidra.program.model.listing.CodeUnit;
++import ghidra.program.model.scalar.Scalar;
++import ghidra.program.model.address.Address;
++import java.math.BigInteger;
++
++public class InterruptContext extends GhidraScript {
++
++    @Override
++    protected void run() throws Exception {
++        if (currentProgram == null) return;
++
++        Register ctxAx = currentProgram.getProgramContext().getRegister("ctxAX");
++        Register ctxAh = currentProgram.getProgramContext().getRegister("ctxAH");
++        Register ctxAl = currentProgram.getProgramContext().getRegister("ctxAL");
++
++        if (ctxAx == null || ctxAh == null || ctxAl == null) {
++            printerr("Error: One of the context registers (ctxAX, ctxAH, ctxAL) wasn't found!\nDo you use correct Sleigh file.");
++            return;
++        }
++
++        Instruction inst = getFirstInstruction();
++        int countAuto = 0;
++        int countManual = 0;
++
++        while (inst != null && !monitor.isCancelled()) {
++            if (inst.getMnemonicString().startsWith("INT")) {
++                Address addr = inst.getAddress();
++
++                Long finalAH = null;
++                Long finalAL = null;
++
++                // Look 15 instructions back
++                Instruction prev = getInstructionBefore(inst);
++                for (int i = 0; i < 15 && prev != null; i++) {
++                    String mnem = prev.getMnemonicString();
++
++                    if (mnem.startsWith("MOV") || mnem.startsWith("XOR")) {
++                        Object[] ops = prev.getOpObjects(0);
++                        if (ops.length > 0 && ops[0] instanceof Register) {
++                            Register reg = (Register) ops[0];
++                            long val = 0;
++                            boolean isValueKnown = false;
++
++                            Scalar s = prev.getScalar(1);
++                            if (s != null) {
++                                val = s.getValue();
++                                isValueKnown = true;
++                            } else if (mnem.startsWith("XOR")) {
++                                Object[] srcOps = prev.getOpObjects(1);
++                                if (srcOps.length > 0 && srcOps[0].equals(reg)) {
++                                    val = 0;
++                                    isValueKnown = true;
++                                }
++                            }
++
++                            if (isValueKnown) {
++                                String regName = reg.getName();
++                                if (regName.equals("AX") || regName.equals("EAX")) {
++                                    if (finalAH == null) finalAH = (val >> 8) & 0xFF;
++                                    if (finalAL == null) finalAL = val & 0xFF;
++                                } else if (regName.equals("AH")) {
++                                    if (finalAH == null) finalAH = val & 0xFF;
++                                } else if (regName.equals("AL")) {
++                                    if (finalAL == null) finalAL = val & 0xFF;
++                                }
++                            }
++                        }
++                    }
++
++                    if (finalAH != null && finalAL != null) break;
++
++                    // Warn for CALL or JUMP
++                    if (prev.getFlowType().isCall() || (prev.getFlowType().isJump() && !prev.getFlowType().isConditional())) {
++                        break;
++                    }
++                    prev = getInstructionBefore(prev);
++                }
++
++                if (finalAH != null) {
++                    // Set automatically
++                    long alValue = (finalAL != null) ? finalAL : 0;
++                    long fullAxValue = (finalAH << 8) | alValue;
++
++                    applyContext(addr, ctxAx, ctxAh, ctxAl, fullAxValue, finalAH, alValue);
++                    countAuto++;
++                } else {
++                    setPreComment(addr, "!!! MANUAL CONTEXT REQUIRED !!!\n" +
++                                        "AX/AH/AL couldn't be defined due to CALL or JMP.\n" +
++                                        "Set 'ctxAX', 'ctxAH', 'ctxAL' with 'Register Values'.");
++                    countManual++;
++                    println("Warning: Manual customization required at " + addr + ".");
++                }
++            }
++            inst = getInstructionAfter(inst.getAddress());
++        }
++        println(String.format("Analysis finished. Automatically: %d, Manually required: %d", countAuto, countManual));
++    }
++
++    private void applyContext(Address addr, Register ax, Register ah, Register al, long valAx, long valAh, long valAl) throws Exception {
++        // Clear listing to avoid ContextChangeException
++        clearListing(addr, addr.add(currentProgram.getListing().getInstructionAt(addr).getLength() - 1));
++
++        RegisterValue rvAX = new RegisterValue(ax, BigInteger.valueOf(valAx));
++
++        currentProgram.getProgramContext().setRegisterValue(addr, addr, rvAX);
++
++        //println(String.format("Set AX=0x%x (AH=0x%x,AL=0x%x) at ", valAx, valAh, valAl) + addr);
++
++        disassemble(addr);
++    }
++}
+-- 
+2.45.1
+
