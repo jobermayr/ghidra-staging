@@ -1,0 +1,101 @@
+From 3bbcc32b1a8444caed5abb212d020f0cb055d2bc Mon Sep 17 00:00:00 2001
+From: Ranjith Rosan <ranjithrosan17@gmail.com>
+Date: Sat, 24 Oct 2026 17:14:50 +0000
+Subject: [PATCH] 10021: AVR8: add a language variant for devices with a 12-bit wrapping PC
+
+Devices with up to 8 KiB of flash have no JMP/CALL instructions, because
+RJMP/RCALL reach the whole code space, and their PC wraps at 4 Ki words.  A
+relative branch that crosses the end of the space therefore wraps to the
+start instead of running past it.  The AVR8 languages have a 16-bit code
+space, so such a branch resolved to an address above 4 Ki words: an rjmp at
+address 0 in a small-device image pointed at 0xf817 instead of 0x817, and the
+code there was never part of a function.
+
+Add an avr8:LE:16:small language that masks relative branch and jump
+destinations to the implemented PC width, and keep the existing languages
+unchanged by defaulting the mask to a no-op.
+---
+ Ghidra/Processors/Atmel/data/languages/avr8.ldefs  | 14 ++++++++++++++
+ Ghidra/Processors/Atmel/data/languages/avr8.sinc   | 10 ++++++++--
+ .../Atmel/data/languages/avr8small.slaspec         | 12 ++++++++++++
+ 3 files changed, 34 insertions(+), 2 deletions(-)
+ create mode 100644 Ghidra/Processors/Atmel/data/languages/avr8small.slaspec
+
+diff --git a/Ghidra/Processors/Atmel/data/languages/avr8.ldefs b/Ghidra/Processors/Atmel/data/languages/avr8.ldefs
+index 35a6be1fea7..4208466f64e 100644
+--- a/Ghidra/Processors/Atmel/data/languages/avr8.ldefs
++++ b/Ghidra/Processors/Atmel/data/languages/avr8.ldefs
+@@ -19,6 +19,20 @@
+     <external_name tool="IDA-PRO" name="avr"/>
+   </language>
+   
++  <language processor="AVR8"
++            endian="little"
++            size="16"
++            variant="small"
++            version="1.0"
++            slafile="avr8small.sla"
++            processorspec="avr8.pspec"
++            manualindexfile="../manuals/AVR8.idx"
++            id="avr8:LE:16:small">
++    <description>AVR8 with a 12-bit wrapping PC (devices with up to 8 KiB of flash)</description>
++    <compiler name="gcc"        spec="avr8gcc.cspec"        id="gcc"/>
++    <external_name tool="IDA-PRO" name="avr"/>
++  </language>
++
+   <language processor="AVR8"
+             deprecated="true"
+             endian="little"
+diff --git a/Ghidra/Processors/Atmel/data/languages/avr8.sinc b/Ghidra/Processors/Atmel/data/languages/avr8.sinc
+index 45ef6ecf565..6e2c9e02046 100644
+--- a/Ghidra/Processors/Atmel/data/languages/avr8.sinc
++++ b/Ghidra/Processors/Atmel/data/languages/avr8.sinc
+@@ -38,6 +38,12 @@ define alignment=2;
+ # Ghidra, it's still preferable to see the name of IO locations used,
+ # rather than code addresses, so leave mem space as the default.
+ 
++# Devices with up to 8 KiB of flash implement a 12-bit PC that wraps at 4 Ki words.
++# Language definitions for those devices override this mask.
++@ifndef PCWRAPMASK
++@define PCWRAPMASK "0xffffffff"
++@endif
++
+ define space code type=ram_space size=$(PCBYTESIZE) wordsize=2 default;
+ define space register type=register_space size=2;
+ define space mem type=ram_space size=$(DATASIZE) wordsize=1;
+@@ -456,7 +462,7 @@ f3cmpK8: val   is f3op2bits0to3 & f3op2bits8to11 [ val = (f3op2bits8to11 << 4) |
+ 
+ @endif
+ 
+-rel7addr: rel  is op3to9signed [ rel = (op3to9signed + inst_next);] { 
++rel7addr: rel  is op3to9signed [ rel = (op3to9signed + inst_next) & $(PCWRAPMASK);] { 
+   export *[code]:2 rel;
+ }
+ 
+@@ -464,7 +470,7 @@ rel7dst: byteOffset  is op3to9signed & rel7addr [ byteOffset = (op3to9signed + i
+   export rel7addr;
+ }
+ 
+-rel12addr: rel  is oplow12signed [ rel = oplow12signed + inst_start + 1; ] { 
++rel12addr: rel  is oplow12signed [ rel = (oplow12signed + inst_start + 1) & $(PCWRAPMASK); ] { 
+   export *[code]:2 rel;
+ }
+ 
+diff --git a/Ghidra/Processors/Atmel/data/languages/avr8small.slaspec b/Ghidra/Processors/Atmel/data/languages/avr8small.slaspec
+new file mode 100644
+index 00000000000..9eb5e9c774c
+--- /dev/null
++++ b/Ghidra/Processors/Atmel/data/languages/avr8small.slaspec
+@@ -0,0 +1,12 @@
++# AVR8 with a 12-bit PC, as implemented by devices with up to 8 KiB of flash.
++#
++# These devices have no JMP/CALL instructions, because RJMP/RCALL already reach
++# the entire code space, and their PC wraps at 4 Ki words.  Code addresses above
++# 4 Ki words do not exist, so relative branches must wrap instead of running off
++# the end of the address space.
++
++@define PCBYTESIZE "2"
++@define HASEIND "0"
++@define PCWRAPMASK "0xfff"
++
++@include "avr8.sinc"

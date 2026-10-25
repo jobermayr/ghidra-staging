@@ -4,6 +4,9 @@ Date: Thu, 22 Oct 2026 23:04:46 +0200
 Subject: [PATCH] 09993: Parent dialogs to the tool's last active window when
  no window is active
 
+Parent dialogs to the tool's last active window when no
+ window is active
+
 When a dialog is shown without a parent and Java reports no active window,
 getParentWindow() fell back to the tool's root frame. On macOS this happens
 after Delete Block in a detached Memory Map window: the progress dialog is
@@ -20,65 +23,91 @@ Use case 'F' in the method's comment describes the new rule.
 DialogParentFallbackTest covers the fallback with a fake focus manager.
 
 Fixes #9963
+
+Fall back to the last active window in getJavaActiveWindow()
+
+Move the fallback from getParentWindow() into getJavaActiveWindow(), as
+suggested in review, so that it also applies to centering the dialog and
+to parenting non-modal dialogs.
+
+The fallback is now also used when Java still reports a window that has
+just closed as the active window. On macOS this happens after Delete Block
+in a detached Memory Map: sometimes Java reports no active window, and
+sometimes the closed confirmation dialog.
+
+When the last active window is itself a closed dialog, walk up to the
+nearest owner that is still showing. Otherwise the new dialog gets the
+right parent but is centered on the screen.
+
+DialogParentFallbackTest has new cases for a closed dialog as the active
+window and for centering on the owner.
 ---
- .../java/docking/DockingWindowManager.java    |  19 +-
- .../docking/DialogParentFallbackTest.java     | 183 ++++++++++++++++++
- 2 files changed, 201 insertions(+), 1 deletion(-)
+ .../java/docking/DockingWindowManager.java    |  34 ++-
+ .../docking/DialogParentFallbackTest.java     | 218 ++++++++++++++++++
+ 2 files changed, 244 insertions(+), 8 deletions(-)
  create mode 100644 Ghidra/Framework/Docking/src/test.slow/java/docking/DialogParentFallbackTest.java
 
 diff --git a/Ghidra/Framework/Docking/src/main/java/docking/DockingWindowManager.java b/Ghidra/Framework/Docking/src/main/java/docking/DockingWindowManager.java
-index ba8379c2f6..67ac9bab4c 100644
+index ba8379c2f6..d7dd561bf1 100644
 --- a/Ghidra/Framework/Docking/src/main/java/docking/DockingWindowManager.java
 +++ b/Ghidra/Framework/Docking/src/main/java/docking/DockingWindowManager.java
-@@ -2171,6 +2171,12 @@ public class DockingWindowManager implements PropertyChangeListener, Placeholder
+@@ -2170,10 +2170,17 @@ public class DockingWindowManager implements PropertyChangeListener, Placeholder
+ 		 		   progress dialog goes away when the input dialog is closed.
  		 		E -A long-running API shows a non-modal progress dialog.  This API then shows a
  		 		   results dialog which is also non-modal.  We do not want to parent the new dialog
- 		 		   to the original dialog, since it is a progress dialog that will go away.
+-		 		   to the original dialog, since it is a progress dialog that will go away.
+-		
+-		
+-		 	For now, the easiest mental model to use is to always prefer the active non-transient
++				   to the original dialog, since it is a progress dialog that will go away.
 +				F -The user acts in a detached window, a dialog closes, and a new dialog is shown
 +				   before the OS has made the detached window active again, so Java reports no
-+				   active window.  The new dialog should use the window the user last worked in,
-+				   not the main tool frame, or that frame comes to the front when the dialog
-+				   closes.  This applies to case 4 as well: with no active window, a background
-+				   thread's dialog also uses the last active window.
- 		
- 		
- 		 	For now, the easiest mental model to use is to always prefer the active non-transient
-@@ -2183,9 +2189,20 @@ public class DockingWindowManager implements PropertyChangeListener, Placeholder
- 		Window defaultWindow = dwm != null ? dwm.getRootFrame() : null;
- 		if (parent == null) {
- 			Window w = getActiveNonTransientWindow();
-+			if (w == null && dwm != null) {
-+				// Java reports no active window, for example while the OS is still activating a
-+				// window after another one closed.  Use the window the user last worked in.  (See
-+				// Use Case 'F' above.)
-+				w = getNonTransientWindowFor(dwm.lastActiveWindow);
-+			}
- 			return w == null ? defaultWindow : w;
- 		}
- 
-+		Window w = getNonTransientWindowFor(parent);
-+		return w == null ? defaultWindow : w;
-+	}
++				   active window, or still reports the closed dialog.  The new dialog should use
++				   the window the user last worked in, not the main tool frame, or that frame
++				   comes to the front when the dialog closes.  This applies to case 4 as well:
++				   with no showing active window, a background thread's dialog also uses the last
++				   active window.
 +
-+	private static Window getNonTransientWindowFor(Component parent) {
- 		Component c = parent;
- 		while (c != null) {
- 			// Note: using a Frame here means that we will not find and use a dialog that is a
-@@ -2197,7 +2214,7 @@ public class DockingWindowManager implements PropertyChangeListener, Placeholder
- 			}
- 			c = c.getParent();
++
++			For now, the easiest mental model to use is to always prefer the active non-transient
+ 		 	window so that a dialog will appear in the user's view.  If we find a case where this is
+ 		 	not desired, then document it here.
+ 		
+@@ -2255,13 +2262,24 @@ public class DockingWindowManager implements PropertyChangeListener, Placeholder
+ 	private static Window getJavaActiveWindow() {
+ 		KeyboardFocusManager kfm = KeyboardFocusManager.getCurrentKeyboardFocusManager();
+ 		Window activeWindow = kfm.getActiveWindow();
+-		if (activeWindow == null) {
++		if (activeWindow != null && activeWindow.isShowing()) {
++			return activeWindow;
++		}
++
++		// Don't let non-showing windows be considered active.  There may be no active window, or
++		// a window that has just closed, when a dialog is shown before Java has finished updating
++		// the KeyboardFocusManager's active window.  (See Use Case 'F' in getParentWindow().)
++		DockingWindowManager dwm = getActiveInstance();
++		if (dwm == null) {
+ 			return null;
  		}
--		return defaultWindow;
-+		return null;
+-		if (!activeWindow.isShowing()) {
+-			return null; // don't let non-showing windows be considered active
++
++		// the last active window may be a dialog that has since closed; use its owner
++		Window w = dwm.lastActiveWindow;
++		while (w != null && !w.isShowing()) {
++			w = w.getOwner();
+ 		}
+-		return activeWindow;
++		return w;
  	}
  
- 	private static boolean isNonTransientWindow(Component c) {
+ 	private static Window getActiveNonTransientWindow() {
 diff --git a/Ghidra/Framework/Docking/src/test.slow/java/docking/DialogParentFallbackTest.java b/Ghidra/Framework/Docking/src/test.slow/java/docking/DialogParentFallbackTest.java
 new file mode 100644
-index 0000000000..605542f46b
+index 0000000000..63bb54ea0e
 --- /dev/null
 +++ b/Ghidra/Framework/Docking/src/test.slow/java/docking/DialogParentFallbackTest.java
-@@ -0,0 +1,183 @@
+@@ -0,0 +1,218 @@
 +/* ###
 + * IP: GHIDRA
 + *
@@ -99,6 +128,7 @@ index 0000000000..605542f46b
 +import static org.junit.Assert.*;
 +
 +import java.awt.*;
++import java.util.function.Function;
 +
 +import javax.swing.*;
 +
@@ -152,6 +182,32 @@ index 0000000000..605542f46b
 +	}
 +
 +	@Test
++	public void testNoActiveWindow_LastActiveIsClosedModalDialog_CentersOnItsOwner() {
++		Window detachedWindow = showDetachedProvider(true);
++		runSwing(() -> detachedWindow.setBounds(40, 60, 500, 400));
++		JDialog closedDialog = runSwing(() -> new JDialog(detachedWindow, "Closed Dialog",
++			Dialog.ModalityType.APPLICATION_MODAL));
++		setLastActiveWindow(closedDialog);
++		fakeActiveWindow = null;
++
++		Rectangle dialogBounds = showDialogAndGetBounds();
++		Rectangle ownerBounds = runSwing(() -> detachedWindow.getBounds());
++		assertEquals(ownerBounds.getCenterX(), dialogBounds.getCenterX(), 1);
++		assertEquals(ownerBounds.getCenterY(), dialogBounds.getCenterY(), 1);
++	}
++
++	@Test
++	public void testActiveWindowIsClosedDialog_UsesLastActiveWindow() {
++		Window detachedWindow = showDetachedProvider(true);
++		setLastActiveWindow(detachedWindow);
++		fakeActiveWindow = runSwing(() -> new JDialog(detachedWindow, "Closed Dialog",
++			Dialog.ModalityType.APPLICATION_MODAL));
++
++		Window owner = showDialogAndGetOwner();
++		assertSame(detachedWindow, owner);
++	}
++
++	@Test
 +	public void testNoActiveWindow_NoLastActiveWindow_UsesToolFrame() {
 +		setLastActiveWindow(null);
 +		fakeActiveWindow = null;
@@ -196,6 +252,14 @@ index 0000000000..605542f46b
 +	}
 +
 +	private Window showDialogAndGetOwner() {
++		return showDialogAndGet(Window::getOwner);
++	}
++
++	private Rectangle showDialogAndGetBounds() {
++		return showDialogAndGet(Window::getBounds);
++	}
++
++	private <T> T showDialogAndGet(Function<Window, T> getter) {
 +
 +		// Replace the focus manager only while the dialog is open, since other tests rely on the
 +		// state of the real focus manager
@@ -207,11 +271,11 @@ index 0000000000..605542f46b
 +			TestDialog dialog = new TestDialog();
 +			executeOnSwingWithoutBlocking(() -> DockingWindowManager.showDialog(dialog));
 +			waitForDialogComponent(TestDialog.class);
-+			Window owner =
-+				runSwing(() -> SwingUtilities.getWindowAncestor(dialog.getComponent()).getOwner());
++			Window window = runSwing(() -> SwingUtilities.getWindowAncestor(dialog.getComponent()));
++			T value = runSwing(() -> getter.apply(window));
 +			runSwing(() -> dialog.close());
 +			waitForSwing();
-+			return owner;
++			return value;
 +		}
 +		finally {
 +			KeyboardFocusManager.setCurrentKeyboardFocusManager(originalFocusManager);

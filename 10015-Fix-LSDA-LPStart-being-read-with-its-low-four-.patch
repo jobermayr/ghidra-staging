@@ -1,0 +1,96 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: mi11ione <i@mi11ion.io>
+Date: Sat, 24 Oct 2026 15:29:46 +0200
+Subject: [PATCH] 10015: Fix LSDA LPStart being read with its low four bits set
+
+---
+ .../structures/gccexcepttable/LSDAHeader.java | 11 +---------
+ .../gccexcepttable/LSDAHeaderTest.java        | 20 ++++++++++++++++---
+ 2 files changed, 18 insertions(+), 13 deletions(-)
+
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/exceptionhandlers/gcc/structures/gccexcepttable/LSDAHeader.java b/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/exceptionhandlers/gcc/structures/gccexcepttable/LSDAHeader.java
+index d548c3b13e..bc192f0b9e 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/exceptionhandlers/gcc/structures/gccexcepttable/LSDAHeader.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/exceptionhandlers/gcc/structures/gccexcepttable/LSDAHeader.java
+@@ -48,7 +48,6 @@ public class LSDAHeader extends GccAnalysisClass {
+ 	private int lpStartEncoding = 0xFF;
+ 	private Address lpStartAddr;
+ 
+-	private boolean hasTypeTable = false;
+ 	private int ttypeEncoding = OMITTED_ENCODING_TYPE;
+ 	private long ttypeOffset;
+ 	private Address ttypeAddr = Address.NO_ADDRESS;
+@@ -61,8 +60,6 @@ public class LSDAHeader extends GccAnalysisClass {
+ 
+ 	private Address nextAddress;
+ 
+-	private static final int LPSTART_PTR_TYPETABLE_FLAG = 0x01;
+-
+ 	private int curSize = 0;
+ 	private long callSiteTableHeaderSize;
+ 
+@@ -109,14 +106,8 @@ public class LSDAHeader extends GccAnalysisClass {
+ 		DwarfDecodeContext ctx = new DwarfDecodeContext(program, addr, region.getRangeStart());
+ 
+ 		long raw = decoder.decode(ctx);
+-
+-		// the bottom 4 bits are *not* part of the pointer
+-		long controls = raw & 0x0F;
+-		raw |= 0xF;
+ 		lpStartAddr = makeAddress(program, raw);
+ 
+-		hasTypeTable = (controls & LPSTART_PTR_TYPETABLE_FLAG) == LPSTART_PTR_TYPETABLE_FLAG;
+-
+ 		int encodedLen = ctx.getEncodedLength();
+ 
+ 		DataType encodedDt = decoder.getDataType(program);
+@@ -294,7 +285,7 @@ public class LSDAHeader extends GccAnalysisClass {
+ 	 * @return true if there is a type table
+ 	 */
+ 	public boolean hasTypeTable() {
+-		return hasTypeTable && ttypeAddr != Address.NO_ADDRESS;
++		return ttypeAddr != Address.NO_ADDRESS;
+ 	}
+ 
+ 	/**
+diff --git a/Ghidra/Features/Base/src/test/java/ghidra/app/plugin/exceptionhandlers/gcc/structures/gccexcepttable/LSDAHeaderTest.java b/Ghidra/Features/Base/src/test/java/ghidra/app/plugin/exceptionhandlers/gcc/structures/gccexcepttable/LSDAHeaderTest.java
+index 6f589c6373..66ddf14c0d 100644
+--- a/Ghidra/Features/Base/src/test/java/ghidra/app/plugin/exceptionhandlers/gcc/structures/gccexcepttable/LSDAHeaderTest.java
++++ b/Ghidra/Features/Base/src/test/java/ghidra/app/plugin/exceptionhandlers/gcc/structures/gccexcepttable/LSDAHeaderTest.java
+@@ -28,9 +28,10 @@ import ghidra.util.task.TaskMonitor;
+ 
+ /**
+  * Tests that the LSDA header locates the type table correctly however many bytes the TType
+- * offset ULEB128 occupies. Each LSDA below runs LPStart encoding (omitted), TType encoding
+- * (pcrel|sdata4), TType offset, call site encoding (uleb128) and table length, call site
+- * records, action table, then a single type table entry ending at the type table base.
++ * offset ULEB128 occupies, and reads an encoded LPStart. Each LSDA below runs LPStart encoding
++ * (omitted unless noted), TType encoding (pcrel|sdata4), TType offset, call site encoding
++ * (uleb128) and table length, call site records, action table, then a single type table entry
++ * ending at the type table base.
+  */
+ public class LSDAHeaderTest extends AbstractGenericTest {
+ 
+@@ -86,6 +87,19 @@ public class LSDAHeaderTest extends AbstractGenericTest {
+ 		assertEquals(addr(0x5004), header.getTTypeBaseAddress());
+ 	}
+ 
++	@Test
++	public void testEncodedLPStart() throws Exception {
++		// as above, but LPStart is pcrel|sdata4 0x3f from 0x1001 and the landing pad is 0x10
++		builder.setBytes("0x1000",
++			"1b 3f 00 00 00 1b 0d 01 04 00 02 10 01 01 00 00 f4 02 00 00");
++
++		LSDATable table = createTable();
++
++		assertEquals(addr(0x1040), table.getHeader().getLPStartAddress());
++		assertEquals(addr(0x1050),
++			table.getCallSiteTable().getCallSiteRecords().get(0).getLandingPad());
++	}
++
+ 	private LSDATable createTable() throws Exception {
+ 		RegionDescriptor region = region();
+ 		region.setLSDAAddress(addr(0x1000));
+-- 
+2.45.1
+

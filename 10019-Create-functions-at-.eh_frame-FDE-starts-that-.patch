@@ -1,0 +1,88 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ranjith Rosan <ranjithrosan17@gmail.com>
+Date: Sat, 24 Oct 2026 16:53:24 +0000
+Subject: [PATCH] 10019: Create functions at .eh_frame FDE starts that are not
+ .cold pieces
+
+GP-6976 stopped .cold symbols from becoming functions of their own. To keep
+.cold pieces from being split out during exception handling analysis, the
+same commit replaced function creation at an FDE's pcBegin with plain
+disassembly.
+
+A .cold piece is now flagged in the ColdEntries property map at import time,
+so the FDE handling can tell the two cases apart: schedule disassembly for a
+.cold entry as before, and create a function at every other FDE start.  This
+restores the function starts that stripped ELF binaries depend on, without
+re-introducing the .cold behavior that GP-6976 fixed.
+---
+ .../ehFrame/FrameDescriptionEntry.java        | 29 +++++++++++++++++--
+ 1 file changed, 26 insertions(+), 3 deletions(-)
+
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/exceptionhandlers/gcc/structures/ehFrame/FrameDescriptionEntry.java b/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/exceptionhandlers/gcc/structures/ehFrame/FrameDescriptionEntry.java
+index e0d25637be..f2129dd2d4 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/exceptionhandlers/gcc/structures/ehFrame/FrameDescriptionEntry.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/exceptionhandlers/gcc/structures/ehFrame/FrameDescriptionEntry.java
+@@ -18,6 +18,7 @@ package ghidra.app.plugin.exceptionhandlers.gcc.structures.ehFrame;
+ import ghidra.app.cmd.comments.SetCommentCmd;
+ import ghidra.app.cmd.data.CreateArrayCmd;
+ import ghidra.app.cmd.data.CreateDataCmd;
++import ghidra.app.cmd.function.CreateFunctionCmd;
+ import ghidra.app.plugin.core.analysis.AutoAnalysisManager;
+ import ghidra.app.plugin.exceptionhandlers.gcc.*;
+ import ghidra.app.plugin.exceptionhandlers.gcc.sections.CieSource;
+@@ -29,6 +30,7 @@ import ghidra.program.model.data.*;
+ import ghidra.program.model.listing.*;
+ import ghidra.program.model.mem.*;
+ import ghidra.program.model.symbol.*;
++import ghidra.program.model.util.AddressSetPropertyMap;
+ import ghidra.program.model.util.CodeUnitInsertionException;
+ import ghidra.util.DataConverter;
+ import ghidra.util.Msg;
+@@ -469,13 +471,20 @@ public class FrameDescriptionEntry extends GccAnalysisClass {
+ 		region.setIPRange(addrRange);
+ 
+ 		try {
+-			/* pcBeginAddr is not necessarily a function start, but it is code */
+-			/* schedule disassembly if there is not already a function defined there */
+-			if (program.getListing().getFunctionAt(pcBeginAddr) == null) {
++			/*
++			 * A .cold piece of a function is not a function entry point, so only schedule
++			 * disassembly of its code.  For every other entry, create a function, since the FDE
++			 * is the only source of function starts in a stripped binary.
++			 */
++			if (isColdEntry(pcBeginAddr)) {
+ 				AutoAnalysisManager analysisMgr = AutoAnalysisManager.getAnalysisManager(program);
+ 				analysisMgr.disassemble(new AddressSet(pcBeginAddr));
+                                analysisMgr.createFunction(pcBeginAddr, false);
+ 			}
++			else if (program.getListing().getFunctionAt(pcBeginAddr) == null) {
++				CreateFunctionCmd createFuncCmd = new CreateFunctionCmd(pcBeginAddr);
++				createFuncCmd.applyTo(program);
++			}
+ 		}
+ 		catch (AddressOutOfBoundsException e) {
+ 			throw new ExceptionHandlerFrameException(
+@@ -515,6 +524,20 @@ public class FrameDescriptionEntry extends GccAnalysisClass {
+ 		return region;
+ 	}
+ 
++	/**
++	 * Determines whether the specified address is the start of a .cold piece of a function,
++	 * which is not a function entry point.  Such addresses are flagged in a property map at
++	 * import time by the loader when it encounters a .cold function symbol.
++	 *
++	 * @param addr the address to check
++	 * @return true if addr was flagged as a .cold entry
++	 */
++	private boolean isColdEntry(Address addr) {
++		AddressSetPropertyMap coldEntries =
++			program.getAddressSetPropertyMap(Program.COLD_ENTRY_MAP_NAME);
++		return coldEntries != null && coldEntries.contains(addr);
++	}
++
+ 	private void markEndOfFrame(Address addr) {
+ 		createAndCommentData(program, addr, dwordDT, "End of Frame", CommentType.EOL);
+ 		SetCommentCmd commentCmd = new SetCommentCmd(addr, CommentType.PLATE, "END OF FRAME");
+-- 
+2.45.1
+
