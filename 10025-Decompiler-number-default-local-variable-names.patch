@@ -1,0 +1,213 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: clearbluejar <3752074+clearbluejar@users.noreply.github.com>
+Date: Sun, 25 Oct 2026 10:43:08 -0600
+Subject: [PATCH] 10025: Decompiler: number default local variable names per
+ name base
+
+The default names the decompiler assigns to local variables (uVar1, iVar2,
+pcVar3, ...) were numbered from a single counter shared across all
+data-types. Adding or removing one variable anywhere in a function
+therefore renumbered every variable named after it, which produces large
+spurious diffs when comparing the decompiler output of two versions of a
+function.
+
+Number the names independently for each name base instead, using the
+smallest index not already taken in the local scope (uVar1, uVar2, ...
+iVar1, iVar2, ...). A change to the variables of one data-type no longer
+renumbers variables of other data-types.
+
+Diffing afd.sys 10.0.22621.1028 against .1415 (1152 matched functions),
+the changed lines caused only by variable renumbering drop from 2310 to
+966 and the total changed lines from 10218 to 8875. Output is otherwise
+unchanged apart from line wrapping that follows from shorter names.
+Decompiler datatests pass as before; DecompilerFindDialogTest updated for
+the new numbering.
+---
+ .../Decompiler/src/decompile/cpp/database.cc  | 23 ++++----
+ .../decompile/cpp/include/ghidra/database.hh  |  3 +-
+ .../decompile/DecompilerFindDialogTest.java   | 54 +++++++++----------
+ 3 files changed, 40 insertions(+), 40 deletions(-)
+
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/database.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/database.cc
+index 8993cd9c04..484d98a5d1 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/database.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/database.cc
+@@ -2684,20 +2684,19 @@ string ScopeInternal::buildVariableName(const Address &addr,
+       s << "var";
+   }
+   else {			// Some sort of local variable
++    // Default names are numbered independently for each name base (uVar1, uVar2, ... iVar1, iVar2, ...)
++    // rather than from a single counter shared across all data-types.  Adding or removing a variable
++    // of one data-type then does not renumber variables of other data-types, which keeps the default
++    // names stable when comparing output across related functions (i.e. diffing two versions of a binary).
+     if (ct != (Datatype *)0)
+       ct->printNameBase(s);
+-    s << "Var" << dec << index++;
+-    if (findFirstByName(s.str()) != nametree.end()) {	// If the name already exists
+-      for(int4 i=0;i<10;++i) {	// Try bumping up the index a few times before calling makeNameUnique
+-	ostringstream s2;
+-	if (ct != (Datatype *)0)
+-	  ct->printNameBase(s2);
+-	s2 << "Var" << dec << index++;
+-	if (findFirstByName(s2.str()) == nametree.end()) {
+-	  return s2.str();
+-	}
+-      }
+-    }
++    s << "Var";
++    string prefix = s.str();
++    int4 i = 1;
++    string nm = prefix + to_string(i);
++    while(findFirstByName(nm) != nametree.end())	// Use the smallest index not already taken for this name base
++      nm = prefix + to_string(++i);
++    return nm;
+   }
+   return makeNameUnique(s.str());
+ }
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/database.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/database.hh
+index 3725597b17..f5e4df8f47 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/database.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/database.hh
+@@ -763,7 +763,8 @@ public:
+   /// \param addr is the given address
+   /// \param pc is the address at which the name is getting used
+   /// \param ct is a data-type used to inform the name
+-  /// \param index is a reference to an index used to make the name unique, which will be updated
++  /// \param index is the parameter index for a function parameter (negative for an \e irregular input);
++  ///        default names for other local variables are numbered independently for each name base
+   /// \param flags are boolean properties of the variable we need the name for
+   /// \return the new variable name
+   virtual string buildVariableName(const Address &addr,
+diff --git a/Ghidra/Features/Decompiler/src/test.slow/java/ghidra/app/plugin/core/decompile/DecompilerFindDialogTest.java b/Ghidra/Features/Decompiler/src/test.slow/java/ghidra/app/plugin/core/decompile/DecompilerFindDialogTest.java
+index d2794d98ce..e979502af3 100644
+--- a/Ghidra/Features/Decompiler/src/test.slow/java/ghidra/app/plugin/core/decompile/DecompilerFindDialogTest.java
++++ b/Ghidra/Features/Decompiler/src/test.slow/java/ghidra/app/plugin/core/decompile/DecompilerFindDialogTest.java
+@@ -69,16 +69,16 @@ public class DecompilerFindDialogTest extends AbstractDecompilerTest {
+ 		
+ 			{
+ 			  undefined4 uVar1;
+-			  int iVar2;
+-			  undefined4 *puVar3;
+-			  bool bVar4;
+-			  undefined *puVar5;
++			  int iVar1;
++			  undefined4 *puVar1;
++			  bool bVar1;
++			  undefined *puVar2;
+ 			  undefined2 local_210;
+ 			  undefined4 local_20e [129];
+ 			  int local_8;
+ 			  
+ 			  local_210 = 0;
+-			  puVar3 = local_20e;
++			  puVar1 = local_20e;
+ 			  ...
+ 			  ...
+ 			  ...
+@@ -129,16 +129,16 @@ public class DecompilerFindDialogTest extends AbstractDecompilerTest {
+ 		
+ 			{
+ 			  undefined4 uVar1;
+-			  int iVar2;
++			  int iVar1;
+ 			  undefined4 *pu1111Var;
+-			  bool bVar4;
+-			  undefined *puVar5;
++			  bool bVar1;
++			  undefined *puVar2;
+ 			  undefined2 local_210;
+ 			  undefined4 local_20e [129];
+ 			  int local_8;
+ 			  
+ 			  local_210 = 0;
+-			  puVar3 = local_20e;
++			  puVar1 = local_20e;
+ 			  ...
+ 			  ...
+ 			  ...
+@@ -194,22 +194,22 @@ public class DecompilerFindDialogTest extends AbstractDecompilerTest {
+ 		
+ 			{
+ 			  undefined4 uVar1;
+-			  int iVar2;
+-			  undefined4 *puVar3;
+-			  bool bVar4;
+-			  undefined *puVar5;
++			  int iVar1;
++			  undefined4 *puVar1;
++			  bool bVar1;
++			  undefined *puVar2;
+ 			  undefined2 local_210;
+ 			  undefined4 local_20e [129];
+ 			  int local_8;
+ 			  
+ 			  local_210 = 0;
+-			  puVar3 = local_20e;
++			  puVar1 = local_20e;
+ 			  
+ 			  local_210 = 0;
+-			  puVar3 = local_20e;
+-			  for (iVar2 = 0x81; iVar2 != 0; iVar2 = iVar2 + -1) {
+-			    *puVar3 = 0;
+-			    puVar3 = puVar3 + 1;
++			  puVar1 = local_20e;
++			  for (iVar1 = 0x81; iVar1 != 0; iVar1 = iVar1 + -1) {
++			    *puVar1 = 0;
++			    puVar1 = puVar1 + 1;
+ 			  }
+ 			  
+ 			  ...
+@@ -222,24 +222,24 @@ public class DecompilerFindDialogTest extends AbstractDecompilerTest {
+ 		// skip past some search hits for test brevity
+ 		setDecompilerLocation(18, 0);
+ 
+-		String text = "puVar3";
++		String text = "puVar1";
+ 		showFind(text);
+ 		next();
+ 
+ 		int length = text.length();
+ 		int line = 19;
+ 		int column = 1;
+-		assertSearchHit(line, column, length); // *|puVar3 = 0;
++		assertSearchHit(line, column, length); // *|puVar1 = 0;
+ 
+ 		line = 20;
+ 		column = 0;
+ 		next();
+-		assertSearchHit(line, column, length); // |puVar3 = puVar3 + 1;
++		assertSearchHit(line, column, length); // |puVar1 = puVar1 + 1;
+ 
+ 		line = 20;
+ 		column = 9;
+ 		next();
+-		assertSearchHit(line, column, length); // puVar3 = |puVar3 + 1;
++		assertSearchHit(line, column, length); // puVar1 = |puVar1 + 1;
+ 
+ 		line = 20;
+ 		column = 0;
+@@ -261,16 +261,16 @@ public class DecompilerFindDialogTest extends AbstractDecompilerTest {
+ 		
+ 			{
+ 			  undefined4 uVar1;
+-			  int iVar2;
+-			  undefined4 *puVar3;
+-			  bool bVar4;
+-			  undefined *puVar5;
++			  int iVar1;
++			  undefined4 *puVar1;
++			  bool bVar1;
++			  undefined *puVar2;
+ 			  undefined2 local_210;
+ 			  undefined4 local_20e [129];
+ 			  int local_8;
+ 			  
+ 			  local_210 = 0;
+-			  puVar3 = local_20e;
++			  puVar1 = local_20e;
+ 			  ...
+ 			  ...
+ 			  ...
+-- 
+2.45.1
+
