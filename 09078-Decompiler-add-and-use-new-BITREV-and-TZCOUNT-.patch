@@ -27,6 +27,7 @@ Decompiler: add RuleTzcountFromBitrevLzcount
  .../decompile/cpp/include/ghidra/typeop.hh    |   15 +
  .../Decompiler/src/decompile/cpp/op.cc        |    2 +
  .../src/decompile/cpp/opbehavior.cc           |   15 +
+ .../Decompiler/src/decompile/cpp/opcodes.cc   |    7 +-
  .../src/decompile/cpp/ruleaction.cc           |   20 +
  .../src/decompile/cpp/slgh_compile.cc         |    6 +
  .../Decompiler/src/decompile/cpp/slghparse.cc | 2098 +++++++++--------
@@ -45,7 +46,7 @@ Decompiler: add RuleTzcountFromBitrevLzcount
  .../ghidra/program/model/pcode/PcodeOp.java   |    8 +-
  .../AARCH64/data/languages/AARCH64base.sinc   |   37 +-
  .../VideoCore/data/languages/vc4.slaspec      |    1 -
- 31 files changed, 1790 insertions(+), 1466 deletions(-)
+ 32 files changed, 1794 insertions(+), 1469 deletions(-)
  create mode 100644 Ghidra/Framework/Emulation/src/main/java/ghidra/pcode/opbehavior/OpBehaviorBitrev.java
  create mode 100644 Ghidra/Framework/Emulation/src/main/java/ghidra/pcode/opbehavior/OpBehaviorTzcount.java
 
@@ -106,10 +107,10 @@ index aefdd8e0f9..b486449b9c 100644
  /// \param val is the given value
  /// \return the mask
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
-index 89284afbff..cb8202e66f 100644
+index 4b2ee288df..c82812bca5 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
-@@ -3958,6 +3958,7 @@ void ActionDeadCode::propagateConsumed(vector<Varnode *> &worklist)
+@@ -3961,6 +3961,7 @@ void ActionDeadCode::propagateConsumed(vector<Varnode *> &worklist)
      }
      break;
    case CPUI_COPY:
@@ -117,7 +118,7 @@ index 89284afbff..cb8202e66f 100644
    case CPUI_INT_NEGATE:
      pushConsumed(outc,op->getIn(0),worklist);
      break;
-@@ -4075,6 +4076,7 @@ void ActionDeadCode::propagateConsumed(vector<Varnode *> &worklist)
+@@ -4078,6 +4079,7 @@ void ActionDeadCode::propagateConsumed(vector<Varnode *> &worklist)
      break;
    case CPUI_POPCOUNT:
    case CPUI_LZCOUNT:
@@ -125,7 +126,7 @@ index 89284afbff..cb8202e66f 100644
      a = 16 * op->getIn(0)->getSize() - 1;	// Mask for possible bits that could be set
      a &= outc;					// Of the bits that could be set, which are consumed
      b = (a == 0) ? 0 : ~((uintb)0);		// if any consumed, treat all input bits as consumed
-@@ -6096,6 +6098,7 @@ void ActionDatabase::universalAction(Architecture *conf)
+@@ -6098,6 +6100,7 @@ void ActionDatabase::universalAction(Architecture *conf)
  	actprop->addRule( new RuleXorSwap("analysis") );
  	actprop->addRule( new RuleLzcountShiftBool("analysis") );
  	actprop->addRule( new RuleLzcntZeroTest("analysis") );
@@ -466,6 +467,30 @@ index edb2a435d3..d2a24c023e 100644
 +
 +
  } // End namespace ghidra
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/opcodes.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/opcodes.cc
+index bdd6f38587..08da12f714 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/opcodes.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/opcodes.cc
+@@ -44,15 +44,16 @@ static const char *opcode_name[] = {
+   "TRUNC", "CEIL", "FLOOR", "ROUND",
+   "BUILD", "DELAY_SLOT", "PIECE", "SUBPIECE", "CAST",
+   "LABEL", "CROSSBUILD", "SEGMENTOP", "CPOOLREF", "NEW",
+-  "INSERT", "EXTRACT", "POPCOUNT", "LZCOUNT"
++  "INSERT", "EXTRACT", "POPCOUNT", "LZCOUNT",
++  "SPULL", "BITREV", "TZCOUNT"
+ };
+ 
+ static const int4 opcode_indices[] = {
+-   0, 39, 37, 40, 38,  4,  6, 60,  7,  8,  9, 64,  5, 57,  1, 68, 66,
++   0, 75, 39, 37, 40, 38,  4,  6, 60,  7,  8,  9, 64,  5, 57,  1, 68, 66,
+   61, 71, 55, 52, 47, 48, 41, 43, 44, 49, 46, 51, 42, 53, 50, 58, 70,
+   54, 24, 19, 27, 21, 33, 11, 29, 15, 16, 32, 25, 12, 28, 35, 30,
+   23, 22, 34, 18, 13, 14, 36, 31, 20, 26, 17, 65,  2, 73, 69, 62, 72, 10, 59,
+-  67,  3, 63, 56, 45
++  67, 74,  3, 63, 56, 45, 76
+ };
+ 
+ /// \param opc is an OpCode value
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc
 index 237d0a847f..671abde2d3 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc
@@ -3994,7 +4019,7 @@ index 416d57573f..b720e966c2 100644
  <sem>goto          { return GOTO_KEY; }
  <sem>call          { return CALL_KEY; }
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/typeop.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/typeop.cc
-index abeb5b14df..e7286e20f1 100644
+index 712373093e..b94e5f7392 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/typeop.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/typeop.cc
 @@ -106,6 +106,8 @@ void TypeOp::registerInstructions(vector<TypeOp *> &inst,TypeFactory *tlst,
@@ -4006,7 +4031,7 @@ index abeb5b14df..e7286e20f1 100644
  }
  
  /// Change basic data-type info (signed vs unsigned) and operator names ( '>>' vs '>>>' )
-@@ -2774,4 +2776,18 @@ TypeOpLzcount::TypeOpLzcount(TypeFactory *t)
+@@ -2771,4 +2773,18 @@ TypeOpLzcount::TypeOpLzcount(TypeFactory *t)
    behave = new OpBehaviorLzcount();
  }
  
@@ -4245,7 +4270,7 @@ index a37cc4cd69..1108b4cc90 100644
  		return false;
  	}
 diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/DynamicHash.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/DynamicHash.java
-index 4452cf0f2f..563f02ab14 100644
+index b8efdaee4a..4ee82ec9bb 100644
 --- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/DynamicHash.java
 +++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/DynamicHash.java
 @@ -76,7 +76,7 @@ public class DynamicHash {

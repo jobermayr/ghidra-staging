@@ -14,9 +14,9 @@ Make resolveIdentityHint thread-local
  .../database/data/DataTypeManagerDB.java      | 86 +++++++++++++++----
  .../database/data/FunctionDefinitionDB.java   |  5 ++
  .../database/data/ParentChildDBAdapterV0.java |  6 +-
- .../program/database/data/StructureDB.java    |  5 ++
+ .../program/database/data/StructureDB.java    |  6 ++
  .../ghidra/program/database/data/UnionDB.java |  5 ++
- 8 files changed, 180 insertions(+), 25 deletions(-)
+ 8 files changed, 181 insertions(+), 25 deletions(-)
 
 diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/compositeeditor/CompositeViewerDataTypeManager.java b/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/compositeeditor/CompositeViewerDataTypeManager.java
 index 143f92467f..a784f89217 100644
@@ -160,7 +160,7 @@ index 9453b17de8..e23486ffb7 100644
  	public void testDoubleReplace() throws Exception {
  		Structure struct = new StructureDataType("test", 0);
 diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/data/DataTypeManagerDB.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/data/DataTypeManagerDB.java
-index dea23f83b1..32d2fb79b9 100644
+index c24267f272..31496dc1a9 100644
 --- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/data/DataTypeManagerDB.java
 +++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/data/DataTypeManagerDB.java
 @@ -178,6 +178,10 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
@@ -174,7 +174,7 @@ index dea23f83b1..32d2fb79b9 100644
  
  	private boolean isBulkRemoving;
  
-@@ -1081,6 +1085,14 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
+@@ -1025,6 +1029,14 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
  				return dataType;
  			}
  
@@ -189,7 +189,7 @@ index dea23f83b1..32d2fb79b9 100644
  			if (handler != null) {
  				currentHandler = handler;
  			}
-@@ -1811,7 +1823,12 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
+@@ -1759,7 +1771,12 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
  		}
  
  		// perform any necessary external use replacements
@@ -203,7 +203,7 @@ index dea23f83b1..32d2fb79b9 100644
  
  		// perform actual database updates (e.g., record updates, change notifications, etc.)
  		for (Pair<DataType, DataType> dataTypeReplacement : dataTypeReplacements) {
-@@ -4249,35 +4266,66 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
+@@ -4213,35 +4230,66 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
  	 */
  	private DataType processConflictQueue(DataType dataType) {
  
@@ -286,7 +286,7 @@ index dea23f83b1..32d2fb79b9 100644
  	/**
  	 * Activate resolveCache and associated resolveQueue if not already active. If
  	 * this method returns true caller is responsible for flushing resolveQueue and
-@@ -4487,7 +4535,7 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
+@@ -4451,7 +4499,7 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
  	 * 
  	 * @return true if successful, false if already active
  	 */
@@ -295,7 +295,7 @@ index dea23f83b1..32d2fb79b9 100644
  		EquivalenceCache cache = equivalenceCache.get();
  		if (cache == null) {
  			cache = new EquivalenceCache();
-@@ -4498,7 +4546,7 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
+@@ -4462,7 +4510,7 @@ abstract public class DataTypeManagerDB implements DataTypeManager {
  		return false;
  	}
  
@@ -305,21 +305,22 @@ index dea23f83b1..32d2fb79b9 100644
  	}
  
 diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/data/FunctionDefinitionDB.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/data/FunctionDefinitionDB.java
-index eaadc08df3..b4dc7a45a2 100644
+index 9ed2076405..0875ab69cb 100644
 --- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/data/FunctionDefinitionDB.java
 +++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/data/FunctionDefinitionDB.java
-@@ -186,8 +186,10 @@ class FunctionDefinitionDB extends DataTypeDB implements FunctionDefinition {
- 			throw new IllegalArgumentException();
- 		}
+@@ -194,9 +194,11 @@ class FunctionDefinitionDB extends DataTypeDB implements FunctionDefinition {
+ 	private void doReplaceWith(FunctionDefinition functionDefinition) {
+ 
  		boolean isResolveCacheOwner = false;
 +		boolean isEquivalenceCacheOwner = false;
- 		try (Closeable c = lock.write()) {
+ 
+ 		try {
  			isResolveCacheOwner = dataMgr.activateResolveCache();
 +			isEquivalenceCacheOwner = dataMgr.activateEquivalenceCache();
  			checkDeleted();
  			doReplaceWith(functionDefinition, true);
  		}
-@@ -198,6 +200,9 @@ class FunctionDefinitionDB extends DataTypeDB implements FunctionDefinition {
+@@ -207,6 +209,9 @@ class FunctionDefinitionDB extends DataTypeDB implements FunctionDefinition {
  			if (isResolveCacheOwner) {
  				dataMgr.processResolveQueue(true);
  			}
@@ -349,21 +350,22 @@ index 5d80250222..b044a4ff87 100644
  				return;
  			}
 diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/data/StructureDB.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/data/StructureDB.java
-index dec67f9f1a..780649ec2b 100644
+index 36bdaf63a9..9a3dd78e47 100644
 --- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/data/StructureDB.java
 +++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/data/StructureDB.java
-@@ -1596,8 +1596,10 @@ class StructureDB extends CompositeDB implements StructureInternal {
- 			throw new IllegalArgumentException();
- 		}
+@@ -1604,8 +1604,11 @@ class StructureDB extends CompositeDB implements StructureInternal {
+ 	private void doReplaceWith(DataType dataType) {
+ 
  		boolean isResolveCacheOwner = false;
 +		boolean isEquivalenceCacheOwner = false;
- 		try (Closeable c = lock.write()) {
++
+ 		try {
  			isResolveCacheOwner = dataMgr.activateResolveCache();
 +			isEquivalenceCacheOwner = dataMgr.activateEquivalenceCache();
  			checkDeleted();
  			doReplaceWith((StructureInternal) dataType, true);
  		}
-@@ -1611,6 +1613,9 @@ class StructureDB extends CompositeDB implements StructureInternal {
+@@ -1619,6 +1622,9 @@ class StructureDB extends CompositeDB implements StructureInternal {
  			if (isResolveCacheOwner) {
  				dataMgr.processResolveQueue(true);
  			}
@@ -374,21 +376,22 @@ index dec67f9f1a..780649ec2b 100644
  	}
  
 diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/data/UnionDB.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/data/UnionDB.java
-index c20f79aa60..cac33a5cb1 100644
+index 57a2930cf1..6362aad77d 100644
 --- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/data/UnionDB.java
 +++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/database/data/UnionDB.java
-@@ -284,8 +284,10 @@ class UnionDB extends CompositeDB implements UnionInternal {
- 			throw new IllegalArgumentException();
- 		}
+@@ -291,9 +291,11 @@ class UnionDB extends CompositeDB implements UnionInternal {
+ 
+ 	private void doReplaceWith(DataType dataType) {
  		boolean isResolveCacheOwner = false;
 +		boolean isEquivalenceCacheOwner = false;
- 		try (Closeable c = lock.write()) {
+ 
+ 		try {
  			isResolveCacheOwner = dataMgr.activateResolveCache();
 +			isEquivalenceCacheOwner = dataMgr.activateEquivalenceCache();
  			checkDeleted();
  			doReplaceWith((UnionInternal) dataType, true);
  		}
-@@ -299,6 +301,9 @@ class UnionDB extends CompositeDB implements UnionInternal {
+@@ -307,6 +309,9 @@ class UnionDB extends CompositeDB implements UnionInternal {
  			if (isResolveCacheOwner) {
  				dataMgr.processResolveQueue(true);
  			}
