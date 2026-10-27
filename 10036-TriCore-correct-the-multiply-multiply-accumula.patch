@@ -1,0 +1,3143 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: grauulzz <61565419+grauulzz@users.noreply.github.com>
+Date: Mon, 26 Oct 2026 15:31:12 -0700
+Subject: [PATCH] 10036: TriCore: correct the multiply / multiply-accumulate
+ family's p-code semantics
+
+---
+ .../tricore/data/languages/tricore.sinc       | 2037 +++++++++++------
+ 1 file changed, 1296 insertions(+), 741 deletions(-)
+
+diff --git a/Ghidra/Processors/tricore/data/languages/tricore.sinc b/Ghidra/Processors/tricore/data/languages/tricore.sinc
+index 00ccb967d5..0930ac33a0 100644
+--- a/Ghidra/Processors/tricore/data/languages/tricore.sinc
++++ b/Ghidra/Processors/tricore/data/languages/tricore.sinc
+@@ -592,6 +592,49 @@ macro overflowflagsb(r3, r2, r1, r0) {
+ }
+ 
+ 
++# 64-bit results of the multiply family (MUL / MADD / MSUB with an E destination): V = the exact result's overflow
++# (passed in), SV sticky, AV = result[63] ^ result[62] of the unsaturated result, SAV sticky (TriCore ISA, Status Flags)
++macro flags64(ov, r) {
++	$(PSW_V) = ov;
++	$(PSW_SV) = ov | $(PSW_SV);
++	$(PSW_AV) = r[63,1] ^ r[62,1];
++	$(PSW_SAV) = $(PSW_AV) | $(PSW_SAV);
++}
++
++# 32-bit results of the multiply family: V = the exact result's overflow (passed in), SV sticky,
++# AV = result[31] ^ result[30] of the unsaturated result, SAV sticky (TriCore ISA, Status Flags)
++macro flags32(ov, r) {
++	$(PSW_V) = ov;
++	$(PSW_SV) = ov | $(PSW_SV);
++	$(PSW_AV) = r[31,1] ^ r[30,1];
++	$(PSW_SAV) = $(PSW_AV) | $(PSW_SAV);
++}
++
++# Packed 32-bit results of the multiply family: one overflow and one advanced overflow per word, ORed (V/SV from
++# the overflow, AV/SAV from the advanced overflow; the manual's packed Status Flags rows)
++macro flagsww(ov1, r1, ov0, r0) {
++	$(PSW_V) = ov1 | ov0;
++	$(PSW_SV) = $(PSW_V) | $(PSW_SV);
++	$(PSW_AV) = (r1[31,1] ^ r1[30,1]) | (r0[31,1] ^ r0[30,1]);
++	$(PSW_SAV) = $(PSW_AV) | $(PSW_SAV);
++}
++
++# 16 x 16 -> 32 half-word product, exact, with the manual's special case (1.4.2, p23):
++# 8000H x 8000H with n == 1 delivers 7FFFFFFFH; that is the only pair whose shifted product is 80000000H,
++# so the flag is subtracted.  hmul4 delivers the 32-bit result (the packed .H forms), hmul the same value
++# sign-extended to 64 bits (the .Q UU/LL forms, which shift it further for an E destination).
++macro hmul(res, x, y, n) {
++	local p:8 = sext(x) * sext(y);
++	p = p << n;
++	res = p - zext((x == 0x8000) && (y == 0x8000) && (n == 1));
++}
++
++macro hmul4(res, x, y, n) {
++	local p:4 = sext(x) * sext(y);
++	p = p << n;
++	res = p - zext((x == 0x8000) && (y == 0x8000) && (n == 1));
++}
++
+ #define pcodeop ssov;
+ macro ssov(res,x,y) {
+         local max_pos = (1 << (y - 1)) - 1;
+@@ -3796,23 +3839,30 @@ SC: [a10]const0815Z10zz is PCPMode=0 & a10 & const0815Z10zz & op0003=8 & op0404=
+ # MADD D[c], D[d], D[a], D[b] (RRR2)
+ :madd Rd2831,Rd2427,Rd0811,Rd1215 is PCPMode=0 & Rd0811 & Rd1215 & op0007=0x3 ; Rd2427 & Rd2831 & op1623=0xa
+ {
+-	Rd2831 = Rd2427 + (Rd0811 * Rd1215);
+-	overflowflags(Rd2831);
++	local result:8 = sext(Rd2427) + (sext(Rd0811) * sext(Rd1215));
++	local ov:1 = result != sext(result:4);
++	flags32(ov, result:4);
++	Rd2831 = result:4;
+ }
+ 
+ # MADD D[c], D[d], D[a], const9 (RCR)
+ :madd Rd2831,Rd2427,Rd0811,const1220S is PCPMode=0 & ( Rd0811 & op0007=0x13 ; Rd2427 & Rd2831 & op2123=0x1 ) & const1220S
+ {
+-	Rd2831 = Rd2427 + (Rd0811 * const1220S);
+-	overflowflags(Rd2831);
++	local result:8 = sext(Rd2427) + (sext(Rd0811) * sext(const1220S));
++	local ov:1 = result != sext(result:4);
++	flags32(ov, result:4);
++	Rd2831 = result:4;
+ }
+ 
+ @if defined(TRICORE_RIDER_B) || defined(TRICORE_RIDER_D) || defined(TRICORE_V2)
+ # MADD E[c], E[d], D[a], const9 (RCR)
+ :madd Re2831,Re2427,Rd0811,const1220S is PCPMode=0 & ( Rd0811 & op0007=0x13 ; Re2427 & Re2831 & op2123=0x3 ) & const1220S
+ {
+-	Re2831 = Re2427 + sext(Rd0811 * const1220S);
+-	overflowflagsd(Re2831);
++	local prod:8 = sext(Rd0811) * sext(const1220S);
++	local result:8 = Re2427 + prod;
++	local ov:1 = scarry(Re2427, prod);
++	flags64(ov, result);
++	Re2831 = result;
+ }
+ @endif
+ 
+@@ -3820,8 +3870,11 @@ SC: [a10]const0815Z10zz is PCPMode=0 & a10 & const0815Z10zz & op0003=8 & op0404=
+ # MADD E[c], E[d], D[a], D[b] (RRR2)
+ :madd Re2831,Re2427,Rd0811,Rd1215 is PCPMode=0 & Rd0811 & Rd1215 & op0007=0x3 ; Re2427 & Re2831 & op1623=0x6a
+ {
+-	Re2831 = Re2427 + sext(Rd0811 * Rd1215);
+-	overflowflagsd(Re2831);
++	local prod:8 = sext(Rd0811) * sext(Rd1215);
++	local result:8 = Re2427 + prod;
++	local ov:1 = scarry(Re2427, prod);
++	flags64(ov, result);
++	Re2831 = result;
+ }
+ @endif
+ 
+@@ -3878,14 +3931,17 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MADD.H E[c], E[d], D[a], D[b] UL, n (RRR1)
+ :madd.h Ree2831/Reo2831,Ree2427/Reo2427,Rd0811,Rd1215^"ul",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0x83 ; Ree2427 & Reo2427 & Ree2831 & Reo2831 & const1617Z & op1823=0x18
+ {
+-	local mres1:4;
+-	local mres0:4;
+-	packed_multiply_ul(mres1, mres0, Rd0811, Rd1215, const1617Z);
+-	local result1:4 = Reo2427 + mres1;
+-	local result0:4 = Ree2427 + mres0;
+-	Reo2831 = result1;
+-	Ree2831 = result0;
+-	overflowflagsww(result1, result0);
++	local w1:4;
++	local w0:4;
++	hmul4(w1, Rd0811[16,16], Rd1215[16,16], const1617Z);
++	hmul4(w0, Rd0811[0,16], Rd1215[0,16], const1617Z);
++	local rw1:8 = sext(Reo2427) + sext(w1);
++	local rw0:8 = sext(Ree2427) + sext(w0);
++	local ov1:1 = rw1 != sext(rw1:4);
++	local ov0:1 = rw0 != sext(rw0:4);
++	Reo2831 = rw1:4;
++	Ree2831 = rw0:4;
++	flagsww(ov1, rw1:4, ov0, rw0:4);
+ }
+ @endif
+ 
+@@ -3893,14 +3949,17 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MADD.H E[c], E[d], D[a], D[b] LU, n (RRR1)
+ :madd.h Ree2831/Reo2831,Ree2427/Reo2427,Rd0811,Rd1215^"lu",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0x83 ; Ree2427 & Reo2427 & Ree2831 & Reo2831 & const1617Z & op1823=0x19
+ {
+-	local mres1:4;
+-	local mres0:4;
+-	packed_multiply_lu(mres1, mres0, Rd0811, Rd1215, const1617Z);
+-	local result1:4 = Reo2427 + mres1;
+-	local result0:4 = Ree2427 + mres0;
+-	Reo2831 = result1;
+-	Ree2831 = result0;
+-	overflowflagsww(result1, result0);
++	local w1:4;
++	local w0:4;
++	hmul4(w1, Rd0811[16,16], Rd1215[0,16], const1617Z);
++	hmul4(w0, Rd0811[0,16], Rd1215[16,16], const1617Z);
++	local rw1:8 = sext(Reo2427) + sext(w1);
++	local rw0:8 = sext(Ree2427) + sext(w0);
++	local ov1:1 = rw1 != sext(rw1:4);
++	local ov0:1 = rw0 != sext(rw0:4);
++	Reo2831 = rw1:4;
++	Ree2831 = rw0:4;
++	flagsww(ov1, rw1:4, ov0, rw0:4);
+ }
+ @endif
+ 
+@@ -3908,14 +3967,17 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MADD.H E[c], E[d], D[a], D[b] LL, n (RRR1)
+ :madd.h Ree2831/Reo2831,Ree2427/Reo2427,Rd0811,Rd1215^"ll",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0x83 ; Ree2427 & Reo2427 & Ree2831 & Reo2831 & const1617Z & op1823=0x1a
+ {
+-	local mres1:4;
+-	local mres0:4;
+-	packed_multiply_ll(mres1, mres0, Rd0811, Rd1215, const1617Z);
+-	local result1:4 = Reo2427 + mres1;
+-	local result0:4 = Ree2427 + mres0;
+-	Reo2831 = result1;
+-	Ree2831 = result0;
+-	overflowflagsww(result1, result0);
++	local w1:4;
++	local w0:4;
++	hmul4(w1, Rd0811[16,16], Rd1215[0,16], const1617Z);
++	hmul4(w0, Rd0811[0,16], Rd1215[0,16], const1617Z);
++	local rw1:8 = sext(Reo2427) + sext(w1);
++	local rw0:8 = sext(Ree2427) + sext(w0);
++	local ov1:1 = rw1 != sext(rw1:4);
++	local ov0:1 = rw0 != sext(rw0:4);
++	Reo2831 = rw1:4;
++	Ree2831 = rw0:4;
++	flagsww(ov1, rw1:4, ov0, rw0:4);
+ }
+ @endif
+ 
+@@ -3923,14 +3985,17 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MADD.H E[c], E[d], D[a], D[b] UU, n (RRR1)
+ :madd.h Ree2831/Reo2831,Ree2427/Reo2427,Rd0811,Rd1215^"uu",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0x83 ; Ree2427 & Reo2427 & Ree2831 & Reo2831 & const1617Z & op1823=0x1b
+ {
+-	local mres1:4;
+-	local mres0:4;
+-	packed_multiply_uu(mres1, mres0, Rd0811, Rd1215, const1617Z);
+-	local result1:4 = Reo2427 + mres1;
+-	local result0:4 = Ree2427 + mres0;
+-	Reo2831 = result1;
+-	Ree2831 = result0;
+-	overflowflagsww(result1, result0);
++	local w1:4;
++	local w0:4;
++	hmul4(w1, Rd0811[0,16], Rd1215[16,16], const1617Z);
++	hmul4(w0, Rd0811[16,16], Rd1215[16,16], const1617Z);
++	local rw1:8 = sext(Reo2427) + sext(w1);
++	local rw0:8 = sext(Ree2427) + sext(w0);
++	local ov1:1 = rw1 != sext(rw1:4);
++	local ov0:1 = rw0 != sext(rw0:4);
++	Reo2831 = rw1:4;
++	Ree2831 = rw0:4;
++	flagsww(ov1, rw1:4, ov0, rw0:4);
+ }
+ @endif
+ 
+@@ -3938,10 +4003,12 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MADD.Q D[c], D[d], D[a] U, D[b] U, n (RRR1)
+ :madd.q Rd2831,Rd2427,Rd0811^"u",Rd1215^"u",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0x43 ; Rd2427 & Rd2831 & const1617Z & op1823=0x4
+ {
+-	local mres:4;
+-	multiply_u_u(mres, Rd0811, Rd1215, const1617Z);
+-	Rd2831 = Rd2427 + mres;
+-	overflowflags(Rd2831);
++	local t:8;
++	hmul(t, Rd0811[16,16], Rd1215[16,16], const1617Z);
++	local result:8 = sext(Rd2427) + t;
++	local ov:1 = result != sext(result:4);
++	flags32(ov, result:4);
++	Rd2831 = result:4;
+ }
+ @endif
+ 
+@@ -3949,10 +4016,13 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MADD.Q D[c], D[d], D[a], D[b] U, n (RRR1)
+ :madd.q Rd2831,Rd2427,Rd0811,Rd1215^"u",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0x43 ; Rd2427 & Rd2831 & const1617Z & op1823=0x0
+ {
+-	local tmp:8 = sext(Rd0811 * sext(Rd1215[16,16]));
+-	tmp = (tmp << const1617Z) s>> 16;
+-	Rd2831 = Rd2427 + tmp[0,32];
+-	overflowflags(Rd2831);
++	local t:8 = sext(Rd0811) * sext(Rd1215[16,16]);
++	t = t << const1617Z;
++	t = t s>> 16;
++	local result:8 = sext(Rd2427) + t;
++	local ov:1 = result != sext(result:4);
++	flags32(ov, result:4);
++	Rd2831 = result:4;
+ }
+ @endif
+ 
+@@ -3960,10 +4030,13 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MADD.Q D[c], D[d], D[a], D[b] L, n (RRR1)
+ :madd.q Rd2831,Rd2427,Rd0811,Rd1215^"l",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0x43 ; Rd2427 & Rd2831 & const1617Z & op1823=0x1
+ {
+-	local tmp:8 = sext(Rd0811 * sext(Rd1215[0,16]));
+-	tmp = (tmp << const1617Z) s>> 16;
+-	Rd2831 = Rd2427 + tmp[0,32];
+-	overflowflags(Rd2831);
++	local t:8 = sext(Rd0811) * sext(Rd1215[0,16]);
++	t = t << const1617Z;
++	t = t s>> 16;
++	local result:8 = sext(Rd2427) + t;
++	local ov:1 = result != sext(result:4);
++	flags32(ov, result:4);
++	Rd2831 = result:4;
+ }
+ @endif
+ 
+@@ -3971,10 +4044,13 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MADD.Q D[c], D[d], D[a], D[b], n (RRR1)
+ :madd.q Rd2831,Rd2427,Rd0811,Rd1215,const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0x43 ; Rd2427 & Rd2831 & const1617Z & op1823=0x2
+ {
+-	local tmp:8 = sext(Rd0811 * Rd1215);
+-	tmp = (tmp << const1617Z) s>> 32;
+-	Rd2831 = Rd2427 + tmp[0,32];
+-	overflowflags(Rd2831);
++	local t:8 = sext(Rd0811) * sext(Rd1215);
++	t = t << const1617Z;
++	t = t s>> 32;
++	local result:8 = sext(Rd2427) + t;
++	local ov:1 = result != sext(result:4);
++	flags32(ov, result:4);
++	Rd2831 = result:4;
+ }
+ @endif
+ 
+@@ -3982,10 +4058,12 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MADD.Q D[c], D[d], D[a] L, D[b] L, n (RRR1)
+ :madd.q Rd2831,Rd2427,Rd0811^"l",Rd1215^"l",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0x43 ; Rd2427 & Rd2831 & const1617Z & op1823=0x5
+ {
+-	local mres:4;
+-	multiply_l_l(mres, Rd0811, Rd1215, const1617Z);
+-	Rd2831 = Rd2427 + mres;
+-	overflowflags(Rd2831);
++	local t:8;
++	hmul(t, Rd0811[0,16], Rd1215[0,16], const1617Z);
++	local result:8 = sext(Rd2427) + t;
++	local ov:1 = result != sext(result:4);
++	flags32(ov, result:4);
++	Rd2831 = result:4;
+ }
+ @endif
+ 
+@@ -3993,9 +4071,13 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MADD.Q E[c], E[d], D[a], D[b] U, n (RRR1)
+ :madd.q Re2831,Re2427,Rd0811,Rd1215^"u",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0x43 ; Re2427 & Re2831 & const1617Z & op1823=0x18
+ {
+-	local tmp:8 = sext(Rd0811 * sext(Rd1215[16,16]));
+-	Re2831 = Re2427 + (tmp << const1617Z);
+-	overflowflagsd(Re2831);
++	local t:8 = sext(Rd0811) * sext(Rd1215[16,16]);
++	t = t << const1617Z;
++	local tov:1 = t == 0x8000000000000000;
++	local result:8 = Re2427 + t;
++	local ov:1 = scarry(Re2427, t) ^ tov;
++	flags64(ov, result);
++	Re2831 = result;
+ }
+ @endif
+ 
+@@ -4003,9 +4085,13 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MADD.Q E[c], E[d], D[a], D[b] L, n (RRR1)
+ :madd.q Re2831,Re2427,Rd0811,Rd1215^"l",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0x43 ; Re2427 & Re2831 & const1617Z & op1823=0x19
+ {
+-	local tmp:8 = sext(Rd0811 * sext(Rd1215[0,16]));
+-	Re2831 = Re2427 + (tmp << const1617Z);
+-	overflowflagsd(Re2831);
++	local t:8 = sext(Rd0811) * sext(Rd1215[0,16]);
++	t = t << const1617Z;
++	local tov:1 = t == 0x8000000000000000;
++	local result:8 = Re2427 + t;
++	local ov:1 = scarry(Re2427, t) ^ tov;
++	flags64(ov, result);
++	Re2831 = result;
+ }
+ @endif
+ 
+@@ -4013,9 +4099,13 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MADD.Q E[c], E[d], D[a], D[b], n (RRR1)
+ :madd.q Re2831,Re2427,Rd0811,Rd1215,const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0x43 ; Re2427 & Re2831 & const1617Z & op1823=0x1b
+ {
+-	local tmp:8 = sext(Rd0811 * Rd1215);
+-	Re2831 = Re2427 + (tmp << const1617Z);
+-	overflowflagsd(Re2831);
++	local t:8 = sext(Rd0811) * sext(Rd1215);
++	t = t << const1617Z;
++	local tov:1 = t == 0x8000000000000000;
++	local result:8 = Re2427 + t;
++	local ov:1 = scarry(Re2427, t) ^ tov;
++	flags64(ov, result);
++	Re2831 = result;
+ }
+ @endif
+ 
+@@ -4023,10 +4113,14 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MADD.Q E[c], E[d], D[a] U, D[b] U, n (RRR1)
+ :madd.q Re2831,Re2427,Rd0811^"u",Rd1215^"u",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0x43 ; Re2427 & Re2831 & const1617Z & op1823=0x1c
+ {
+-	local mres:4;
+-	multiply_u_u(mres, Rd0811, Rd1215, const1617Z);
+-	Re2831 = Re2427 + sext(mres << 16);
+-	overflowflagsd(Re2831);
++	local t:8;
++	hmul(t, Rd0811[16,16], Rd1215[16,16], const1617Z);
++	t = t << 16;
++	local tov:1 = t == 0x8000000000000000;
++	local result:8 = Re2427 + t;
++	local ov:1 = scarry(Re2427, t) ^ tov;
++	flags64(ov, result);
++	Re2831 = result;
+ }
+ @endif
+ 
+@@ -4034,10 +4128,14 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MADD.Q E[c], E[d], D[a] L, D[b] L, n (RRR1)
+ :madd.q Re2831,Re2427,Rd0811^"l",Rd1215^"l",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0x43 ; Re2427 & Re2831 & const1617Z & op1823=0x1d
+ {
+-	local mres:4;
+-	multiply_l_l(mres, Rd0811, Rd1215, const1617Z);
+-	Re2831 = Re2427 + (sext(mres) << 16);
+-	overflowflagsd(Re2831);
++	local t:8;
++	hmul(t, Rd0811[0,16], Rd1215[0,16], const1617Z);
++	t = t << 16;
++	local tov:1 = t == 0x8000000000000000;
++	local result:8 = Re2427 + t;
++	local ov:1 = scarry(Re2427, t) ^ tov;
++	flags64(ov, result);
++	Re2831 = result;
+ }
+ @endif
+ 
+@@ -4045,8 +4143,11 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MADD.U E[c], E[d], D[a], const9 (RCR)
+ :madd.u Re2831,Re2427,Rd0811,const1220Z is PCPMode=0 & ( Rd0811 & op0007=0x13 ; Re2427 & Re2831 & op2123=0x2 ) & const1220Z
+ {
+-	Re2831 = Re2427 + zext(Rd0811 * const1220Z);
+-	overflowflagsd(Re2831);
++	local prod:8 = zext(Rd0811) * zext(const1220Z);
++	local result:8 = Re2427 + prod;
++	local ov:1 = carry(Re2427, prod);
++	flags64(ov, result);
++	Re2831 = result;
+ }
+ @endif
+ 
+@@ -4054,8 +4155,11 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MADD.U E[c], E[d], D[a], D[b] (RRR2)
+ :madd.u Re2831,Re2427,Rd0811,Rd1215 is PCPMode=0 & Rd0811 & Rd1215 & op0007=0x3 ; Re2427 & Re2831 & op1623=0x68
+ {
+-	Re2831 = Re2427 + zext(Rd0811 * Rd1215);
+-	overflowflagsd(Re2831);
++	local prod:8 = zext(Rd0811) * zext(Rd1215);
++	local result:8 = Re2427 + prod;
++	local ov:1 = carry(Re2427, prod);
++	flags64(ov, result);
++	Re2831 = result;
+ }
+ @endif
+ 
+@@ -4063,11 +4167,15 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MADDM.H E[c], E[d], D[a], D[b] UL, n (RRR1)
+ :maddm.h Re2831,Re2427,Rd0811,Rd1215^"ul",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0x83 ; Re2427 & Re2831 & const1617Z & op1823=0x1c
+ {
+-	local mres1:4;
+-	local mres0:4;
+-	packed_multiply_ul(mres1, mres0, Rd0811, Rd1215, const1617Z);
+-	Re2831 = Re2427 + sext((mres1 + mres0) << 16);
+-	overflowflagsd(Re2831);
++	local w1:4;
++	local w0:4;
++	hmul4(w1, Rd0811[16,16], Rd1215[16,16], const1617Z);
++	hmul4(w0, Rd0811[0,16], Rd1215[0,16], const1617Z);
++	local s:8 = (sext(w1) + sext(w0)) << 16;
++	local result:8 = Re2427 + s;
++	local ov:1 = scarry(Re2427, s);
++	flags64(ov, result);
++	Re2831 = result;
+ }
+ @endif
+ 
+@@ -4075,11 +4183,15 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MADDM.H E[c], E[d], D[a], D[b] LU, n (RRR1)
+ :maddm.h Re2831,Re2427,Rd0811,Rd1215^"lu",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0x83 ; Re2427 & Re2831 & const1617Z & op1823=0x1d
+ {
+-	local mres1:4;
+-	local mres0:4;
+-	packed_multiply_lu(mres1, mres0, Rd0811, Rd1215, const1617Z);
+-	Re2831 = Re2427 + sext((mres1 + mres0) << 16);
+-	overflowflagsd(Re2831);
++	local w1:4;
++	local w0:4;
++	hmul4(w1, Rd0811[16,16], Rd1215[0,16], const1617Z);
++	hmul4(w0, Rd0811[0,16], Rd1215[16,16], const1617Z);
++	local s:8 = (sext(w1) + sext(w0)) << 16;
++	local result:8 = Re2427 + s;
++	local ov:1 = scarry(Re2427, s);
++	flags64(ov, result);
++	Re2831 = result;
+ }
+ @endif
+ 
+@@ -4087,11 +4199,15 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MADDM.H E[c], E[d], D[a], D[b] LL, n (RRR1)
+ :maddm.h Re2831,Re2427,Rd0811,Rd1215^"ll",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0x83 ; Re2427 & Re2831 & const1617Z & op1823=0x1e
+ {
+-	local mres1:4;
+-	local mres0:4;
+-	packed_multiply_ll(mres1, mres0, Rd0811, Rd1215, const1617Z);
+-	Re2831 = Re2427 + sext((mres1 + mres0) << 16);
+-	overflowflagsd(Re2831);
++	local w1:4;
++	local w0:4;
++	hmul4(w1, Rd0811[16,16], Rd1215[0,16], const1617Z);
++	hmul4(w0, Rd0811[0,16], Rd1215[0,16], const1617Z);
++	local s:8 = (sext(w1) + sext(w0)) << 16;
++	local result:8 = Re2427 + s;
++	local ov:1 = scarry(Re2427, s);
++	flags64(ov, result);
++	Re2831 = result;
+ }
+ @endif
+ 
+@@ -4099,11 +4215,15 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MADDM.H E[c], E[d], D[a], D[b] UU, n (RRR1)
+ :maddm.h Re2831,Re2427,Rd0811,Rd1215^"uu",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0x83 ; Re2427 & Re2831 & const1617Z & op1823=0x1f
+ {
+-	local mres1:4;
+-	local mres0:4;
+-	packed_multiply_uu(mres1, mres0, Rd0811, Rd1215, const1617Z);
+-	Re2831 = Re2427 + sext((mres1 + mres0) << 16);
+-	overflowflagsd(Re2831);
++	local w1:4;
++	local w0:4;
++	hmul4(w1, Rd0811[0,16], Rd1215[16,16], const1617Z);
++	hmul4(w0, Rd0811[16,16], Rd1215[16,16], const1617Z);
++	local s:8 = (sext(w1) + sext(w0)) << 16;
++	local result:8 = Re2427 + s;
++	local ov:1 = scarry(Re2427, s);
++	flags64(ov, result);
++	Re2831 = result;
+ }
+ @endif
+ 
+@@ -4111,12 +4231,16 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MADDMS.H E[c], E[d], D[a], D[b] UL, n (RRR1)
+ :maddms.h Re2831,Re2427,Rd0811,Rd1215^"ul",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0x83 ; Re2427 & Re2831 & const1617Z & op1823=0x3c
+ {
+-	local mres1:4;
+-	local mres0:4;
+-	packed_multiply_ul(mres1, mres0, Rd0811, Rd1215, const1617Z);
+-	local result:8 = Re2427 + sext((mres1 + mres0) << 16);
+-	ssov(Re2831, result, 64);
+-	overflowflagsd(result);
++	local w1:4;
++	local w0:4;
++	hmul4(w1, Rd0811[16,16], Rd1215[16,16], const1617Z);
++	hmul4(w0, Rd0811[0,16], Rd1215[0,16], const1617Z);
++	local s:8 = (sext(w1) + sext(w0)) << 16;
++	local result:8 = Re2427 + s;
++	local ov:1 = scarry(Re2427, s);
++	flags64(ov, result);
++	local neg:1 = Re2427 s< 0;
++	Re2831 = (result * zext(ov == 0)) + (zext(ov != 0) * (0x7fffffffffffffff + zext(neg)));
+ }
+ @endif
+ 
+@@ -4124,12 +4248,16 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MADDMS.H E[c], E[d], D[a], D[b] LU, n (RRR1)
+ :maddms.h Re2831,Re2427,Rd0811,Rd1215^"lu",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0x83 ; Re2427 & Re2831 & const1617Z & op1823=0x3d
+ {
+-	local mres1:4;
+-	local mres0:4;
+-	packed_multiply_lu(mres1, mres0, Rd0811, Rd1215, const1617Z);
+-	local result:8 = Re2427 + sext((mres1 + mres0) << 16);
+-	ssov(Re2831, result, 64);
+-	overflowflagsd(result);
++	local w1:4;
++	local w0:4;
++	hmul4(w1, Rd0811[16,16], Rd1215[0,16], const1617Z);
++	hmul4(w0, Rd0811[0,16], Rd1215[16,16], const1617Z);
++	local s:8 = (sext(w1) + sext(w0)) << 16;
++	local result:8 = Re2427 + s;
++	local ov:1 = scarry(Re2427, s);
++	flags64(ov, result);
++	local neg:1 = Re2427 s< 0;
++	Re2831 = (result * zext(ov == 0)) + (zext(ov != 0) * (0x7fffffffffffffff + zext(neg)));
+ }
+ @endif
+ 
+@@ -4137,12 +4265,16 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MADDMS.H E[c], E[d], D[a], D[b] LL, n (RRR1)
+ :maddms.h Re2831,Re2427,Rd0811,Rd1215^"ll",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0x83 ; Re2427 & Re2831 & const1617Z & op1823=0x3e
+ {
+-	local mres1:4;
+-	local mres0:4;
+-	packed_multiply_ll(mres1, mres0, Rd0811, Rd1215, const1617Z);
+-	local result:8 = Re2427 + sext((mres1 + mres0) << 16);
+-	ssov(Re2831, result, 64);
+-	overflowflagsd(result);
++	local w1:4;
++	local w0:4;
++	hmul4(w1, Rd0811[16,16], Rd1215[0,16], const1617Z);
++	hmul4(w0, Rd0811[0,16], Rd1215[0,16], const1617Z);
++	local s:8 = (sext(w1) + sext(w0)) << 16;
++	local result:8 = Re2427 + s;
++	local ov:1 = scarry(Re2427, s);
++	flags64(ov, result);
++	local neg:1 = Re2427 s< 0;
++	Re2831 = (result * zext(ov == 0)) + (zext(ov != 0) * (0x7fffffffffffffff + zext(neg)));
+ }
+ @endif
+ 
+@@ -4150,12 +4282,16 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MADDMS.H E[c], E[d], D[a], D[b] UU, n (RRR1)
+ :maddms.h Re2831,Re2427,Rd0811,Rd1215^"uu",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0x83 ; Re2427 & Re2831 & const1617Z & op1823=0x3f
+ {
+-	local mres1:4;
+-	local mres0:4;
+-	packed_multiply_uu(mres1, mres0, Rd0811, Rd1215, const1617Z);
+-	local result:8 = Re2427 + sext((mres1 + mres0) << 16);
+-	ssov(Re2831, result, 64);
+-	overflowflagsd(result);
++	local w1:4;
++	local w0:4;
++	hmul4(w1, Rd0811[0,16], Rd1215[16,16], const1617Z);
++	hmul4(w0, Rd0811[16,16], Rd1215[16,16], const1617Z);
++	local s:8 = (sext(w1) + sext(w0)) << 16;
++	local result:8 = Re2427 + s;
++	local ov:1 = scarry(Re2427, s);
++	flags64(ov, result);
++	local neg:1 = Re2427 s< 0;
++	Re2831 = (result * zext(ov == 0)) + (zext(ov != 0) * (0x7fffffffffffffff + zext(neg)));
+ }
+ @endif
+ 
+@@ -4370,26 +4506,33 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MADDS D[c], D[d], D[a], D[b] (RRR2)
+ :madds Rd2831,Rd2427,Rd0811,Rd1215 is PCPMode=0 & Rd0811 & Rd1215 & op0007=0x3 ; Rd2427 & Rd2831 & op1623=0x8a
+ {
+-	local result:4 = Rd2427 + (Rd0811 * Rd1215);
+-	overflowflags(result);
+-	ssov(Rd2831, result, 32);
++	local result:8 = sext(Rd2427) + (sext(Rd0811) * sext(Rd1215));
++	local ov:1 = result != sext(result:4);
++	flags32(ov, result:4);
++	local neg:1 = result s< 0;
++	Rd2831 = (result:4 * zext(ov == 0)) + (zext(ov != 0) * (0x7fffffff + zext(neg)));
+ }
+ 
+ # MADDS D[c], D[d], D[a], const9 (RCR)
+ :madds Rd2831,Rd2427,Rd0811,const1220S is PCPMode=0 & ( Rd0811 & op0007=0x13 ; Rd2427 & Rd2831 & op2123=0x5 ) & const1220S
+ {
+-	local result:4 = Rd2427 + (Rd0811 * const1220S);
+-	overflowflags(result);
+-	ssov(Rd2831, result, 32);
++	local result:8 = sext(Rd2427) + (sext(Rd0811) * sext(const1220S));
++	local ov:1 = result != sext(result:4);
++	flags32(ov, result:4);
++	local neg:1 = result s< 0;
++	Rd2831 = (result:4 * zext(ov == 0)) + (zext(ov != 0) * (0x7fffffff + zext(neg)));
+ }
+ 
+ @if defined(TRICORE_RIDER_B) || defined(TRICORE_RIDER_D) || defined(TRICORE_V2)
+ # MADDS E[c], E[d], D[a], const9 (RCR)
+ :madds Re2831,Re2427,Rd0811,const1220S is PCPMode=0 & ( Rd0811 & op0007=0x13 ; Re2427 & Re2831 & op2123=0x7 ) & const1220S
+ {
+-	local result:8 = Re2427 + sext(Rd0811 * const1220S);
+-	overflowflagsd(result);
+-	ssov(Re2831, result, 64);
++	local prod:8 = sext(Rd0811) * sext(const1220S);
++	local result:8 = Re2427 + prod;
++	local ov:1 = scarry(Re2427, prod);
++	flags64(ov, result);
++	local neg:1 = Re2427 s< 0;
++	Re2831 = (result * zext(ov == 0)) + (zext(ov != 0) * (0x7fffffffffffffff + zext(neg)));
+ }
+ @endif
+ 
+@@ -4397,9 +4540,12 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MADDS E[c], E[d], D[a], D[b] (RRR2)
+ :madds Re2831,Re2427,Rd0811,Rd1215 is PCPMode=0 & Rd0811 & Rd1215 & op0007=0x3 ; Re2427 & Re2831 & op1623=0xea
+ {
+-	local result:8 = Re2427 + sext(Rd0811 * Rd1215);
+-	overflowflagsd(result);
+-	ssov(Re2831, result, 64);
++	local prod:8 = sext(Rd0811) * sext(Rd1215);
++	local result:8 = Re2427 + prod;
++	local ov:1 = scarry(Re2427, prod);
++	flags64(ov, result);
++	local neg:1 = Re2427 s< 0;
++	Re2831 = (result * zext(ov == 0)) + (zext(ov != 0) * (0x7fffffffffffffff + zext(neg)));
+ }
+ @endif
+ 
+@@ -4407,14 +4553,19 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MADDS.H E[c], E[d], D[a], D[b] UL, n (RRR1)
+ :madds.h Ree2831/Reo2831,Ree2427/Reo2427,Rd0811,Rd1215^"ul",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0x83 ; Ree2427 & Reo2427 & Ree2831 & Reo2831 & const1617Z & op1823=0x38
+ {
+-	local mres1:4;
+-	local mres0:4;
+-	packed_multiply_ul(mres1, mres0, Rd0811, Rd1215, const1617Z);
+-	local result1:4 = Reo2427 + mres1;
+-	local result0:4 = Ree2427 + mres0;
+-	ssov(Reo2831, result1, 32);
+-	ssov(Ree2831, result0, 32);
+-	overflowflagsww(result1, result0);
++	local w1:4;
++	local w0:4;
++	hmul4(w1, Rd0811[16,16], Rd1215[16,16], const1617Z);
++	hmul4(w0, Rd0811[0,16], Rd1215[0,16], const1617Z);
++	local rw1:8 = sext(Reo2427) + sext(w1);
++	local rw0:8 = sext(Ree2427) + sext(w0);
++	local ov1:1 = rw1 != sext(rw1:4);
++	local ov0:1 = rw0 != sext(rw0:4);
++	local neg1:1 = rw1 s< 0;
++	local neg0:1 = rw0 s< 0;
++	Reo2831 = (rw1:4 * zext(ov1 == 0)) + (zext(ov1 != 0) * (0x7fffffff + zext(neg1)));
++	Ree2831 = (rw0:4 * zext(ov0 == 0)) + (zext(ov0 != 0) * (0x7fffffff + zext(neg0)));
++	flagsww(ov1, rw1:4, ov0, rw0:4);
+ }
+ @endif
+ 
+@@ -4422,14 +4573,19 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MADDS.H E[c], E[d], D[a], D[b] LU, n (RRR1)
+ :madds.h Ree2831/Reo2831,Ree2427/Reo2427,Rd0811,Rd1215^"lu",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0x83 ; Ree2427 & Reo2427 & Ree2831 & Reo2831 & const1617Z & op1823=0x39
+ {
+-	local mres1:4;
+-	local mres0:4;
+-	packed_multiply_lu(mres1, mres0, Rd0811, Rd1215, const1617Z);
+-	local result1:4 = Reo2427 + mres1;
+-	local result0:4 = Ree2427 + mres0;
+-	ssov(Reo2831, result1, 32);
+-	ssov(Ree2831, result0, 32);
+-	overflowflagsww(result1, result0);
++	local w1:4;
++	local w0:4;
++	hmul4(w1, Rd0811[16,16], Rd1215[0,16], const1617Z);
++	hmul4(w0, Rd0811[0,16], Rd1215[16,16], const1617Z);
++	local rw1:8 = sext(Reo2427) + sext(w1);
++	local rw0:8 = sext(Ree2427) + sext(w0);
++	local ov1:1 = rw1 != sext(rw1:4);
++	local ov0:1 = rw0 != sext(rw0:4);
++	local neg1:1 = rw1 s< 0;
++	local neg0:1 = rw0 s< 0;
++	Reo2831 = (rw1:4 * zext(ov1 == 0)) + (zext(ov1 != 0) * (0x7fffffff + zext(neg1)));
++	Ree2831 = (rw0:4 * zext(ov0 == 0)) + (zext(ov0 != 0) * (0x7fffffff + zext(neg0)));
++	flagsww(ov1, rw1:4, ov0, rw0:4);
+ }
+ @endif
+ 
+@@ -4437,14 +4593,19 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MADDS.H E[c], E[d], D[a], D[b] LL, n (RRR1)
+ :madds.h Ree2831/Reo2831,Ree2427/Reo2427,Rd0811,Rd1215^"ll",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0x83 ; Ree2427 & Reo2427 & Ree2831 & Reo2831 & const1617Z & op1823=0x3a
+ {
+-	local mres1:4;
+-	local mres0:4;
+-	packed_multiply_ll(mres1, mres0, Rd0811, Rd1215, const1617Z);
+-	local result1:4 = Reo2427 + mres1;
+-	local result0:4 = Ree2427 + mres0;
+-	ssov(Reo2831, result1, 32);
+-	ssov(Ree2831, result0, 32);
+-	overflowflagsww(result1, result0);
++	local w1:4;
++	local w0:4;
++	hmul4(w1, Rd0811[16,16], Rd1215[0,16], const1617Z);
++	hmul4(w0, Rd0811[0,16], Rd1215[0,16], const1617Z);
++	local rw1:8 = sext(Reo2427) + sext(w1);
++	local rw0:8 = sext(Ree2427) + sext(w0);
++	local ov1:1 = rw1 != sext(rw1:4);
++	local ov0:1 = rw0 != sext(rw0:4);
++	local neg1:1 = rw1 s< 0;
++	local neg0:1 = rw0 s< 0;
++	Reo2831 = (rw1:4 * zext(ov1 == 0)) + (zext(ov1 != 0) * (0x7fffffff + zext(neg1)));
++	Ree2831 = (rw0:4 * zext(ov0 == 0)) + (zext(ov0 != 0) * (0x7fffffff + zext(neg0)));
++	flagsww(ov1, rw1:4, ov0, rw0:4);
+ }
+ @endif
+ 
+@@ -4452,14 +4613,19 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MADDS.H E[c], E[d], D[a], D[b] UU, n (RRR1)
+ :madds.h Ree2831/Reo2831,Ree2427/Reo2427,Rd0811,Rd1215^"uu",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0x83 ; Ree2427 & Reo2427 & Ree2831 & Reo2831 & const1617Z & op1823=0x3b
+ {
+-	local mres1:4;
+-	local mres0:4;
+-	packed_multiply_uu(mres1, mres0, Rd0811, Rd1215, const1617Z);
+-	local result1:4 = Reo2427 + mres1;
+-	local result0:4 = Ree2427 + mres0;
+-	ssov(Reo2831, result1, 32);
+-	ssov(Ree2831, result0, 32);
+-	overflowflagsww(result1, result0);
++	local w1:4;
++	local w0:4;
++	hmul4(w1, Rd0811[0,16], Rd1215[16,16], const1617Z);
++	hmul4(w0, Rd0811[16,16], Rd1215[16,16], const1617Z);
++	local rw1:8 = sext(Reo2427) + sext(w1);
++	local rw0:8 = sext(Ree2427) + sext(w0);
++	local ov1:1 = rw1 != sext(rw1:4);
++	local ov0:1 = rw0 != sext(rw0:4);
++	local neg1:1 = rw1 s< 0;
++	local neg0:1 = rw0 s< 0;
++	Reo2831 = (rw1:4 * zext(ov1 == 0)) + (zext(ov1 != 0) * (0x7fffffff + zext(neg1)));
++	Ree2831 = (rw0:4 * zext(ov0 == 0)) + (zext(ov0 != 0) * (0x7fffffff + zext(neg0)));
++	flagsww(ov1, rw1:4, ov0, rw0:4);
+ }
+ @endif
+ 
+@@ -4467,11 +4633,13 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MADDS.Q D[c], D[d], D[a] U, D[b] U, n (RRR1)
+ :madds.q Rd2831,Rd2427,Rd0811^"u",Rd1215^"u",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0x43 ; Rd2427 & Rd2831 & const1617Z & op1823=0x24
+ {
+-	local mres:4;
+-	multiply_u_u(mres, Rd0811, Rd1215, const1617Z);
+-	local result:4 = Rd2427 + mres;
+-	overflowflags(result);
+-	ssov(Rd2831, result, 32);
++	local t:8;
++	hmul(t, Rd0811[16,16], Rd1215[16,16], const1617Z);
++	local result:8 = sext(Rd2427) + t;
++	local ov:1 = result != sext(result:4);
++	flags32(ov, result:4);
++	local neg:1 = result s< 0;
++	Rd2831 = (result:4 * zext(ov == 0)) + (zext(ov != 0) * (0x7fffffff + zext(neg)));
+ }
+ @endif
+ 
+@@ -4479,11 +4647,14 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MADDS.Q D[c], D[d], D[a], D[b] U, n (RRR1)
+ :madds.q Rd2831,Rd2427,Rd0811,Rd1215^"u",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0x43 ; Rd2427 & Rd2831 & const1617Z & op1823=0x20
+ {
+-	local tmp:8 = sext(Rd0811 * sext(Rd1215[16,16]));
+-	tmp = (tmp << const1617Z) s>> 16;
+-	local result:4 = Rd2427 + tmp[0,32];
+-	overflowflags(result);
+-	ssov(Rd2831, result, 32);
++	local t:8 = sext(Rd0811) * sext(Rd1215[16,16]);
++	t = t << const1617Z;
++	t = t s>> 16;
++	local result:8 = sext(Rd2427) + t;
++	local ov:1 = result != sext(result:4);
++	flags32(ov, result:4);
++	local neg:1 = result s< 0;
++	Rd2831 = (result:4 * zext(ov == 0)) + (zext(ov != 0) * (0x7fffffff + zext(neg)));
+ }
+ @endif
+ 
+@@ -4491,11 +4662,14 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MADDS.Q D[c], D[d], D[a], D[b] L, n (RRR1)
+ :madds.q Rd2831,Rd2427,Rd0811,Rd1215^"l",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0x43 ; Rd2427 & Rd2831 & const1617Z & op1823=0x21
+ {
+-	local tmp:8 = sext(Rd0811 * sext(Rd1215[0,16]));
+-	tmp = (tmp << const1617Z) s>> 16;
+-	local result:4 = Rd2427 + tmp[0,32];
+-	overflowflags(result);
+-	ssov(Rd2831, result, 32);
++	local t:8 = sext(Rd0811) * sext(Rd1215[0,16]);
++	t = t << const1617Z;
++	t = t s>> 16;
++	local result:8 = sext(Rd2427) + t;
++	local ov:1 = result != sext(result:4);
++	flags32(ov, result:4);
++	local neg:1 = result s< 0;
++	Rd2831 = (result:4 * zext(ov == 0)) + (zext(ov != 0) * (0x7fffffff + zext(neg)));
+ }
+ @endif
+ 
+@@ -4503,11 +4677,14 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MADDS.Q D[c], D[d], D[a], D[b], n (RRR1)
+ :madds.q Rd2831,Rd2427,Rd0811,Rd1215,const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0x43 ; Rd2427 & Rd2831 & const1617Z & op1823=0x22
+ {
+-	local tmp:8 = sext(Rd0811 * Rd1215);
+-	tmp = (tmp << const1617Z) s>> 32;
+-	local result:4 = Rd2427 + tmp[0,32];
+-	overflowflags(result);
+-	ssov(Rd2831, result, 32);
++	local t:8 = sext(Rd0811) * sext(Rd1215);
++	t = t << const1617Z;
++	t = t s>> 32;
++	local result:8 = sext(Rd2427) + t;
++	local ov:1 = result != sext(result:4);
++	flags32(ov, result:4);
++	local neg:1 = result s< 0;
++	Rd2831 = (result:4 * zext(ov == 0)) + (zext(ov != 0) * (0x7fffffff + zext(neg)));
+ }
+ @endif
+ 
+@@ -4515,11 +4692,13 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MADDS.Q D[c], D[d], D[a] L, D[b] L, n (RRR1)
+ :madds.q Rd2831,Rd2427,Rd0811^"l",Rd1215^"l",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0x43 ; Rd2427 & Rd2831 & const1617Z & op1823=0x25
+ {
+-	local mres:4;
+-	multiply_l_l(mres, Rd0811, Rd1215, const1617Z);
+-	local result:4 = Rd2427 + mres;
+-	overflowflags(result);
+-	ssov(Rd2831, result, 32);
++	local t:8;
++	hmul(t, Rd0811[0,16], Rd1215[0,16], const1617Z);
++	local result:8 = sext(Rd2427) + t;
++	local ov:1 = result != sext(result:4);
++	flags32(ov, result:4);
++	local neg:1 = result s< 0;
++	Rd2831 = (result:4 * zext(ov == 0)) + (zext(ov != 0) * (0x7fffffff + zext(neg)));
+ }
+ @endif
+ 
+@@ -4527,10 +4706,14 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MADDS.QE[c], E[d], D[a], D[b] U, n (RRR1)
+ :madds.q Re2831,Re2427,Rd0811,Rd1215^"u",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0x43 ; Re2427 & Re2831 & const1617Z & op1823=0x38
+ {
+-	local tmp:8 = sext(Rd0811 * sext(Rd1215[16,16]));
+-	local result:8 = Re2427 + (tmp << const1617Z);
+-	overflowflagsd(result);
+-	ssov(Re2831, result, 64);
++	local t:8 = sext(Rd0811) * sext(Rd1215[16,16]);
++	t = t << const1617Z;
++	local tov:1 = t == 0x8000000000000000;
++	local result:8 = Re2427 + t;
++	local ov:1 = scarry(Re2427, t) ^ tov;
++	flags64(ov, result);
++	local neg:1 = (Re2427 s< 0) && (tov == 0);
++	Re2831 = (result * zext(ov == 0)) + (zext(ov != 0) * (0x7fffffffffffffff + zext(neg)));
+ }
+ @endif
+ 
+@@ -4538,10 +4721,14 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MADDS.Q E[c], E[d], D[a], D[b] L, n (RRR1)
+ :madds.q Re2831,Re2427,Rd0811,Rd1215^"l",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0x43 ; Re2427 & Re2831 & const1617Z & op1823=0x39
+ {
+-	local tmp:8 = sext(Rd0811 * sext(Rd1215[0,16]));
+-	local result:8 = Re2427 + (tmp << const1617Z);
+-	overflowflagsd(result);
+-	ssov(Re2831, result, 64);
++	local t:8 = sext(Rd0811) * sext(Rd1215[0,16]);
++	t = t << const1617Z;
++	local tov:1 = t == 0x8000000000000000;
++	local result:8 = Re2427 + t;
++	local ov:1 = scarry(Re2427, t) ^ tov;
++	flags64(ov, result);
++	local neg:1 = (Re2427 s< 0) && (tov == 0);
++	Re2831 = (result * zext(ov == 0)) + (zext(ov != 0) * (0x7fffffffffffffff + zext(neg)));
+ }
+ @endif
+ 
+@@ -4549,11 +4736,14 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MADDS.Q E[c], E[d], D[a], D[b], n (RRR1)
+ :madds.q Re2831,Re2427,Rd0811,Rd1215,const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0x43 ; Re2427 & Re2831 & const1617Z & op1823=0x3b
+ {
+-	local tmp:8 = sext(Rd0811 * Rd1215);
+-	tmp = tmp << const1617Z;
+-	local result:8 = Re2427 + tmp;
+-	overflowflags(result);
+-	ssov(Re2831, result, 64);
++	local t:8 = sext(Rd0811) * sext(Rd1215);
++	t = t << const1617Z;
++	local tov:1 = t == 0x8000000000000000;
++	local result:8 = Re2427 + t;
++	local ov:1 = scarry(Re2427, t) ^ tov;
++	flags64(ov, result);
++	local neg:1 = (Re2427 s< 0) && (tov == 0);
++	Re2831 = (result * zext(ov == 0)) + (zext(ov != 0) * (0x7fffffffffffffff + zext(neg)));
+ }
+ @endif
+ 
+@@ -4561,11 +4751,15 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MADDS.Q E[c], E[d], D[a] U, D[b] U, n (RRR1)
+ :madds.q Re2831,Re2427,Rd0811^"u",Rd1215^"u",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0x43 ; Re2427 & Re2831 & const1617Z & op1823=0x3c
+ {
+-	local mres:4;
+-	multiply_u_u(mres, Rd0811, Rd1215, const1617Z);
+-	local result:8 = Re2427 + sext(mres << 16);
+-	overflowflagsd(result);
+-	ssov(Re2831, result, 64);
++	local t:8;
++	hmul(t, Rd0811[16,16], Rd1215[16,16], const1617Z);
++	t = t << 16;
++	local tov:1 = t == 0x8000000000000000;
++	local result:8 = Re2427 + t;
++	local ov:1 = scarry(Re2427, t) ^ tov;
++	flags64(ov, result);
++	local neg:1 = (Re2427 s< 0) && (tov == 0);
++	Re2831 = (result * zext(ov == 0)) + (zext(ov != 0) * (0x7fffffffffffffff + zext(neg)));
+ }
+ @endif
+ 
+@@ -4573,37 +4767,45 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MADDS.Q E[c], E[d], D[a] L, D[b] L, n (RRR1)
+ :madds.q Re2831,Re2427,Rd0811^"l",Rd1215^"l",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0x43 ; Re2427 & Re2831 & const1617Z & op1823=0x3d
+ {
+-	local mres:4;
+-	multiply_l_l(mres, Rd0811, Rd1215, const1617Z);
+-	local result:8 = Re2427 + sext(mres << 16);
+-	overflowflagsd(result);
+-	ssov(Re2831, result, 64);
++	local t:8;
++	hmul(t, Rd0811[0,16], Rd1215[0,16], const1617Z);
++	t = t << 16;
++	local tov:1 = t == 0x8000000000000000;
++	local result:8 = Re2427 + t;
++	local ov:1 = scarry(Re2427, t) ^ tov;
++	flags64(ov, result);
++	local neg:1 = (Re2427 s< 0) && (tov == 0);
++	Re2831 = (result * zext(ov == 0)) + (zext(ov != 0) * (0x7fffffffffffffff + zext(neg)));
+ }
+ @endif
+ 
+ # MADDS.U D[c], D[d], D[a], const9 (RCR)
+ :madds.u Rd2831,Rd2427,Rd0811,const1220Z is PCPMode=0 & ( Rd0811 & op0007=0x13 ; Rd2427 & Rd2831 & op2123=0x4 ) & const1220Z
+ {
+-	local result:4 = Rd2427 + (Rd0811 * const1220Z);
+-	overflowflags(result);
+-	suov(Rd2831, result, 32);
++	local result:8 = zext(Rd2427) + (zext(Rd0811) * zext(const1220Z));
++	local ov:1 = result > 0xffffffff;
++	flags32(ov, result:4);
++	Rd2831 = (result:4 * zext(ov == 0)) + (zext(ov != 0) * 0xffffffff);
+ }
+ 
+ # MADDS.U D[c], D[d], D[a], D[b] (RRR2)
+ :madds.u Rd2831,Rd2427,Rd0811,Rd1215 is PCPMode=0 & Rd0811 & Rd1215 & op0007=0x3 ; Rd2427 & Rd2831 & op1623=0x88
+ {
+-	local result:4 = Rd2427 + (Rd0811 * Rd1215);
+-	overflowflags(result);
+-	suov(Rd2831, result, 32);
++	local result:8 = zext(Rd2427) + (zext(Rd0811) * zext(Rd1215));
++	local ov:1 = result > 0xffffffff;
++	flags32(ov, result:4);
++	Rd2831 = (result:4 * zext(ov == 0)) + (zext(ov != 0) * 0xffffffff);
+ }
+ 
+ @if defined(TRICORE_RIDER_B) || defined(TRICORE_RIDER_D) || defined(TRICORE_V2)
+ # MADDS.U E[c], E[d], D[a], const9 (RCR)
+ :madds.u Re2831,Re2427,Rd0811,const1220Z is PCPMode=0 & ( Rd0811 & op0007=0x13 ; Re2427 & Re2831 & op2123=0x6 ) & const1220Z
+ {
+-	local result:8 = Re2427 + zext(Rd0811 * const1220Z);
+-	overflowflagsd(result);
+-	suov(Re2831, result, 64);
++	local prod:8 = zext(Rd0811) * zext(const1220Z);
++	local result:8 = Re2427 + prod;
++	local ov:1 = carry(Re2427, prod);
++	flags64(ov, result);
++	Re2831 = (result * zext(ov == 0)) + (zext(ov != 0) * 0xffffffffffffffff);
+ }
+ @endif
+ 
+@@ -4611,9 +4813,11 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MADDS.U E[c], E[d], D[a], D[b] (RRR2)
+ :madds.u Re2831,Re2427,Rd0811,Rd1215 is PCPMode=0 & Rd0811 & Rd1215 & op0007=0x3 ; Re2427 & Re2831 & op1623=0xe8
+ {
+-	local result:8 = Re2427 + zext(Rd0811 * Rd1215);
+-	overflowflags(result);
+-	suov(Re2831, result, 64);
++	local prod:8 = zext(Rd0811) * zext(Rd1215);
++	local result:8 = Re2427 + prod;
++	local ov:1 = carry(Re2427, prod);
++	flags64(ov, result);
++	Re2831 = (result * zext(ov == 0)) + (zext(ov != 0) * 0xffffffffffffffff);
+ }
+ @endif
+ 
+@@ -4621,14 +4825,17 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MADDSU.H E[c], E[d], D[a], D[b] UL, n (RRR1)
+ :maddsu.h Ree2831/Reo2831,Ree2427/Reo2427,Rd0811,Rd1215^"ul",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0xc3 ; Ree2427 & Reo2427 & Ree2831 & Reo2831 & const1617Z & op1823=0x18
+ {
+-	local mres1:4;
+-	local mres0:4;
+-	packed_multiply_ul(mres1, mres0, Rd0811, Rd1215, const1617Z);
+-	local result1:4 = Reo2427 + mres1;
+-	local result0:4 = Ree2427 - mres0;
+-	Reo2831 = result1;
+-	Ree2831 = result0;
+-	overflowflagsww(result1, result0);
++	local w1:4;
++	local w0:4;
++	hmul4(w1, Rd0811[16,16], Rd1215[16,16], const1617Z);
++	hmul4(w0, Rd0811[0,16], Rd1215[0,16], const1617Z);
++	local rw1:8 = sext(Reo2427) + sext(w1);
++	local rw0:8 = sext(Ree2427) - sext(w0);
++	local ov1:1 = rw1 != sext(rw1:4);
++	local ov0:1 = rw0 != sext(rw0:4);
++	Reo2831 = rw1:4;
++	Ree2831 = rw0:4;
++	flagsww(ov1, rw1:4, ov0, rw0:4);
+ }
+ @endif
+ 
+@@ -4636,14 +4843,17 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MADDSU.H E[c], E[d], D[a], D[b] LU, n (RRR1)
+ :maddsu.h Ree2831/Reo2831,Ree2427/Reo2427,Rd0811,Rd1215^"lu",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0xc3 ; Ree2427 & Reo2427 & Ree2831 & Reo2831 & const1617Z & op1823=0x19
+ {
+-	local mres1:4;
+-	local mres0:4;
+-	packed_multiply_lu(mres1, mres0, Rd0811, Rd1215, const1617Z);
+-	local result1:4 = Reo2427 + mres1;
+-	local result0:4 = Ree2427 - mres0;
+-	Reo2831 = result1;
+-	Ree2831 = result0;
+-	overflowflagsww(result1, result0);
++	local w1:4;
++	local w0:4;
++	hmul4(w1, Rd0811[16,16], Rd1215[0,16], const1617Z);
++	hmul4(w0, Rd0811[0,16], Rd1215[16,16], const1617Z);
++	local rw1:8 = sext(Reo2427) + sext(w1);
++	local rw0:8 = sext(Ree2427) - sext(w0);
++	local ov1:1 = rw1 != sext(rw1:4);
++	local ov0:1 = rw0 != sext(rw0:4);
++	Reo2831 = rw1:4;
++	Ree2831 = rw0:4;
++	flagsww(ov1, rw1:4, ov0, rw0:4);
+ }
+ @endif
+ 
+@@ -4651,14 +4861,17 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MADDSU.H E[c], E[d], D[a], D[b] LL, n (RRR1)
+ :maddsu.h Ree2831/Reo2831,Ree2427/Reo2427,Rd0811,Rd1215^"ll",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0xc3 ; Ree2427 & Reo2427 & Ree2831 & Reo2831 & const1617Z & op1823=0x1a
+ {
+-	local mres1:4;
+-	local mres0:4;
+-	packed_multiply_ll(mres1, mres0, Rd0811, Rd1215, const1617Z);
+-	local result1:4 = Reo2427 + mres1;
+-	local result0:4 = Ree2427 - mres0;
+-	Reo2831 = result1;
+-	Ree2831 = result0;
+-	overflowflagsww(result1, result0);
++	local w1:4;
++	local w0:4;
++	hmul4(w1, Rd0811[16,16], Rd1215[0,16], const1617Z);
++	hmul4(w0, Rd0811[0,16], Rd1215[0,16], const1617Z);
++	local rw1:8 = sext(Reo2427) + sext(w1);
++	local rw0:8 = sext(Ree2427) - sext(w0);
++	local ov1:1 = rw1 != sext(rw1:4);
++	local ov0:1 = rw0 != sext(rw0:4);
++	Reo2831 = rw1:4;
++	Ree2831 = rw0:4;
++	flagsww(ov1, rw1:4, ov0, rw0:4);
+ }
+ @endif
+ 
+@@ -4666,14 +4879,17 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MADDSU.H E[c], E[d], D[a], D[b] UU, n (RRR1)
+ :maddsu.h Ree2831/Reo2831,Ree2427/Reo2427,Rd0811,Rd1215^"uu",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0xc3 ; Ree2427 & Reo2427 & Ree2831 & Reo2831 & const1617Z & op1823=0x1b
+ {
+-	local mres1:4;
+-	local mres0:4;
+-	packed_multiply_uu(mres1, mres0, Rd0811, Rd1215, const1617Z);
+-	local result1:4 = Reo2427 + mres1;
+-	local result0:4 = Ree2427 - mres0;
+-	Reo2831 = result1;
+-	Ree2831 = result0;
+-	overflowflagsww(result1, result0);
++	local w1:4;
++	local w0:4;
++	hmul4(w1, Rd0811[0,16], Rd1215[16,16], const1617Z);
++	hmul4(w0, Rd0811[16,16], Rd1215[16,16], const1617Z);
++	local rw1:8 = sext(Reo2427) + sext(w1);
++	local rw0:8 = sext(Ree2427) - sext(w0);
++	local ov1:1 = rw1 != sext(rw1:4);
++	local ov0:1 = rw0 != sext(rw0:4);
++	Reo2831 = rw1:4;
++	Ree2831 = rw0:4;
++	flagsww(ov1, rw1:4, ov0, rw0:4);
+ }
+ @endif
+ 
+@@ -4681,11 +4897,15 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MADDSUM.H E[c], E[d], D[a], D[b] UL, n (RRR1)
+ :maddsum.h Re2831,Re2427,Rd0811,Rd1215^"ul",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0xc3 ; Re2427 & Re2831 & const1617Z & op1823=0x1c
+ {
+-	local mres1:4;
+-	local mres0:4;
+-	packed_multiply_ul(mres1, mres0, Rd0811, Rd1215, const1617Z);
+-	Re2831 = Re2427 + sext((mres1 - mres0) << 16);
+-	overflowflagsd(Re2831);
++	local w1:4;
++	local w0:4;
++	hmul4(w1, Rd0811[16,16], Rd1215[16,16], const1617Z);
++	hmul4(w0, Rd0811[0,16], Rd1215[0,16], const1617Z);
++	local s:8 = (sext(w1) - sext(w0)) << 16;
++	local result:8 = Re2427 + s;
++	local ov:1 = scarry(Re2427, s);
++	flags64(ov, result);
++	Re2831 = result;
+ }
+ @endif
+ 
+@@ -4693,11 +4913,15 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MADDSUM.H E[c], E[d], D[a], D[b] LU, n (RRR1)
+ :maddsum.h Re2831,Re2427,Rd0811,Rd1215^"lu",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0xc3 ; Re2427 & Re2831 & const1617Z & op1823=0x1d
+ {
+-	local mres1:4;
+-	local mres0:4;
+-	packed_multiply_lu(mres1, mres0, Rd0811, Rd1215, const1617Z);
+-	Re2831 = Re2427 + sext((mres1 - mres0) << 16);
+-	overflowflagsd(Re2831);
++	local w1:4;
++	local w0:4;
++	hmul4(w1, Rd0811[16,16], Rd1215[0,16], const1617Z);
++	hmul4(w0, Rd0811[0,16], Rd1215[16,16], const1617Z);
++	local s:8 = (sext(w1) - sext(w0)) << 16;
++	local result:8 = Re2427 + s;
++	local ov:1 = scarry(Re2427, s);
++	flags64(ov, result);
++	Re2831 = result;
+ }
+ @endif
+ 
+@@ -4705,11 +4929,15 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MADDSUM.H E[c], E[d], D[a], D[b] LL, n (RRR1)
+ :maddsum.h Re2831,Re2427,Rd0811,Rd1215^"ll",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0xc3 ; Re2427 & Re2831 & const1617Z & op1823=0x1e
+ {
+-	local mres1:4;
+-	local mres0:4;
+-	packed_multiply_ll(mres1, mres0, Rd0811, Rd1215, const1617Z);
+-	Re2831 = Re2427 + sext((mres1 - mres0) << 16);
+-	overflowflagsd(Re2831);
++	local w1:4;
++	local w0:4;
++	hmul4(w1, Rd0811[16,16], Rd1215[0,16], const1617Z);
++	hmul4(w0, Rd0811[0,16], Rd1215[0,16], const1617Z);
++	local s:8 = (sext(w1) - sext(w0)) << 16;
++	local result:8 = Re2427 + s;
++	local ov:1 = scarry(Re2427, s);
++	flags64(ov, result);
++	Re2831 = result;
+ }
+ @endif
+ 
+@@ -4717,11 +4945,15 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MADDSUM.H E[c], E[d], D[a], D[b] UU, n (RRR1)
+ :maddsum.h Re2831,Re2427,Rd0811,Rd1215^"uu",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0xc3 ; Re2427 & Re2831 & const1617Z & op1823=0x1f
+ {
+-	local mres1:4;
+-	local mres0:4;
+-	packed_multiply_uu(mres1, mres0, Rd0811, Rd1215, const1617Z);
+-	Re2831 = Re2427 + sext((mres1 - mres0) << 16);
+-	overflowflagsd(Re2831);
++	local w1:4;
++	local w0:4;
++	hmul4(w1, Rd0811[0,16], Rd1215[16,16], const1617Z);
++	hmul4(w0, Rd0811[16,16], Rd1215[16,16], const1617Z);
++	local s:8 = (sext(w1) - sext(w0)) << 16;
++	local result:8 = Re2427 + s;
++	local ov:1 = scarry(Re2427, s);
++	flags64(ov, result);
++	Re2831 = result;
+ }
+ @endif
+ 
+@@ -4729,12 +4961,16 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MADDSUMS.H E[c], E[d], D[a], D[b] UL, n (RRR1)
+ :maddsums.h Re2831,Re2427,Rd0811,Rd1215^"ul",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0xc3 ; Re2427 & Re2831 & const1617Z & op1823=0x3c
+ {
+-	local mres1:4;
+-	local mres0:4;
+-	packed_multiply_ul(mres1, mres0, Rd0811, Rd1215, const1617Z);
+-	local result:8 = Re2427 + sext((mres1 - mres0) << 16);
+-	overflowflagsd(result);
+-	ssov(Re2831, result, 64);
++	local w1:4;
++	local w0:4;
++	hmul4(w1, Rd0811[16,16], Rd1215[16,16], const1617Z);
++	hmul4(w0, Rd0811[0,16], Rd1215[0,16], const1617Z);
++	local s:8 = (sext(w1) - sext(w0)) << 16;
++	local result:8 = Re2427 + s;
++	local ov:1 = scarry(Re2427, s);
++	flags64(ov, result);
++	local neg:1 = Re2427 s< 0;
++	Re2831 = (result * zext(ov == 0)) + (zext(ov != 0) * (0x7fffffffffffffff + zext(neg)));
+ }
+ @endif
+ 
+@@ -4742,12 +4978,16 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MADDSUMS.H E[c], E[d], D[a], D[b] LU, n (RRR1)
+ :maddsums.h Re2831,Re2427,Rd0811,Rd1215^"lu",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0xc3 ; Re2427 & Re2831 & const1617Z & op1823=0x3d
+ {
+-	local mres1:4;
+-	local mres0:4;
+-	packed_multiply_lu(mres1, mres0, Rd0811, Rd1215, const1617Z);
+-	local result:8 = Re2427 + sext((mres1 - mres0) << 16);
+-	overflowflagsd(result);
+-	ssov(Re2831, result, 64);
++	local w1:4;
++	local w0:4;
++	hmul4(w1, Rd0811[16,16], Rd1215[0,16], const1617Z);
++	hmul4(w0, Rd0811[0,16], Rd1215[16,16], const1617Z);
++	local s:8 = (sext(w1) - sext(w0)) << 16;
++	local result:8 = Re2427 + s;
++	local ov:1 = scarry(Re2427, s);
++	flags64(ov, result);
++	local neg:1 = Re2427 s< 0;
++	Re2831 = (result * zext(ov == 0)) + (zext(ov != 0) * (0x7fffffffffffffff + zext(neg)));
+ }
+ @endif
+ 
+@@ -4755,12 +4995,16 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MADDSUMS.H E[c], E[d], D[a], D[b] LL, n (RRR1)
+ :maddsums.h Re2831,Re2427,Rd0811,Rd1215^"ll",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0xc3 ; Re2427 & Re2831 & const1617Z & op1823=0x3e
+ {
+-	local mres1:4;
+-	local mres0:4;
+-	packed_multiply_ll(mres1, mres0, Rd0811, Rd1215, const1617Z);
+-	local result:8 = Re2427 + sext((mres1 - mres0) << 16);
+-	overflowflagsd(result);
+-	ssov(Re2831, result, 64);
++	local w1:4;
++	local w0:4;
++	hmul4(w1, Rd0811[16,16], Rd1215[0,16], const1617Z);
++	hmul4(w0, Rd0811[0,16], Rd1215[0,16], const1617Z);
++	local s:8 = (sext(w1) - sext(w0)) << 16;
++	local result:8 = Re2427 + s;
++	local ov:1 = scarry(Re2427, s);
++	flags64(ov, result);
++	local neg:1 = Re2427 s< 0;
++	Re2831 = (result * zext(ov == 0)) + (zext(ov != 0) * (0x7fffffffffffffff + zext(neg)));
+ }
+ @endif
+ 
+@@ -4768,12 +5012,16 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MADDSUMS.H E[c], E[d], D[a], D[b] UU, n (RRR1)
+ :maddsums.h Re2831,Re2427,Rd0811,Rd1215^"uu",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0xc3 ; Re2427 & Re2831 & const1617Z & op1823=0x3f
+ {
+-	local mres1:4;
+-	local mres0:4;
+-	packed_multiply_uu(mres1, mres0, Rd0811, Rd1215, const1617Z);
+-	local result:8 = Re2427 + sext((mres1 - mres0) << 16);
+-	overflowflagsd(result);
+-	ssov(Re2831, result, 64);
++	local w1:4;
++	local w0:4;
++	hmul4(w1, Rd0811[0,16], Rd1215[16,16], const1617Z);
++	hmul4(w0, Rd0811[16,16], Rd1215[16,16], const1617Z);
++	local s:8 = (sext(w1) - sext(w0)) << 16;
++	local result:8 = Re2427 + s;
++	local ov:1 = scarry(Re2427, s);
++	flags64(ov, result);
++	local neg:1 = Re2427 s< 0;
++	Re2831 = (result * zext(ov == 0)) + (zext(ov != 0) * (0x7fffffffffffffff + zext(neg)));
+ }
+ @endif
+ 
+@@ -4901,14 +5149,19 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MADDSUS.H E[c], E[d], D[a], D[b] UL, n (RRR1)
+ :maddsus.h Ree2831/Reo2831,Ree2427/Reo2427,Rd0811,Rd1215^"ul",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0xc3 ; Ree2427 & Reo2427 & Ree2831 & Reo2831 & const1617Z & op1823=0x38
+ {
+-	local mres1:4;
+-	local mres0:4;
+-	packed_multiply_ul(mres1, mres0, Rd0811, Rd1215, const1617Z);
+-	local result1:4 = Reo2427 + mres1;
+-	local result0:4 = Ree2427 - mres0;
+-	ssov(Reo2831, result1, 32);
+-	ssov(Ree2831, result0, 32);
+-	overflowflagsww(result1, result0);
++	local w1:4;
++	local w0:4;
++	hmul4(w1, Rd0811[16,16], Rd1215[16,16], const1617Z);
++	hmul4(w0, Rd0811[0,16], Rd1215[0,16], const1617Z);
++	local rw1:8 = sext(Reo2427) + sext(w1);
++	local rw0:8 = sext(Ree2427) - sext(w0);
++	local ov1:1 = rw1 != sext(rw1:4);
++	local ov0:1 = rw0 != sext(rw0:4);
++	local neg1:1 = rw1 s< 0;
++	local neg0:1 = rw0 s< 0;
++	Reo2831 = (rw1:4 * zext(ov1 == 0)) + (zext(ov1 != 0) * (0x7fffffff + zext(neg1)));
++	Ree2831 = (rw0:4 * zext(ov0 == 0)) + (zext(ov0 != 0) * (0x7fffffff + zext(neg0)));
++	flagsww(ov1, rw1:4, ov0, rw0:4);
+ }
+ @endif
+ 
+@@ -4916,12 +5169,19 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MADDSUS.H E[c], E[d], D[a], D[b] LU, n (RRR1)
+ :maddsus.h Ree2831/Reo2831,Ree2427/Reo2427,Rd0811,Rd1215^"lu",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0xc3 ; Ree2427 & Reo2427 & Ree2831 & Reo2831 & const1617Z & op1823=0x39
+ {
+-	local mres1:4;
+-	local mres0:4;
+-	packed_multiply_lu(mres1, mres0, Rd0811, Rd1215, const1617Z);
+-	ssov(Reo2831, Reo2427 + mres1, 32);
+-	ssov(Ree2831, Ree2427 - mres0, 32);
+-	overflowflagsww(Reo2427 + mres1, Ree2427 - mres0);
++	local w1:4;
++	local w0:4;
++	hmul4(w1, Rd0811[16,16], Rd1215[0,16], const1617Z);
++	hmul4(w0, Rd0811[0,16], Rd1215[16,16], const1617Z);
++	local rw1:8 = sext(Reo2427) + sext(w1);
++	local rw0:8 = sext(Ree2427) - sext(w0);
++	local ov1:1 = rw1 != sext(rw1:4);
++	local ov0:1 = rw0 != sext(rw0:4);
++	local neg1:1 = rw1 s< 0;
++	local neg0:1 = rw0 s< 0;
++	Reo2831 = (rw1:4 * zext(ov1 == 0)) + (zext(ov1 != 0) * (0x7fffffff + zext(neg1)));
++	Ree2831 = (rw0:4 * zext(ov0 == 0)) + (zext(ov0 != 0) * (0x7fffffff + zext(neg0)));
++	flagsww(ov1, rw1:4, ov0, rw0:4);
+ }
+ @endif
+ 
+@@ -4929,14 +5189,19 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MADDSUS.H E[c], E[d], D[a], D[b] LL, n (RRR1)
+ :maddsus.h Ree2831/Reo2831,Ree2427/Reo2427,Rd0811,Rd1215^"ll",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0xc3 ; Ree2427 & Reo2427 & Ree2831 & Reo2831 & const1617Z & op1823=0x3a
+ {
+-	local mres1:4;
+-	local mres0:4;
+-	packed_multiply_ll(mres1, mres0, Rd0811, Rd1215, const1617Z);
+-	local result1:4 = Reo2427 + mres1;
+-	local result0:4 = Ree2427 - mres0;
+-	ssov(Reo2831, result1, 32);
+-	ssov(Ree2831, result0, 32);
+-	overflowflagsww(result1, result0);
++	local w1:4;
++	local w0:4;
++	hmul4(w1, Rd0811[16,16], Rd1215[0,16], const1617Z);
++	hmul4(w0, Rd0811[0,16], Rd1215[0,16], const1617Z);
++	local rw1:8 = sext(Reo2427) + sext(w1);
++	local rw0:8 = sext(Ree2427) - sext(w0);
++	local ov1:1 = rw1 != sext(rw1:4);
++	local ov0:1 = rw0 != sext(rw0:4);
++	local neg1:1 = rw1 s< 0;
++	local neg0:1 = rw0 s< 0;
++	Reo2831 = (rw1:4 * zext(ov1 == 0)) + (zext(ov1 != 0) * (0x7fffffff + zext(neg1)));
++	Ree2831 = (rw0:4 * zext(ov0 == 0)) + (zext(ov0 != 0) * (0x7fffffff + zext(neg0)));
++	flagsww(ov1, rw1:4, ov0, rw0:4);
+ }
+ @endif
+ 
+@@ -4944,14 +5209,19 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MADDSUS.H E[c], E[d], D[a], D[b] UU, n (RRR1)
+ :maddsus.h Ree2831/Reo2831,Ree2427/Reo2427,Rd0811,Rd1215^"uu",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0xc3 ; Ree2427 & Reo2427 & Ree2831 & Reo2831 & const1617Z & op1823=0x3b
+ {
+-	local mres1:4;
+-	local mres0:4;
+-	packed_multiply_uu(mres1, mres0, Rd0811, Rd1215, const1617Z);
+-	local result1:4 = Reo2427 + mres1;
+-	local result0:4 = Ree2427 - mres0;
+-	ssov(Reo2831, result1, 32);
+-	ssov(Ree2831, result0, 32);
+-	overflowflagsww(result1, result0);
++	local w1:4;
++	local w0:4;
++	hmul4(w1, Rd0811[0,16], Rd1215[16,16], const1617Z);
++	hmul4(w0, Rd0811[16,16], Rd1215[16,16], const1617Z);
++	local rw1:8 = sext(Reo2427) + sext(w1);
++	local rw0:8 = sext(Ree2427) - sext(w0);
++	local ov1:1 = rw1 != sext(rw1:4);
++	local ov0:1 = rw0 != sext(rw0:4);
++	local neg1:1 = rw1 s< 0;
++	local neg0:1 = rw0 s< 0;
++	Reo2831 = (rw1:4 * zext(ov1 == 0)) + (zext(ov1 != 0) * (0x7fffffff + zext(neg1)));
++	Ree2831 = (rw0:4 * zext(ov0 == 0)) + (zext(ov0 != 0) * (0x7fffffff + zext(neg0)));
++	flagsww(ov1, rw1:4, ov0, rw0:4);
+ }
+ @endif
+ 
+@@ -5252,23 +5522,30 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ #MSUB D[c], D[d], D[a], D[b] (RRR2)
+ :msub Rd2831,Rd2427,Rd0811,Rd1215 is PCPMode=0 & Rd0811 & Rd1215 & op0007=0x23 ; Rd2427 & Rd2831 & op1623=0xa
+ {
+-	Rd2831 = Rd2427 - (Rd0811 * Rd1215);
+-	overflowflags(Rd2831);
++	local result:8 = sext(Rd2427) - (sext(Rd0811) * sext(Rd1215));
++	local ov:1 = result != sext(result:4);
++	flags32(ov, result:4);
++	Rd2831 = result:4;
+ }
+ 
+ # MSUB D[c], D[d], D[a], const9 (RCR)
+ :msub Rd2831,Rd2427,Rd0811,const1220S is PCPMode=0 & ( Rd0811 & op0007=0x33 ; Rd2427 & Rd2831 & op2123=0x1 ) & const1220S
+ {
+-	Rd2831 = Rd2427 - (Rd0811 * const1220S);
+-	overflowflags(Rd2831);
++	local result:8 = sext(Rd2427) - (sext(Rd0811) * sext(const1220S));
++	local ov:1 = result != sext(result:4);
++	flags32(ov, result:4);
++	Rd2831 = result:4;
+ }
+ 
+ @if defined(TRICORE_RIDER_B) || defined(TRICORE_RIDER_D) || defined(TRICORE_V2)
+ # MSUB E[c], E[d], D[a], const9 (RCR)
+ :msub Re2831,Re2427,Rd0811,const1220S is PCPMode=0 & ( Rd0811 & op0007=0x33 ; Re2427 & Re2831 & op2123=0x3 ) & const1220S
+ {
+-	Re2831 = Re2427 - sext(Rd0811 * const1220S);
+-	overflowflagsd(Re2831);
++	local prod:8 = sext(Rd0811) * sext(const1220S);
++	local result:8 = Re2427 - prod;
++	local ov:1 = sborrow(Re2427, prod);
++	flags64(ov, result);
++	Re2831 = result;
+ }
+ @endif
+ 
+@@ -5276,8 +5553,11 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MSUB E[c], E[d], D[a], D[b] (RRR2)
+ :msub Re2831,Re2427,Rd0811,Rd1215 is PCPMode=0 & Rd0811 & Rd1215 & op0007=0x23 ; Re2427 & Re2831 & op1623=0x6a
+ {
+-	Re2831 = Re2427 - sext(Rd0811 * Rd1215);
+-	overflowflagsd(Re2831);
++	local prod:8 = sext(Rd0811) * sext(Rd1215);
++	local result:8 = Re2427 - prod;
++	local ov:1 = sborrow(Re2427, prod);
++	flags64(ov, result);
++	Re2831 = result;
+ }
+ @endif
+ 
+@@ -5295,14 +5575,17 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MSUB.H E[c], E[d], D[a], D[b] UL, n (RRR1)
+ :msub.h Ree2831/Reo2831,Ree2427/Reo2427,Rd0811,Rd1215^"ul",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0xa3 ; Ree2427 & Reo2427 & Ree2831 & Reo2831 & const1617Z & op1823=0x18
+ {
+-	local mres1:4;
+-	local mres0:4;
+-	packed_multiply_ul(mres1, mres0, Rd0811, Rd1215, const1617Z);
+-	local result1:4 = Reo2427 - mres1;
+-	local result0:4 = Ree2427 - mres0;
+-	Reo2831 = result1;
+-	Ree2831 = result0;
+-	overflowflagsww(result1, result0);
++	local w1:4;
++	local w0:4;
++	hmul4(w1, Rd0811[16,16], Rd1215[16,16], const1617Z);
++	hmul4(w0, Rd0811[0,16], Rd1215[0,16], const1617Z);
++	local rw1:8 = sext(Reo2427) - sext(w1);
++	local rw0:8 = sext(Ree2427) - sext(w0);
++	local ov1:1 = rw1 != sext(rw1:4);
++	local ov0:1 = rw0 != sext(rw0:4);
++	Reo2831 = rw1:4;
++	Ree2831 = rw0:4;
++	flagsww(ov1, rw1:4, ov0, rw0:4);
+ }
+ @endif
+ 
+@@ -5310,14 +5593,17 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MSUB.H E[c], E[d], D[a], D[b] LU, n (RRR1)
+ :msub.h Ree2831/Reo2831,Ree2427/Reo2427,Rd0811,Rd1215^"lu",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0xa3 ; Ree2427 & Reo2427 & Ree2831 & Reo2831 & const1617Z & op1823=0x19
+ {
+-	local mres1:4;
+-	local mres0:4;
+-	packed_multiply_lu(mres1, mres0, Rd0811, Rd1215, const1617Z);
+-	local result1:4 = Reo2427 - mres1;
+-	local result0:4 = Ree2427 - mres0;
+-	Reo2831 = result1;
+-	Ree2831 = result0;
+-	overflowflagsww(result1, result0);
++	local w1:4;
++	local w0:4;
++	hmul4(w1, Rd0811[16,16], Rd1215[0,16], const1617Z);
++	hmul4(w0, Rd0811[0,16], Rd1215[16,16], const1617Z);
++	local rw1:8 = sext(Reo2427) - sext(w1);
++	local rw0:8 = sext(Ree2427) - sext(w0);
++	local ov1:1 = rw1 != sext(rw1:4);
++	local ov0:1 = rw0 != sext(rw0:4);
++	Reo2831 = rw1:4;
++	Ree2831 = rw0:4;
++	flagsww(ov1, rw1:4, ov0, rw0:4);
+ }
+ @endif
+ 
+@@ -5325,14 +5611,17 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MSUB.H E[c], E[d], D[a], D[b] LL, n (RRR1)
+ :msub.h Ree2831/Reo2831,Ree2427/Reo2427,Rd0811,Rd1215^"ll",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0xa3 ; Ree2427 & Reo2427 & Ree2831 & Reo2831 & const1617Z & op1823=0x1a
+ {
+-	local mres1:4;
+-	local mres0:4;
+-	packed_multiply_ll(mres1, mres0, Rd0811, Rd1215, const1617Z);
+-	local result1:4 = Reo2427 - mres1;
+-	local result0:4 = Ree2427 - mres0;
+-	Reo2831 = result1;
+-	Ree2831 = result0;
+-	overflowflagsww(result1, result0);
++	local w1:4;
++	local w0:4;
++	hmul4(w1, Rd0811[16,16], Rd1215[0,16], const1617Z);
++	hmul4(w0, Rd0811[0,16], Rd1215[0,16], const1617Z);
++	local rw1:8 = sext(Reo2427) - sext(w1);
++	local rw0:8 = sext(Ree2427) - sext(w0);
++	local ov1:1 = rw1 != sext(rw1:4);
++	local ov0:1 = rw0 != sext(rw0:4);
++	Reo2831 = rw1:4;
++	Ree2831 = rw0:4;
++	flagsww(ov1, rw1:4, ov0, rw0:4);
+ }
+ @endif
+ 
+@@ -5340,14 +5629,17 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MSUB.H E[c], E[d], D[a], D[b] UU, n (RRR1)
+ :msub.h Ree2831/Reo2831,Ree2427/Reo2427,Rd0811,Rd1215^"uu",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0xa3 ; Ree2427 & Reo2427 & Ree2831 & Reo2831 & const1617Z & op1823=0x1b
+ {
+-	local mres1:4;
+-	local mres0:4;
+-	packed_multiply_uu(mres1, mres0, Rd0811, Rd1215, const1617Z);
+-	local result1:4 = Reo2427 - mres1;
+-	local result0:4 = Ree2427 - mres0;
+-	Reo2831 = result1;
+-	Ree2831 = result0;
+-	overflowflagsww(result1, result0);
++	local w1:4;
++	local w0:4;
++	hmul4(w1, Rd0811[0,16], Rd1215[16,16], const1617Z);
++	hmul4(w0, Rd0811[16,16], Rd1215[16,16], const1617Z);
++	local rw1:8 = sext(Reo2427) - sext(w1);
++	local rw0:8 = sext(Ree2427) - sext(w0);
++	local ov1:1 = rw1 != sext(rw1:4);
++	local ov0:1 = rw0 != sext(rw0:4);
++	Reo2831 = rw1:4;
++	Ree2831 = rw0:4;
++	flagsww(ov1, rw1:4, ov0, rw0:4);
+ }
+ @endif
+ 
+@@ -5355,10 +5647,12 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MSUB.Q D[c], D[d], D[a] U, D[b] U, n (RRR1)
+ :msub.q Rd2831,Rd2427,Rd0811^"u",Rd1215^"u",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0x63 ; Rd2427 & Rd2831 & const1617Z & op1823=0x4
+ {
+-	local mres:4;
+-	multiply_u_u(mres, Rd0811, Rd1215, const1617Z);
+-	Rd2831 = Rd2427 - mres;
+-	overflowflags(Rd2831);
++	local t:8;
++	hmul(t, Rd0811[16,16], Rd1215[16,16], const1617Z);
++	local result:8 = sext(Rd2427) - t;
++	local ov:1 = result != sext(result:4);
++	flags32(ov, result:4);
++	Rd2831 = result:4;
+ }
+ @endif
+ 
+@@ -5366,8 +5660,13 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MSUB.Q D[c], D[d], D[a], D[b] U, n (RRR1)
+ :msub.q Rd2831,Rd2427,Rd0811,Rd1215^"u",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0x63 ; Rd2427 & Rd2831 & const1617Z & op1823=0x0
+ {
+-	Rd2831 = Rd2427 - (((Rd0811 * sext(Rd1215[16,16])) << const1617Z) s>> 16);
+-	overflowflags(Rd2831);
++	local t:8 = sext(Rd0811) * sext(Rd1215[16,16]);
++	t = t << const1617Z;
++	t = t s>> 16;
++	local result:8 = sext(Rd2427) - t;
++	local ov:1 = result != sext(result:4);
++	flags32(ov, result:4);
++	Rd2831 = result:4;
+ }
+ @endif
+ 
+@@ -5375,8 +5674,13 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MSUB.Q D[c], D[d], D[a], D[b] L, n (RRR1)
+ :msub.q Rd2831,Rd2427,Rd0811,Rd1215^"l",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0x63 ; Rd2427 & Rd2831 & const1617Z & op1823=0x1
+ {
+-	Rd2831 = Rd2427 - (((Rd0811 * sext(Rd1215[0,16])) << const1617Z) s>> 16);
+-	overflowflags(Rd2831);
++	local t:8 = sext(Rd0811) * sext(Rd1215[0,16]);
++	t = t << const1617Z;
++	t = t s>> 16;
++	local result:8 = sext(Rd2427) - t;
++	local ov:1 = result != sext(result:4);
++	flags32(ov, result:4);
++	Rd2831 = result:4;
+ }
+ @endif
+ 
+@@ -5384,8 +5688,13 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MSUB.Q D[c], D[d], D[a], D[b], n (RRR1)
+ :msub.q Rd2831,Rd2427,Rd0811,Rd1215,const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0x63 ; Rd2427 & Rd2831 & const1617Z & op1823=0x2
+ {
+-	Rd2831 = Rd2427 - (((Rd0811 * Rd1215) << const1617Z) s>> 32);
+-	overflowflags(Rd2831);
++	local t:8 = sext(Rd0811) * sext(Rd1215);
++	t = t << const1617Z;
++	t = t s>> 32;
++	local result:8 = sext(Rd2427) - t;
++	local ov:1 = result != sext(result:4);
++	flags32(ov, result:4);
++	Rd2831 = result:4;
+ }
+ @endif
+ 
+@@ -5393,10 +5702,12 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MSUB.Q D[c], D[d], D[a] L, D[b] L, n (RRR1)
+ :msub.q Rd2831,Rd2427,Rd0811^"l",Rd1215^"l",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0x63 ; Rd2427 & Rd2831 & const1617Z & op1823=0x5
+ {
+-	local mres:4;
+-	multiply_l_l(mres, Rd0811, Rd1215, const1617Z);
+-	Rd2831 = Rd2427 - mres;
+-	overflowflags(Rd2831);
++	local t:8;
++	hmul(t, Rd0811[0,16], Rd1215[0,16], const1617Z);
++	local result:8 = sext(Rd2427) - t;
++	local ov:1 = result != sext(result:4);
++	flags32(ov, result:4);
++	Rd2831 = result:4;
+ }
+ @endif
+ 
+@@ -5404,8 +5715,13 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MSUB.Q E[c], E[d], D[a], D[b] U, n (RRR1)
+ :msub.q Re2831,Re2427,Rd0811,Rd1215^"u",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0x63 ; Re2427 & Re2831 & const1617Z & op1823=0x18
+ {
+-	Re2831 = Re2427 - sext((Rd0811 * sext(Rd1215[16,16])) << const1617Z);
+-	overflowflagsd(Re2831);
++	local t:8 = sext(Rd0811) * sext(Rd1215[16,16]);
++	t = t << const1617Z;
++	local tov:1 = t == 0x8000000000000000;
++	local result:8 = Re2427 - t;
++	local ov:1 = sborrow(Re2427, t) ^ tov;
++	flags64(ov, result);
++	Re2831 = result;
+ }
+ @endif
+ 
+@@ -5413,8 +5729,13 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MSUB.Q E[c], E[d], D[a], D[b] L, n (RRR1)
+ :msub.q Re2831,Re2427,Rd0811,Rd1215^"l",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0x63 ; Re2427 & Re2831 & const1617Z & op1823=0x19
+ {
+-	Re2831 = Re2427 - sext((Rd0811 * sext(Rd1215[0,16])) << const1617Z);
+-	overflowflagsd(Re2831);
++	local t:8 = sext(Rd0811) * sext(Rd1215[0,16]);
++	t = t << const1617Z;
++	local tov:1 = t == 0x8000000000000000;
++	local result:8 = Re2427 - t;
++	local ov:1 = sborrow(Re2427, t) ^ tov;
++	flags64(ov, result);
++	Re2831 = result;
+ }
+ @endif
+ 
+@@ -5422,8 +5743,13 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MSUB.Q E[c], E[d], D[a], D[b], n (RRR1)
+ :msub.q Re2831,Re2427,Rd0811,Rd1215,const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0x63 ; Re2427 & Re2831 & const1617Z & op1823=0x1b
+ {
+-	Re2831 = Re2427 - sext((Rd0811 * Rd1215) << const1617Z);
+-	overflowflagsd(Re2831);
++	local t:8 = sext(Rd0811) * sext(Rd1215);
++	t = t << const1617Z;
++	local tov:1 = t == 0x8000000000000000;
++	local result:8 = Re2427 - t;
++	local ov:1 = sborrow(Re2427, t) ^ tov;
++	flags64(ov, result);
++	Re2831 = result;
+ }
+ @endif
+ 
+@@ -5431,10 +5757,14 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MSUB.Q E[c], E[d], D[a] U, D[b] U, n (RRR1)
+ :msub.q Re2831,Re2427,Rd0811^"u",Rd1215^"u",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0x63 ; Re2427 & Re2831 & const1617Z & op1823=0x1c
+ {
+-	local mres:4;
+-	multiply_u_u(mres, Rd0811, Rd1215, const1617Z);
+-	Re2831 = Re2427 - sext(mres << 16);
+-	overflowflagsd(Re2831);
++	local t:8;
++	hmul(t, Rd0811[16,16], Rd1215[16,16], const1617Z);
++	t = t << 16;
++	local tov:1 = t == 0x8000000000000000;
++	local result:8 = Re2427 - t;
++	local ov:1 = sborrow(Re2427, t) ^ tov;
++	flags64(ov, result);
++	Re2831 = result;
+ }
+ @endif
+ 
+@@ -5442,10 +5772,14 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # SUB.Q E[c], E[d], D[a] L, D[b] L, n (RRR1)
+ :msub.q Re2831,Re2427,Rd0811^"l",Rd1215^"l",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0x63 ; Re2427 & Re2831 & const1617Z & op1823=0x1d
+ {
+-	local mres:4;
+-	multiply_l_l(mres, Rd0811, Rd1215, const1617Z);
+-	Re2831 = Re2427 - sext(mres << 16);
+-	overflowflagsd(Re2831);
++	local t:8;
++	hmul(t, Rd0811[0,16], Rd1215[0,16], const1617Z);
++	t = t << 16;
++	local tov:1 = t == 0x8000000000000000;
++	local result:8 = Re2427 - t;
++	local ov:1 = sborrow(Re2427, t) ^ tov;
++	flags64(ov, result);
++	Re2831 = result;
+ }
+ @endif
+ 
+@@ -5453,8 +5787,11 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MSUB.U E[c], E[d], D[a], const9 (RCR)
+ :msub.u Re2831,Re2427,Rd0811,const1220Z is PCPMode=0 & ( Rd0811 & op0007=0x33 ; Re2427 & Re2831 & op2123=0x2 ) & const1220Z
+ {
+-	Re2831 = Re2427 - zext(Rd0811 * const1220Z);
+-	overflowflagsd(Re2831);
++	local prod:8 = zext(Rd0811) * zext(const1220Z);
++	local result:8 = Re2427 - prod;
++	local ov:1 = Re2427 < prod;
++	flags64(ov, result);
++	Re2831 = result;
+ }
+ @endif
+ 
+@@ -5462,8 +5799,11 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MSUB.U E[c], E[d], D[a], D[b] (RRR2)
+ :msub.u Re2831,Re2427,Rd0811,Rd1215 is PCPMode=0 & Rd0811 & Rd1215 & op0007=0x23 ; Re2427 & Re2831 & op1623=0x68
+ {
+-	Re2831 = Re2427 - zext(Rd0811 * Rd1215);
+-	overflowflagsd(Re2831);
++	local prod:8 = zext(Rd0811) * zext(Rd1215);
++	local result:8 = Re2427 - prod;
++	local ov:1 = Re2427 < prod;
++	flags64(ov, result);
++	Re2831 = result;
+ }
+ @endif
+ 
+@@ -5471,14 +5811,17 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MSUBAD.H E[c], E[d], D[a], D[b] UL, n (RRR1)
+ :msubad.h Ree2831/Reo2831,Ree2427/Reo2427,Rd0811,Rd1215^"ul",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0xe3 ; Ree2427 & Reo2427 & Ree2831 & Reo2831 & const1617Z & op1823=0x18
+ {
+-	local mres1:4;
+-	local mres0:4;
+-	packed_multiply_ul(mres1, mres0, Rd0811, Rd1215, const1617Z);
+-	local res1:4 = Reo2427 - mres1;
+-	local res0:4 = Ree2427 + mres0;
+-	Reo2831 = res1;
+-	Ree2831 = res0;
+-	overflowflagsww(res1, res0);
++	local w1:4;
++	local w0:4;
++	hmul4(w1, Rd0811[16,16], Rd1215[16,16], const1617Z);
++	hmul4(w0, Rd0811[0,16], Rd1215[0,16], const1617Z);
++	local rw1:8 = sext(Reo2427) - sext(w1);
++	local rw0:8 = sext(Ree2427) + sext(w0);
++	local ov1:1 = rw1 != sext(rw1:4);
++	local ov0:1 = rw0 != sext(rw0:4);
++	Reo2831 = rw1:4;
++	Ree2831 = rw0:4;
++	flagsww(ov1, rw1:4, ov0, rw0:4);
+ }
+ @endif
+ 
+@@ -5486,14 +5829,17 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MSUBAD.H E[c], E[d], D[a], D[b] LU, n (RRR1)
+ :msubad.h Ree2831/Reo2831,Ree2427/Reo2427,Rd0811,Rd1215^"lu",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0xe3 ; Ree2427 & Reo2427 & Ree2831 & Reo2831 & const1617Z & op1823=0x19
+ {
+-	local mres1:4;
+-	local mres0:4;
+-	packed_multiply_lu(mres1, mres0, Rd0811, Rd1215, const1617Z);
+-	local res1:4 = Reo2427 - mres1;
+-	local res0:4 = Ree2427 + mres0;
+-	Reo2831 = res1;
+-	Ree2831 = res0;
+-	overflowflagsww(res1, res0);
++	local w1:4;
++	local w0:4;
++	hmul4(w1, Rd0811[16,16], Rd1215[0,16], const1617Z);
++	hmul4(w0, Rd0811[0,16], Rd1215[16,16], const1617Z);
++	local rw1:8 = sext(Reo2427) - sext(w1);
++	local rw0:8 = sext(Ree2427) + sext(w0);
++	local ov1:1 = rw1 != sext(rw1:4);
++	local ov0:1 = rw0 != sext(rw0:4);
++	Reo2831 = rw1:4;
++	Ree2831 = rw0:4;
++	flagsww(ov1, rw1:4, ov0, rw0:4);
+ }
+ @endif
+ 
+@@ -5501,14 +5847,17 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MSUBAD.H E[c], E[d], D[a], D[b] LL, n (RRR1)
+ :msubad.h Ree2831/Reo2831,Ree2427/Reo2427,Rd0811,Rd1215^"ll",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0xe3 ; Ree2427 & Reo2427 & Ree2831 & Reo2831 & const1617Z & op1823=0x1a
+ {
+-	local mres1:4;
+-	local mres0:4;
+-	packed_multiply_ll(mres1, mres0, Rd0811, Rd1215, const1617Z);
+-	local res1:4 = Reo2427 - mres1;
+-	local res0:4 = Ree2427 + mres0;
+-	Reo2831 = res1;
+-	Ree2831 = res0;
+-	overflowflagsww(res1, res0);
++	local w1:4;
++	local w0:4;
++	hmul4(w1, Rd0811[16,16], Rd1215[0,16], const1617Z);
++	hmul4(w0, Rd0811[0,16], Rd1215[0,16], const1617Z);
++	local rw1:8 = sext(Reo2427) - sext(w1);
++	local rw0:8 = sext(Ree2427) + sext(w0);
++	local ov1:1 = rw1 != sext(rw1:4);
++	local ov0:1 = rw0 != sext(rw0:4);
++	Reo2831 = rw1:4;
++	Ree2831 = rw0:4;
++	flagsww(ov1, rw1:4, ov0, rw0:4);
+ }
+ @endif
+ 
+@@ -5516,14 +5865,17 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MSUBAD.H E[c], E[d], D[a], D[b] UU, n (RRR1)
+ :msubad.h Ree2831/Reo2831,Ree2427/Reo2427,Rd0811,Rd1215^"uu",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0xe3 ; Ree2427 & Reo2427 & Ree2831 & Reo2831 & const1617Z & op1823=0x1b
+ {
+-	local mres1:4;
+-	local mres0:4;
+-	packed_multiply_uu(mres1, mres0, Rd0811, Rd1215, const1617Z);
+-	local res1:4 = Reo2427 - mres1;
+-	local res0:4 = Ree2427 + mres0;
+-	Reo2831 = res1;
+-	Ree2831 = res0;
+-	overflowflagsww(res1, res0);
++	local w1:4;
++	local w0:4;
++	hmul4(w1, Rd0811[0,16], Rd1215[16,16], const1617Z);
++	hmul4(w0, Rd0811[16,16], Rd1215[16,16], const1617Z);
++	local rw1:8 = sext(Reo2427) - sext(w1);
++	local rw0:8 = sext(Ree2427) + sext(w0);
++	local ov1:1 = rw1 != sext(rw1:4);
++	local ov0:1 = rw0 != sext(rw0:4);
++	Reo2831 = rw1:4;
++	Ree2831 = rw0:4;
++	flagsww(ov1, rw1:4, ov0, rw0:4);
+ }
+ @endif
+ 
+@@ -5531,11 +5883,15 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MSUBADM.H E[c], E[d], D[a], D[b] UL, n (RRR1)
+ :msubadm.h Re2831,Re2427,Rd0811,Rd1215^"ul",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0xe3 ; Re2427 & Re2831 & const1617Z & op1823=0x1c
+ {
+-	local mres1:4;
+-	local mres0:4;
+-	packed_multiply_ul(mres1, mres0, Rd0811, Rd1215, const1617Z);
+-	Re2831 = Re2427 - sext((mres1 - mres0) << 16);
+-	overflowflagsd(Re2831);
++	local w1:4;
++	local w0:4;
++	hmul4(w1, Rd0811[16,16], Rd1215[16,16], const1617Z);
++	hmul4(w0, Rd0811[0,16], Rd1215[0,16], const1617Z);
++	local s:8 = (sext(w1) - sext(w0)) << 16;
++	local result:8 = Re2427 - s;
++	local ov:1 = sborrow(Re2427, s);
++	flags64(ov, result);
++	Re2831 = result;
+ }
+ @endif
+ 
+@@ -5543,11 +5899,15 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MSUBADM.H E[c], E[d], D[a], D[b] LU, n (RRR1)
+ :msubadm.h Re2831,Re2427,Rd0811,Rd1215^"lu",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0xe3 ; Re2427 & Re2831 & const1617Z & op1823=0x1d
+ {
+-	local mres1:4;
+-	local mres0:4;
+-	packed_multiply_lu(mres1, mres0, Rd0811, Rd1215, const1617Z);
+-	Re2831 = Re2427 - sext((mres1 - mres0) << 16);
+-	overflowflagsd(Re2831);
++	local w1:4;
++	local w0:4;
++	hmul4(w1, Rd0811[16,16], Rd1215[0,16], const1617Z);
++	hmul4(w0, Rd0811[0,16], Rd1215[16,16], const1617Z);
++	local s:8 = (sext(w1) - sext(w0)) << 16;
++	local result:8 = Re2427 - s;
++	local ov:1 = sborrow(Re2427, s);
++	flags64(ov, result);
++	Re2831 = result;
+ }
+ @endif
+ 
+@@ -5555,11 +5915,15 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MSUBADM.H E[c], E[d], D[a], D[b] LL, n (RRR1)
+ :msubadm.h Re2831,Re2427,Rd0811,Rd1215^"ll",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0xe3 ; Re2427 & Re2831 & const1617Z & op1823=0x1e
+ {
+-	local mres1:4;
+-	local mres0:4;
+-	packed_multiply_ll(mres1, mres0, Rd0811, Rd1215, const1617Z);
+-	Re2831 = Re2427 - sext((mres1 - mres0) << 16);
+-	overflowflagsd(Re2831);
++	local w1:4;
++	local w0:4;
++	hmul4(w1, Rd0811[16,16], Rd1215[0,16], const1617Z);
++	hmul4(w0, Rd0811[0,16], Rd1215[0,16], const1617Z);
++	local s:8 = (sext(w1) - sext(w0)) << 16;
++	local result:8 = Re2427 - s;
++	local ov:1 = sborrow(Re2427, s);
++	flags64(ov, result);
++	Re2831 = result;
+ }
+ @endif
+ 
+@@ -5567,11 +5931,15 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MSUBADM.H E[c], E[d], D[a], D[b] UU, n (RRR1)
+ :msubadm.h Re2831,Re2427,Rd0811,Rd1215^"uu",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0xe3 ; Re2427 & Re2831 & const1617Z & op1823=0x1f
+ {
+-	local mres1:4;
+-	local mres0:4;
+-	packed_multiply_uu(mres1, mres0, Rd0811, Rd1215, const1617Z);
+-	Re2831 = Re2427 - sext((mres1 - mres0) << 16);
+-	overflowflagsd(Re2831);
++	local w1:4;
++	local w0:4;
++	hmul4(w1, Rd0811[0,16], Rd1215[16,16], const1617Z);
++	hmul4(w0, Rd0811[16,16], Rd1215[16,16], const1617Z);
++	local s:8 = (sext(w1) - sext(w0)) << 16;
++	local result:8 = Re2427 - s;
++	local ov:1 = sborrow(Re2427, s);
++	flags64(ov, result);
++	Re2831 = result;
+ }
+ @endif
+ 
+@@ -5579,12 +5947,16 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MSUBADMS.H E[c], E[d], D[a], D[b] UL, n (RRR1)
+ :msubadms.h Re2831,Re2427,Rd0811,Rd1215^"ul",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0xe3 ; Re2427 & Re2831 & const1617Z & op1823=0x3c
+ {
+-	local mres1:4;
+-	local mres0:4;
+-	packed_multiply_ul(mres1, mres0, Rd0811, Rd1215, const1617Z);
+-	local result:8 = Re2427 - sext((mres1 - mres0) << 16);
+-	overflowflagsd(result);
+-	ssov(Re2831, result, 64);
++	local w1:4;
++	local w0:4;
++	hmul4(w1, Rd0811[16,16], Rd1215[16,16], const1617Z);
++	hmul4(w0, Rd0811[0,16], Rd1215[0,16], const1617Z);
++	local s:8 = (sext(w1) - sext(w0)) << 16;
++	local result:8 = Re2427 - s;
++	local ov:1 = sborrow(Re2427, s);
++	flags64(ov, result);
++	local neg:1 = Re2427 s< 0;
++	Re2831 = (result * zext(ov == 0)) + (zext(ov != 0) * (0x7fffffffffffffff + zext(neg)));
+ }
+ @endif
+ 
+@@ -5592,12 +5964,16 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MSUBADMS.H E[c], E[d], D[a], D[b] LU, n (RRR1)
+ :msubadms.h Re2831,Re2427,Rd0811,Rd1215^"lu",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0xe3 ; Re2427 & Re2831 & const1617Z & op1823=0x3d
+ {
+-	local mres1:4;
+-	local mres0:4;
+-	packed_multiply_lu(mres1, mres0, Rd0811, Rd1215, const1617Z);
+-	local result:8 = Re2427 - sext((mres1 - mres0) << 16);
+-	overflowflagsd(result);
+-	ssov(Re2831, result, 64);
++	local w1:4;
++	local w0:4;
++	hmul4(w1, Rd0811[16,16], Rd1215[0,16], const1617Z);
++	hmul4(w0, Rd0811[0,16], Rd1215[16,16], const1617Z);
++	local s:8 = (sext(w1) - sext(w0)) << 16;
++	local result:8 = Re2427 - s;
++	local ov:1 = sborrow(Re2427, s);
++	flags64(ov, result);
++	local neg:1 = Re2427 s< 0;
++	Re2831 = (result * zext(ov == 0)) + (zext(ov != 0) * (0x7fffffffffffffff + zext(neg)));
+ }
+ @endif
+ 
+@@ -5605,12 +5981,16 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MSUBADMS.H E[c], E[d], D[a], D[b] LL, n (RRR1)
+ :msubadms.h Re2831,Re2427,Rd0811,Rd1215^"ll",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0xe3 ; Re2427 & Re2831 & const1617Z & op1823=0x3e
+ {
+-	local mres1:4;
+-	local mres0:4;
+-	packed_multiply_ll(mres1, mres0, Rd0811, Rd1215, const1617Z);
+-	local result:8 = Re2427 - sext((mres1 - mres0) << 16);
+-	overflowflagsd(result);
+-	ssov(Re2831, result, 64);
++	local w1:4;
++	local w0:4;
++	hmul4(w1, Rd0811[16,16], Rd1215[0,16], const1617Z);
++	hmul4(w0, Rd0811[0,16], Rd1215[0,16], const1617Z);
++	local s:8 = (sext(w1) - sext(w0)) << 16;
++	local result:8 = Re2427 - s;
++	local ov:1 = sborrow(Re2427, s);
++	flags64(ov, result);
++	local neg:1 = Re2427 s< 0;
++	Re2831 = (result * zext(ov == 0)) + (zext(ov != 0) * (0x7fffffffffffffff + zext(neg)));
+ }
+ @endif
+ 
+@@ -5618,12 +5998,16 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MSUBADMS.H E[c], E[d], D[a], D[b] UU, n (RRR1)
+ :msubadms.h Re2831,Re2427,Rd0811,Rd1215^"uu",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0xe3 ; Re2427 & Re2831 & const1617Z & op1823=0x3f
+ {
+-	local mres1:4;
+-	local mres0:4;
+-	packed_multiply_uu(mres1, mres0, Rd0811, Rd1215, const1617Z);
+-	local result:8 = Re2427 - sext((mres1 - mres0) << 16);
+-	overflowflagsd(result);
+-	ssov(Re2831, result, 64);
++	local w1:4;
++	local w0:4;
++	hmul4(w1, Rd0811[0,16], Rd1215[16,16], const1617Z);
++	hmul4(w0, Rd0811[16,16], Rd1215[16,16], const1617Z);
++	local s:8 = (sext(w1) - sext(w0)) << 16;
++	local result:8 = Re2427 - s;
++	local ov:1 = sborrow(Re2427, s);
++	flags64(ov, result);
++	local neg:1 = Re2427 s< 0;
++	Re2831 = (result * zext(ov == 0)) + (zext(ov != 0) * (0x7fffffffffffffff + zext(neg)));
+ }
+ @endif
+ 
+@@ -5750,14 +6134,19 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MSUBADS.H E[c], E[d], D[a], D[b] UL, n (RRR1)
+ :msubads.h Ree2831/Reo2831,Ree2427/Reo2427,Rd0811,Rd1215^"ul",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0xe3 ; Ree2427 & Reo2427 & Ree2831 & Reo2831 & const1617Z & op1823=0x38
+ {
+-	local mres1:4;
+-	local mres0:4;
+-	packed_multiply_ul(mres1, mres0, Rd0811, Rd1215, const1617Z);
+-	local res1:4 = Reo2427 - mres1;
+-	local res0:4 = Ree2427 + mres0;
+-	overflowflagsww(res1, res0);
+-	ssov(Reo2831, res1, 32);
+-	ssov(Ree2831, res0, 32);
++	local w1:4;
++	local w0:4;
++	hmul4(w1, Rd0811[16,16], Rd1215[16,16], const1617Z);
++	hmul4(w0, Rd0811[0,16], Rd1215[0,16], const1617Z);
++	local rw1:8 = sext(Reo2427) - sext(w1);
++	local rw0:8 = sext(Ree2427) + sext(w0);
++	local ov1:1 = rw1 != sext(rw1:4);
++	local ov0:1 = rw0 != sext(rw0:4);
++	local neg1:1 = rw1 s< 0;
++	local neg0:1 = rw0 s< 0;
++	Reo2831 = (rw1:4 * zext(ov1 == 0)) + (zext(ov1 != 0) * (0x7fffffff + zext(neg1)));
++	Ree2831 = (rw0:4 * zext(ov0 == 0)) + (zext(ov0 != 0) * (0x7fffffff + zext(neg0)));
++	flagsww(ov1, rw1:4, ov0, rw0:4);
+ }
+ @endif
+ 
+@@ -5765,14 +6154,19 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MSUBADS.H E[c], E[d], D[a], D[b] LU, n (RRR1)
+ :msubads.h Ree2831/Reo2831,Ree2427/Reo2427,Rd0811,Rd1215^"lu",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0xe3 ; Ree2427 & Reo2427 & Ree2831 & Reo2831 & const1617Z & op1823=0x39
+ {
+-	local mres1:4;
+-	local mres0:4;
+-	packed_multiply_lu(mres1, mres0, Rd0811, Rd1215, const1617Z);
+-	local res1:4 = Reo2427 - mres1;
+-	local res0:4 = Ree2427 + mres0;
+-	overflowflagsww(res1, res0);
+-	ssov(Reo2831, res1, 32);
+-	ssov(Ree2831, res0, 32);
++	local w1:4;
++	local w0:4;
++	hmul4(w1, Rd0811[16,16], Rd1215[0,16], const1617Z);
++	hmul4(w0, Rd0811[0,16], Rd1215[16,16], const1617Z);
++	local rw1:8 = sext(Reo2427) - sext(w1);
++	local rw0:8 = sext(Ree2427) + sext(w0);
++	local ov1:1 = rw1 != sext(rw1:4);
++	local ov0:1 = rw0 != sext(rw0:4);
++	local neg1:1 = rw1 s< 0;
++	local neg0:1 = rw0 s< 0;
++	Reo2831 = (rw1:4 * zext(ov1 == 0)) + (zext(ov1 != 0) * (0x7fffffff + zext(neg1)));
++	Ree2831 = (rw0:4 * zext(ov0 == 0)) + (zext(ov0 != 0) * (0x7fffffff + zext(neg0)));
++	flagsww(ov1, rw1:4, ov0, rw0:4);
+ }
+ @endif
+ 
+@@ -5780,14 +6174,19 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MSUBADS.H E[c], E[d], D[a], D[b] LL, n (RRR1)
+ :msubads.h Ree2831/Reo2831,Ree2427/Reo2427,Rd0811,Rd1215^"ll",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0xe3 ; Ree2427 & Reo2427 & Ree2831 & Reo2831 & const1617Z & op1823=0x3a
+ {
+-	local mres1:4;
+-	local mres0:4;
+-	packed_multiply_ll(mres1, mres0, Rd0811, Rd1215, const1617Z);
+-	local res1:4 = Reo2427 - mres1;
+-	local res0:4 = Ree2427 + mres0;
+-	overflowflagsww(res1, res0);
+-	ssov(Reo2831, res1, 32);
+-	ssov(Ree2831, res0, 32);
++	local w1:4;
++	local w0:4;
++	hmul4(w1, Rd0811[16,16], Rd1215[0,16], const1617Z);
++	hmul4(w0, Rd0811[0,16], Rd1215[0,16], const1617Z);
++	local rw1:8 = sext(Reo2427) - sext(w1);
++	local rw0:8 = sext(Ree2427) + sext(w0);
++	local ov1:1 = rw1 != sext(rw1:4);
++	local ov0:1 = rw0 != sext(rw0:4);
++	local neg1:1 = rw1 s< 0;
++	local neg0:1 = rw0 s< 0;
++	Reo2831 = (rw1:4 * zext(ov1 == 0)) + (zext(ov1 != 0) * (0x7fffffff + zext(neg1)));
++	Ree2831 = (rw0:4 * zext(ov0 == 0)) + (zext(ov0 != 0) * (0x7fffffff + zext(neg0)));
++	flagsww(ov1, rw1:4, ov0, rw0:4);
+ }
+ @endif
+ 
+@@ -5795,14 +6194,19 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MSUBADS.H E[c], E[d], D[a], D[b] UU, n (RRR1)
+ :msubads.h Ree2831/Reo2831,Ree2427/Reo2427,Rd0811,Rd1215^"uu",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0xe3 ; Ree2427 & Reo2427 & Ree2831 & Reo2831 & const1617Z & op1823=0x3b
+ {
+-	local mres1:4;
+-	local mres0:4;
+-	packed_multiply_uu(mres1, mres0, Rd0811, Rd1215, const1617Z);
+-	local res1:4 = Reo2427 - mres1;
+-	local res0:4 = Ree2427 + mres0;
+-	overflowflagsww(res1, res0);
+-	ssov(Reo2831, res1, 32);
+-	ssov(Ree2831, res0, 32);
++	local w1:4;
++	local w0:4;
++	hmul4(w1, Rd0811[0,16], Rd1215[16,16], const1617Z);
++	hmul4(w0, Rd0811[16,16], Rd1215[16,16], const1617Z);
++	local rw1:8 = sext(Reo2427) - sext(w1);
++	local rw0:8 = sext(Ree2427) + sext(w0);
++	local ov1:1 = rw1 != sext(rw1:4);
++	local ov0:1 = rw0 != sext(rw0:4);
++	local neg1:1 = rw1 s< 0;
++	local neg0:1 = rw0 s< 0;
++	Reo2831 = (rw1:4 * zext(ov1 == 0)) + (zext(ov1 != 0) * (0x7fffffff + zext(neg1)));
++	Ree2831 = (rw0:4 * zext(ov0 == 0)) + (zext(ov0 != 0) * (0x7fffffff + zext(neg0)));
++	flagsww(ov1, rw1:4, ov0, rw0:4);
+ }
+ @endif
+ 
+@@ -5810,12 +6214,15 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MSUBM.H E[c], E[d], D[a], D[b] UL, n (RRR1)
+ :msubm.h Re2831,Re2427,Rd0811,Rd1215^"ul",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0xa3 ; Re2427 & Re2831 & const1617Z & op1823=0x1c
+ {
+-	local mres1:4;
+-	local mres0:4;
+-	packed_multiply_ul(mres1, mres0, Rd0811, Rd1215, const1617Z);
+-	local res:8 = Re2427 - (sext(mres1 + mres0) << 16);
+-	overflowflagsd(res);
+-	Re2831 = res;
++	local w1:4;
++	local w0:4;
++	hmul4(w1, Rd0811[16,16], Rd1215[16,16], const1617Z);
++	hmul4(w0, Rd0811[0,16], Rd1215[0,16], const1617Z);
++	local s:8 = (sext(w1) + sext(w0)) << 16;
++	local result:8 = Re2427 - s;
++	local ov:1 = sborrow(Re2427, s);
++	flags64(ov, result);
++	Re2831 = result;
+ }
+ @endif
+ 
+@@ -5823,12 +6230,15 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MSUBM.H E[c], E[d], D[a], D[b] LU, n (RRR1)
+ :msubm.h Re2831,Re2427,Rd0811,Rd1215^"lu",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0xa3 ; Re2427 & Re2831 & const1617Z & op1823=0x1d
+ {
+-	local mres1:4;
+-	local mres0:4;
+-	packed_multiply_lu(mres1, mres0, Rd0811, Rd1215, const1617Z);
+-	local res:8 = Re2427 - (sext(mres1 + mres0) << 16);
+-	overflowflagsd(res);
+-	Re2831 = res;
++	local w1:4;
++	local w0:4;
++	hmul4(w1, Rd0811[16,16], Rd1215[0,16], const1617Z);
++	hmul4(w0, Rd0811[0,16], Rd1215[16,16], const1617Z);
++	local s:8 = (sext(w1) + sext(w0)) << 16;
++	local result:8 = Re2427 - s;
++	local ov:1 = sborrow(Re2427, s);
++	flags64(ov, result);
++	Re2831 = result;
+ }
+ @endif
+ 
+@@ -5836,12 +6246,15 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MSUBM.H E[c], E[d], D[a], D[b] LL, n (RRR1)
+ :msubm.h Re2831,Re2427,Rd0811,Rd1215^"ll",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0xa3 ; Re2427 & Re2831 & const1617Z & op1823=0x1e
+ {
+-	local mres1:4;
+-	local mres0:4;
+-	packed_multiply_ll(mres1, mres0, Rd0811, Rd1215, const1617Z);
+-	local res:8 = Re2427 - (sext(mres1 + mres0) << 16);
+-	overflowflagsd(res);
+-	Re2831 = res;
++	local w1:4;
++	local w0:4;
++	hmul4(w1, Rd0811[16,16], Rd1215[0,16], const1617Z);
++	hmul4(w0, Rd0811[0,16], Rd1215[0,16], const1617Z);
++	local s:8 = (sext(w1) + sext(w0)) << 16;
++	local result:8 = Re2427 - s;
++	local ov:1 = sborrow(Re2427, s);
++	flags64(ov, result);
++	Re2831 = result;
+ }
+ @endif
+ 
+@@ -5849,12 +6262,15 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MSUBM.H E[c], E[d], D[a], D[b] UU, n (RRR1)
+ :msubm.h Re2831,Re2427,Rd0811,Rd1215^"uu",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0xa3 ; Re2427 & Re2831 & const1617Z & op1823=0x1f
+ {
+-	local mres1:4;
+-	local mres0:4;
+-	packed_multiply_uu(mres1, mres0, Rd0811, Rd1215, const1617Z);
+-	local res:8 = Re2427 - (sext(mres1 + mres0) << 16);
+-	overflowflagsd(res);
+-	Re2831 = res;
++	local w1:4;
++	local w0:4;
++	hmul4(w1, Rd0811[0,16], Rd1215[16,16], const1617Z);
++	hmul4(w0, Rd0811[16,16], Rd1215[16,16], const1617Z);
++	local s:8 = (sext(w1) + sext(w0)) << 16;
++	local result:8 = Re2427 - s;
++	local ov:1 = sborrow(Re2427, s);
++	flags64(ov, result);
++	Re2831 = result;
+ }
+ @endif
+ 
+@@ -5862,12 +6278,16 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MSUBMS.H E[c], E[d], D[a], D[b] UL, n (RRR1)
+ :msubms.h Re2831,Re2427,Rd0811,Rd1215^"ul",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0xa3 ; Re2427 & Re2831 & const1617Z & op1823=0x3c
+ {
+-	local mres1:4;
+-	local mres0:4;
+-	packed_multiply_ul(mres1, mres0, Rd0811, Rd1215, const1617Z);
+-	local res:8 = Re2427 - (sext(mres1 + mres0) << 16);
+-	overflowflagsd(res);
+-	ssov(Re2427, res, 64);
++	local w1:4;
++	local w0:4;
++	hmul4(w1, Rd0811[16,16], Rd1215[16,16], const1617Z);
++	hmul4(w0, Rd0811[0,16], Rd1215[0,16], const1617Z);
++	local s:8 = (sext(w1) + sext(w0)) << 16;
++	local result:8 = Re2427 - s;
++	local ov:1 = sborrow(Re2427, s);
++	flags64(ov, result);
++	local neg:1 = Re2427 s< 0;
++	Re2831 = (result * zext(ov == 0)) + (zext(ov != 0) * (0x7fffffffffffffff + zext(neg)));
+ }
+ @endif
+ 
+@@ -5875,12 +6295,16 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MSUBMS.H E[c], E[d], D[a], D[b] LU, n (RRR1)
+ :msubms.h Re2831,Re2427,Rd0811,Rd1215^"lu",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0xa3 ; Re2427 & Re2831 & const1617Z & op1823=0x3d
+ {
+-	local mres1:4;
+-	local mres0:4;
+-	packed_multiply_lu(mres1, mres0, Rd0811, Rd1215, const1617Z);
+-	local res:8 = Re2427 - (sext(mres1 + mres0) << 16);
+-	overflowflagsd(res);
+-	ssov(Re2427, res, 64);
++	local w1:4;
++	local w0:4;
++	hmul4(w1, Rd0811[16,16], Rd1215[0,16], const1617Z);
++	hmul4(w0, Rd0811[0,16], Rd1215[16,16], const1617Z);
++	local s:8 = (sext(w1) + sext(w0)) << 16;
++	local result:8 = Re2427 - s;
++	local ov:1 = sborrow(Re2427, s);
++	flags64(ov, result);
++	local neg:1 = Re2427 s< 0;
++	Re2831 = (result * zext(ov == 0)) + (zext(ov != 0) * (0x7fffffffffffffff + zext(neg)));
+ }
+ @endif
+ 
+@@ -5888,12 +6312,16 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MSUBMS.H E[c], E[d], D[a], D[b] LL, n (RRR1)
+ :msubms.h Re2831,Re2427,Rd0811,Rd1215^"ll",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0xa3 ; Re2427 & Re2831 & const1617Z & op1823=0x3e
+ {
+-	local mres1:4;
+-	local mres0:4;
+-	packed_multiply_ll(mres1, mres0, Rd0811, Rd1215, const1617Z);
+-	local res:8 = Re2427 - (sext(mres1 + mres0) << 16);
+-	overflowflagsd(res);
+-	ssov(Re2427, res, 64);
++	local w1:4;
++	local w0:4;
++	hmul4(w1, Rd0811[16,16], Rd1215[0,16], const1617Z);
++	hmul4(w0, Rd0811[0,16], Rd1215[0,16], const1617Z);
++	local s:8 = (sext(w1) + sext(w0)) << 16;
++	local result:8 = Re2427 - s;
++	local ov:1 = sborrow(Re2427, s);
++	flags64(ov, result);
++	local neg:1 = Re2427 s< 0;
++	Re2831 = (result * zext(ov == 0)) + (zext(ov != 0) * (0x7fffffffffffffff + zext(neg)));
+ }
+ @endif
+ 
+@@ -5901,12 +6329,16 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MSUBMS.H E[c], E[d], D[a], D[b] UU, n (RRR1)
+ :msubms.h Re2831,Re2427,Rd0811,Rd1215^"uu",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0xa3 ; Re2427 & Re2831 & const1617Z & op1823=0x3f
+ {
+-	local mres1:4;
+-	local mres0:4;
+-	packed_multiply_uu(mres1, mres0, Rd0811, Rd1215, const1617Z);
+-	local res:8 = Re2427 - (sext(mres1 + mres0) << 16);
+-	overflowflagsd(res);
+-	ssov(Re2427, res, 64);
++	local w1:4;
++	local w0:4;
++	hmul4(w1, Rd0811[0,16], Rd1215[16,16], const1617Z);
++	hmul4(w0, Rd0811[16,16], Rd1215[16,16], const1617Z);
++	local s:8 = (sext(w1) + sext(w0)) << 16;
++	local result:8 = Re2427 - s;
++	local ov:1 = sborrow(Re2427, s);
++	flags64(ov, result);
++	local neg:1 = Re2427 s< 0;
++	Re2831 = (result * zext(ov == 0)) + (zext(ov != 0) * (0x7fffffffffffffff + zext(neg)));
+ }
+ @endif
+ 
+@@ -6113,26 +6545,33 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MSUBS D[c], D[d], D[a], D[b] (RRR2)
+ :msubs Rd2831,Rd2427,Rd0811,Rd1215 is PCPMode=0 & Rd0811 & Rd1215 & op0007=0x23 ; Rd2427 & Rd2831 & op1623=0x8a
+ {
+-	Rd2831 = Rd2427 - (Rd0811 - Rd1215);
+-	overflowflags(Rd2831);
+-	ssov(Rd2831, Rd2831, 32);
++	local result:8 = sext(Rd2427) - (sext(Rd0811) * sext(Rd1215));
++	local ov:1 = result != sext(result:4);
++	flags32(ov, result:4);
++	local neg:1 = result s< 0;
++	Rd2831 = (result:4 * zext(ov == 0)) + (zext(ov != 0) * (0x7fffffff + zext(neg)));
+ }
+ 
+ # MSUBS D[c], D[d], D[a], const9 (RCR)
+ :msubs Rd2831,Rd2427,Rd0811,const1220S is PCPMode=0 & ( Rd0811 & op0007=0x33 ; Rd2427 & Rd2831 & op2123=0x5 ) & const1220S
+ {
+-	local result:4 = Rd2427 - (Rd0811 - const1220S);
+-	overflowflags(result);
+-	ssov(Rd2831, result, 32);
++	local result:8 = sext(Rd2427) - (sext(Rd0811) * sext(const1220S));
++	local ov:1 = result != sext(result:4);
++	flags32(ov, result:4);
++	local neg:1 = result s< 0;
++	Rd2831 = (result:4 * zext(ov == 0)) + (zext(ov != 0) * (0x7fffffff + zext(neg)));
+ }
+ 
+ @if defined(TRICORE_RIDER_B) || defined(TRICORE_RIDER_D) || defined(TRICORE_V2)
+ # MSUBS E[c], E[d], D[a], const9 (RCR)
+ :msubs Re2831,Re2427,Rd0811,const1220S is PCPMode=0 & ( Rd0811 & op0007=0x33 ; Re2427 & Re2831 & op2123=0x7 ) & const1220S
+ {
+-	local result:8 = Re2427 - sext(Rd0811 - const1220S);
+-	overflowflagsd(result);
+-	ssov(Re2831, result, 64);
++	local prod:8 = sext(Rd0811) * sext(const1220S);
++	local result:8 = Re2427 - prod;
++	local ov:1 = sborrow(Re2427, prod);
++	flags64(ov, result);
++	local neg:1 = Re2427 s< 0;
++	Re2831 = (result * zext(ov == 0)) + (zext(ov != 0) * (0x7fffffffffffffff + zext(neg)));
+ }
+ @endif
+ 
+@@ -6140,9 +6579,12 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MSUBS E[c], E[d], D[a], D[b] (RRR2)
+ :msubs Re2831,Re2427,Rd0811,Rd1215 is PCPMode=0 & Rd0811 & Rd1215 & op0007=0x23 ; Re2427 & Re2831 & op1623=0xea
+ {
+-	local result:8 = Re2427 - sext(Rd0811 - Rd1215);
+-	overflowflags(result);
+-	ssov(Re2831, result, 64);
++	local prod:8 = sext(Rd0811) * sext(Rd1215);
++	local result:8 = Re2427 - prod;
++	local ov:1 = sborrow(Re2427, prod);
++	flags64(ov, result);
++	local neg:1 = Re2427 s< 0;
++	Re2831 = (result * zext(ov == 0)) + (zext(ov != 0) * (0x7fffffffffffffff + zext(neg)));
+ }
+ @endif
+ 
+@@ -6150,14 +6592,19 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MSUBS.H E[c], E[d], D[a], D[b] UL, n (RRR1)
+ :msubs.h Ree2831/Reo2831,Ree2427/Reo2427,Rd0811,Rd1215^"ul",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0xa3 ; Ree2427 & Reo2427 & Ree2831 & Reo2831 & const1617Z & op1823=0x38
+ {
+-	local mres1:4;
+-	local mres0:4;
+-	packed_multiply_ul(mres1, mres0, Rd0811, Rd1215, const1617Z);
+-	local res1:4 = Reo2427 - mres1;
+-	local res0:4 = Ree2427 - mres0;
+-	overflowflagsww(res1, res0);
+-	ssov(Reo2831, res1, 32);
+-	ssov(Ree2831, res0, 32);
++	local w1:4;
++	local w0:4;
++	hmul4(w1, Rd0811[16,16], Rd1215[16,16], const1617Z);
++	hmul4(w0, Rd0811[0,16], Rd1215[0,16], const1617Z);
++	local rw1:8 = sext(Reo2427) - sext(w1);
++	local rw0:8 = sext(Ree2427) - sext(w0);
++	local ov1:1 = rw1 != sext(rw1:4);
++	local ov0:1 = rw0 != sext(rw0:4);
++	local neg1:1 = rw1 s< 0;
++	local neg0:1 = rw0 s< 0;
++	Reo2831 = (rw1:4 * zext(ov1 == 0)) + (zext(ov1 != 0) * (0x7fffffff + zext(neg1)));
++	Ree2831 = (rw0:4 * zext(ov0 == 0)) + (zext(ov0 != 0) * (0x7fffffff + zext(neg0)));
++	flagsww(ov1, rw1:4, ov0, rw0:4);
+ }
+ @endif
+ 
+@@ -6165,14 +6612,19 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MSUBS.H E[c], E[d], D[a], D[b] LU, n (RRR1)
+ :msubs.h Ree2831/Reo2831,Ree2427/Reo2427,Rd0811,Rd1215^"lu",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0xa3 ; Ree2427 & Reo2427 & Ree2831 & Reo2831 & const1617Z & op1823=0x39
+ {
+-	local mres1:4;
+-	local mres0:4;
+-	packed_multiply_lu(mres1, mres0, Rd0811, Rd1215, const1617Z);
+-	local res1:4 = Reo2427 - mres1;
+-	local res0:4 = Ree2427 - mres0;
+-	overflowflagsww(res1, res0);
+-	ssov(Reo2831, res1, 32);
+-	ssov(Ree2831, res0, 32);
++	local w1:4;
++	local w0:4;
++	hmul4(w1, Rd0811[16,16], Rd1215[0,16], const1617Z);
++	hmul4(w0, Rd0811[0,16], Rd1215[16,16], const1617Z);
++	local rw1:8 = sext(Reo2427) - sext(w1);
++	local rw0:8 = sext(Ree2427) - sext(w0);
++	local ov1:1 = rw1 != sext(rw1:4);
++	local ov0:1 = rw0 != sext(rw0:4);
++	local neg1:1 = rw1 s< 0;
++	local neg0:1 = rw0 s< 0;
++	Reo2831 = (rw1:4 * zext(ov1 == 0)) + (zext(ov1 != 0) * (0x7fffffff + zext(neg1)));
++	Ree2831 = (rw0:4 * zext(ov0 == 0)) + (zext(ov0 != 0) * (0x7fffffff + zext(neg0)));
++	flagsww(ov1, rw1:4, ov0, rw0:4);
+ }
+ @endif
+ 
+@@ -6180,14 +6632,19 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MSUBS.H E[c], E[d], D[a], D[b] LL, n (RRR1)
+ :msubs.h Ree2831/Reo2831,Ree2427/Reo2427,Rd0811,Rd1215^"ll",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0xa3 ; Ree2427 & Reo2427 & Ree2831 & Reo2831 & const1617Z & op1823=0x3a
+ {
+-	local mres1:4;
+-	local mres0:4;
+-	packed_multiply_ll(mres1, mres0, Rd0811, Rd1215, const1617Z);
+-	local res1:4 = Reo2427 - mres1;
+-	local res0:4 = Ree2427 - mres0;
+-	overflowflagsww(res1, res0);
+-	ssov(Reo2831, res1, 32);
+-	ssov(Ree2831, res0, 32);
++	local w1:4;
++	local w0:4;
++	hmul4(w1, Rd0811[16,16], Rd1215[0,16], const1617Z);
++	hmul4(w0, Rd0811[0,16], Rd1215[0,16], const1617Z);
++	local rw1:8 = sext(Reo2427) - sext(w1);
++	local rw0:8 = sext(Ree2427) - sext(w0);
++	local ov1:1 = rw1 != sext(rw1:4);
++	local ov0:1 = rw0 != sext(rw0:4);
++	local neg1:1 = rw1 s< 0;
++	local neg0:1 = rw0 s< 0;
++	Reo2831 = (rw1:4 * zext(ov1 == 0)) + (zext(ov1 != 0) * (0x7fffffff + zext(neg1)));
++	Ree2831 = (rw0:4 * zext(ov0 == 0)) + (zext(ov0 != 0) * (0x7fffffff + zext(neg0)));
++	flagsww(ov1, rw1:4, ov0, rw0:4);
+ }
+ @endif
+ 
+@@ -6195,14 +6652,19 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MSUBS.H E[c], E[d], D[a], D[b] UU, n (RRR1)
+ :msubs.h Ree2831/Reo2831,Ree2427/Reo2427,Rd0811,Rd1215^"uu",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0xa3 ; Ree2427 & Reo2427 & Ree2831 & Reo2831 & const1617Z & op1823=0x3b
+ {
+-	local mres1:4;
+-	local mres0:4;
+-	packed_multiply_uu(mres1, mres0, Rd0811, Rd1215, const1617Z);
+-	local res1:4 = Reo2427 - mres1;
+-	local res0:4 = Ree2427 - mres0;
+-	overflowflagsww(res1, res0);
+-	ssov(Reo2831, res1, 32);
+-	ssov(Ree2831, res0, 32);
++	local w1:4;
++	local w0:4;
++	hmul4(w1, Rd0811[0,16], Rd1215[16,16], const1617Z);
++	hmul4(w0, Rd0811[16,16], Rd1215[16,16], const1617Z);
++	local rw1:8 = sext(Reo2427) - sext(w1);
++	local rw0:8 = sext(Ree2427) - sext(w0);
++	local ov1:1 = rw1 != sext(rw1:4);
++	local ov0:1 = rw0 != sext(rw0:4);
++	local neg1:1 = rw1 s< 0;
++	local neg0:1 = rw0 s< 0;
++	Reo2831 = (rw1:4 * zext(ov1 == 0)) + (zext(ov1 != 0) * (0x7fffffff + zext(neg1)));
++	Ree2831 = (rw0:4 * zext(ov0 == 0)) + (zext(ov0 != 0) * (0x7fffffff + zext(neg0)));
++	flagsww(ov1, rw1:4, ov0, rw0:4);
+ }
+ @endif
+ 
+@@ -6210,11 +6672,13 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MSUBS.Q D[c], D[d], D[a] U, D[b] U, n (RRR1)
+ :msubs.q Rd2831,Rd2427,Rd0811^"u",Rd1215^"u",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0x63 ; Rd2427 & Rd2831 & const1617Z & op1823=0x24
+ {
+-	local mres:4;
+-	multiply_u_u(mres, Rd0811, Rd1215, const1617Z);
+-	local res:4 = Rd2427 - mres;
+-	overflowflags(res);
+-	ssov(Rd2831, res, 32);
++	local t:8;
++	hmul(t, Rd0811[16,16], Rd1215[16,16], const1617Z);
++	local result:8 = sext(Rd2427) - t;
++	local ov:1 = result != sext(result:4);
++	flags32(ov, result:4);
++	local neg:1 = result s< 0;
++	Rd2831 = (result:4 * zext(ov == 0)) + (zext(ov != 0) * (0x7fffffff + zext(neg)));
+ }
+ @endif
+ 
+@@ -6222,9 +6686,14 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MSUBS.Q D[c], D[d], D[a], D[b] U, n (RRR1)
+ :msubs.q Rd2831,Rd2427,Rd0811,Rd1215^"u",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0x63 ; Rd2427 & Rd2831 & const1617Z & op1823=0x20
+ {
+-	local result:4 = Rd2427 - (((Rd0811 * sext(Rd1215[16,16])) << const1617Z) s>> 16);
+-	overflowflags(result);
+-	ssov(Rd2831, result, 32);
++	local t:8 = sext(Rd0811) * sext(Rd1215[16,16]);
++	t = t << const1617Z;
++	t = t s>> 16;
++	local result:8 = sext(Rd2427) - t;
++	local ov:1 = result != sext(result:4);
++	flags32(ov, result:4);
++	local neg:1 = result s< 0;
++	Rd2831 = (result:4 * zext(ov == 0)) + (zext(ov != 0) * (0x7fffffff + zext(neg)));
+ }
+ @endif
+ 
+@@ -6232,9 +6701,14 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MSUBS.Q D[c], D[d], D[a], D[b] L, n (RRR1)
+ :msubs.q Rd2831,Rd2427,Rd0811,Rd1215^"l",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0x63 ; Rd2427 & Rd2831 & const1617Z & op1823=0x21
+ {
+-	local result:4 = Rd2427 - (((Rd0811 * sext(Rd1215[0,16])) << const1617Z) s>> 16);
+-	overflowflags(result);
+-	ssov(Rd2831, result, 32);
++	local t:8 = sext(Rd0811) * sext(Rd1215[0,16]);
++	t = t << const1617Z;
++	t = t s>> 16;
++	local result:8 = sext(Rd2427) - t;
++	local ov:1 = result != sext(result:4);
++	flags32(ov, result:4);
++	local neg:1 = result s< 0;
++	Rd2831 = (result:4 * zext(ov == 0)) + (zext(ov != 0) * (0x7fffffff + zext(neg)));
+ }
+ @endif
+ 
+@@ -6242,9 +6716,14 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MSUBS.Q D[c], D[d], D[a], D[b], n (RRR1)
+ :msubs.q Rd2831,Rd2427,Rd0811,Rd1215,const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0x63 ; Rd2427 & Rd2831 & const1617Z & op1823=0x22
+ {
+-	local result:4 = Rd2427 - (((Rd0811 * Rd1215) << const1617Z) s>> 32);
+-	overflowflags(result);
+-	ssov(Rd2831, result, 32);
++	local t:8 = sext(Rd0811) * sext(Rd1215);
++	t = t << const1617Z;
++	t = t s>> 32;
++	local result:8 = sext(Rd2427) - t;
++	local ov:1 = result != sext(result:4);
++	flags32(ov, result:4);
++	local neg:1 = result s< 0;
++	Rd2831 = (result:4 * zext(ov == 0)) + (zext(ov != 0) * (0x7fffffff + zext(neg)));
+ }
+ @endif
+ 
+@@ -6252,11 +6731,13 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MSUBS.Q D[c], D[d], D[a] L, D[b] L, n (RRR1)
+ :msubs.q Rd2831,Rd2427,Rd0811^"l",Rd1215^"l",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0x63 ; Rd2427 & Rd2831 & const1617Z & op1823=0x25
+ {
+-	local mres:4;
+-	multiply_l_l(mres, Rd0811, Rd1215, const1617Z);
+-	local res:4 = Rd2427 - mres;
+-	overflowflags(res);
+-	ssov(Rd2831, res, 32);
++	local t:8;
++	hmul(t, Rd0811[0,16], Rd1215[0,16], const1617Z);
++	local result:8 = sext(Rd2427) - t;
++	local ov:1 = result != sext(result:4);
++	flags32(ov, result:4);
++	local neg:1 = result s< 0;
++	Rd2831 = (result:4 * zext(ov == 0)) + (zext(ov != 0) * (0x7fffffff + zext(neg)));
+ }
+ @endif
+ 
+@@ -6264,9 +6745,14 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MSUBS.Q E[c], E[d], D[a], D[b] U, n (RRR1)
+ :msubs.q Re2831,Re2427,Rd0811,Rd1215^"u",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0x63 ; Re2427 & Re2831 & const1617Z & op1823=0x38
+ {
+-	local result:8 = Re2427 - sext((Rd0811 * sext(Rd1215[16,16])) << const1617Z);
+-	overflowflagsd(result);
+-	ssov(Re2831, result, 64);
++	local t:8 = sext(Rd0811) * sext(Rd1215[16,16]);
++	t = t << const1617Z;
++	local tov:1 = t == 0x8000000000000000;
++	local result:8 = Re2427 - t;
++	local ov:1 = sborrow(Re2427, t) ^ tov;
++	flags64(ov, result);
++	local neg:1 = tov | (Re2427 s< 0);
++	Re2831 = (result * zext(ov == 0)) + (zext(ov != 0) * (0x7fffffffffffffff + zext(neg)));
+ }
+ @endif
+ 
+@@ -6274,9 +6760,14 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MSUBS.Q E[c], E[d], D[a], D[b] L, n (RRR1)
+ :msubs.q Re2831,Re2427,Rd0811,Rd1215^"l",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0x63 ; Re2427 & Re2831 & const1617Z & op1823=0x39
+ {
+-	local result:8 = Re2427 - sext((Rd0811 * sext(Rd1215[0,16])) << const1617Z);
+-	overflowflagsd(result);
+-	ssov(Re2831, result, 64);
++	local t:8 = sext(Rd0811) * sext(Rd1215[0,16]);
++	t = t << const1617Z;
++	local tov:1 = t == 0x8000000000000000;
++	local result:8 = Re2427 - t;
++	local ov:1 = sborrow(Re2427, t) ^ tov;
++	flags64(ov, result);
++	local neg:1 = tov | (Re2427 s< 0);
++	Re2831 = (result * zext(ov == 0)) + (zext(ov != 0) * (0x7fffffffffffffff + zext(neg)));
+ }
+ @endif
+ 
+@@ -6284,9 +6775,14 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MSUBS.Q E[c], E[d], D[a], D[b], n (RRR1)
+ :msubs.q Re2831,Re2427,Rd0811,Rd1215,const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0x63 ; Re2427 & Re2831 & const1617Z & op1823=0x3b
+ {
+-	local result:8 = Re2427 - sext((Rd0811 * Rd1215) << const1617Z);
+-	overflowflagsd(result);
+-	ssov(Re2831, result, 64);
++	local t:8 = sext(Rd0811) * sext(Rd1215);
++	t = t << const1617Z;
++	local tov:1 = t == 0x8000000000000000;
++	local result:8 = Re2427 - t;
++	local ov:1 = sborrow(Re2427, t) ^ tov;
++	flags64(ov, result);
++	local neg:1 = tov | (Re2427 s< 0);
++	Re2831 = (result * zext(ov == 0)) + (zext(ov != 0) * (0x7fffffffffffffff + zext(neg)));
+ }
+ @endif
+ 
+@@ -6294,11 +6790,15 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MSUBS.Q E[c], E[d], D[a] U, D[b] U, n (RRR1)
+ :msubs.q Re2831,Re2427,Rd0811^"u",Rd1215^"u",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0x63 ; Re2427 & Re2831 & const1617Z & op1823=0x3c
+ {
+-	local mres:4;
+-	multiply_u_u(mres, Rd0811, Rd1215, const1617Z);
+-	local res:8 = Re2427 - sext(mres << 16);
+-	overflowflagsd(res);
+-	ssov(Re2831, res, 64);
++	local t:8;
++	hmul(t, Rd0811[16,16], Rd1215[16,16], const1617Z);
++	t = t << 16;
++	local tov:1 = t == 0x8000000000000000;
++	local result:8 = Re2427 - t;
++	local ov:1 = sborrow(Re2427, t) ^ tov;
++	flags64(ov, result);
++	local neg:1 = tov | (Re2427 s< 0);
++	Re2831 = (result * zext(ov == 0)) + (zext(ov != 0) * (0x7fffffffffffffff + zext(neg)));
+ }
+ @endif
+ 
+@@ -6306,37 +6806,45 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MSUBS.Q E[c], E[d], D[a] L, D[b] L, n (RRR1)
+ :msubs.q Re2831,Re2427,Rd0811^"l",Rd1215^"l",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0x63 ; Re2427 & Re2831 & const1617Z & op1823=0x3d
+ {
+-	local mres:4;
+-	multiply_l_l(mres, Rd0811, Rd1215, const1617Z);
+-	local res:8 = Re2427 - sext(mres << 16);
+-	overflowflagsd(res);
+-	ssov(Re2831, res, 64);
++	local t:8;
++	hmul(t, Rd0811[0,16], Rd1215[0,16], const1617Z);
++	t = t << 16;
++	local tov:1 = t == 0x8000000000000000;
++	local result:8 = Re2427 - t;
++	local ov:1 = sborrow(Re2427, t) ^ tov;
++	flags64(ov, result);
++	local neg:1 = tov | (Re2427 s< 0);
++	Re2831 = (result * zext(ov == 0)) + (zext(ov != 0) * (0x7fffffffffffffff + zext(neg)));
+ }
+ @endif
+ 
+ # MSUBS.U D[c], D[d], D[a], const9 (RCR)
+ :msubs.u Rd2831,Rd2427,Rd0811,const1220Z is PCPMode=0 & ( Rd0811 & op0007=0x33 ; Rd2427 & Rd2831 & op2123=0x4 ) & const1220Z
+ {
+-	local result:4 = Rd2427 - (Rd0811 - const1220Z);
+-	overflowflags(result);
+-	suov(Rd2831, result, 32);
++	local result:8 = zext(Rd2427) - (zext(Rd0811) * zext(const1220Z));
++	local ov:1 = (result > 0xffffffff) | (result s< 0);
++	flags32(ov, result:4);
++	Rd2831 = result:4 * zext(ov == 0);
+ }
+ 
+ # MSUBS.U D[c], D[d], D[a], D[b] (RRR2)
+ :msubs.u Rd2831,Rd2427,Rd0811,Rd1215 is PCPMode=0 & Rd0811 & Rd1215 & op0007=0x23 ; Rd2427 & Rd2831 & op1623=0x88
+ {
+-	local result:4 = Rd2427 - (Rd0811 - Rd1215);
+-	overflowflags(result);
+-	suov(Rd2831, result, 32);
++	local result:8 = zext(Rd2427) - (zext(Rd0811) * zext(Rd1215));
++	local ov:1 = (result > 0xffffffff) | (result s< 0);
++	flags32(ov, result:4);
++	Rd2831 = result:4 * zext(ov == 0);
+ }
+ 
+ @if defined(TRICORE_RIDER_B) || defined(TRICORE_RIDER_D) || defined(TRICORE_V2)
+ # MSUBS.U E[c], E[d], D[a], const9 (RCR)
+ :msubs.u Re2831,Re2427,Rd0811,const1220Z is PCPMode=0 & ( Rd0811 & op0007=0x33 ; Re2427 & Re2831 & op2123=0x6 ) & const1220Z
+ {
+-	local result:8 = Re2427 - zext(Rd0811 - const1220Z);
+-	overflowflagsd(result);
+-	ssov(Re2831, result, 64);
++	local prod:8 = zext(Rd0811) * zext(const1220Z);
++	local result:8 = Re2427 - prod;
++	local ov:1 = Re2427 < prod;
++	flags64(ov, result);
++	Re2831 = result * zext(ov == 0);
+ }
+ @endif
+ 
+@@ -6344,9 +6852,11 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MSUBS.U E[c], E[d], D[a], D[b] (RRR2)
+ :msubs.u Re2831,Re2427,Rd0811,Rd1215 is PCPMode=0 & Rd0811 & Rd1215 & op0007=0x23 ; Re2427 & Re2831 & op1623=0xe8
+ {
+-	local result:8 = Re2427 - zext(Rd0811 - Rd1215);
+-	overflowflagsd(result);
+-	ssov(Re2831, result, 64);
++	local prod:8 = zext(Rd0811) * zext(Rd1215);
++	local result:8 = Re2427 - prod;
++	local ov:1 = Re2427 < prod;
++	flags64(ov, result);
++	Re2831 = result * zext(ov == 0);
+ }
+ @endif
+ 
+@@ -6374,16 +6884,20 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MUL D[c], D[a], const9 (RC)
+ :mul Rd2831,Rd0811,const1220S is PCPMode=0 & ( Rd0811 & op0007=0x53 ; Rd2831 & op2127=0x1 ) & const1220S
+ {
+-	Rd2831 = Rd0811 * const1220S;
+-	overflowflags(Rd2831);
++	local result:8 = sext(Rd0811) * sext(const1220S);
++	local ov:1 = result != sext(result:4);
++	flags32(ov, result:4);
++	Rd2831 = result:4;
+ }
+ 
+ @if defined(TRICORE_RIDER_B) || defined(TRICORE_RIDER_D) || defined(TRICORE_V2)
+ # MUL D[c], D[a], D[b] (RR2)
+ :mul Rd2831,Rd0811,Rd1215 is PCPMode=0 & Rd0811 & Rd1215 & op0007=0x73 ; Rd2831 & op1627=0xa
+ {
+-	Rd2831 = Rd0811 * Rd1215;
+-	overflowflags(Rd2831);
++	local result:8 = sext(Rd0811) * sext(Rd1215);
++	local ov:1 = result != sext(result:4);
++	flags32(ov, result:4);
++	Rd2831 = result:4;
+ }
+ @endif
+ 
+@@ -6391,8 +6905,9 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MUL E[c], D[a], const9 (RC)
+ :mul Re2831,Rd0811,const1220S is PCPMode=0 & ( Rd0811 & op0007=0x53 ; Re2831 & op2127=0x3 ) & const1220S
+ {
+-	Re2831 = sext(Rd0811 * const1220S);
+-	overflowflagsd(Re2831);
++	local result:8 = sext(Rd0811) * sext(const1220S);
++	Re2831 = result;
++	flags64(0:1, result);
+ }
+ @endif
+ 
+@@ -6400,8 +6915,9 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MUL E[c], D[a], D[b] (RR2)
+ :mul Re2831,Rd0811,Rd1215 is PCPMode=0 & Rd0811 & Rd1215 & op0007=0x73 ; Re2831 & op1627=0x6a
+ {
+-	Re2831 = sext(Rd0811 * Rd1215);
+-	overflowflagsd(Re2831);
++	local result:8 = sext(Rd0811) * sext(Rd1215);
++	Re2831 = result;
++	flags64(0:1, result);
+ }
+ @endif
+ 
+@@ -6419,12 +6935,13 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MUL.H E[c], D[a], D[b] UL, n (RR1)
+ :mul.h Ree2831/Reo2831,Rd0811,Rd1215^"ul",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0xb3 ; Ree2831 & Reo2831 & const1617Z & op1827=0x18
+ {
+-	local mres1:4;
+-	local mres0:4;
+-	packed_multiply_ul(mres1, mres0, Rd0811, Rd1215, const1617Z);
+-	Reo2831 = mres1;
+-	Ree2831 = mres0;
+-	advoverflowflagsww(mres1, mres0);
++	local w1:4;
++	local w0:4;
++	hmul4(w1, Rd0811[16,16], Rd1215[16,16], const1617Z);
++	hmul4(w0, Rd0811[0,16], Rd1215[0,16], const1617Z);
++	Reo2831 = w1;
++	Ree2831 = w0;
++	advoverflowflagsww(w1, w0);
+ }
+ @endif
+ 
+@@ -6432,12 +6949,13 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MUL.H E[c], D[a], D[b] LU, n (RR1)
+ :mul.h Ree2831/Reo2831,Rd0811,Rd1215^"lu",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0xb3 ; Ree2831 & Reo2831 & const1617Z & op1827=0x19
+ {
+-	local mres1:4;
+-	local mres0:4;
+-	packed_multiply_lu(mres1, mres0, Rd0811, Rd1215, const1617Z);
+-	Reo2831 = mres1;
+-	Ree2831 = mres0;
+-	advoverflowflagsww(mres1, mres0);
++	local w1:4;
++	local w0:4;
++	hmul4(w1, Rd0811[16,16], Rd1215[0,16], const1617Z);
++	hmul4(w0, Rd0811[0,16], Rd1215[16,16], const1617Z);
++	Reo2831 = w1;
++	Ree2831 = w0;
++	advoverflowflagsww(w1, w0);
+ }
+ @endif
+ 
+@@ -6445,12 +6963,13 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MUL.H E[c], D[a], D[b] LL, n (RR1)
+ :mul.h Ree2831/Reo2831,Rd0811,Rd1215^"ll",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0xb3 ; Ree2831 & Reo2831 & const1617Z & op1827=0x1a
+ {
+-	local mres1:4;
+-	local mres0:4;
+-	packed_multiply_ll(mres1, mres0, Rd0811, Rd1215, const1617Z);
+-	Reo2831 = mres1;
+-	Ree2831 = mres0;
+-	advoverflowflagsww(mres1, mres0);
++	local w1:4;
++	local w0:4;
++	hmul4(w1, Rd0811[16,16], Rd1215[0,16], const1617Z);
++	hmul4(w0, Rd0811[0,16], Rd1215[0,16], const1617Z);
++	Reo2831 = w1;
++	Ree2831 = w0;
++	advoverflowflagsww(w1, w0);
+ }
+ @endif
+ 
+@@ -6458,12 +6977,13 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MUL.H E[c], D[a], D[b] UU, n (RR1)
+ :mul.h Ree2831/Reo2831,Rd0811,Rd1215^"uu",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0xb3 ; Ree2831 & Reo2831 & const1617Z & op1827=0x1b
+ {
+-	local mres1:4;
+-	local mres0:4;
+-	packed_multiply_uu(mres1, mres0, Rd0811, Rd1215, const1617Z);
+-	Reo2831 = mres1;
+-	Ree2831 = mres0;
+-	advoverflowflagsww(mres1, mres0);
++	local w1:4;
++	local w0:4;
++	hmul4(w1, Rd0811[0,16], Rd1215[16,16], const1617Z);
++	hmul4(w0, Rd0811[16,16], Rd1215[16,16], const1617Z);
++	Reo2831 = w1;
++	Ree2831 = w0;
++	advoverflowflagsww(w1, w0);
+ }
+ @endif
+ 
+@@ -6471,8 +6991,12 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MUL.Q D[c], D[a], D[b] U, n (RR1)
+ :mul.q Rd2831,Rd0811,Rd1215^"u",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0x93 ; Rd2831 & const1617Z & op1827=0x0
+ {
+-	Rd2831 = ((Rd0811 * sext(Rd1215[16,16])) << const1617Z) s>> 16;
+-	overflowflags(Rd2831);
++	local t:8 = sext(Rd0811) * sext(Rd1215[16,16]);
++	t = t << const1617Z;
++	t = t s>> 16;
++	local ov:1 = t != sext(t:4);
++	flags32(ov, t:4);
++	Rd2831 = t:4;
+ }
+ @endif
+ 
+@@ -6480,8 +7004,12 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MUL.Q D[c], D[a], D[b] L, n (RR1)
+ :mul.q Rd2831,Rd0811,Rd1215^"l",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0x93 ; Rd2831 & const1617Z & op1827=0x1
+ {
+-	Rd2831 = ((Rd0811 * sext(Rd1215[0,16])) << const1617Z) s>> 16;
+-	overflowflags(Rd2831);
++	local t:8 = sext(Rd0811) * sext(Rd1215[0,16]);
++	t = t << const1617Z;
++	t = t s>> 16;
++	local ov:1 = t != sext(t:4);
++	flags32(ov, t:4);
++	Rd2831 = t:4;
+ }
+ @endif
+ 
+@@ -6489,8 +7017,12 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MUL.Q D[c], D[a], D[b], n (RR1)
+ :mul.q Rd2831,Rd0811,Rd1215,const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0x93 ; Rd2831 & const1617Z & op1827=0x2
+ {
+-	Rd2831 = ((Rd0811 * Rd1215) << const1617Z) s>> 32;
+-	overflowflags(Rd2831);
++	local t:8 = sext(Rd0811) * sext(Rd1215);
++	t = t << const1617Z;
++	t = t s>> 32;
++	local ov:1 = t != sext(t:4);
++	flags32(ov, t:4);
++	Rd2831 = t:4;
+ }
+ @endif
+ 
+@@ -6498,10 +7030,11 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MUL.Q D[c], D[a] U, D[b] U, n (RR1)
+ :mul.q Rd2831,Rd0811^"u",Rd1215^"u",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0x93 ; Rd2831 & const1617Z & op1827=0x4
+ {
+-	local mres:4;
+-	multiply_u_u(mres, Rd0811, Rd1215, const1617Z);
+-	overflowflags(mres);
+-	Rd2831 = mres;
++	local t:8;
++	hmul(t, Rd0811[16,16], Rd1215[16,16], const1617Z);
++	local ov:1 = t != sext(t:4);
++	flags32(ov, t:4);
++	Rd2831 = t:4;
+ }
+ @endif
+ 
+@@ -6509,10 +7042,11 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MUL.Q D[c], D[a] L, D[b] L, n (RR1)
+ :mul.q Rd2831,Rd0811^"l",Rd1215^"l",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0x93 ; Rd2831 & const1617Z & op1827=0x5
+ {
+-	local mres:4;
+-	multiply_l_l(mres, Rd0811, Rd1215, const1617Z);
+-	overflowflags(mres);
+-	Rd2831 = mres;
++	local t:8;
++	hmul(t, Rd0811[0,16], Rd1215[0,16], const1617Z);
++	local ov:1 = t != sext(t:4);
++	flags32(ov, t:4);
++	Rd2831 = t:4;
+ }
+ @endif
+ 
+@@ -6520,8 +7054,11 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MUL.Q E[c], D[a], D[b] U, n (RR1)
+ :mul.q Re2831,Rd0811,Rd1215^"u",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0x93 ; Re2831 & const1617Z & op1827=0x18
+ {
+-	Re2831 = sext(Rd0811 * sext(Rd1215[16,16])) << const1617Z;
+-	overflowflagsd(Re2831);
++	local t:8 = sext(Rd0811) * sext(Rd1215[16,16]);
++	t = t << const1617Z;
++	Re2831 = t;
++	local ov:1 = t == 0x8000000000000000;
++	flags64(ov, t);
+ }
+ @endif
+ 
+@@ -6529,8 +7066,11 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MUL.Q E[c], D[a], D[b] L, n (RR1)
+ :mul.q Re2831,Rd0811,Rd1215^"l",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0x93 ; Re2831 & const1617Z & op1827=0x19
+ {
+-	Re2831 = sext(Rd0811 * sext(Rd1215[0,16])) << const1617Z;
+-	overflowflagsd(Re2831);
++	local t:8 = sext(Rd0811) * sext(Rd1215[0,16]);
++	t = t << const1617Z;
++	Re2831 = t;
++	local ov:1 = t == 0x8000000000000000;
++	flags64(ov, t);
+ }
+ @endif
+ 
+@@ -6538,8 +7078,11 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MUL.Q E[c], D[a], D[b], n (RR1)
+ :mul.q Re2831,Rd0811,Rd1215,const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0x93 ; Re2831 & const1617Z & op1827=0x1b
+ {
+-	Re2831 = sext(Rd0811 * Rd1215) << const1617Z;
+-	overflowflagsd(Re2831);
++	local t:8 = sext(Rd0811) * sext(Rd1215);
++	t = t << const1617Z;
++	Re2831 = t;
++	local ov:1 = t == 0x8000000000000000;
++	flags64(ov, t);
+ }
+ @endif
+ 
+@@ -6547,8 +7090,9 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MUL.U E[c], D[a], const9 (RC)
+ :mul.u Re2831,Rd0811,const1220Z is PCPMode=0 & ( Rd0811 & op0007=0x53 ; Re2831 & op2127=0x2 ) & const1220Z
+ {
+-	Re2831 = zext(Rd0811) * zext(const1220Z);
+-	overflowflagsd(Re2831);
++	local result:8 = zext(Rd0811) * zext(const1220Z);
++	Re2831 = result;
++	flags64(0:1, result);
+ }
+ @endif
+ 
+@@ -6556,8 +7100,9 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MUL.U E[c], D[a], D[b] (RR2)
+ :mul.u Re2831,Rd0811,Rd1215 is PCPMode=0 & Rd0811 & Rd1215 & op0007=0x73 ; Re2831 & op1627=0x68
+ {
+-	Re2831 = zext(Rd0811) * zext(Rd1215);
+-	overflowflagsd(Re2831);
++	local result:8 = zext(Rd0811) * zext(Rd1215);
++	Re2831 = result;
++	flags64(0:1, result);
+ }
+ @endif
+ 
+@@ -6565,10 +7110,11 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MULM.H E[c], D[a], D[b] UL, n (RR1)
+ :mulm.h Re2831,Rd0811,Rd1215^"ul",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0xb3 ; Re2831 & const1617Z & op1827=0x1c
+ {
+-	local mres1:4;
+-	local mres0:4;
+-	packed_multiply_ul(mres1, mres0, Rd0811, Rd1215, const1617Z);
+-	Re2831 = sext(mres1 + mres0) << 16;
++	local w1:4;
++	local w0:4;
++	hmul4(w1, Rd0811[16,16], Rd1215[16,16], const1617Z);
++	hmul4(w0, Rd0811[0,16], Rd1215[0,16], const1617Z);
++	Re2831 = (sext(w1) + sext(w0)) << 16;
+ 	$(PSW_V) = 0;
+ 	$(PSW_AV) = 0;
+ }
+@@ -6578,10 +7124,11 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MULM.H E[c], D[a], D[b] LU, n (RR1)
+ :mulm.h Re2831,Rd0811,Rd1215^"lu",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0xb3 ; Re2831 & const1617Z & op1827=0x1d
+ {
+-	local mres1:4;
+-	local mres0:4;
+-	packed_multiply_lu(mres1, mres0, Rd0811, Rd1215, const1617Z);
+-	Re2831 = sext(mres1 + mres0) << 16;
++	local w1:4;
++	local w0:4;
++	hmul4(w1, Rd0811[16,16], Rd1215[0,16], const1617Z);
++	hmul4(w0, Rd0811[0,16], Rd1215[16,16], const1617Z);
++	Re2831 = (sext(w1) + sext(w0)) << 16;
+ 	$(PSW_V) = 0;
+ 	$(PSW_AV) = 0;
+ }
+@@ -6591,10 +7138,11 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MULM.H E[c], D[a], D[b] LL, n (RR1)
+ :mulm.h Re2831,Rd0811,Rd1215^"ll",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0xb3 ; Re2831 & const1617Z & op1827=0x1e
+ {
+-	local mres1:4;
+-	local mres0:4;
+-	packed_multiply_ll(mres1, mres0, Rd0811, Rd1215, const1617Z);
+-	Re2831 = sext(mres1 + mres0) << 16;
++	local w1:4;
++	local w0:4;
++	hmul4(w1, Rd0811[16,16], Rd1215[0,16], const1617Z);
++	hmul4(w0, Rd0811[0,16], Rd1215[0,16], const1617Z);
++	Re2831 = (sext(w1) + sext(w0)) << 16;
+ 	$(PSW_V) = 0;
+ 	$(PSW_AV) = 0;
+ }
+@@ -6604,10 +7152,11 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MULM.H E[c], D[a], D[b] UU, n (RR1)
+ :mulm.h Re2831,Rd0811,Rd1215^"uu",const1617Z is PCPMode=0 & Rd0811 & Rd1215 & op0007=0xb3 ; Re2831 & const1617Z & op1827=0x1f
+ {
+-	local mres1:4;
+-	local mres0:4;
+-	packed_multiply_uu(mres1, mres0, Rd0811, Rd1215, const1617Z);
+-	Re2831 = sext(mres1 + mres0) << 16;
++	local w1:4;
++	local w0:4;
++	hmul4(w1, Rd0811[0,16], Rd1215[16,16], const1617Z);
++	hmul4(w0, Rd0811[16,16], Rd1215[16,16], const1617Z);
++	Re2831 = (sext(w1) + sext(w0)) << 16;
+ 	$(PSW_V) = 0;
+ 	$(PSW_AV) = 0;
+ }
+@@ -6700,36 +7249,42 @@ macro multiply_u_u(mres0, rega, regb, n) {
+ # MULS D[c], D[a], const9 (RC)
+ :muls Rd2831,Rd0811,const1220S is PCPMode=0 & ( Rd0811 & op0007=0x53 ; Rd2831 & op2127=0x5 ) & const1220S
+ {
+-	local result:4 = Rd0811 * const1220S;
+-	overflowflags(result);
+-	ssov(Rd2831, result, 32);
++	local result:8 = sext(Rd0811) * sext(const1220S);
++	local ov:1 = result != sext(result:4);
++	flags32(ov, result:4);
++	local neg:1 = result s< 0;
++	Rd2831 = (result:4 * zext(ov == 0)) + (zext(ov != 0) * (0x7fffffff + zext(neg)));
+ }
+ 
+ @if defined(TRICORE_RIDER_B) || defined(TRICORE_RIDER_D) || defined(TRICORE_V2)
+ # MULS D[c], D[a], D[b] (RR2)
+ :muls Rd2831,Rd0811,Rd1215 is PCPMode=0 & Rd0811 & Rd1215 & op0007=0x73 ; Rd2831 & op1627=0x8a
+ {
+-	local result:4 = Rd0811 * Rd1215;
+-	overflowflags(result);
+-	ssov(Rd2831, result, 32);
++	local result:8 = sext(Rd0811) * sext(Rd1215);
++	local ov:1 = result != sext(result:4);
++	flags32(ov, result:4);
++	local neg:1 = result s< 0;
++	Rd2831 = (result:4 * zext(ov == 0)) + (zext(ov != 0) * (0x7fffffff + zext(neg)));
+ }
+ @endif
+ 
+ # MULS.U D[c], D[a], const9 (RC)
+ :muls.u Rd2831,Rd0811,const1220Z is PCPMode=0 & ( Rd0811 & op0007=0x53 ; Rd2831 & op2127=0x4 ) & const1220Z
+ {
+-	local result:4 = Rd0811 * const1220Z;
+-	overflowflags(result);
+-	suov(Rd2831, result, 32);
++	local result:8 = zext(Rd0811) * zext(const1220Z);
++	local ov:1 = result > 0xffffffff;
++	flags32(ov, result:4);
++	Rd2831 = (result:4 * zext(ov == 0)) + (zext(ov != 0) * 0xffffffff);
+ }
+ 
+ @if defined(TRICORE_RIDER_B) || defined(TRICORE_RIDER_D) || defined(TRICORE_V2)
+ # MULS.U D[c], D[a], D[b] (RR2)
+ :muls.u Rd2831,Rd0811,Rd1215 is PCPMode=0 & Rd0811 & Rd1215 & op0007=0x73 ; Rd2831 & op1627=0x88
+ {
+-	local result:4 = Rd0811 * Rd1215;
+-	overflowflags(result);
+-	suov(Rd2831, result, 32);
++	local result:8 = zext(Rd0811) * zext(Rd1215);
++	local ov:1 = result > 0xffffffff;
++	flags32(ov, result:4);
++	Rd2831 = (result:4 * zext(ov == 0)) + (zext(ov != 0) * 0xffffffff);
+ }
+ @endif
+ 
+-- 
+2.45.1
+
