@@ -1,0 +1,75 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ash Pera <ashley.pera@noaa.gov>
+Date: Mon, 26 Oct 2026 20:41:34 -0600
+Subject: [PATCH] 10045: Fix MultiMemberAssign NullPointerException when a
+ member does not fit on the stack
+
+---
+ .../Features/Decompiler/src/decompile/cpp/modelrules.cc   | 2 ++
+ .../Decompiler/src/decompile/unittests/testparamstore.cc  | 8 ++++++++
+ .../program/model/lang/protorules/MultiMemberAssign.java  | 3 +++
+ .../program/model/lang/X64GoPrototypeModelTest.java       | 2 ++
+ 4 files changed, 15 insertions(+)
+
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/modelrules.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/modelrules.cc
+index 85434208b7..79c10a3add 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/modelrules.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/modelrules.cc
+@@ -1137,6 +1137,8 @@ uint4 MultiMemberAssign::assignAddress(Datatype *dt,const PrototypePieces &proto
+       const PrimitiveExtractor::Primitive &primitive(primitives.get(i));
+       if (resource->assignAddress(primitive.dt, proto, pos, tlist, tmpStatus,param) == fail)
+ 	return fail;
++      if (param.addr.isInvalid())	// No storage for member
++	return fail;
+       if (!consumeFromStack && stackEntry != (const ParamEntry *)0) {
+ 	if (before != tmpStatus[stackEntry->getGroup()])
+ 	  return fail;
+diff --git a/Ghidra/Features/Decompiler/src/decompile/unittests/testparamstore.cc b/Ghidra/Features/Decompiler/src/decompile/unittests/testparamstore.cc
+index 34443b988a..a5787b8c17 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/unittests/testparamstore.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/unittests/testparamstore.cc
+@@ -299,6 +299,14 @@ TEST(paramstore_x64_go) {
+   ASSERT(theEnviron.test(model, "float8 func(int8 a,int8 b[10])[5];", "stack58:40,RAX,stack8:80"));
+   ASSERT(theEnviron.test(model, "char func(char a[3],char b[7],int8 c)[5];", "stack18:5,stack8:3,stackb:7,RAX"));
+   ASSERT(theEnviron.test(model, "void func(float4 a,int8 b[1],int8 c[2]);","void,XMM0:4,RAX,stack8:16"));
++  theEnviron.parseType(model,"struct Buffer { char a[250]; char b; };");
++  bool sawUnassignedError = false;
++  try {
++    theEnviron.test(model, "void func(Buffer a,Buffer b);", "");	// b overflows the 500-byte stack entry
++  } catch(ParamUnassignedError &err) {
++    sawUnassignedError = true;
++  }
++  ASSERT(sawUnassignedError);
+ }
+ 
+ TEST(paramstore_ppc64be_stdcall) {
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/protorules/MultiMemberAssign.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/protorules/MultiMemberAssign.java
+index f2967536f9..ce8ae6562b 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/protorules/MultiMemberAssign.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/protorules/MultiMemberAssign.java
+@@ -123,6 +123,9 @@ public class MultiMemberAssign extends AssignAction {
+ 					param) == FAIL) {
+ 					return FAIL;
+ 				}
++				if (param.address == null) {	// No storage for member
++					return FAIL;
++				}
+ 				if (!consumeFromStack && stackEntry != null) {
+ 					if (before != tmpStatus[stackEntry.getGroup()])
+ 						return FAIL;
+diff --git a/Ghidra/Test/IntegrationTest/src/test.slow/java/ghidra/program/model/lang/X64GoPrototypeModelTest.java b/Ghidra/Test/IntegrationTest/src/test.slow/java/ghidra/program/model/lang/X64GoPrototypeModelTest.java
+index 159166c107..2423179cb2 100644
+--- a/Ghidra/Test/IntegrationTest/src/test.slow/java/ghidra/program/model/lang/X64GoPrototypeModelTest.java
++++ b/Ghidra/Test/IntegrationTest/src/test.slow/java/ghidra/program/model/lang/X64GoPrototypeModelTest.java
+@@ -49,6 +49,8 @@ public class X64GoPrototypeModelTest extends AbstractProtoModelTest {
+ 		test(model, "double[5] func(int a,int[10] b)", "stack58:40,RAX,stack8:80");
+ 		test(model, "char[5] func(char[3] a,char[7] b,int c)", "stack18:5,stack8:3,stackb:7,RAX");
+ 		test(model, "void func(float a,int[1] b,int[2] c)", "void,XMM0:4,RAX,stack8:16");
++		parseStructure("Buffer", "char[250],char");
++		test(model, "void func(Buffer a,Buffer b)", "void,stack8:251,void");	// b overflows the 500-byte stack entry
+ 	}
+ 
+ }
+-- 
+2.45.1
+

@@ -1,0 +1,239 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ash Pera <ashley.pera@noaa.gov>
+Date: Wed, 28 Oct 2026 01:26:54 -0600
+Subject: [PATCH] 10049: Fix Go stack parameter alignment
+
+Align a Go struct to its most-aligned field, raised to the RTTI alignment
+when known; force 8 for atomic.align64 fields; align complex numbers as
+their real part; and align stack slots relative to the start of the
+arguments. Recover Go complex64/complex128 as complex types.
+---
+ .../golang/GoParamStorageAllocator.java       |  12 ++-
+ .../bin/format/golang/GoRegisterInfo.java     |  26 ++++-
+ .../format/golang/rtti/types/GoBaseType.java  |  10 ++
+ .../golang/rtti/types/GoStructType.java       |   3 +
+ .../bin/format/golang/GoRegisterInfoTest.java | 100 ++++++++++++++++++
+ 5 files changed, 145 insertions(+), 6 deletions(-)
+ create mode 100644 Ghidra/Features/Base/src/test.slow/java/ghidra/app/util/bin/format/golang/GoRegisterInfoTest.java
+
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/golang/GoParamStorageAllocator.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/golang/GoParamStorageAllocator.java
+index c44b96b6d0..2ab4d264d1 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/golang/GoParamStorageAllocator.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/golang/GoParamStorageAllocator.java
+@@ -226,13 +226,17 @@ public class GoParamStorageAllocator {
+ 	}
+ 
+ 	public void alignStackFor(DataType dt) {
+-		int alignmentSize = callspecInfo.getAlignmentForType(dt);
+-		stackOffset = NumericUtilities.getUnsignedAlignedValue(stackOffset, alignmentSize);
++		alignStack(callspecInfo.getAlignmentForType(dt));
+ 	}
+ 
+ 	public void alignStack() {
+-		stackOffset =
+-			NumericUtilities.getUnsignedAlignedValue(stackOffset, callspecInfo.getMaxAlign());
++		alignStack(callspecInfo.getMaxAlign());
++	}
++
++	private void alignStack(int alignment) {
++		// Go aligns relative to the start of the stack arguments, not to absolute stack offsets
++		long base = callspecInfo.getStackInitialOffset();
++		stackOffset = base + NumericUtilities.getUnsignedAlignedValue(stackOffset - base, alignment);
+ 	}
+ 
+ 	public Register getClosureContextRegister() {
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/golang/GoRegisterInfo.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/golang/GoRegisterInfo.java
+index 923944ee85..8bec883ed6 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/golang/GoRegisterInfo.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/golang/GoRegisterInfo.java
+@@ -165,15 +165,37 @@ public class GoRegisterInfo {
+ 		if (isIntType(dt) && isIntrinsicSize(dt.getLength())) {
+ 			return Math.min(maxAlign, dt.getLength());
+ 		}
+-		if (dt instanceof Complex8DataType /* Go complex64 */ ) {
+-			return 4;
++		if (dt instanceof AbstractComplexDataType) {	// aligned as its real part
++			return Math.min(maxAlign, dt.getLength() / 2);
+ 		}
+ 		if (dt instanceof AbstractFloatDataType) {
+ 			return Math.min(maxAlign, dt.getLength());
+ 		}
++		if (dt instanceof Structure struct) {
++			// a Go struct is aligned to its most aligned field, or to its RTTI alignment
++			int align = struct.hasExplicitMinimumAlignment()
++					? struct.getExplicitMinimumAlignment()
++					: 1;
++			for (DataTypeComponent dtc : struct.getDefinedComponents()) {
++				align = Math.max(align, isAtomicAlign64(dtc.getDataType())
++						? 8
++						: getAlignmentForType(dtc.getDataType()));
++			}
++			return align;
++		}
+ 		return maxAlign;
+ 	}
+ 
++	private static boolean isAtomicAlign64(DataType dt) {
++		// as cmd/compile, an atomic.align64 field forces 8-byte alignment on all archs
++		return switch (dt.getName()) {
++			case "sync/atomic.align64", "internal/runtime/atomic.align64",
++					"runtime/internal/atomic.align64" ->
++				true;
++			default -> false;
++		};
++	}
++
+ 	static boolean isIntType(DataType dt) {
+ 		return dt instanceof AbstractIntegerDataType || dt instanceof WideCharDataType ||
+ 			dt instanceof WideChar16DataType || dt instanceof WideChar32DataType ||
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/golang/rtti/types/GoBaseType.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/golang/rtti/types/GoBaseType.java
+index e240f727fb..29bf56b0c7 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/golang/rtti/types/GoBaseType.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/golang/rtti/types/GoBaseType.java
+@@ -53,6 +53,9 @@ public class GoBaseType implements StructureVerifier {
+ 	@EOLComment("flags")
+ 	private int tflag;
+ 
++	@FieldMapping(fieldName = {"align", "Align_"})
++	private int align;
++
+ 	@FieldMapping(fieldName = {"kind", "Kind_"})
+ 	@EOLComment
+ 	private int kind;
+@@ -79,6 +82,13 @@ public class GoBaseType implements StructureVerifier {
+ 		return ptrdata;
+ 	}
+ 
++	/**
++	 * {@return the alignment of the type being defined by this structure}
++	 */
++	public int getAlign() {
++		return align;
++	}
++
+ 	/**
+ 	 * {@return the {@link GoKind} enum assigned to this type definition}
+ 	 */
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/golang/rtti/types/GoStructType.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/golang/rtti/types/GoStructType.java
+index ad860e2046..339cdeb364 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/golang/rtti/types/GoStructType.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/golang/rtti/types/GoStructType.java
+@@ -169,6 +169,9 @@ public class GoStructType extends GoType {
+ 		}
+ 
+ 		DWARFUtil.packCompositeIfPossible(struct, goTypes.getDTM());
++		if (typ.getAlign() > 1) {
++			struct.setExplicitMinimumAlignment(typ.getAlign());	// omitted zero-len fields may align it
++		}
+ 		return struct;
+ 	}
+ 
+diff --git a/Ghidra/Features/Base/src/test.slow/java/ghidra/app/util/bin/format/golang/GoRegisterInfoTest.java b/Ghidra/Features/Base/src/test.slow/java/ghidra/app/util/bin/format/golang/GoRegisterInfoTest.java
+new file mode 100644
+index 0000000000..c1b11bea44
+--- /dev/null
++++ b/Ghidra/Features/Base/src/test.slow/java/ghidra/app/util/bin/format/golang/GoRegisterInfoTest.java
+@@ -0,0 +1,100 @@
++/* ###
++ * IP: GHIDRA
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package ghidra.app.util.bin.format.golang;
++
++import static org.junit.Assert.*;
++
++import org.junit.Test;
++
++import ghidra.program.database.ProgramBuilder;
++import ghidra.program.model.data.*;
++import ghidra.program.model.lang.Language;
++import ghidra.program.model.lang.LanguageID;
++import ghidra.program.model.listing.Program;
++import ghidra.test.AbstractGhidraHeadlessIntegrationTest;
++
++public class GoRegisterInfoTest extends AbstractGhidraHeadlessIntegrationTest {
++
++	private static final GoVer GO_VER = GoVer.parse("1.26");
++
++	private static Structure struct(DataType... fields) {
++		StructureDataType struct = new StructureDataType("S", 0);
++		for (DataType field : fields) {
++			struct.add(field);
++		}
++		return struct;
++	}
++
++	private static DataType atomicInt64() {
++		return struct(new StructureDataType("sync/atomic.align64", 0), LongLongDataType.dataType);
++	}
++
++	private GoRegisterInfo regInfo(String langId) throws Exception {
++		Language lang = getLanguageService().getLanguage(new LanguageID(langId));
++		return GoRegisterInfoManager.getInstance().getRegisterInfoForLang(lang, GO_VER);
++	}
++
++	@Test
++	public void testStructAlignment() throws Exception {
++		GoRegisterInfo regInfo = regInfo(ProgramBuilder._X64);
++		DataType bytes = new ArrayDataType(ByteDataType.dataType, 250, 1);
++		assertEquals(1, regInfo.getAlignmentForType(struct(bytes, ByteDataType.dataType)));
++		assertEquals(2, regInfo.getAlignmentForType(struct(bytes, UnsignedShortDataType.dataType)));
++		assertEquals(8, regInfo.getAlignmentForType(struct(bytes, LongLongDataType.dataType)));
++		assertEquals(1, regInfo.getAlignmentForType(struct()));
++	}
++
++	@Test
++	public void testComplexAlignment() throws Exception {
++		GoRegisterInfo regInfo = regInfo(ProgramBuilder._X64);
++		DataType named = new TypedefDataType("main.T", Complex8DataType.dataType);
++		assertEquals(4, regInfo.getAlignmentForType(named));
++		assertEquals(4, regInfo.getAlignmentForType(struct(ByteDataType.dataType, named)));
++		assertEquals(4, regInfo.getAlignmentForType(FloatComplexDataType.dataType));
++		assertEquals(8, regInfo.getAlignmentForType(Complex16DataType.dataType));
++		assertEquals(4, regInfo(ProgramBuilder._X86).getAlignmentForType(Complex16DataType.dataType));
++	}
++
++	@Test
++	public void testRttiAlignment() throws Exception {
++		GoRegisterInfo regInfo = regInfo(ProgramBuilder._X64);
++		StructureDataType struct = (StructureDataType) struct(ByteDataType.dataType);	// zero-len fields omitted
++		struct.setExplicitMinimumAlignment(2);	// Go struct{ b byte; _ [0]uint16 }
++		assertEquals(2, regInfo.getAlignmentForType(struct));
++	}
++
++	@Test
++	public void testAtomicAlign64() throws Exception {
++		GoRegisterInfo regInfo = regInfo(ProgramBuilder._X86);
++		assertEquals(8, regInfo.getAlignmentForType(atomicInt64()));
++		assertEquals(8, regInfo.getAlignmentForType(struct(ByteDataType.dataType, atomicInt64())));
++		assertEquals(4, regInfo.getAlignmentForType(struct(LongLongDataType.dataType)));
++	}
++
++	@Test
++	public void testStackAlignmentIsRelativeToArgs() throws Exception {
++		ProgramBuilder builder = new ProgramBuilder("go386", ProgramBuilder._X86, this);
++		try {
++			Program program = builder.getProgram();
++			GoParamStorageAllocator allocator = new GoParamStorageAllocator(program, GO_VER);
++			long base = allocator.getStackAllocation(ByteDataType.dataType);
++			assertEquals(base + 8, allocator.getStackAllocation(atomicInt64()));
++		}
++		finally {
++			builder.dispose();
++		}
++	}
++}
+-- 
+2.45.1
+

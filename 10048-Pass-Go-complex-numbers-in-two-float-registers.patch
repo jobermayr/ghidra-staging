@@ -1,0 +1,189 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ash Pera <ashley.pera@noaa.gov>
+Date: Tue, 27 Oct 2026 23:28:54 -0600
+Subject: [PATCH] 10048: Pass Go complex numbers in two float registers
+
+Map Go complex64/complex128 (RTTI kinds and DWARF base types tagged with
+a Go kind) to complex data types, and allocate them like Go's ABI does:
+real and imaginary parts in two float registers, or both on the stack.
+---
+ .../format/dwarf/DWARFDataTypeManager.java    |  3 +
+ .../golang/GoParamStorageAllocator.java       |  6 ++
+ .../bin/format/golang/rtti/GoTypeManager.java |  2 +
+ .../dwarf/DWARFDataTypeImporterTest.java      | 29 +++++++++
+ .../golang/GoParamStorageAllocatorTest.java   | 65 +++++++++++++++++++
+ 5 files changed, 105 insertions(+)
+ create mode 100644 Ghidra/Features/Base/src/test.slow/java/ghidra/app/util/bin/format/golang/GoParamStorageAllocatorTest.java
+
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/dwarf/DWARFDataTypeManager.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/dwarf/DWARFDataTypeManager.java
+index dd70c7c923..831d1bcd56 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/dwarf/DWARFDataTypeManager.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/dwarf/DWARFDataTypeManager.java
+@@ -424,6 +424,9 @@ public class DWARFDataTypeManager {
+ 			// May need to add name lookup capability to AbstractFloatDataType
+ 			case DWARFEncoding.DW_ATE_float -> AbstractFloatDataType.getFloatDataType(dwarfSize,
+ 				getCorrectDTMForFixedLengthTypes(name, dwarfSize, isExplictSize));
++			case DWARFEncoding.DW_ATE_complex_float -> isExplictSize	// Go complex64, complex128
++					? AbstractComplexDataType.getComplexDataType(dwarfSize, null)
++					: null;
+ 			case DWARFEncoding.DW_ATE_signed -> AbstractIntegerDataType.getSignedDataType(dwarfSize,
+ 				getCorrectDTMForFixedLengthTypes(name, dwarfSize, isExplictSize));
+ 			case DWARFEncoding.DW_ATE_unsigned -> AbstractIntegerDataType.getUnsignedDataType(
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/golang/GoParamStorageAllocator.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/golang/GoParamStorageAllocator.java
+index 014dbf8ce8..c44b96b6d0 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/golang/GoParamStorageAllocator.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/golang/GoParamStorageAllocator.java
+@@ -262,6 +262,12 @@ public class GoParamStorageAllocator {
+ 		if (dt instanceof AbstractFloatDataType) {
+ 			return allocateReg(1, FLOATREG, dt, result);
+ 		}
++		if (dt instanceof AbstractComplexDataType) {
++			// Go passes a complex number as two floats
++			DataType part = AbstractFloatDataType.getFloatDataType(dt.getLength() / 2, null);
++			return allocateReg(1, FLOATREG, part, result) &&
++				allocateReg(1, FLOATREG, part, result);
++		}
+ 		if (dt instanceof Array array) {
+ 			int numElements = array.getNumElements();
+ 			if (numElements == 0) {
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/golang/rtti/GoTypeManager.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/golang/rtti/GoTypeManager.java
+index c34bf835eb..93d3ad56d8 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/golang/rtti/GoTypeManager.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/golang/rtti/GoTypeManager.java
+@@ -800,6 +800,8 @@ public class GoTypeManager {
+ 			case Bool -> BooleanDataType.dataType;
+ 			case Float32 -> AbstractFloatDataType.getFloatDataType(32 / 8, null);
+ 			case Float64 -> AbstractFloatDataType.getFloatDataType(64 / 8, null);
++			case Complex64 -> Complex8DataType.dataType;
++			case Complex128 -> Complex16DataType.dataType;
+ 			case Int -> AbstractIntegerDataType.getSignedDataType(ptrSize, dtm); // depends on arch
+ 			case Int8 -> Int8TDataType.dataType;
+ 			case Int16 -> Int16TDataType.dataType;
+diff --git a/Ghidra/Features/Base/src/test.slow/java/ghidra/app/util/bin/format/dwarf/DWARFDataTypeImporterTest.java b/Ghidra/Features/Base/src/test.slow/java/ghidra/app/util/bin/format/dwarf/DWARFDataTypeImporterTest.java
+index 4543c4df87..955e0c583d 100644
+--- a/Ghidra/Features/Base/src/test.slow/java/ghidra/app/util/bin/format/dwarf/DWARFDataTypeImporterTest.java
++++ b/Ghidra/Features/Base/src/test.slow/java/ghidra/app/util/bin/format/dwarf/DWARFDataTypeImporterTest.java
+@@ -15,6 +15,7 @@
+  */
+ package ghidra.app.util.bin.format.dwarf;
+ 
++import static ghidra.app.util.bin.format.dwarf.DWARFTag.*;
+ import static ghidra.app.util.bin.format.dwarf.attribs.DWARFAttributeId.*;
+ import static org.junit.Assert.*;
+ 
+@@ -23,6 +24,7 @@ import java.util.*;
+ 
+ import org.junit.Test;
+ 
++import ghidra.app.util.bin.format.golang.rtti.types.GoKind;
+ import ghidra.program.model.data.*;
+ import ghidra.program.model.data.Enum;
+ import ghidra.program.model.symbol.SymbolUtilities;
+@@ -84,6 +86,33 @@ public class DWARFDataTypeImporterTest extends DWARFTestBase {
+ 		assertTrue(baseTypeDT.hasLanguageDependantLength());
+ 	}
+ 
++	@Test
++	public void testGoComplexBaseType() throws CancelledException, IOException, DWARFException {
++		DebugInfoEntry c64DIE = addGoBaseType("complex64", 8, GoKind.Complex64);
++		DebugInfoEntry c128DIE = addGoBaseType("complex128", 16, GoKind.Complex128);
++		DebugInfoEntry cDIE = addBaseType("complex double", 16, DWARFEncoding.DW_ATE_complex_float);
++
++		importAllDataTypes();
++
++		assertTrue(baseOf(c64DIE) instanceof Complex8DataType);
++		assertTrue(baseOf(c128DIE) instanceof Complex16DataType);
++		assertFalse(baseOf(cDIE) instanceof AbstractComplexDataType);
++	}
++
++	private DebugInfoEntry addGoBaseType(String name, int size, GoKind kind) {
++		ensureCompUnit();
++		return new DIECreator(dwarfProg, DW_TAG_base_type).addString(DW_AT_name, name)
++				.addInt(DW_AT_byte_size, size)
++				.addInt(DW_AT_encoding, DWARFEncoding.DW_ATE_complex_float)
++				.addInt(DW_AT_go_kind, kind.ordinal())
++				.create();
++	}
++
++	private DataType baseOf(DebugInfoEntry die) {
++		DataType dt = dwarfDTM.getDataType(die.getOffset(), null);
++		return dt instanceof TypeDef td ? td.getBaseDataType() : dt;
++	}
++
+ 	@Test
+ 	public void testBaseTypeInt() throws CancelledException, IOException, DWARFException {
+ 		addTypedef("mytypedef", addInt());
+diff --git a/Ghidra/Features/Base/src/test.slow/java/ghidra/app/util/bin/format/golang/GoParamStorageAllocatorTest.java b/Ghidra/Features/Base/src/test.slow/java/ghidra/app/util/bin/format/golang/GoParamStorageAllocatorTest.java
+new file mode 100644
+index 0000000000..1e503faecf
+--- /dev/null
++++ b/Ghidra/Features/Base/src/test.slow/java/ghidra/app/util/bin/format/golang/GoParamStorageAllocatorTest.java
+@@ -0,0 +1,65 @@
++/* ###
++ * IP: GHIDRA
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package ghidra.app.util.bin.format.golang;
++
++import static org.junit.Assert.*;
++
++import java.util.List;
++
++import org.junit.*;
++
++import ghidra.program.database.ProgramBuilder;
++import ghidra.program.model.data.*;
++import ghidra.program.model.lang.Register;
++import ghidra.test.AbstractGhidraHeadlessIntegrationTest;
++
++public class GoParamStorageAllocatorTest extends AbstractGhidraHeadlessIntegrationTest {
++
++	private ProgramBuilder builder;
++	private GoParamStorageAllocator alloc;
++
++	@Before
++	public void setUp() throws Exception {
++		builder = new ProgramBuilder("go", ProgramBuilder._X64, "golang", this);
++		alloc = new GoParamStorageAllocator(builder.getProgram(), GoVer.parse("1.22"));
++	}
++
++	@After
++	public void tearDown() {
++		builder.dispose();
++	}
++
++	private List<String> regs(DataType dt) {
++		List<Register> regs = alloc.getRegistersFor(dt);
++		return regs != null ? regs.stream().map(Register::getName).toList() : null;
++	}
++
++	@Test
++	public void testComplexUsesTwoFloatRegisters() {
++		assertEquals(List.of("XMM1_Qa", "XMM0_Qa"), regs(Complex16DataType.dataType));
++		assertEquals(List.of("XMM3_Da", "XMM2_Da"), regs(Complex8DataType.dataType));
++		assertEquals(List.of("XMM4_Qa"), regs(DoubleDataType.dataType));
++	}
++
++	@Test
++	public void testComplexNeedsBothRegisters() {
++		for (int i = 0; i < 14; i++) {
++			regs(DoubleDataType.dataType);
++		}
++		assertNull(regs(Complex16DataType.dataType));
++		assertEquals(List.of("XMM14_Qa"), regs(DoubleDataType.dataType));
++	}
++}
+-- 
+2.45.1
+

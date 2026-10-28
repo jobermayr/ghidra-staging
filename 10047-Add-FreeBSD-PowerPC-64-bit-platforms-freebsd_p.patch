@@ -1,0 +1,194 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Piotr Kubaj <pkubaj@anongoth.pl>
+Date: Wed, 28 Oct 2026 07:12:14 +0100
+Subject: [PATCH] 10047: Add FreeBSD PowerPC 64-bit platforms (freebsd_ppc_64,
+ freebsd_ppc_64le)
+
+FreeBSD runs on 64-bit PowerPC in both byte orders (uname -p powerpc64
+and powerpc64le; the JVM reports os.arch "ppc64" and "ppc64le"). Ghidra
+has no Platform for either, so Platform.CURRENT_PLATFORM is UNSUPPORTED
+with a null directory name and the native decompiler, sleigh, demangler
+and lzfse helpers are never found. The gradle native build refuses to
+run there as well ("Unrecognized platform architecture: ppc64le").
+
+Register the two platforms the same way freebsd_arm_64 is registered:
+
+- Architecture: add POWERPC_64LE for os.arch "ppc64le" (POWERPC_64
+  already matches the big-endian "ppc64").
+- Platform: add FREEBSD_PPC_64 and FREEBSD_PPC_64LE with the os/
+  directory names freebsd_ppc_64 and freebsd_ppc_64le. The two byte
+  orders need separate directories because their native binaries are
+  not interchangeable.
+- nativePlatforms.gradle: add both to PLATFORMS and map the JVM
+  architecture names to them in getCurrentPlatformName().
+- Add both as targetPlatform of decompile, sleigh, lzfse and the two GNU
+  demanglers.
+- GettingStarted.md: list them with the other user-built platforms.
+
+Like the other FreeBSD platforms there is no debugger support.
+
+Tested on FreeBSD 15.1 powerpc64le and powerpc64 (POWER9) with the
+12.0.4 release: the natives build with gradle 9.8, OpenJDK 25 and clang
+19 (this is how the FreeBSD port devel/ghidra builds them), and with
+Platform/Architecture rebuilt into Generic.jar a headless analysis of a
+native ELF binary decompiles its functions through the new
+os/freebsd_ppc_64le and os/freebsd_ppc_64 binaries, the GNU demangler
+analyzer runs through the new demangler_gnu_v2_41, and sleigh compiles
+a processor spec. lzfse builds on both, but as on any big-endian host
+the Apple code reads and writes its stream headers in host byte order,
+so only the little-endian binary produces and reads valid LZFSE data.
+---
+ GPL/DemanglerGnu/build.gradle                             | 4 ++++
+ GPL/nativePlatforms.gradle                                | 7 +++++++
+ Ghidra/Features/Decompiler/buildNatives.gradle            | 8 ++++++++
+ Ghidra/Features/FileFormats/buildNatives.gradle           | 2 ++
+ .../src/main/java/ghidra/framework/Architecture.java      | 1 +
+ .../Generic/src/main/java/ghidra/framework/Platform.java  | 6 ++++++
+ GhidraDocs/GettingStarted.md                              | 2 ++
+ 7 files changed, 30 insertions(+)
+
+diff --git a/GPL/DemanglerGnu/build.gradle b/GPL/DemanglerGnu/build.gradle
+index cef2471660..db917b445b 100644
+--- a/GPL/DemanglerGnu/build.gradle
++++ b/GPL/DemanglerGnu/build.gradle
+@@ -85,6 +85,8 @@ model {
+ 			targetPlatform "mac_arm_64"
+ 			targetPlatform "freebsd_x86_64"
+ 			targetPlatform "freebsd_arm_64"
++			targetPlatform "freebsd_ppc_64"
++			targetPlatform "freebsd_ppc_64le"
+ 			targetPlatform "openbsd_x86_64"
+ 			targetPlatform "openbsd_arm_64"
+ 			sources {
+@@ -112,6 +114,8 @@ model {
+ 			targetPlatform "mac_arm_64"
+ 			targetPlatform "freebsd_x86_64"
+ 			targetPlatform "freebsd_arm_64"
++			targetPlatform "freebsd_ppc_64"
++			targetPlatform "freebsd_ppc_64le"
+ 			targetPlatform "openbsd_x86_64"
+ 			targetPlatform "openbsd_arm_64"
+ 			sources {
+diff --git a/GPL/nativePlatforms.gradle b/GPL/nativePlatforms.gradle
+index 6ace12f728..61e6d106a6 100644
+--- a/GPL/nativePlatforms.gradle
++++ b/GPL/nativePlatforms.gradle
+@@ -29,6 +29,8 @@ project.ext.PLATFORMS = [
+ 	[name: "mac_arm_64", os: "osx", arch: "arm64"],
+ 	[name: "freebsd_x86_64", os: "freebsd", arch: "x86_64"],
+ 	[name: "freebsd_arm_64", os: "freebsd", arch: "arm64"],
++	[name: "freebsd_ppc_64", os: "freebsd", arch: "ppc64"],
++	[name: "freebsd_ppc_64le", os: "freebsd", arch: "ppc64le"],
+ 	[name: "openbsd_x86_64", os: "openbsd", arch: "x86_64"],
+ 	[name: "openbsd_arm_64", os: "openbsd", arch: "arm64"]
+ ]
+@@ -86,6 +88,11 @@ ext.getCurrentPlatformName = {
+ 		case "loongarch64":
+ 		case "loong64":
+ 			arch = "loongarch_64"
++		case "ppc64":
++			arch = "ppc_64"
++			break
++		case "ppc64le":
++			arch = "ppc_64le"
+ 			break
+ 		default:
+ 			throw new GradleException("Unrecognized platform architecture: $arch" )
+diff --git a/Ghidra/Features/Decompiler/buildNatives.gradle b/Ghidra/Features/Decompiler/buildNatives.gradle
+index cf5c6263e1..472af4996c 100644
+--- a/Ghidra/Features/Decompiler/buildNatives.gradle
++++ b/Ghidra/Features/Decompiler/buildNatives.gradle
+@@ -247,6 +247,8 @@ model {
+ 			targetPlatform "mac_arm_64"
+ 			targetPlatform "freebsd_x86_64"
+ 			targetPlatform "freebsd_arm_64"
++			targetPlatform "freebsd_ppc_64"
++			targetPlatform "freebsd_ppc_64le"
+ 			targetPlatform "openbsd_x86_64"
+ 			targetPlatform "openbsd_arm_64"
+ 			sources {
+@@ -294,6 +296,8 @@ model {
+ 			targetPlatform "mac_arm_64"
+ 			targetPlatform "freebsd_x86_64"
+ 			targetPlatform "freebsd_arm_64"
++			targetPlatform "freebsd_ppc_64"
++			targetPlatform "freebsd_ppc_64le"
+ 			targetPlatform "openbsd_x86_64"
+ 			targetPlatform "openbsd_arm_64"
+ 			sources {
+@@ -355,6 +359,8 @@ model {
+ 				targetPlatform "mac_arm_64"
+ 				targetPlatform "freebsd_x86_64"
+ 				targetPlatform "freebsd_arm_64"
++				targetPlatform "freebsd_ppc_64"
++				targetPlatform "freebsd_ppc_64le"
+ 				targetPlatform "openbsd_x86_64"
+ 				targetPlatform "openbsd_arm_64"
+ 				sources {
+@@ -406,6 +412,8 @@ model {
+ 				targetPlatform "mac_arm_64"
+ 				targetPlatform "freebsd_x86_64"
+ 				targetPlatform "freebsd_arm_64"
++				targetPlatform "freebsd_ppc_64"
++				targetPlatform "freebsd_ppc_64le"
+ 				targetPlatform "openbsd_x86_64"
+ 				targetPlatform "openbsd_arm_64"
+ 				sources {
+diff --git a/Ghidra/Features/FileFormats/buildNatives.gradle b/Ghidra/Features/FileFormats/buildNatives.gradle
+index 1dd2c9c676..00881b5260 100644
+--- a/Ghidra/Features/FileFormats/buildNatives.gradle
++++ b/Ghidra/Features/FileFormats/buildNatives.gradle
+@@ -37,6 +37,8 @@ model {
+ 			targetPlatform "mac_arm_64"
+ 			targetPlatform "freebsd_x86_64"
+ 			targetPlatform "freebsd_arm_64"
++			targetPlatform "freebsd_ppc_64"
++			targetPlatform "freebsd_ppc_64le"
+ 			targetPlatform "openbsd_x86_64"
+ 			targetPlatform "openbsd_arm_64"
+ 		
+diff --git a/Ghidra/Framework/Generic/src/main/java/ghidra/framework/Architecture.java b/Ghidra/Framework/Generic/src/main/java/ghidra/framework/Architecture.java
+index f31dc4673b..04b2648bd5 100644
+--- a/Ghidra/Framework/Generic/src/main/java/ghidra/framework/Architecture.java
++++ b/Ghidra/Framework/Generic/src/main/java/ghidra/framework/Architecture.java
+@@ -20,6 +20,7 @@ public enum Architecture {
+ 	X86_64("x86_64", "amd64"),
+ 	POWERPC("ppc"),
+ 	POWERPC_64("ppc64"),
++	POWERPC_64LE("ppc64le"),
+ 	ARM_64("aarch64", "arm64"),
+ 	LOONGARCH_64("loongarch64", "loong64"),
+ 	UNKNOWN("Unknown Architecture");
+diff --git a/Ghidra/Framework/Generic/src/main/java/ghidra/framework/Platform.java b/Ghidra/Framework/Generic/src/main/java/ghidra/framework/Platform.java
+index babc6d0672..17fa75ce8c 100644
+--- a/Ghidra/Framework/Generic/src/main/java/ghidra/framework/Platform.java
++++ b/Ghidra/Framework/Generic/src/main/java/ghidra/framework/Platform.java
+@@ -61,6 +61,12 @@ public enum Platform {
+ 	/// Identifies a FreeBSD ARM 64-bit OS
+ 	FREEBSD_ARM_64(OperatingSystem.FREE_BSD, Architecture.ARM_64, "freebsd_arm_64", ".so", ""),
+ 
++	/// Identifies a FreeBSD PowerPC 64-bit big-endian OS
++	FREEBSD_PPC_64(OperatingSystem.FREE_BSD, Architecture.POWERPC_64, "freebsd_ppc_64", ".so", ""),
++
++	/// Identifies a FreeBSD PowerPC 64-bit little-endian OS
++	FREEBSD_PPC_64LE(OperatingSystem.FREE_BSD, Architecture.POWERPC_64LE, "freebsd_ppc_64le", ".so", ""),
++
+ 	/// Identifies a OpenBSD x86 64-bit OS
+ 	OPENBSD_X86_64(OperatingSystem.OPEN_BSD, Architecture.X86_64, "openbsd_x86_64", ".so", ""),
+ 
+diff --git a/GhidraDocs/GettingStarted.md b/GhidraDocs/GettingStarted.md
+index 2dd828b7f1..16b3c8adf8 100644
+--- a/GhidraDocs/GettingStarted.md
++++ b/GhidraDocs/GettingStarted.md
+@@ -203,6 +203,8 @@ Ghidra supports running on the following additional platforms with user-built na
+ * Linux ARM 64-bit
+ * FreeBSD x86 64-bit (no debugger support)
+ * FreeBSD ARM 64-bit (no debugger support)
++* FreeBSD PowerPC 64-bit big-endian (no debugger support)
++* FreeBSD PowerPC 64-bit little-endian (no debugger support)
+ * OpenBSD x86 64-bit
+ * OpenBSD ARM 64-bit
+ 
+-- 
+2.45.1
+
