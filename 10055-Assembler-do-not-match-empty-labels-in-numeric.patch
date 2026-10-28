@@ -1,0 +1,97 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Pankraz76 <punkratz1@gmail.com>
+Date: Wed, 28 Oct 2026 13:13:39 +0000
+Subject: [PATCH] 10055: Assembler: do not match empty labels in numeric
+ terminals
+
+When a numeric operand is expected but the input has no label
+characters at that position (e.g. right after "[" or "#"),
+AssemblyNumericTerminal.match still looked up the empty string via
+AssemblyNumericSymbols.choose(""). The symbol table stores
+default-named functions (FUN_xxxxxxxx) with an empty name, so
+SymbolTable.getSymbols("") returns every one of them. Each returned
+address became a zero-width symbol token, forking one parse branch per
+function. On large programs this made every keystroke in Patch
+Instruction take seconds, and it also let incomplete input such as
+"ldr x0,[x1, #]" be accepted with an arbitrary function address as
+the operand.
+
+Return no token when no label characters were consumed. Without a
+program the lookup of "" already yielded nothing, so behavior there is
+unchanged.
+
+AArch64, 300k labels + 50k default-named functions, median of 5 runs
+after 2 warm-ups:
+  parseLine("ldr x0, [")    1687.7 ms -> 2.3 ms
+  parseLine("ldr x0,[x1, ") 1316.8 ms -> 2.6 ms
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01MTr23xgfS13yZrtCrypJ98
+---
+ .../symbol/AssemblyNumericTerminal.java       |  4 ++++
+ .../assembler/sleigh/PublicAPITest.java       | 24 +++++++++++++++++++
+ 2 files changed, 28 insertions(+)
+
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/assembler/sleigh/symbol/AssemblyNumericTerminal.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/assembler/sleigh/symbol/AssemblyNumericTerminal.java
+index c89ca0c94b..8a665753a0 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/assembler/sleigh/symbol/AssemblyNumericTerminal.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/assembler/sleigh/symbol/AssemblyNumericTerminal.java
+@@ -138,6 +138,10 @@ public class AssemblyNumericTerminal extends AssemblyTerminal {
+ 			}
+ 			break;
+ 		}
++		if (b == s) {
++			// No label here. Note the symbol table returns all default-named functions for ""
++			return Collections.emptySet();
++		}
+ 		String lab = buffer.substring(s, b);
+ 		return symbols.choose(lab, space)
+ 				.stream()
+diff --git a/Ghidra/Framework/SoftwareModeling/src/test/java/ghidra/app/plugin/assembler/sleigh/PublicAPITest.java b/Ghidra/Framework/SoftwareModeling/src/test/java/ghidra/app/plugin/assembler/sleigh/PublicAPITest.java
+index 4b983ebd29..11d700ff52 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/test/java/ghidra/app/plugin/assembler/sleigh/PublicAPITest.java
++++ b/Ghidra/Framework/SoftwareModeling/src/test/java/ghidra/app/plugin/assembler/sleigh/PublicAPITest.java
+@@ -25,11 +25,14 @@ import org.junit.*;
+ import db.Transaction;
+ import generic.test.AbstractGenericTest;
+ import ghidra.app.plugin.assembler.*;
++import ghidra.app.plugin.assembler.sleigh.parse.AssemblyParseResult;
+ import ghidra.program.database.ProgramDB;
+ import ghidra.program.model.address.Address;
+ import ghidra.program.model.address.AddressOverflowException;
++import ghidra.program.model.address.AddressSet;
+ import ghidra.program.model.lang.*;
+ import ghidra.program.model.listing.*;
++import ghidra.program.model.symbol.SourceType;
+ import ghidra.program.util.DefaultLanguageService;
+ import ghidra.util.exception.CancelledException;
+ import ghidra.util.task.TaskMonitor;
+@@ -97,4 +100,25 @@ public class PublicAPITest extends AbstractGenericTest {
+ 		assertEquals("brds", result.get(0).getMnemonicString());
+ 		assertEquals("_add", result.get(1).getMnemonicString());
+ 	}
++
++	@Test
++	public void testEmptyOperandDoesNotMatchDefaultFunctionNames() throws Exception {
++		Language aarch64 = getLanguage("AARCH64:LE:64:v8A");
++		program = new ProgramDB("test", aarch64, aarch64.getDefaultCompilerSpec(), this);
++
++		try (Transaction tx = program.openTransaction("Test")) {
++			program.getMemory()
++					.createInitializedBlock(".text", addr(0x00400000), 0x1000, (byte) 0,
++						TaskMonitor.DUMMY, false);
++			// Default-named functions are stored with an empty name
++			program.getFunctionManager()
++					.createFunction(null, addr(0x00400100), new AddressSet(addr(0x00400100)),
++						SourceType.DEFAULT);
++		}
++		Assembler asm = Assemblers.getAssembler(program);
++
++		for (AssemblyParseResult result : asm.parseLine("ldr x0,[x1, #]")) {
++			assertTrue(result.isError());
++		}
++	}
+ }
+-- 
+2.45.1
+

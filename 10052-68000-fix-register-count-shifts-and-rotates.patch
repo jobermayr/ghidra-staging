@@ -1,0 +1,103 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Andrei Bacescu <9010245+bacescuandrei@users.noreply.github.com>
+Date: Wed, 28 Oct 2026 17:41:43 +0200
+Subject: [PATCH] 10052: 68000: fix register-count shifts and rotates
+
+ROL and ROR did not reduce the count modulo the operand size, so counts
+of the size or more cleared the register, and they set C for a zero
+count. ROXL and ROXR rotate through X, so their count repeats every
+size + 1 bits. ASR took the last bit shifted out with a logical shift,
+which lost the sign bit for counts beyond the operand size, and ASL set
+V only when the sign before and after the shift differed instead of
+when it changed at any point during the shift.
+---
+ .../68000/data/languages/68000.sinc           | 38 +++++++++++--------
+ 1 file changed, 22 insertions(+), 16 deletions(-)
+
+diff --git a/Ghidra/Processors/68000/data/languages/68000.sinc b/Ghidra/Processors/68000/data/languages/68000.sinc
+index cd6a8138c6..ae2bdb2fd4 100644
+--- a/Ghidra/Processors/68000/data/languages/68000.sinc
++++ b/Ghidra/Processors/68000/data/languages/68000.sinc
+@@ -885,18 +885,20 @@ macro extendedResultFlags(result) {
+ macro arithmeticShiftLeft(count, register, width) {
+ 	local modcount = count & 63;
+ 	local lbit:1 = ((register >> (width - modcount) & 1) != 0);
+-	local msbBefore:4 = zext(register s< 0);
++	# V is set if the most significant bit changes at any time during the shift: the top modcount+1 bits
++	# are not all equal, or, for a count of width or more, the operand is not zero
++	local top = register s>> (width - 1 - modcount);
++	local vbit:1 = ((modcount < width) && (top != 0) && (top != -1)) || ((modcount >= width) && (register != 0));
+ 	register = register << modcount;
+ 	resflags(register);
+-	local msbAfter:4 = zext(register s< 0);
+-	VF = (msbBefore ^ msbAfter) != 0;
++	VF = vbit;
+ 	CF = (modcount != 0) * lbit;
+ 	XF = ((modcount == 0) * XF) + ((modcount != 0) * CF);
+ }
+ 
+ macro arithmeticShiftRight(count, register, width) {
+ 	local modcount = count & 63;
+-	local lbit:1 = ((register >> (modcount-1) & 1) != 0);
++	local lbit:1 = ((register s>> (modcount-1) & 1) != 0);
+ 	local msbBefore:4 = zext(register s< 0);
+ 	register = register s>> modcount;
+ 	resflags(register);
+@@ -928,38 +930,42 @@ macro logicalShiftRight(count, register, width) {
+ 
+ macro rotateLeft(count, register, width) {
+ 	local modcount = count & 63;
+-	register = (register << modcount) | (register >> (width - modcount));
++	local rot = modcount % width;
++	register = (register << rot) | (register >> (width - rot));
+ 	resflags(register);
+-	CF = (register & 1) != 0;
++	CF = (modcount != 0) && ((register & 1) != 0);
+ 	VF = 0;
+ }
+ 
+ macro rotateRight(count, register, width) {
+ 	local modcount = count & 63;
+-	register = (register << (width - modcount)) | (register >> modcount);
++	local rot = modcount % width;
++	register = (register << (width - rot)) | (register >> rot);
+ 	resflags(register);
+-	CF = zext(register s< 0);
++	CF = (modcount != 0) && (register s< 0);
+ 	VF = 0;
+ }
+ 
+ macro rotateLeftExtended(count, register, width) {
+ 	local modcount = count & 63;
+-	local xflag = (register & (1 << (width - modcount))) != 0;
+-	local result = (register << modcount) | (zext(XF) << (modcount - 1)) | (register >> (width - modcount + 1));
+-	register = (zext(modcount != 0) * result) + (zext(modcount == 0) * register);
++	local rot = modcount % (width + 1);
++	local xflag = (register & (1 << (width - rot))) != 0;
++	local result = (register << rot) | (zext(XF) << (rot - 1)) | (register >> (width - rot + 1));
++	register = (zext(rot != 0) * result) + (zext(rot == 0) * register);
+ 	resflags(register);
+-	XF = (zext(modcount != 0) * xflag) + (zext(modcount == 0) * XF);
++	XF = (zext(rot != 0) * xflag) + (zext(rot == 0) * XF);
+ 	CF = XF;
+ 	VF = 0;
+ }
+ 
+ macro rotateRightExtended(count, register, width) {
+ 	local modcount = count & 63;
+-	local xflag = (register & (1 << (modcount - 1))) != 0;
+-	local result = (zext(XF) << (width - modcount)) | (register >> modcount) | (register << (width - modcount + 1));
+-	register = (zext(modcount != 0) * result) + (zext(modcount == 0) * register);
++	local rot = modcount % (width + 1);
++	local xflag = (register & (1 << (rot - 1))) != 0;
++	local result = (zext(XF) << (width - rot)) | (register >> rot) | (register << (width - rot + 1));
++	register = (zext(rot != 0) * result) + (zext(rot == 0) * register);
+ 	resflags(register);
+-	XF = (zext(modcount != 0) * xflag) + (zext(modcount == 0) * XF);
++	XF = (zext(rot != 0) * xflag) + (zext(rot == 0) * XF);
+ 	CF = XF;
+ 	VF = 0;
+ }
+-- 
+2.45.1
+
