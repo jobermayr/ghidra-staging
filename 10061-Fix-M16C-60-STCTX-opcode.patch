@@ -1,0 +1,43 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 29 Oct 2026 07:29:02 +0000
+Subject: [PATCH] 10061: Fix M16C/60 STCTX opcode
+
+The M16C/60 STCTX constructor used the opcode bytes B6 D3, which are the
+M16C/80 encoding (identical to the STCTX constructor in M16C_80.slaspec).
+As a result:
+
+- 7D F0 <abs16> <abs20> (STCTX as emitted by m32c-elf-gcc -mcpu=m16c)
+  failed to disassemble on M16C/60.
+- B6 D3 was decoded as a 7-byte STCTX, shadowing the 2-byte
+  MOV.B:Z #0,dsp:8[FB] encoding (B0-B7 = MOV.B:Z, dst3 = 110 -> dsp:8[FB]).
+
+Use 7D F0, the M16C/60 counterpart of the existing LDCTX encoding (7C F0)
+with the same abs16/abs20 operand layout. The p-code is unchanged.
+
+Verified by decoding all 65536 two-byte opcode prefixes on M16C/60 and
+M16C/80 before and after the change: only 7D F0 (now STCTX) and B6 D3 (now
+MOV.B:Z #0,-0x2d[FB]) change on M16C/60; M16C/80 output is identical.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01MTr23zEqxiTojevNa13zsc
+---
+ Ghidra/Processors/M16C/data/languages/M16C_60.slaspec | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/Ghidra/Processors/M16C/data/languages/M16C_60.slaspec b/Ghidra/Processors/M16C/data/languages/M16C_60.slaspec
+index e6046afac7..f992f4cb10 100644
+--- a/Ghidra/Processors/M16C/data/languages/M16C_60.slaspec
++++ b/Ghidra/Processors/M16C/data/languages/M16C_60.slaspec
+@@ -3321,7 +3321,7 @@ macro SHLsetShiftLeftFlags(val,shift,result,sze) {
+ 
+ ### STCTX ###
+ 
+-:STCTX abs16offset, abs20offset     is b1_0007=0xb6; b2_0007=0xd3; abs16offset; imm20_dat & abs20offset {
++:STCTX abs16offset, abs20offset     is b1_0007=0x7d; b2_0007=0xf0; abs16offset; imm20_dat & abs20offset {
+ 
+     taskNum:1 = abs16offset; # load task number stored at abs16
+     ptr:3 = imm20_dat + (zext(taskNum) * 2); # compute table entry address relative to abs20
+-- 
+2.45.1
+

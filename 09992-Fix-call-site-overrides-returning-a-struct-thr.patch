@@ -4,15 +4,24 @@ Date: Fri, 23 Oct 2026 00:28:56 +0200
 Subject: [PATCH] 09992: Fix call-site overrides returning a struct through a
  hidden pointer
 
-9991: Fix call-site overrides returning a struct through a
- hidden pointer
+With a hidden_return voidlock model, ProtoStoreInternal::decode cleared the
+output's typelock before copying it onto the hidden return input. The first
+input then read as unlocked, so the whole override was treated as unlocked and
+the call lost its arguments. The hidden input now keeps the declared lock.
+
+When the override's own return travels through a hidden pointer, the
+decompiler supplies that pointer itself, so it is not one of the override's
+inputs. getFirstVarArg no longer counts the callee's hidden return pointer for
+such an override; HighFunction passes the override through a new overload and
+the existing method is unchanged.
 ---
- Ghidra/Features/Decompiler/src/decompile/cpp/fspec.cc     | 3 ++-
- .../ghidra/program/model/pcode/HighFunctionDBUtil.java    | 8 +++++++-
- 2 files changed, 9 insertions(+), 2 deletions(-)
+ .../Decompiler/src/decompile/cpp/fspec.cc     |  3 +-
+ .../program/model/pcode/HighFunction.java     |  6 ++--
+ .../model/pcode/HighFunctionDBUtil.java       | 33 ++++++++++++++++++-
+ 3 files changed, 37 insertions(+), 5 deletions(-)
 
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.cc
-index c39c38ce56..192b35947f 100644
+index 49c345a821..51ac50137d 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.cc
 @@ -3762,6 +3762,7 @@ void ProtoStoreInternal::decode(Decoder &decoder,ProtoModel *model)
@@ -32,25 +41,79 @@ index c39c38ce56..192b35947f 100644
         continue;    // increment i but not j
      }
      curparam = setInput(i-1,proto.innames[j],pieces[i]);
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/HighFunction.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/HighFunction.java
+index 887625b8ab..9318f8bd32 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/HighFunction.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/HighFunction.java
+@@ -516,9 +516,9 @@ public class HighFunction extends PcodeSyntaxTree {
+ 			Program prog = func.getProgram();
+ 			for (DataTypeSymbol sym : protoOverrides == null ? List.<DataTypeSymbol>of() : protoOverrides) {
+ 				Address addr = sym.getAddress();
+-				int firstVarArg = HighFunctionDBUtil.getFirstVarArg(prog, addr);
+-				FunctionPrototype fproto = new FunctionPrototype(
+-					(FunctionSignature) sym.getDataType(), compilerSpec, false);
++				FunctionSignature signature = (FunctionSignature) sym.getDataType();
++				int firstVarArg = HighFunctionDBUtil.getFirstVarArg(prog, addr, signature);
++				FunctionPrototype fproto = new FunctionPrototype(signature, compilerSpec, false);
+ 				encoder.openElement(ELEM_PROTOOVERRIDE);
+ 				AddressXML.encode(encoder, addr);
+ 				fproto.encodePrototype(encoder, dtmanage, firstVarArg);
 diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/HighFunctionDBUtil.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/HighFunctionDBUtil.java
-index 861fc4543e..c2c94f7c76 100644
+index 861fc4543e..eba6ca4e8a 100644
 --- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/HighFunctionDBUtil.java
 +++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/pcode/HighFunctionDBUtil.java
-@@ -815,7 +815,13 @@ public class HighFunctionDBUtil {
+@@ -810,12 +810,35 @@ public class HighFunctionDBUtil {
+ 	 * @return the index of the first variable argument or -1
+ 	 */
+ 	public static int getFirstVarArg(Program program, Address addr) {
++		return getFirstVarArg(program, addr, null);
++	}
++
++	/**
++	 * {@link #getFirstVarArg(Program, Address)} as an index into the inputs of a call-site
++	 * override. A callee returning through a hidden pointer counts that pointer among its
++	 * parameters. An override whose own return also travels through a hidden pointer does not
++	 * list it, so it is not counted there; an override spelling the pointer out does list it.
++	 * @param program is the Program
++	 * @param addr is the given address of the call
++	 * @param override is the call-site override, or null to index the callee's parameters
++	 * @return the index of the first variable argument or -1
++	 */
++	public static int getFirstVarArg(Program program, Address addr, FunctionSignature override) {
+ 		for (Reference ref : program.getReferenceManager().getReferencesFrom(addr)) {
+ 			if (ref.isPrimary() && ref.getReferenceType().isCall()) {
  				Address callDestAddr = ref.getToAddress();
  				Function func = program.getFunctionManager().getFunctionAt(callDestAddr);
  				if (func != null && func.hasVarArgs()) {
 -					return func.getParameterCount();
-+					int count = 0;
++					int count = func.getParameterCount();
++					if (override == null || !returnsThroughHiddenPointer(program, override)) {
++						return count;
++					}
 +					for (Parameter param : func.getParameters()) {
-+						if (param.getAutoParameterType() != AutoParameterType.RETURN_STORAGE_PTR) {
-+							count++;
++						if (param.getAutoParameterType() == AutoParameterType.RETURN_STORAGE_PTR) {
++							count--;
 +						}
 +					}
 +					return count;
  				}
  				break;
  			}
+@@ -823,6 +846,14 @@ public class HighFunctionDBUtil {
+ 		return -1;
+ 	}
+ 
++	private static boolean returnsThroughHiddenPointer(Program program,
++			FunctionSignature signature) {
++		PrototypeModel model =
++			program.getCompilerSpec().matchConvention(signature.getCallingConventionName());
++		DataType[] returnOnly = { signature.getReturnType() };
++		return model.getStorageLocations(program, returnOnly, true, false)[0].isForcedIndirect();
++	}
++
+ 	/**
+ 	 * Get the Address referred to by a spacebase reference. Address-of references are encoded in
+ 	 * the p-code syntax tree as: {@code vn = PTRSUB(<spacebase>, #const)}.  This decodes the
 -- 
 2.45.1
 

@@ -1,0 +1,376 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Wall-AF <Allan.F.Wall@users.noreply.github.com>
+Date: Tue, 20 Oct 2026 16:22:01 +0100
+Subject: [PATCH] 09972: Add 'Pascal Calling Convention' and auto-pointer
+ sizing to support 16-/32-bit
+
+Add 'Pascal Calling Convention' and auto-pointer sizing to support 16-/32-bit pointers based upon calling convention.
+
+Add missed files to support the 'Pascal Calling Convention
+---
+ .../Decompiler/src/decompile/cpp/fspec.cc     |   4 +-
+ .../src/decompile/cpp/modelrules.cc           |   1 +
+ .../program/model/lang/PrototypeModel.java    |   3 +-
+ .../x86/data/languages/x86-16.cspec           | 196 ++++++++----------
+ 4 files changed, 87 insertions(+), 117 deletions(-)
+
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.cc
+index c39c38ce56..49c345a821 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/fspec.cc
+@@ -1898,7 +1898,7 @@ void ParamListPascal::assignMap(const PrototypePieces& proto, TypeFactory& typef
+       throw ParamUnassignedError("Cannot assign parameter address for " + dt->getName());
+   }
+ 
+-  if (proto.intypes.size() == 0) {
++  if (proto.intypes.size() == 0) { // no 'this'
+     allocateHiddenReturn(proto, typefactory, status, hiddenParam, hiddenPtr);
+     return;
+   }
+@@ -2474,7 +2474,7 @@ void ProtoModel::defaultParamRange(void)
+ }
+ 
+ /// Generate derived ParamList objects based on a given strategy
+-/// \param strategy is the resource \e strategy: currently "standard" or "register"
++/// \param strategy is the resource \e strategy: currently "standard", "register" or "pascal"
+ void ProtoModel::buildParamList(const string &strategy)
+ 
+ {
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/modelrules.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/modelrules.cc
+index 85434208b7..252916cfc0 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/modelrules.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/modelrules.cc
+@@ -834,6 +834,7 @@ uint4 ConvertToPointer::assignAddress(Datatype *dt,const PrototypePieces &proto,
+   AddrSpace *spc = space;
+   if (spc == (AddrSpace*)0)
+     spc = tlist.getArch()->getDefaultDataSpace();
++//  int4 pointersize = spc->getAddrSize();
+   int4 pointersize = proto.model->getPointerSize(spc);
+   int4 wordsize = spc->getWordSize();
+   // Convert the data-type to a pointer
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/PrototypeModel.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/PrototypeModel.java
+index 2adea82be0..78e8e26485 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/PrototypeModel.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/program/model/lang/PrototypeModel.java
+@@ -489,12 +489,11 @@ public class PrototypeModel {
+ 	public VariableStorage[] getStorageLocations(Program program, DataType[] dataTypes,
+ 			boolean addAutoParams, boolean isVarArgs) {
+ 
+-		int pointerSize = getPointerSize(program.getAddressFactory().getDefaultAddressSpace());
+-
+ 		DataType injectedThis = null;
+ 		if (addAutoParams && hasThis) {
+ 			// explicit support for auto 'this' parameter
+ 			// must inject pointer arg to obtain storage assignment
++			int pointerSize = getPointerSize(program.getAddressFactory().getDefaultAddressSpace());
+ 			injectedThis = new PointerDataType(null, pointerSize, program.getDataTypeManager());
+ 		}
+ 		PrototypePieces proto = new PrototypePieces(this, dataTypes, injectedThis);
+diff --git a/Ghidra/Processors/x86/data/languages/x86-16.cspec b/Ghidra/Processors/x86/data/languages/x86-16.cspec
+index bd1a1de9c5..64c2719e99 100644
+--- a/Ghidra/Processors/x86/data/languages/x86-16.cspec
++++ b/Ghidra/Processors/x86/data/languages/x86-16.cspec
+@@ -54,8 +54,6 @@
+         <register name="DS"/>
+         <register name="CS"/>
+         <register name="ES"/>
+-        <register name="FS"/>
+-        <register name="GS"/>
+         <register name="SS"/>
+         <register name="DF"/>
+       </unaffected>
+@@ -83,8 +81,6 @@
+       <register name="DS"/>
+       <register name="CS"/>
+       <register name="ES"/>
+-      <register name="FS"/>
+-      <register name="GS"/>
+       <register name="SS"/>
+       <register name="DF"/>
+     </unaffected>
+@@ -111,8 +107,6 @@
+       <register name="DS"/>
+       <register name="CS"/>
+       <register name="ES"/>
+-      <register name="FS"/>
+-      <register name="GS"/>
+       <register name="SS"/>
+       <register name="DF"/>
+     </unaffected>
+@@ -127,9 +121,9 @@
+       <pentry minsize="1" maxsize="2">
+         <register name="AX"/>
+       </pentry>
+-      <pentry minsize="3" maxsize="4">
+-        <addr space="join" piece1="DX" piece2="AX"/>
+-      </pentry>
++        <pentry minsize="3" maxsize="4">
++          <addr space="join" piece1="DX" piece2="AX"/>
++        </pentry>
+     </output>
+     <unaffected>
+       <register name="SP"/>
+@@ -139,8 +133,6 @@
+       <register name="DS"/>
+       <register name="CS"/>
+       <register name="ES"/>
+-      <register name="FS"/>
+-      <register name="GS"/>
+       <register name="SS"/>
+       <register name="DF"/>
+     </unaffected>
+@@ -178,23 +170,13 @@
+       <register name="DS"/>
+       <register name="CS"/>
+       <register name="ES"/>
+-      <register name="FS"/>
+-      <register name="GS"/>
+       <register name="SS"/>
+       <register name="DF"/>
+     </unaffected>
+   </prototype>
+-  <prototype name="__fastcall16near" extrapop="unknown" stackshift="2">
++
++  <prototype name="__pascal16near" extrapop="unknown" stackshift="2" strategy="pascal">
+     <input>
+-      <pentry minsize="1" maxsize="2">
+-        <register name="AX"/>
+-      </pentry>
+-      <pentry minsize="1" maxsize="2">
+-        <register name="DX"/>
+-      </pentry>
+-      <pentry minsize="1" maxsize="2">
+-        <register name="CX"/>
+-      </pentry>
+       <pentry minsize="1" maxsize="500" align="2">
+         <addr offset="2" space="stack"/>
+       </pentry>
+@@ -221,52 +203,20 @@
+       <register name="DF"/>
+     </unaffected>
+   </prototype>
+-  <prototype name="__fastcall16far" extrapop="unknown" stackshift="4">
++  <prototype name="__pascal16far" extrapop="unknown" stackshift="4" strategy="pascal">
+     <input>
+-      <pentry minsize="1" maxsize="2">
+-        <register name="AX"/>
+-      </pentry>
+-      <pentry minsize="1" maxsize="2">
+-        <register name="DX"/>
+-      </pentry>
+-      <pentry minsize="1" maxsize="2">
+-        <register name="CX"/>
+-      </pentry>
+       <pentry minsize="1" maxsize="500" align="2">
+         <addr offset="4" space="stack"/>
+       </pentry>
+     </input>
+     <output>
+-        <pentry minsize="1" maxsize="2">
+-          <register name="AX"/>
+-        </pentry>
+-        <pentry minsize="3" maxsize="4">
+-          <addr space="join" piece1="DX" piece2="AX"/>
+-        </pentry>
+-    </output>
+-    <unaffected>
+-      <register name="SP"/>
+-      <register name="BP"/>
+-      <register name="SI"/>
+-      <register name="DI"/>
+-      <register name="DS"/>
+-      <register name="CS"/>
+-      <register name="ES"/>
+-      <register name="FS"/>
+-      <register name="GS"/>
+-      <register name="SS"/>
+-      <register name="DF"/>
+-    </unaffected>
+-  </prototype>
+-
+-  <prototype name="__pascal16near" extrapop="unknown" stackshift="2" strategy="pascal">
+-    <input>
+-      <pentry minsize="1" maxsize="500" align="2">
+-        <addr offset="2" space="stack"/>
++      <pentry minsize="8" maxsize="10" metatype="float">
++        <register name="ST0"/>
+       </pentry>
+-    </input>
+-    <output>
+-      <pentry minsize="1" maxsize="2">
++      <pentry minsize="1" maxsize="1">
++        <register name="AL"/>
++      </pentry>
++      <pentry minsize="2" maxsize="2">
+         <register name="AX"/>
+       </pentry>
+       <pentry minsize="3" maxsize="4">
+@@ -287,43 +237,45 @@
+       <register name="DF"/>
+     </unaffected>
+   </prototype>
+-  <prototype name="__pascal16far" extrapop="unknown" stackshift="4" strategy="pascal">
+-    <input>
+-      <pentry minsize="1" maxsize="500" align="2">
+-        <addr offset="4" space="stack"/>
+-      </pentry>
+-    </input>
+-    <output>
+-        <pentry minsize="1" maxsize="2">
+-          <register name="AX"/>
+-        </pentry>
+-        <pentry minsize="3" maxsize="4">
+-          <addr space="join" piece1="DX" piece2="AX"/>
+-        </pentry>
+-    </output>
+-    <unaffected>
+-      <register name="SP"/>
+-      <register name="BP"/>
+-      <register name="SI"/>
+-      <register name="DI"/>
+-      <register name="DS"/>
+-      <register name="CS"/>
+-      <register name="ES"/>
+-      <register name="FS"/>
+-      <register name="GS"/>
+-      <register name="SS"/>
+-      <register name="DF"/>
+-    </unaffected>
+-  </prototype>
+ 
+   <prototype name="__thiscallpascal16near" extrapop="unknown" stackshift="2" hasthis="true" strategy="pascal">
+     <input>
++      <pentry minsize="8" maxsize="10" metatype="float">
++        <register name="ST0"/>
++      </pentry>
++      <pentry minsize="8" maxsize="10" metatype="float">
++        <register name="ST1"/>
++      </pentry>
++      <pentry minsize="8" maxsize="10" metatype="float">
++        <register name="ST2"/>
++      </pentry>
++      <pentry minsize="8" maxsize="10" metatype="float">
++        <register name="ST3"/>
++      </pentry>
++      <pentry minsize="8" maxsize="10" metatype="float">
++        <register name="ST4"/>
++      </pentry>
++      <pentry minsize="8" maxsize="10" metatype="float">
++        <register name="ST5"/>
++      </pentry>
++      <pentry minsize="8" maxsize="10" metatype="float">
++        <register name="ST6"/>
++      </pentry>
++      <pentry minsize="8" maxsize="10" metatype="float">
++        <register name="ST7"/>
++      </pentry>
+       <pentry minsize="1" maxsize="500" align="2">
+         <addr offset="2" space="stack"/>
+       </pentry>
+     </input>
+     <output>
+-      <pentry minsize="1" maxsize="2">
++      <pentry minsize="8" maxsize="10" metatype="float">
++        <register name="ST0"/>
++      </pentry>
++      <pentry minsize="1" maxsize="1">
++        <register name="AL"/>
++      </pentry>
++      <pentry minsize="2" maxsize="2">
+         <register name="AX"/>
+       </pentry>
+       <pentry minsize="3" maxsize="4">
+@@ -352,12 +304,18 @@
+       </pentry>
+     </input>
+     <output>
+-        <pentry minsize="1" maxsize="2">
+-          <register name="AX"/>
+-        </pentry>
+-        <pentry minsize="3" maxsize="4">
+-          <addr space="join" piece1="DX" piece2="AX"/>
+-        </pentry>
++      <pentry minsize="8" maxsize="10" metatype="float">
++        <register name="ST0"/>
++      </pentry>
++      <pentry minsize="1" maxsize="1">
++        <register name="AL"/>
++      </pentry>
++      <pentry minsize="2" maxsize="2">
++        <register name="AX"/>
++      </pentry>
++      <pentry minsize="3" maxsize="4">
++        <addr space="join" piece1="DX" piece2="AX"/>
++      </pentry>
+     </output>
+     <unaffected>
+       <register name="SP"/>
+@@ -377,11 +335,17 @@
+   <prototype name="__thiscallcdecl16near" extrapop="2" stackshift="2" hasthis="true">
+     <input>
+       <pentry minsize="1" maxsize="500" align="2">
+-        <addr offset="4" space="stack"/>
++        <addr offset="2" space="stack"/>
+       </pentry>
+     </input>
+     <output>
+-      <pentry minsize="1" maxsize="2">
++      <pentry minsize="8" maxsize="10" metatype="float">
++        <register name="ST0"/>
++      </pentry>
++      <pentry minsize="1" maxsize="1">
++        <register name="AL"/>
++      </pentry>
++      <pentry minsize="2" maxsize="2">
+         <register name="AX"/>
+       </pentry>
+       <pentry minsize="3" maxsize="4">
+@@ -409,7 +373,13 @@
+       </pentry>
+     </input>
+     <output>
+-      <pentry minsize="1" maxsize="2">
++      <pentry minsize="8" maxsize="10" metatype="float">
++        <register name="ST0"/>
++      </pentry>
++      <pentry minsize="1" maxsize="1">
++        <register name="AL"/>
++      </pentry>
++      <pentry minsize="2" maxsize="2">
+         <register name="AX"/>
+       </pentry>
+       <pentry minsize="3" maxsize="4">
+@@ -435,17 +405,17 @@
+      <model name="__stdcall16far"/>
+   </resolveprototype>
+   <eval_current_prototype name="__stdcall16far/__stdcall16near"/>
+-<callfixup name="alloca_probe">
+-  <target name="__alloca_probe"/>
+-  <target name="__alloca_probe_8"/>
+-  <target name="__alloca_probe_16"/>
+-  <target name="__chkstk"/>
+-  <pcode>
+-    <body><![CDATA[
+-	 AX = AX + 1;
+-	 AX = AX & 0xFFFE;
+-	 SP = SP + 2 - AX;
+-    ]]></body>
+-  </pcode>
+-</callfixup>
++  <callfixup name="alloca_probe">
++    <target name="__alloca_probe"/>
++    <target name="__alloca_probe_8"/>
++    <target name="__alloca_probe_16"/>
++    <target name="__chkstk"/>
++    <pcode>
++      <body><![CDATA[
++         AX = AX + 1;
++         AX = AX & 0xFFFE;
++         SP = SP + 2 - AX;
++      ]]></body>
++    </pcode>
++  </callfixup>
+ </compiler_spec>
+-- 
+2.45.1
+
