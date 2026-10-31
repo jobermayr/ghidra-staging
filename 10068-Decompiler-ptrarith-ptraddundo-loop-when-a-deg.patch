@@ -1,0 +1,42 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: FlashHit <56718716+FlashHit@users.noreply.github.com>
+Date: Thu, 29 Oct 2026 20:56:59 +0100
+Subject: [PATCH] 10068: Decompiler: ptrarith/ptraddundo loop when a degenerate
+ PTRADD swaps inputs that carry union resolutions
+
+---
+ .../Decompiler/src/decompile/cpp/ruleaction.cc   | 16 ++++++++++++++--
+ 1 file changed, 14 insertions(+), 2 deletions(-)
+
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc
+index 46b711054c..12b099bfa9 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc
+@@ -6969,10 +6969,22 @@ bool AddTreeState::buildDegenerate(void)
+     return false;
+   if (tryShiftedSpacebaseUsedAsCounter(baseOp))
+     return true;
+-  vector<Varnode *> newparams;
+   int4 slot = baseOp->getSlot(ptr);
++  Varnode *otherVn = baseOp->getIn(1-slot);
++  if (slot != 0 && (ptr->getType()->needsResolution() || otherVn->getType()->needsResolution())) {
++    // Union resolutions are tied to the input slot, so build a new op that inherits them
++    PcodeOp *newop = data.newOpBefore(baseOp,CPUI_PTRADD,ptr,otherVn,data.newConstant(ct->getSize(),1));
++    if (ptr->getType()->needsResolution())
++      data.inheritUnionField(ptr->getType(),newop,0,baseOp,slot);
++    if (otherVn->getType()->needsResolution())
++      data.inheritUnionField(otherVn->getType(),newop,1,baseOp,1-slot);
++    data.opSetOutput(newop,baseOp->getOut());
++    data.opDestroy(baseOp);
++    return true;
++  }
++  vector<Varnode *> newparams;
+   newparams.push_back( ptr );
+-  newparams.push_back( baseOp->getIn(1-slot) );
++  newparams.push_back( otherVn );
+   newparams.push_back( data.newConstant(ct->getSize(),1));
+   data.opSetAllInput(baseOp,newparams);
+   data.opSetOpcode(baseOp,CPUI_PTRADD);
+-- 
+2.45.1
+
