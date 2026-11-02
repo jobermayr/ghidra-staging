@@ -1,0 +1,54 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Erik Berg <github@slipsprogrammor.no>
+Date: Mon, 2 Nov 2026 13:48:08 +0100
+Subject: [PATCH] 10097: CreateFunctionCmd: remove only the new body from an
+ overlapping function
+
+When a new function overlaps an existing one, subtractBodyFromExisting
+removed the whole range from the new entry to the end of the overlap
+from the existing function, even code there that the new function does
+not reach. That code was then left in no function.
+
+Remove only the new body's addresses in that range.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../java/ghidra/app/cmd/function/CreateFunctionCmd.java   | 8 +++++---
+ 1 file changed, 5 insertions(+), 3 deletions(-)
+
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/cmd/function/CreateFunctionCmd.java b/Ghidra/Features/Base/src/main/java/ghidra/app/cmd/function/CreateFunctionCmd.java
+index 8ff89b7e5f..e2f0f43571 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/cmd/function/CreateFunctionCmd.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/cmd/function/CreateFunctionCmd.java
+@@ -396,7 +396,7 @@ public class CreateFunctionCmd extends BackgroundCommand<Program> {
+ 	 * Subtract this functions entire body from existing functions.
+ 	 * NewFuncBody keeps any overlapping code that occurs between its entry point and the next entry point.
+ 	 * This rule helps functions keep a contiguous function body if functions share code such as a return, or
+-	 * even an internal branch.
++	 * even an internal branch. Code in that range that newFuncBody doesn't reach stays with its function.
+ 	 * 
+ 	 * NOTE: This will change the other functions bodies
+ 	 *
+@@ -434,7 +434,8 @@ public class CreateFunctionCmd extends BackgroundCommand<Program> {
+ 			}
+ 
+ 			// get new body for overlapping function, by carving out addresses that
+-			// should belong in the new function
++			// should belong in the new function: those of its body in the range, not code
++			// in the range that only the overlapping function reaches
+ 			Address overlapEndAddr;
+ 			if (overlapEntryPoint.compareTo(entry) < 0) {
+ 				// overlap function is before, subtract from entry to end of new function
+@@ -444,7 +445,8 @@ public class CreateFunctionCmd extends BackgroundCommand<Program> {
+ 				// overlap function is after, subtract from entry to entry of overlapping function
+ 				overlapEndAddr = overlapEntryPoint.previous();
+ 			}
+-			AddressSet overlapAddrsShouldBeInNewFunction = new AddressSet(entry, overlapEndAddr);
++			AddressSetView overlapAddrsShouldBeInNewFunction =
++				newFuncBody.intersectRange(entry, overlapEndAddr);
+ 			AddressSetView newOverlapFuncBody =
+ 				overlapFuncBody.subtract(overlapAddrsShouldBeInNewFunction);
+ 			try {
+-- 
+2.45.1
+
