@@ -1,24 +1,24 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Pankraz76 <punkratz1@gmail.com>
-Date: Wed, 28 Oct 2026 13:13:39 +0000
+Date: Mon, 2 Nov 2026 19:58:16 +0000
 Subject: [PATCH] 10055: Assembler: do not match empty labels in numeric
  terminals
 
+Assembler: skip symbol table lookup for empty names
+
 When a numeric operand is expected but the input has no label
 characters at that position (e.g. right after "[" or "#"),
-AssemblyNumericTerminal.match still looked up the empty string via
-AssemblyNumericSymbols.choose(""). The symbol table stores
-default-named functions (FUN_xxxxxxxx) with an empty name, so
-SymbolTable.getSymbols("") returns every one of them. Each returned
-address became a zero-width symbol token, forking one parse branch per
-function. On large programs this made every keystroke in Patch
-Instruction take seconds, and it also let incomplete input such as
-"ldr x0,[x1, #]" be accepted with an arbitrary function address as
-the operand.
+AssemblyNumericTerminal.match looks up the empty string.
+SymbolTable.getSymbols("") returns every default-named symbol
+(FUN_xxxxxxxx), since those are stored without a name. Each became a
+zero-width symbol token, forking one parse branch per function. On
+large programs this made every keystroke in Patch Instruction take
+seconds, and it let incomplete input such as "ldr x0,[x1, #]" be
+accepted with an arbitrary function address as the operand.
 
-Return no token when no label characters were consumed. Without a
-program the lookup of "" already yielded nothing, so behavior there is
-unchanged.
+Skip the symbol table in AssemblyNumericSymbols.chooseAll and
+chooseBySpace when the name is empty. Equates and language labels are
+plain maps and need no special handling.
 
 AArch64, 300k labels + 50k default-named functions, median of 5 runs
 after 2 warm-ups:
@@ -26,32 +26,71 @@ after 2 warm-ups:
   parseLine("ldr x0,[x1, ") 1316.8 ms -> 2.6 ms
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
-Claude-Session: https://claude.ai/code/session_01MTr23xgfS13yZrtCrypJ98
+Claude-Session: https://claude.ai/code/session_01MTr23yotYR4n4votGs7j1e
 ---
- .../symbol/AssemblyNumericTerminal.java       |  4 ++++
- .../assembler/sleigh/PublicAPITest.java       | 24 +++++++++++++++++++
- 2 files changed, 28 insertions(+)
+ .../sleigh/symbol/AssemblyNumericSymbols.java | 20 +++++++++++--
+ .../assembler/sleigh/PublicAPITest.java       | 29 +++++++++++++++++--
+ 2 files changed, 45 insertions(+), 4 deletions(-)
 
-diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/assembler/sleigh/symbol/AssemblyNumericTerminal.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/assembler/sleigh/symbol/AssemblyNumericTerminal.java
-index c89ca0c94b..8a665753a0 100644
---- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/assembler/sleigh/symbol/AssemblyNumericTerminal.java
-+++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/assembler/sleigh/symbol/AssemblyNumericTerminal.java
-@@ -138,6 +138,10 @@ public class AssemblyNumericTerminal extends AssemblyTerminal {
- 			}
- 			break;
- 		}
-+		if (b == s) {
-+			// No label here. Note the symbol table returns all default-named functions for ""
-+			return Collections.emptySet();
-+		}
- 		String lab = buffer.substring(s, b);
- 		return symbols.choose(lab, space)
- 				.stream()
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/assembler/sleigh/symbol/AssemblyNumericSymbols.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/assembler/sleigh/symbol/AssemblyNumericSymbols.java
+index 08b44706a5..bfc9b37828 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/assembler/sleigh/symbol/AssemblyNumericSymbols.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/assembler/sleigh/symbol/AssemblyNumericSymbols.java
+@@ -132,6 +132,22 @@ public final class AssemblyNumericSymbols {
+ 		this.languageLabels = collectLanguageLabels(program.getLanguage());
+ 	}
+ 
++	/**
++	 * Check whether the program's symbol table should be searched for the given name
++	 *
++	 * <p>
++	 * {@link SymbolTable#getSymbols(String)} returns every default-named symbol (e.g.,
++	 * {@code FUN_00401000}) for the empty name, since those are stored without a name. For the
++	 * assembler, that would produce one candidate operand per such symbol. That behavior seems
++	 * wrong; if it is ever addressed, the empty-name check here can be removed.
++	 *
++	 * @param name the name
++	 * @return true to search the symbol table
++	 */
++	private boolean shouldSearchSymbolTable(String name) {
++		return program != null && !name.isEmpty();
++	}
++
+ 	/**
+ 	 * Choose any symbol with the given name
+ 	 * 
+@@ -145,7 +161,7 @@ public final class AssemblyNumericSymbols {
+ 	public Set<Long> chooseAll(String name) {
+ 		Set<Long> result = new TreeSet<>();
+ 		result.addAll(programEquates.getOrDefault(name, Set.of()));
+-		if (program != null) {
++		if (shouldSearchSymbolTable(name)) {
+ 			StreamSupport.stream(program.getSymbolTable().getSymbols(name).spliterator(), false)
+ 					.flatMap(sym -> streamNonExternalAddresses(sym))
+ 					.forEach(a -> result.add(a.getAddressableWordOffset()));
+@@ -165,7 +181,7 @@ public final class AssemblyNumericSymbols {
+ 	 */
+ 	public Set<Long> chooseBySpace(String name, AddressSpace space) {
+ 		Set<Long> result = new TreeSet<>();
+-		if (program != null) {
++		if (shouldSearchSymbolTable(name)) {
+ 			StreamSupport.stream(program.getSymbolTable().getSymbols(name).spliterator(), false)
+ 					.flatMap(sym -> streamAddresses(sym))
+ 					.filter(a -> a.getAddressSpace() == space)
 diff --git a/Ghidra/Framework/SoftwareModeling/src/test/java/ghidra/app/plugin/assembler/sleigh/PublicAPITest.java b/Ghidra/Framework/SoftwareModeling/src/test/java/ghidra/app/plugin/assembler/sleigh/PublicAPITest.java
-index 4b983ebd29..11d700ff52 100644
+index 4b983ebd29..5b5814ef08 100644
 --- a/Ghidra/Framework/SoftwareModeling/src/test/java/ghidra/app/plugin/assembler/sleigh/PublicAPITest.java
 +++ b/Ghidra/Framework/SoftwareModeling/src/test/java/ghidra/app/plugin/assembler/sleigh/PublicAPITest.java
-@@ -25,11 +25,14 @@ import org.junit.*;
+@@ -17,19 +17,21 @@ package ghidra.app.plugin.assembler.sleigh;
+ 
+ import static org.junit.Assert.*;
+ 
+-import java.util.ArrayList;
+-import java.util.List;
++import java.util.*;
+ 
+ import org.junit.*;
+ 
  import db.Transaction;
  import generic.test.AbstractGenericTest;
  import ghidra.app.plugin.assembler.*;
@@ -66,7 +105,7 @@ index 4b983ebd29..11d700ff52 100644
  import ghidra.program.util.DefaultLanguageService;
  import ghidra.util.exception.CancelledException;
  import ghidra.util.task.TaskMonitor;
-@@ -97,4 +100,25 @@ public class PublicAPITest extends AbstractGenericTest {
+@@ -97,4 +99,27 @@ public class PublicAPITest extends AbstractGenericTest {
  		assertEquals("brds", result.get(0).getMnemonicString());
  		assertEquals("_add", result.get(1).getMnemonicString());
  	}
@@ -87,7 +126,9 @@ index 4b983ebd29..11d700ff52 100644
 +		}
 +		Assembler asm = Assemblers.getAssembler(program);
 +
-+		for (AssemblyParseResult result : asm.parseLine("ldr x0,[x1, #]")) {
++		Collection<AssemblyParseResult> results = asm.parseLine("ldr x0,[x1, #]");
++		assertFalse(results.isEmpty());
++		for (AssemblyParseResult result : results) {
 +			assertTrue(result.isError());
 +		}
 +	}

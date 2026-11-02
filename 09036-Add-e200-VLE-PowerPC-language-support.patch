@@ -63,11 +63,9 @@ Thanks to @jobermayr for identifying this in the build log.
  .../data/languages/ppc_32_e200.slaspec        |  24 ++
  .../data/languages/ppc_64_isa_vle_be.slaspec  |   2 +
  .../PowerPC/data/languages/ppc_e200_ds.sinc   |  10 +
- .../data/languages/ppc_instructions.sinc      |   9 +
  .../PowerPC/data/languages/ppc_vle.sinc       | 123 ++++----
- .../PowerPC/data/languages/quicciii.sinc      |   9 -
  .../PowerPC_ElfRelocationHandler.java         | 269 ++++++++++++++++++
- 12 files changed, 448 insertions(+), 92 deletions(-)
+ 10 files changed, 439 insertions(+), 83 deletions(-)
  create mode 100644 Ghidra/Processors/PowerPC/data/languages/ppc_32_e200.slaspec
  create mode 100644 Ghidra/Processors/PowerPC/data/languages/ppc_e200_ds.sinc
 
@@ -346,26 +344,6 @@ index 0000000000..70abf397f9
 +:lbdx RT,A,B is OP=31 & XOP_1_10=515 & RT & A & B & BIT_0=0  {
 +	RT = lbdxOp(RT,A,B);
 +}
-diff --git a/Ghidra/Processors/PowerPC/data/languages/ppc_instructions.sinc b/Ghidra/Processors/PowerPC/data/languages/ppc_instructions.sinc
-index 612b775d9b..20d1ec78d0 100644
---- a/Ghidra/Processors/PowerPC/data/languages/ppc_instructions.sinc
-+++ b/Ghidra/Processors/PowerPC/data/languages/ppc_instructions.sinc
-@@ -3978,6 +3978,15 @@ define pcodeop TLBSynchronize; # Outputs/affect TBD
- 	A = S ^ (UIMM << 16);
- }
- 
-+# isel r0,r0,r0	0x7c 00 00 1e
-+:isel^CC_X_OPm D,RA_OR_ZERO,B,CC_X_OP  is OP=31 & D & RA_OR_ZERO & B & CC_X_OP & CC_X_OPm & XOP_1_5=15
-+{
-+	local tmp:$(REGISTER_SIZE) = RA_OR_ZERO;
-+	D = B;
-+	if (!CC_X_OP) goto inst_next;
-+	D = tmp;
-+}
-+
- 
- #TODO:
- # 2) Add simplified mnemonics for all instructions
 diff --git a/Ghidra/Processors/PowerPC/data/languages/ppc_vle.sinc b/Ghidra/Processors/PowerPC/data/languages/ppc_vle.sinc
 index 76b75bc433..ffef76ca23 100644
 --- a/Ghidra/Processors/PowerPC/data/languages/ppc_vle.sinc
@@ -532,26 +510,6 @@ index 76b75bc433..ffef76ca23 100644
  :e_slwi A,S,SHL					is $(ISVLE) & OP=31 & BIT_0=0 & XOP_1_10=56 & A & SHL & S {
  	tmpS:4 = S:4;
  	tmpS = tmpS << SHL;
-diff --git a/Ghidra/Processors/PowerPC/data/languages/quicciii.sinc b/Ghidra/Processors/PowerPC/data/languages/quicciii.sinc
-index c9958477e9..ab0250869f 100644
---- a/Ghidra/Processors/PowerPC/data/languages/quicciii.sinc
-+++ b/Ghidra/Processors/PowerPC/data/languages/quicciii.sinc
-@@ -60,15 +60,6 @@ define pcodeop invalidateTLB;
- 	prefetchInstructionCacheBlockLockSetX(ea);
- }
- 
--:isel^CC_X_OPm D,RA_OR_ZERO,B,CC_X_OP  is OP=31 & D & RA_OR_ZERO & B & CC_X_OP & CC_X_OPm & XOP_1_5=15
--{
--	local tmp:$(REGISTER_SIZE) = RA_OR_ZERO;
--	D = B;
--	if (!CC_X_OP) goto inst_next;
--	D = tmp;
--#        D = (zext(CC_X_OP) * RA_OR_ZERO) + (zext(!CC_X_OP) * B);
--}
--
- #mfapidi r0,r1  #FIXME
- :mfapidi D,A    is $(NOTVLE) & OP=31 & D & A & XOP_1_10=275
- { 
 diff --git a/Ghidra/Processors/PowerPC/src/main/java/ghidra/app/util/bin/format/elf/relocation/PowerPC_ElfRelocationHandler.java b/Ghidra/Processors/PowerPC/src/main/java/ghidra/app/util/bin/format/elf/relocation/PowerPC_ElfRelocationHandler.java
 index 97545dca3c..6a23cb480c 100644
 --- a/Ghidra/Processors/PowerPC/src/main/java/ghidra/app/util/bin/format/elf/relocation/PowerPC_ElfRelocationHandler.java
