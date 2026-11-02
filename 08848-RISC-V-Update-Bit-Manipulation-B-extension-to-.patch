@@ -28,39 +28,15 @@ Fix RV64 packw and cpopw instructions, add HXLEN constant to lp64d and ilp32d.
 
 Add Half-XLEN comment to HXLEN.
 ---
- .../RISCV/data/languages/riscv.ilp32d.slaspec |   1 +
- .../RISCV/data/languages/riscv.lp64d.slaspec  |   1 +
- .../RISCV/data/languages/riscv.rv32b.sinc     | 409 +++++++++++-------
- .../RISCV/data/languages/riscv.rv64b.sinc     | 245 ++++++-----
- 4 files changed, 402 insertions(+), 254 deletions(-)
+ .../RISCV/data/languages/riscv.rv32b.sinc     | 427 ++++++++++++------
+ .../RISCV/data/languages/riscv.rv64b.sinc     | 251 +++++-----
+ 2 files changed, 424 insertions(+), 254 deletions(-)
 
-diff --git a/Ghidra/Processors/RISCV/data/languages/riscv.ilp32d.slaspec b/Ghidra/Processors/RISCV/data/languages/riscv.ilp32d.slaspec
-index ee9976d0fb..24c80ffac0 100644
---- a/Ghidra/Processors/RISCV/data/languages/riscv.ilp32d.slaspec
-+++ b/Ghidra/Processors/RISCV/data/languages/riscv.ilp32d.slaspec
-@@ -1,5 +1,6 @@
- define endian=little;
- 
-+@define HXLEN 2 # Half-XLEN
- @define XLEN 4
- @define XLEN2 8
- @define FLEN 8
-diff --git a/Ghidra/Processors/RISCV/data/languages/riscv.lp64d.slaspec b/Ghidra/Processors/RISCV/data/languages/riscv.lp64d.slaspec
-index f1d11a233a..6e5faaf595 100644
---- a/Ghidra/Processors/RISCV/data/languages/riscv.lp64d.slaspec
-+++ b/Ghidra/Processors/RISCV/data/languages/riscv.lp64d.slaspec
-@@ -1,5 +1,6 @@
- define endian=little;
- 
-+@define HXLEN 4 # Half-XLEN
- @define XLEN 8
- @define XLEN2 16
- @define FLEN 8
 diff --git a/Ghidra/Processors/RISCV/data/languages/riscv.rv32b.sinc b/Ghidra/Processors/RISCV/data/languages/riscv.rv32b.sinc
-index 9deafd0f46..5d907c4906 100644
+index 9deafd0f46..fddf824b7a 100644
 --- a/Ghidra/Processors/RISCV/data/languages/riscv.rv32b.sinc
 +++ b/Ghidra/Processors/RISCV/data/languages/riscv.rv32b.sinc
-@@ -1,149 +1,268 @@
+@@ -1,149 +1,286 @@
 -# RV32 Bitmanip Extension
 +# RV32 Zb Extension (Bit Manipulation)
 +# NOTE: v1.0.0
@@ -214,6 +190,14 @@ index 9deafd0f46..5d907c4906 100644
 -
 -define pcodeop xperm_n;
 -:xperm.nf rd, rs1, rs2 is op0006=0x33 & rd & op1214=0x2 & rs1 & rs2 & op2531=0x14 {rd=xperm_n(rs1,rs2);}
++# Half of XLEN in bytes, for pack. riscv.table.sinc already defines HXLEN as
++# the halfword size (2), and a later @define replaces an earlier one.
++@if ADDRSIZE == "64"
++@define HALFXLEN 4
++@else
++@define HALFXLEN 2
++@endif
++
 +# ==============================================================================
 +# Zba Instructions
 +# ==============================================================================
@@ -321,10 +305,13 @@ index 9deafd0f46..5d907c4906 100644
 +}
 +
 +# 0000100 00000 rs1 100 rd 0110011
++# RV64 encodes zext.h in OP-32; this encoding is pack rd, rs1, zero there.
++@if ADDRSIZE == "32"
 +:zext.h rd, rs1         is op2531=0x4 & op2024=0x0 & rs1 & op1214=0x4 & rd & op0006=0x33
 +{
 +    rd = zext(rs1:2);
 +}
++@endif
 +
 +# 0010100 00111 rs1 101 rd 0010011
 +:orc.b rd, rs1          is op2031=0x287 & rs1 & op1214=0x5 & rd & op0006=0x13
@@ -427,7 +414,7 @@ index 9deafd0f46..5d907c4906 100644
 +# 0000100 rs2 rs1 100 rd 0110011
 +:pack rd, rs1, rs2      is op2531=0x4 & rs2 & rs1 & op1214=0x4 & rd & op0006=0x33
 +{
-+    rd = (zext(rs2:$(HXLEN)) << ($(XLEN) << 2)) | zext(rs1:$(HXLEN));
++    rd = (zext(rs2:$(HALFXLEN)) << ($(XLEN) << 2)) | zext(rs1:$(HALFXLEN));
 +}
 +
 +# 0000100 rs2 rs1 111 rd 0110011
@@ -444,15 +431,22 @@ index 9deafd0f46..5d907c4906 100644
 +    rd =        ((tmp & 0x0F0F0F0F0F0F0F0F) << 4) | ((tmp >> 4) & 0x0F0F0F0F0F0F0F0F);
 +}
 +
++# 0110000 00000 rs1 001 rd 0010011
++:clz rd, rs1            is op2531=0x30 & op2024=0x0 & rs1 & op1214=0x1 & rd & op0006=0x13
++{
++    rd = lzcount(rs1);
++}
++
++# 0110000 00001 rs1 001 rd 0010011
++# The bits below the lowest set bit; all XLEN bits when rs1 is zero.
++:ctz rd, rs1            is op2531=0x30 & op2024=0x1 & rs1 & op1214=0x1 & rd & op0006=0x13
++{
++    rd = popcount(~rs1 & (rs1 - 1));
++}
++
 +# ==============================================================================
 +# Unimpl Instructions
 +# ==============================================================================
-+
-+# 0110000 00000 rs1 001 rd 0010011
-+:clz rd, rs1            is op2531=0x30 & op2024=0x0 & rs1 & op1214=0x1 & rd & op0006=0x13 unimpl
-+
-+# 0110000 00001 rs1 001 rd 0010011
-+:ctz rd, rs1            is op2531=0x30 & op2024=0x1 & rs1 & op1214=0x1 & rd & op0006=0x13 unimpl
 +
 +# 0000101 rs2 rs1 001 rd 0110011
 +:clmul rd, rs1, rs2     is op2531=0x5 & rs2 & rs1 & op1214=0x1 & rd & op0006=0x33 unimpl
@@ -475,10 +469,10 @@ index 9deafd0f46..5d907c4906 100644
 +# 0010100 rs2 rs1 100 rd 0110011
 +:xperm8 rd, rs1, rs2    is op2531=0x14 & rs2 & rs1 & op1214=0x4 & rd & op0006=0x33 unimpl
 diff --git a/Ghidra/Processors/RISCV/data/languages/riscv.rv64b.sinc b/Ghidra/Processors/RISCV/data/languages/riscv.rv64b.sinc
-index fe73f244e0..c92a1e04e5 100644
+index fe73f244e0..798b99bafc 100644
 --- a/Ghidra/Processors/RISCV/data/languages/riscv.rv64b.sinc
 +++ b/Ghidra/Processors/RISCV/data/languages/riscv.rv64b.sinc
-@@ -1,109 +1,136 @@
+@@ -1,109 +1,142 @@
 -# RV64 Bitmanip Extension
 -
 -#TODO  fix op2031
@@ -654,19 +648,19 @@ index fe73f244e0..c92a1e04e5 100644
 +}
 +
 +# 010010 shamt rs1 101 rd 0010011
-+:bexti rd, rs1, op2025  is op2531=0x12 & op2025 & rs1 & op1214=0x5 & rd & op0006=0x13
++:bexti rd, rs1, op2025  is op2631=0x12 & op2025 & rs1 & op1214=0x5 & rd & op0006=0x13
 +{
 +    rd = (rs1 >> op2025) & 1;
 +}
 +
 +# 011010 shamt rs1 001 rd 0010011
-+:binvi rd, rs1, op2025  is op2531=0x1a & op2025 & rs1 & op1214=0x1 & rd & op0006=0x13
++:binvi rd, rs1, op2025  is op2631=0x1a & op2025 & rs1 & op1214=0x1 & rd & op0006=0x13
 +{
 +    rd = rs1 ^ (1:$(XLEN) << op2025);
 +}
 +
 +# 001010 shamt rs1 001 rd 0010011
-+:bseti rd, rs1, op2025  is op2531=0xa & op2025 & rs1 & op1214=0x1 & rd & op0006=0x13
++:bseti rd, rs1, op2025  is op2631=0xa & op2025 & rs1 & op1214=0x1 & rd & op0006=0x13
 +{
 +    rd = rs1 | (1:$(XLEN) << op2025);
 +}
@@ -715,15 +709,21 @@ index fe73f244e0..c92a1e04e5 100644
 +    rd = sext((rs1:4 >> op2024) | (rs1:4 << (32 - op2024)));
 +}
 +
-+# ==============================================================================
-+# Unimpl Instructions
-+# ==============================================================================
-+
 +# 0110000 00001 rs1 001 rd 0011011
-+:ctzw rd, rs1           is op2531=0x30 & op2024=0x1 & rs1 & op1214=0x1 & rd & op0006=0x1b unimpl
++:ctzw rd, rs1           is op2531=0x30 & op2024=0x1 & rs1 & op1214=0x1 & rd & op0006=0x1b
++{
++    local word:4 = rs1:4;
++    local count:4 = popcount(~word & (word - 1));
++    rd = zext(count);
++}
 +
 +# 0110000 00000 rs1 001 rd 0011011
-+:clzw rd, rs1           is op2531=0x30 & op2024=0x0 & rs1 & op1214=0x1 & rd & op0006=0x1b unimpl
++:clzw rd, rs1           is op2531=0x30 & op2024=0x0 & rs1 & op1214=0x1 & rd & op0006=0x1b
++{
++    local word:4 = rs1:4;
++    local count:4 = lzcount(word);
++    rd = zext(count);
++}
 -- 
 2.45.1
 

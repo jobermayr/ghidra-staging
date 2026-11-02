@@ -1,0 +1,48 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Chris Bongaarts <cab@bongalow.net>
+Date: Fri, 30 Oct 2026 13:10:25 -0500
+Subject: [PATCH] 10086: Decompiler Switch Analysis: don't nest switchD
+ namespaces under an UndefinedFunction
+
+GP-7316 creates the switchD_ namespace under decompilerResults.getFunction().
+For a computed jump outside any defined function that is an UndefinedFunction,
+whose getSymbol() throws UnsupportedOperationException when SymbolManager
+validates the parent. The exception escapes labelSwitch and aborts the whole
+command before the table is disassembled or referenced. Fall back to the
+global namespace for an UndefinedFunction, as before GP-7316, and look a
+duplicate up under the same parent it was created under.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_015RwRYnVtqwZWUAFbFfAhBd
+---
+ .../app/cmd/function/DecompilerSwitchAnalysisCmd.java       | 6 ++++--
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/Ghidra/Features/Decompiler/src/main/java/ghidra/app/cmd/function/DecompilerSwitchAnalysisCmd.java b/Ghidra/Features/Decompiler/src/main/java/ghidra/app/cmd/function/DecompilerSwitchAnalysisCmd.java
+index 0369fa411f..0707b7297a 100644
+--- a/Ghidra/Features/Decompiler/src/main/java/ghidra/app/cmd/function/DecompilerSwitchAnalysisCmd.java
++++ b/Ghidra/Features/Decompiler/src/main/java/ghidra/app/cmd/function/DecompilerSwitchAnalysisCmd.java
+@@ -320,16 +320,18 @@ public class DecompilerSwitchAnalysisCmd extends BackgroundCommand<Program> {
+ 			}
+ 		}
+ 
++		// an UndefinedFunction has no symbol, so it cannot be a namespace parent
+ 		Function func = decompilerResults.getFunction();
++		Namespace parent = (func instanceof UndefinedFunction) ? null : func;
+ 
+ 		// put switch table cases into a new switch namespace
+ 		Namespace space = null;
+ 		String switchName = "switchD_" + table.getSwitchAddress();
+ 		try {
+-			space = program.getSymbolTable().createNameSpace(func, switchName, SourceType.ANALYSIS);
++			space = program.getSymbolTable().createNameSpace(parent, switchName, SourceType.ANALYSIS);
+ 		}
+ 		catch (DuplicateNameException e) {
+-			space = program.getSymbolTable().getNamespace(switchName, null);
++			space = program.getSymbolTable().getNamespace(switchName, parent);
+ 		}
+ 		catch (InvalidInputException e) {
+ 			// just go with default space
+-- 
+2.45.1
+

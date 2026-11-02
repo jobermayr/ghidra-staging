@@ -1,0 +1,57 @@
+From 8508c4f019866cbe5bc1afd8cc9dcb9fd1cf998b Mon Sep 17 00:00:00 2001
+From: Chris Bongaarts <cab@bongalow.net>
+Date: Sun, 1 Nov 2026 14:33:37 -0600
+Subject: [PATCH] 10087: 6502: push and return the hardware return address in JSR, RTS and BRK
+
+JSR pushed inst_next and RTS returned to the pulled value, but the 6502
+pushes the address of the JSR's last byte (inst_next - 1) and RTS returns
+to the pulled value plus one. The two errors cancel for a plain JSR/RTS
+pair, and nowhere else: code that treats the return address as data sees
+it off by one. That covers the RTS trick (push target - 1 from a table,
+then RTS), routines that pull their return address to read inline
+arguments or an inline jump table, and any emulation of the p-code.
+
+BRK had the matching error: it skips a signature byte, so the hardware
+pushes inst_start + 2, not inst_next. RTI already returns the pulled
+address unchanged, which is correct.
+
+65c02.slaspec includes 6502.slaspec and picks up the same fix.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01NvtBaMzjqw4yWFLd5VQhMQ
+---
+ Ghidra/Processors/6502/data/languages/6502.slaspec | 7 +++++--
+ 1 file changed, 5 insertions(+), 2 deletions(-)
+
+diff --git a/Ghidra/Processors/6502/data/languages/6502.sinc b/Ghidra/Processors/6502/data/languages/6502.sinc
+index 3c8d765bc33..19d63950525 100644
+--- a/Ghidra/Processors/6502/data/languages/6502.sinc
++++ b/Ghidra/Processors/6502/data/languages/6502.sinc
+@@ -192,7 +192,8 @@ ADDRI:  (imm16)   is imm16    { tmp:2 = imm16; export *:2 tmp; }
+ 
+ :BRK   is op=0x00
+ {
+-	*:2 (SP - 1) = inst_next;
++	local ret:2 = inst_start + 2;
++	*:2 (SP - 1) = ret;
+ 	SP = SP - 2;
+ 	B = 1;
+ 	pushSR();
+@@ -313,7 +314,8 @@ ADDRI:  (imm16)   is imm16    { tmp:2 = imm16; export *:2 tmp; }
+ 
+ :JSR   ADDR16    is op=0x20; ADDR16
+ {
+-	*:2 (SP-1) = inst_next;
++	local ret:2 = inst_next - 1;
++	*:2 (SP-1) = ret;
+ 	SP=SP-2; 
+ 	call ADDR16;
+ }
+@@ -417,6 +419,7 @@ ADDRI:  (imm16)   is imm16    { tmp:2 = imm16; export *:2 tmp; }
+ 	SP = SP+1;
+ 	tmp:2 = *:2 SP;
+ 	SP = SP+1;
++	tmp = tmp + 1;
+ 	
+ 	return [tmp];
+ }

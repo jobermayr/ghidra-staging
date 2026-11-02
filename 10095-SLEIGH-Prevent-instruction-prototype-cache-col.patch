@@ -1,0 +1,98 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Muzzy5150 <muzzy5150yt@gmail.com>
+Date: Mon, 2 Nov 2026 02:52:17 -0800
+Subject: [PATCH] 10095: SLEIGH: Prevent instruction prototype cache collisions
+
+---
+ .../processors/sleigh/ConstructState.java     | 21 +++++++++++++++++++
+ .../sleigh/SleighInstructionPrototype.java    |  8 +++++--
+ .../processors/sleigh/SleighLanguage.java     | 11 +++++-----
+ 3 files changed, 32 insertions(+), 8 deletions(-)
+
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/processors/sleigh/ConstructState.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/processors/sleigh/ConstructState.java
+index 2b5adcc992..d76e3baf10 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/processors/sleigh/ConstructState.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/processors/sleigh/ConstructState.java
+@@ -75,6 +75,27 @@ public class ConstructState {
+ 		return hashcode;
+ 	}
+ 
++	/**
++	 * Tests whether two states describe the same resolved constructor tree.  Constructor identity
++	 * also ensures that the states belong to the same language generation.  This is deliberately
++	 * separate from {@link #equals(Object)} because parser contexts use state identity as map keys.
++	 *
++	 * @param other the other state
++	 * @return true if the resolved constructor trees are equivalent
++	 */
++	boolean isEquivalent(ConstructState other) {
++		if (other == null || ct != other.ct || length != other.length || offset != other.offset ||
++			resolvedStates.size() != other.resolvedStates.size()) {
++			return false;
++		}
++		for (int i = 0; i < resolvedStates.size(); i++) {
++			if (!resolvedStates.get(i).isEquivalent(other.resolvedStates.get(i))) {
++				return false;
++			}
++		}
++		return true;
++	}
++
+ 	public Constructor getConstructor() {
+ 		return ct;
+ 	}
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/processors/sleigh/SleighInstructionPrototype.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/processors/sleigh/SleighInstructionPrototype.java
+index 4d1d0a9c6c..951853b30c 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/processors/sleigh/SleighInstructionPrototype.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/processors/sleigh/SleighInstructionPrototype.java
+@@ -420,10 +420,14 @@ public class SleighInstructionPrototype implements InstructionPrototype {
+ 
+ 	@Override
+ 	public boolean equals(Object obj) {
+-		if (obj == null) {
++		if (this == obj) {
++			return true;
++		}
++		if (!(obj instanceof SleighInstructionPrototype other)) {
+ 			return false;
+ 		}
+-		return (hashCode() == obj.hashCode()); // Trust entirely in hash
++		return language == other.language && isindelayslot == other.isindelayslot &&
++			rootState.isEquivalent(other.rootState);
+ 	}
+ 
+ 	@Override
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/processors/sleigh/SleighLanguage.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/processors/sleigh/SleighLanguage.java
+index 7c2ad0abf8..04c697190e 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/processors/sleigh/SleighLanguage.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/plugin/processors/sleigh/SleighLanguage.java
+@@ -92,7 +92,8 @@ public class SleighLanguage implements Language {
+ 	/**
+ 	 * Cached instruction prototypes
+ 	 */
+-	private ConcurrentHashMap<Integer, SleighInstructionPrototype> instructProtoMap;
++	private ConcurrentHashMap<SleighInstructionPrototype, SleighInstructionPrototype>
++		instructProtoMap;
+ 	private DecisionNode root = null;
+ 	/**
+ 	 * table of AddressSpaces
+@@ -390,13 +391,11 @@ public class SleighLanguage implements Language {
+ 		try {
+ 			SleighInstructionPrototype newProto =
+ 				new SleighInstructionPrototype(this, buf, context, contextcache, inDelaySlot, null);
+-			Integer hashcode = newProto.hashCode();
+-
+ 			// get existing proto and use it
+ 			// if doesn't exist in map, cache info and store new proto
+-			res = instructProtoMap.computeIfAbsent(hashcode, h -> {
+-				newProto.cacheInfo(buf, context, true);
+-				return newProto;
++			res = instructProtoMap.computeIfAbsent(newProto, proto -> {
++				proto.cacheInfo(buf, context, true);
++				return proto;
+ 			});
+ 
+ 			if (inDelaySlot && res.hasDelaySlots()) {
+-- 
+2.45.1
+

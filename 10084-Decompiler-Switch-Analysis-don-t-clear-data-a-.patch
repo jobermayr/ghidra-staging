@@ -1,0 +1,79 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Chris Bongaarts <cab@bongalow.net>
+Date: Fri, 30 Oct 2026 08:58:38 -0500
+Subject: [PATCH] 10084: Decompiler Switch Analysis: don't clear data a load
+ table overlaps
+
+labelLoadTable skipped a load table only when non-undefined data started
+at the table's address, then created its data with force=true. A load
+table starting inside existing data (e.g. the tbl+1 byte table of a
+6502 LDA tbl,Y / LDA tbl+1,Y dispatch over a word[n]) passed the check,
+and the forced create cleared that data and its references. Check the
+whole range the new data would cover instead.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_015RwRYnVtqwZWUAFbFfAhBd
+---
+ .../function/DecompilerSwitchAnalysisCmd.java | 39 ++++++++++++++++---
+ 1 file changed, 34 insertions(+), 5 deletions(-)
+
+diff --git a/Ghidra/Features/Decompiler/src/main/java/ghidra/app/cmd/function/DecompilerSwitchAnalysisCmd.java b/Ghidra/Features/Decompiler/src/main/java/ghidra/app/cmd/function/DecompilerSwitchAnalysisCmd.java
+index e660083a47..0369fa411f 100644
+--- a/Ghidra/Features/Decompiler/src/main/java/ghidra/app/cmd/function/DecompilerSwitchAnalysisCmd.java
++++ b/Ghidra/Features/Decompiler/src/main/java/ghidra/app/cmd/function/DecompilerSwitchAnalysisCmd.java
+@@ -456,11 +456,9 @@ public class DecompilerSwitchAnalysisCmd extends BackgroundCommand<Program> {
+ 		for (int i = 0; i < num; i++) {
+ 			monitor.checkCancelled();
+ 			Address addr = tableAddr.addWrap(i * size);
+-			Data defData = program.getListing().getDefinedDataAt(addr);
+-			if (defData != null) {
+-				if (!Undefined.isUndefined(defData.getDataType())) {
+-					continue;
+-				}
++			// Leave existing data alone, including data the table only partially overlaps
++			if (overlapsDefinedData(addr, fulldt.getLength())) {
++				continue;
+ 			}
+ 			CreateDataCmd cmd = new CreateDataCmd(addr, true, fulldt);
+ 			cmd.applyTo(program);
+@@ -493,6 +491,37 @@ public class DecompilerSwitchAnalysisCmd extends BackgroundCommand<Program> {
+ 
+ 	}
+ 
++	/**
++	 * Check whether any non-undefined defined data overlaps the given range,
++	 * either containing its start or starting within it.
++	 * @param start first address of the range
++	 * @param length length of the range in bytes
++	 * @return true if defined data overlaps the range
++	 */
++	private boolean overlapsDefinedData(Address start, int length) {
++		Listing listing = program.getListing();
++		Data containing = listing.getDefinedDataContaining(start);
++		if (containing != null && !Undefined.isUndefined(containing.getDataType())) {
++			return true;
++		}
++		if (length <= 1) {
++			return false;
++		}
++		Address end;
++		try {
++			end = start.addNoWrap(length - 1);
++		}
++		catch (AddressOverflowException e) {
++			end = start.getAddressSpace().getMaxAddress();
++		}
++		for (Data data : listing.getDefinedData(new AddressSet(start, end), true)) {
++			if (!Undefined.isUndefined(data.getDataType())) {
++				return true;
++			}
++		}
++		return false;
++	}
++
+ 	public final void markDataAsConstant(Address addr) {
+ 		Data data = program.getListing().getDataAt(addr);
+ 		if (data == null) {
+-- 
+2.45.1
+
