@@ -10,13 +10,13 @@ Add PicoBlaze KCPSM3 and KCPSM6 processors
  Ghidra/Processors/PicoBlaze/build.gradle      |  20 +
  .../PicoBlaze/certification.manifest          |   8 +
  .../PicoBlaze/data/languages/KCPSM3.cspec     |  17 +
- .../PicoBlaze/data/languages/KCPSM3.pspec     |   9 +
- .../PicoBlaze/data/languages/KCPSM3.slaspec   | 377 ++++++++++++++++
- .../PicoBlaze/data/languages/KCPSM6.pspec     |   9 +
- .../PicoBlaze/data/languages/KCPSM6.slaspec   | 402 ++++++++++++++++++
+ .../PicoBlaze/data/languages/KCPSM3.pspec     |  10 +
+ .../PicoBlaze/data/languages/KCPSM3.slaspec   | 386 ++++++++++++++++
+ .../PicoBlaze/data/languages/KCPSM6.pspec     |  10 +
+ .../PicoBlaze/data/languages/KCPSM6.slaspec   | 417 ++++++++++++++++++
  .../PicoBlaze/data/languages/picoblaze.ldefs  |  30 ++
  .../data/languages/picoblaze_common.sinc      |  21 +
- 11 files changed, 894 insertions(+)
+ 11 files changed, 920 insertions(+)
  create mode 100644 Ghidra/Processors/PicoBlaze/Module.manifest
  create mode 100644 Ghidra/Processors/PicoBlaze/README.md
  create mode 100644 Ghidra/Processors/PicoBlaze/build.gradle
@@ -104,10 +104,10 @@ index 0000000000..248cad321e
 +</compiler_spec>
 diff --git a/Ghidra/Processors/PicoBlaze/data/languages/KCPSM3.pspec b/Ghidra/Processors/PicoBlaze/data/languages/KCPSM3.pspec
 new file mode 100644
-index 0000000000..4bcf8877de
+index 0000000000..fe23b558c1
 --- /dev/null
 +++ b/Ghidra/Processors/PicoBlaze/data/languages/KCPSM3.pspec
-@@ -0,0 +1,9 @@
+@@ -0,0 +1,10 @@
 +<?xml version="1.0" encoding="UTF-8"?>
 +
 +<processor_spec>
@@ -116,13 +116,14 @@ index 0000000000..4bcf8877de
 +    <!-- 0x3FF * 3 -->
 +    <symbol name="ISR" address="rom:0xBDF"/>
 +  </default_symbols>
++  <programcounter register="PC"/>
 +</processor_spec>
 diff --git a/Ghidra/Processors/PicoBlaze/data/languages/KCPSM3.slaspec b/Ghidra/Processors/PicoBlaze/data/languages/KCPSM3.slaspec
 new file mode 100644
-index 0000000000..566e1a7fe4
+index 0000000000..60cd5659ca
 --- /dev/null
 +++ b/Ghidra/Processors/PicoBlaze/data/languages/KCPSM3.slaspec
-@@ -0,0 +1,377 @@
+@@ -0,0 +1,386 @@
 +# Specification for the PicoBlaze KCPSM3 processor
 +
 +# Known differences from actual KCPSM3:
@@ -156,7 +157,8 @@ index 0000000000..566e1a7fe4
 +
 +
 +macro push(v) {
-+    *[stack_buffer]:2 SP = v;
++    local dst:1 = SP << 1;
++    *[stack_buffer]:2 dst = v;
 +    SP = (SP + 1) % 32;
 +}
 +
@@ -219,7 +221,8 @@ index 0000000000..566e1a7fe4
 +:RETURN jcond  is op13_17=0b10101 & jcond & op0_9=0 {
 +    if(jcond == 0) goto <end>;
 +        SP = (SP - 1) % 32;
-+        local tmp:2 = *[stack_buffer]:2 SP;
++        local dst:1 = SP << 1;
++        local tmp:2 = *[stack_buffer]:2 dst;
 +        tmp = tmp + 3;
 +        return [tmp];
 +    <end>
@@ -227,7 +230,8 @@ index 0000000000..566e1a7fe4
 +# Unconditional
 +:RETURN is op13_17=0b10101 & op12=0 & op0_9=0 {
 +    SP = (SP - 1) % 32;
-+    local tmp:2 = *[stack_buffer]:2 SP;
++    local dst:1 = SP << 1;
++    local tmp:2 = *[stack_buffer]:2 dst;
 +    tmp = tmp + 3;
 +    return [tmp];
 +}
@@ -236,7 +240,8 @@ index 0000000000..566e1a7fe4
 +
 +:RETURNI_ENABLE  is op0_17=0b111000000000000001 {
 +    SP = (SP - 1) % 32;
-+    local tmp:2 = *[stack_buffer]:2 SP;
++    local dst:1 = SP << 1;
++    local tmp:2 = *[stack_buffer]:2 dst;
 +    tmp = tmp + 3;
 +    enable_interrupt();
 +    return [tmp];
@@ -244,7 +249,8 @@ index 0000000000..566e1a7fe4
 +
 +:RETURNI_DISABLE  is op0_17=0b111000000000000000 {
 +    SP = (SP - 1) % 32;
-+    local tmp:2 = *[stack_buffer]:2 SP;
++    local dst:1 = SP << 1;
++    local tmp:2 = *[stack_buffer]:2 dst;
 +    tmp = tmp + 3;
 +    disable_interrupt();
 +    return [tmp];
@@ -328,14 +334,14 @@ index 0000000000..566e1a7fe4
 +# ADD
 +
 +:ADD reg8_11,op0_7 is op12_17=0b011000 & reg8_11 & op0_7 {
-+	reg8_11 = reg8_11 + op0_7;
 +    C = carry(reg8_11, op0_7);
++	reg8_11 = reg8_11 + op0_7;
 +    Z = (reg8_11 == 0);
 +}
 +
 +:ADD reg8_11,reg4_7 is op12_17=0b011001 & reg8_11 & reg4_7 & op0_3=0b0000 {
-+	reg8_11 = reg8_11 + reg4_7;
 +    C = carry(reg8_11, reg4_7);
++	reg8_11 = reg8_11 + reg4_7;
 +    Z = (reg8_11 == 0);
 +}
 +
@@ -343,15 +349,17 @@ index 0000000000..566e1a7fe4
 +
 +:ADDCY reg8_11,op0_7 is op12_17=0b011010 & reg8_11 & op0_7 {
 +    local tmp:1 = reg8_11 + op0_7;
-+	reg8_11 = reg8_11 + op0_7 + C;
++    local old_c:1 = C;
 +    C = carry(reg8_11, op0_7) || carry(tmp, C);
++	reg8_11 = reg8_11 + op0_7 + old_c;
 +    Z = (reg8_11 == 0);
 +}
 +
-+:ADDCY reg8_11,reg4_7 is op12_17=0b011010 & reg8_11 & reg4_7 & op0_3=0b0000 {
++:ADDCY reg8_11,reg4_7 is op12_17=0b011011 & reg8_11 & reg4_7 & op0_3=0b0000 {
 +    local tmp:1 = reg8_11 + reg4_7;
-+	reg8_11 = reg8_11 + reg4_7 + C;
++    local old_c:1 = C;
 +    C = carry(reg8_11, reg4_7) || carry(tmp, C);
++	reg8_11 = reg8_11 + reg4_7 + old_c;
 +    Z = (reg8_11 == 0);
 +}
 +
@@ -363,7 +371,7 @@ index 0000000000..566e1a7fe4
 +    Z = reg8_11 == 0;
 +}
 +
-+:SUB reg8_11,reg4_7 is op12_17=0b011100 & reg8_11 & reg4_7 & op0_3=0b0000 {
++:SUB reg8_11,reg4_7 is op12_17=0b011101 & reg8_11 & reg4_7 & op0_3=0b0000 {
 +    C = reg8_11 < reg4_7;
 +	reg8_11 = reg8_11 - reg4_7;
 +    Z = reg8_11 == 0;
@@ -373,15 +381,17 @@ index 0000000000..566e1a7fe4
 +
 +:SUBCY reg8_11,op0_7 is op12_17=0b011110 & reg8_11 & op0_7 {
 +    local tmp:1 = reg8_11 - op0_7;
-+	reg8_11 = reg8_11 - op0_7 - C;
++    local old_c:1 = C;
 +    C = reg8_11 < op0_7 || tmp < C;
++	reg8_11 = reg8_11 - op0_7 - old_c;
 +    Z = (reg8_11 == 0);
 +}
 +
 +:SUBCY reg8_11,reg4_7 is op12_17=0b011111 & reg8_11 & reg4_7 & op0_3=0b0000 {
 +    local tmp:1 = reg8_11 - reg4_7;
-+	reg8_11 = reg8_11 - reg4_7 - C;
++    local old_c:1 = C;
 +    C = reg8_11 < reg4_7 || tmp < C;
++	reg8_11 = reg8_11 - reg4_7 - old_c;
 +    Z = (reg8_11 == 0);
 +}
 +
@@ -439,7 +449,7 @@ index 0000000000..566e1a7fe4
 +    C = reg8_11 >> 7;
 +    reg8_11 = (1 | ( reg8_11 << 1));
 +}
-+:SLX reg8_11 is op12_17=0b100000 & reg8_11 & op3_7=0b00000 & op0_2=0b010 {
++:SLX reg8_11 is op12_17=0b100000 & reg8_11 & op3_7=0b00000 & op0_2=0b100 {
 +    C = reg8_11 >> 7;
 +    reg8_11 = (( reg8_11 & 1) | ( reg8_11 << 1));
 +    Z = reg8_11 == 0;
@@ -450,7 +460,7 @@ index 0000000000..566e1a7fe4
 +    C = tmp;
 +    Z = reg8_11 == 0;
 +}
-+:RL reg8_11 is op12_17=0b100000 & reg8_11 & op3_7=0b00000 & op0_2=0b100 {
++:RL reg8_11 is op12_17=0b100000 & reg8_11 & op3_7=0b00000 & op0_2=0b010 {
 +    local new_c:1 = reg8_11 >> 7;
 +    reg8_11 = (( C ) | ( reg8_11 << 1));
 +    C = new_c;
@@ -502,10 +512,10 @@ index 0000000000..566e1a7fe4
 +}
 diff --git a/Ghidra/Processors/PicoBlaze/data/languages/KCPSM6.pspec b/Ghidra/Processors/PicoBlaze/data/languages/KCPSM6.pspec
 new file mode 100644
-index 0000000000..4bcf8877de
+index 0000000000..fe23b558c1
 --- /dev/null
 +++ b/Ghidra/Processors/PicoBlaze/data/languages/KCPSM6.pspec
-@@ -0,0 +1,9 @@
+@@ -0,0 +1,10 @@
 +<?xml version="1.0" encoding="UTF-8"?>
 +
 +<processor_spec>
@@ -514,13 +524,14 @@ index 0000000000..4bcf8877de
 +    <!-- 0x3FF * 3 -->
 +    <symbol name="ISR" address="rom:0xBDF"/>
 +  </default_symbols>
++  <programcounter register="PC"/>
 +</processor_spec>
 diff --git a/Ghidra/Processors/PicoBlaze/data/languages/KCPSM6.slaspec b/Ghidra/Processors/PicoBlaze/data/languages/KCPSM6.slaspec
 new file mode 100644
-index 0000000000..88126aac38
+index 0000000000..5bd362a93f
 --- /dev/null
 +++ b/Ghidra/Processors/PicoBlaze/data/languages/KCPSM6.slaspec
-@@ -0,0 +1,402 @@
+@@ -0,0 +1,417 @@
 +# Specification for the PicoBlaze KCPSM6 processor
 +# Implementation based on this spec: https://web.archive.org/web/20240817205135/https://www.eng.auburn.edu/~nelsovp/courses/elec4200/PicoBlaze/kcpsm6.pdf
 +
@@ -556,7 +567,9 @@ index 0000000000..88126aac38
 +
 +macro push(v) {
 +	# In KCPSM6 stack overflow is a reset rather than a wraparound
-+    *[stack_buffer]:2 SP = v;
++    local dst:1 = SP << 1;
++    *[stack_buffer]:2 dst = v;
++    SP = (SP + 1) % 32;
 +}
 +
 +# Loading
@@ -573,6 +586,11 @@ index 0000000000..88126aac38
 +
 +:STAR sX, sY is opc=0x16 & sX & sY & op0_3=0 {
 +	move_banks(sX, sY);
++}
++
++# Not documented in the ISA spec, but assemblers do support it
++:STAR sX, kk is opc=0x17 & sX & kk {
++	move_banks(sX, kk:1);
 +}
 +
 +# Logical
@@ -834,14 +852,18 @@ index 0000000000..88126aac38
 +define pcodeop restore_interrupt_flags;
 +:RETURNI_DISABLE is ins=0x29000 {
 +    SP = SP - 1;
-+    local tmp:2 = *[stack_buffer]:2 SP;
++    local dst:1 = SP << 1;
++    local tmp:2 = *[stack_buffer]:2 dst;
++    tmp = tmp + 3;
 +    disable_interrupt();
 +    flags = restore_interrupt_flags();
 +    return [tmp];
 +}
 +:RETURNI_ENABLE is ins=0x29001 {
 +    SP = SP - 1;
-+    local tmp:2 = *[stack_buffer]:2 SP;
++    local dst:1 = SP << 1;
++    local tmp:2 = *[stack_buffer]:2 dst;
++    tmp = tmp + 3;
 +    enable_interrupt();
 +    flags = restore_interrupt_flags();
 +    return [tmp];
@@ -888,19 +910,22 @@ index 0000000000..88126aac38
 +	local tmp:2 = inst_start;
 +    push(tmp);
 +	local tmp2:2 = zext(sY) | ((zext(sX) & 0xF) << 8);
++    tmp2 = tmp2 * 3;
 +	call [tmp2];
 +}
 +
 +:RETURN is ins=0x25000 {
 +    SP = SP - 1;
-+    local tmp:2 = *[stack_buffer]:2 SP;
++    local dst:1 = SP << 1;
++    local tmp:2 = *[stack_buffer]:2 dst;
 +    tmp = tmp + 3;
 +    return [tmp];
 +}
 +:RETURN jcond is op12_13=0b01 & jcond & op17=1 & aaa=0 {
 +	if(jcond == 0) goto <end>;
 +        SP = SP - 1;
-+        local tmp:2 = *[stack_buffer]:2 SP;
++        local dst:1 = SP << 1;
++        local tmp:2 = *[stack_buffer]:2 dst;
 +        tmp = tmp + 3;
 +        return [tmp];
 +    <end>
@@ -909,7 +934,8 @@ index 0000000000..88126aac38
 +	sX = kk;
 +
 +	SP = SP - 1;
-+    local tmp:2 = *[stack_buffer]:2 SP;
++    local dst:1 = SP << 1;
++    local tmp:2 = *[stack_buffer]:2 dst;
 +    tmp = tmp + 3;
 +    return [tmp];
 +}
@@ -925,7 +951,7 @@ index 0000000000..88126aac38
 +}
 diff --git a/Ghidra/Processors/PicoBlaze/data/languages/picoblaze.ldefs b/Ghidra/Processors/PicoBlaze/data/languages/picoblaze.ldefs
 new file mode 100644
-index 0000000000..e21e2c2f76
+index 0000000000..c3c3d14c41
 --- /dev/null
 +++ b/Ghidra/Processors/PicoBlaze/data/languages/picoblaze.ldefs
 @@ -0,0 +1,30 @@
@@ -938,7 +964,7 @@ index 0000000000..e21e2c2f76
 +            endian="big"
 +            size="24"
 +            variant="KCPSM3"
-+            version="1.0"
++            version="1.1"
 +            slafile="KCPSM3.sla"
 +            processorspec="KCPSM3.pspec"
 +            id="KCPSM3:BE:24:default">
@@ -950,7 +976,7 @@ index 0000000000..e21e2c2f76
 +            endian="big"
 +            size="24"
 +            variant="KCPSM6"
-+            version="1.0"
++            version="1.1"
 +            slafile="KCPSM6.sla"
 +            processorspec="KCPSM6.pspec"
 +            id="KCPSM6:BE:24:default">

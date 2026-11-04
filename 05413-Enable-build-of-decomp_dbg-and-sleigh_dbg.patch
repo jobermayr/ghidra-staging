@@ -3,18 +3,27 @@ From: Johannes Obermayr <johannesobermayr@gmx.de>
 Date: Sat, 3 Jun 2023 12:49:09 +0200
 Subject: [PATCH] 05413: Enable build of decomp_dbg and sleigh_dbg
 
-Building decomp_dbg and sleigh_dbg can now easily enabled via 'gradle -Pcli' switch.
+Define the "native build model" for building the decompiler executables.
+Options:
+ -Pcli        Build unoptimized debug interfaces with debug information (not for Windows)
+ -Pdebug      Build with debug information (all systems)
+ -Pgdb        Try to create a gdb backtrace to /tmp/ghidra_gdb_bt.log (not always possible in this form)
+ -Pwait       Wait for debugger to set startDebug = true
+ -Plto        Enable Link Time Optimization (not for debug interfaces (-Pcli), disable on Windows with -Pnolto)
+ -Popt        Build optimized with GCC / Clang (disable on Windows with -Pnoopt)
+ -PsysZlib    Build against system zlib (ignored for Windows)
+ -PsharedBfd  Link against a shared libbfd
 ---
- .../Features/Decompiler/buildNatives.gradle   | 581 ++++++++++++------
+ .../Features/Decompiler/buildNatives.gradle   | 575 ++++++++++++------
  .../src/decompile/cpp/ghidra_arch.cc          |   7 +
  .../src/decompile/cpp/ghidra_process.cc       |  48 ++
- 3 files changed, 455 insertions(+), 181 deletions(-)
+ 3 files changed, 449 insertions(+), 181 deletions(-)
 
 diff --git a/Ghidra/Features/Decompiler/buildNatives.gradle b/Ghidra/Features/Decompiler/buildNatives.gradle
-index ebd7dba0d6..1d64bf67fe 100644
+index ebd7dba0d6..d3878219a4 100644
 --- a/Ghidra/Features/Decompiler/buildNatives.gradle
 +++ b/Ghidra/Features/Decompiler/buildNatives.gradle
-@@ -22,20 +22,220 @@ if (findProject(':Generic') == null) {
+@@ -22,20 +22,237 @@ if (findProject(':Generic') == null) {
  	apply from: "../../../GPL/nativeBuildProperties.gradle"
  }
  
@@ -217,6 +226,23 @@ index ebd7dba0d6..1d64bf67fe 100644
 +	return lFlags
 +}
 +
++// Flags to optimize decompile and sleigh binaries
++def getOptFlags(NativeBinarySpec b) {
++	def optFlags = []
++	if (project.hasProperty('debug')) {
++		optFlags += "-g"
++	}
++	if (project.hasProperty('opt')) {
++		optFlags += "-O2"
++	}
++	if (project.hasProperty('lto')) {
++		optFlags += "-flto"
++	}
++	b.cppCompiler.args.addAll optFlags
++	b.cCompiler.args.addAll optFlags
++	b.linker.args.addAll optFlags
++}
++
 +/*
   * Define the "native build model" for building the decompiler executables.
 + * Options:
@@ -243,7 +269,7 @@ index ebd7dba0d6..1d64bf67fe 100644
  			// these tell gradle for which platforms to build a decompiler executable.
  			targetPlatform "win_x86_64"
  			targetPlatform "win_arm_64"
-@@ -51,106 +251,37 @@ model {
+@@ -51,106 +268,28 @@ model {
  			targetPlatform "openbsd_arm_64"
  			sources {
  				cpp {
@@ -357,16 +383,7 @@ index ebd7dba0d6..1d64bf67fe 100644
 +			}
 +			binaries.all { b ->
 +				if (b.toolChain in Gcc || b.toolChain in Clang) {
-+					if (project.hasProperty('debug')) {
-+						b.cppCompiler.args "-g"
-+					}
-+					if (project.hasProperty('opt')) {
-+						b.cppCompiler.args "-O2"
-+					}
-+					if (project.hasProperty('lto')) {
-+						b.cppCompiler.args "-flto"
-+						b.linker.args "-flto"
-+					}
++					getOptFlags(b)
 +					if (project.hasProperty('gdb')) {
 +						b.cppCompiler.define "GDB_BT"
 +					}
@@ -378,7 +395,7 @@ index ebd7dba0d6..1d64bf67fe 100644
  		} // end decompile
  
  		sleigh(NativeExecutableSpec) {
-@@ -168,91 +299,194 @@ model {
+@@ -168,91 +307,180 @@ model {
  			targetPlatform "openbsd_arm_64"
  			sources {
  				cpp {
@@ -441,23 +458,9 @@ index ebd7dba0d6..1d64bf67fe 100644
 +			}
 +			binaries.all { b ->
 +				if (b.toolChain in Gcc || b.toolChain in Clang) {
-+					if (project.hasProperty('debug')) {
-+						b.cppCompiler.args "-g"
-+						b.cCompiler.args "-g"
-+					}
-+					if (project.hasProperty('opt')) {
-+						b.cppCompiler.args "-O2"
-+						b.cCompiler.args "-O2"
-+					}
++					getOptFlags(b)
 +					if (project.hasProperty('sysZlib')) {
 +						b.linker.args "-lz"
-+					}
-+					if (project.hasProperty('lto')) {
-+						b.cppCompiler.args "-flto"
-+						if (!project.hasProperty('sysZlib')) {
-+							b.cCompiler.args "-flto"
-+						}
-+						b.linker.args "-flto"
  					}
  				}
 -			} // end sources (sleigh)
@@ -632,7 +635,7 @@ index ebd7dba0d6..1d64bf67fe 100644
  				if (b.targetPlatform.operatingSystem.windows) {
  					b.cppCompiler.define "WINDOWS"
  					b.cppCompiler.define "_WINDOWS"
-@@ -263,25 +497,10 @@ model {
+@@ -263,25 +491,10 @@ model {
  						b.cppCompiler.define "_WIN64"
  					}	
  				}

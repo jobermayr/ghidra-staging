@@ -1,0 +1,189 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Leon Zandman <leon@wirwar.com>
+Date: Tue, 3 Nov 2026 23:33:56 +0100
+Subject: [PATCH] 10113: Swift demangler: keep the Objective-C signature on
+ @objc thunks
+
+Keep the Objective-C signature on Swift @objc thunks
+
+SwiftGlobalNode skipped the ObjCAttribute node of Swift @objc thunks
+(To symbols) and demangled the next child as the Swift method,
+initializer, getter or setter that the thunk wraps. The thunk is the
+Objective-C method implementation, and the Objective-C loader has
+already given it a signature from its type encoding. The demangler then
+set __swift_thiscall on it (self in x20 on arm64, R13 on x86_64), and
+on setters it replaced the Objective-C parameters with the Swift ones.
+Return an unknown (label) for ObjCAttribute, as the .cxx_destruct
+thunks already get, so the thunk keeps its Objective-C signature and
+calling convention and gets an "@objc ..." label.
+---
+ .../swift/nodes/SwiftGlobalNode.java          |   5 +-
+ .../demangler/swift/SwiftDemanglerTest.java   | 135 ++++++++++++++++++
+ 2 files changed, 139 insertions(+), 1 deletion(-)
+
+diff --git a/Ghidra/Features/Swift/src/main/java/ghidra/app/util/demangler/swift/nodes/SwiftGlobalNode.java b/Ghidra/Features/Swift/src/main/java/ghidra/app/util/demangler/swift/nodes/SwiftGlobalNode.java
+index 8d3a41a72c..64669f7c43 100644
+--- a/Ghidra/Features/Swift/src/main/java/ghidra/app/util/demangler/swift/nodes/SwiftGlobalNode.java
++++ b/Ghidra/Features/Swift/src/main/java/ghidra/app/util/demangler/swift/nodes/SwiftGlobalNode.java
+@@ -35,8 +35,11 @@ public class SwiftGlobalNode extends SwiftNode {
+ 			switch (child.getKind()) {
+ 				case GenericSpecialization:
+ 				case MergedFunction:
+-				case ObjCAttribute:
+ 					continue;
++				case ObjCAttribute:
++					// The symbol is the Objective-C thunk of the entity in the next child; its
++					// signature and calling convention are Objective-C, not Swift
++					return getUnknown();
+ 				case AccessibleFunctionRecord:
+ 				case AsyncFunctionPointer:
+ 				case CoroFunctionPointer:
+diff --git a/Ghidra/Features/Swift/src/test/java/ghidra/app/util/demangler/swift/SwiftDemanglerTest.java b/Ghidra/Features/Swift/src/test/java/ghidra/app/util/demangler/swift/SwiftDemanglerTest.java
+index 1694ff8df1..cc940af320 100644
+--- a/Ghidra/Features/Swift/src/test/java/ghidra/app/util/demangler/swift/SwiftDemanglerTest.java
++++ b/Ghidra/Features/Swift/src/test/java/ghidra/app/util/demangler/swift/SwiftDemanglerTest.java
+@@ -848,6 +848,141 @@ public class SwiftDemanglerTest extends AbstractGenericTest {
+ 		assertEquals(demangled, label.getOriginalDemangled());
+ 	}
+ 
++	@Test
++	public void testObjCClassFunction() throws Exception {
++		/*-********************************************************************
++		kind=Global
++		  kind=ObjCAttribute
++		  kind=Function
++		    kind=Class
++		      kind=Module, text="SwiftDemanglerTest"
++		      kind=Identifier, text="MyClass"
++		    kind=Identifier, text="myMethod"
++		    kind=LabelList
++		      kind=Identifier, text="label1"
++		      kind=Identifier, text="label2"
++		    kind=Type
++		      kind=FunctionType
++		        kind=ArgumentTuple
++		          kind=Type
++		            kind=Tuple
++		              kind=TupleElement
++		                kind=Type
++		                  kind=Structure
++		                    kind=Module, text="Swift"
++		                    kind=Identifier, text="Int"
++		              kind=TupleElement
++		                kind=Type
++		                  kind=Structure
++		                    kind=Module, text="Swift"
++		                    kind=Identifier, text="Int"
++		        kind=ReturnType
++		          kind=Type
++		            kind=Structure
++		              kind=Module, text="Swift"
++		              kind=Identifier, text="Int"
++		@objc SwiftDemanglerTest.MyClass.myMethod(label1: Swift.Int, label2: Swift.Int) -> Swift.Int
++		**********************************************************************/
++		String mangled = "_$s18SwiftDemanglerTest7MyClassC8myMethod6label16label2S2i_SitFTo";
++		String demangled =
++			"@objc SwiftDemanglerTest.MyClass.myMethod(label1: Swift.Int, label2: Swift.Int) -> Swift.Int";
++
++		if (!(demangler.demangle(mangled) instanceof DemangledLabel label)) {
++			throw new AssertException("Demangled object is not a label");
++		}
++		assertEquals(demangled, label.getOriginalDemangled());
++	}
++
++	@Test
++	public void testObjCClassConstructor() throws Exception {
++		/*-********************************************************************
++		kind=Global
++		  kind=ObjCAttribute
++		  kind=Constructor
++		    kind=Class
++		      kind=Module, text="SwiftDemanglerTest"
++		      kind=Identifier, text="MyClass"
++		    kind=LabelList
++		      kind=Identifier, text="label1"
++		    kind=Type
++		      kind=FunctionType
++		        kind=ArgumentTuple
++		          kind=Type
++		            kind=Tuple
++		              kind=TupleElement
++		                kind=Type
++		                  kind=Structure
++		                    kind=Module, text="Swift"
++		                    kind=Identifier, text="Int"
++		        kind=ReturnType
++		          kind=Type
++		            kind=Class
++		              kind=Module, text="SwiftDemanglerTest"
++		              kind=Identifier, text="MyClass"
++		@objc SwiftDemanglerTest.MyClass.init(label1: Swift.Int) -> SwiftDemanglerTest.MyClass
++		**********************************************************************/
++		String mangled = "_$s18SwiftDemanglerTest7MyClassC6label1ACSi_tcfcTo";
++		String demangled =
++			"@objc SwiftDemanglerTest.MyClass.init(label1: Swift.Int) -> SwiftDemanglerTest.MyClass";
++
++		if (!(demangler.demangle(mangled) instanceof DemangledLabel label)) {
++			throw new AssertException("Demangled object is not a label");
++		}
++		assertEquals(demangled, label.getOriginalDemangled());
++	}
++
++	@Test
++	public void testObjCClassGetter() throws Exception {
++		/*-********************************************************************
++		kind=Global
++		  kind=ObjCAttribute
++		  kind=Getter
++		    kind=Variable
++		      kind=Class
++		        kind=Module, text="SwiftDemanglerTest"
++		        kind=Identifier, text="MyClass"
++		      kind=Identifier, text="z"
++		      kind=Type
++		        kind=Structure
++		          kind=Module, text="Swift"
++		          kind=Identifier, text="Int"
++		@objc SwiftDemanglerTest.MyClass.z.getter : Swift.Int
++		**********************************************************************/
++		String mangled = "_$s18SwiftDemanglerTest7MyClassC1zSivgTo";
++		String demangled = "@objc SwiftDemanglerTest.MyClass.z.getter : Swift.Int";
++
++		if (!(demangler.demangle(mangled) instanceof DemangledLabel label)) {
++			throw new AssertException("Demangled object is not a label");
++		}
++		assertEquals(demangled, label.getOriginalDemangled());
++	}
++
++	@Test
++	public void testObjCClassSetter() throws Exception {
++		/*-********************************************************************
++		kind=Global
++		  kind=ObjCAttribute
++		  kind=Setter
++		    kind=Variable
++		      kind=Class
++		        kind=Module, text="SwiftDemanglerTest"
++		        kind=Identifier, text="MyClass"
++		      kind=Identifier, text="z"
++		      kind=Type
++		        kind=Structure
++		          kind=Module, text="Swift"
++		          kind=Identifier, text="Int"
++		@objc SwiftDemanglerTest.MyClass.z.setter : Swift.Int
++		**********************************************************************/
++		String mangled = "_$s18SwiftDemanglerTest7MyClassC1zSivsTo";
++		String demangled = "@objc SwiftDemanglerTest.MyClass.z.setter : Swift.Int";
++
++		if (!(demangler.demangle(mangled) instanceof DemangledLabel label)) {
++			throw new AssertException("Demangled object is not a label");
++		}
++		assertEquals(demangled, label.getOriginalDemangled());
++	}
++
+ 	@Test
+ 	public void testUnsupportedString() throws Exception {
+ 		String mangled = "__mh_execute_header";
+-- 
+2.45.1
+

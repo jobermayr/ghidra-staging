@@ -1,0 +1,58 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Quentin Kaiser <quentin.kaiser@onekey.com>
+Date: Wed, 4 Nov 2026 17:43:40 +0100
+Subject: [PATCH] 10120: fix(pyghidra): fix infinite recusion in find_spec
+
+fix(pyghidra): fix infinite recusion in find_spec when ghidra
+ modules are not loaded yet
+
+When pyghidra launches, it can happen that ghidra modules are not yet
+registered in sys.modules. The underlying cause looks like a race
+condition as we very rarely hit it.
+
+When that happens, pyghidra re-enters find_spec in an infinite recursion
+loop leading to python yielding a RecursionError.
+
+Fixed by verifying their presence in sys.modules and replacing
+incomplete modules cached before the JVM started.
+
+Ref:
+https://github.com/NationalSecurityAgency/ghidra/issues/8190#issuecomment-5192839941
+---
+ .../PyGhidra/src/main/py/src/pyghidra/launcher.py   | 13 +++++++++++--
+ 1 file changed, 11 insertions(+), 2 deletions(-)
+
+diff --git a/Ghidra/Features/PyGhidra/src/main/py/src/pyghidra/launcher.py b/Ghidra/Features/PyGhidra/src/main/py/src/pyghidra/launcher.py
+index 8247c123b1..39745ee344 100644
+--- a/Ghidra/Features/PyGhidra/src/main/py/src/pyghidra/launcher.py
++++ b/Ghidra/Features/PyGhidra/src/main/py/src/pyghidra/launcher.py
+@@ -113,8 +113,15 @@ class _GhidraBundleFinder(importlib.machinery.PathFinder):
+     """ (internal) Used to find modules in Ghidra bundle locations """
+     
+     def find_spec(self, fullname, path=None, target=None):
+-        from ghidra.framework import Application
+-        from ghidra.app.script import GhidraScriptUtil
++        # Avoid importing Ghidra packages here because that re-enters this finder.
++        fw = sys.modules.get('ghidra.framework')
++        scr = sys.modules.get('ghidra.app.script')
++        if fw is None or scr is None:
++            return None
++
++        Application = fw.Application
++        GhidraScriptUtil = scr.GhidraScriptUtil
++
+         if Application.isInitialized():
+             GhidraScriptUtil.acquireBundleHostReference()
+             try:
+@@ -468,6 +475,8 @@ class PyGhidraLauncher:
+         sys.meta_path.append(_GhidraBundleFinder())
+ 
+         imports.registerDomain("ghidra")
++        # Replace incomplete Python modules cached before the JVM started.
++        sys.modules["ghidra"] = _jpype._JPackage("ghidra")
+ 
+     def _pre_launch_init(self):
+         """
+-- 
+2.45.1
+
