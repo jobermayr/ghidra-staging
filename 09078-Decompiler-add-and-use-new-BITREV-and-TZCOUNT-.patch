@@ -27,7 +27,7 @@ Decompiler: add RuleTzcountFromBitrevLzcount
  .../decompile/cpp/include/ghidra/typeop.hh    |   15 +
  .../Decompiler/src/decompile/cpp/op.cc        |    2 +
  .../src/decompile/cpp/opbehavior.cc           |   15 +
- .../Decompiler/src/decompile/cpp/opcodes.cc   |    7 +-
+ .../Decompiler/src/decompile/cpp/opcodes.cc   |    3 +-
  .../src/decompile/cpp/ruleaction.cc           |   20 +
  .../src/decompile/cpp/slgh_compile.cc         |    6 +
  .../Decompiler/src/decompile/cpp/slghparse.cc | 2098 +++++++++--------
@@ -46,7 +46,7 @@ Decompiler: add RuleTzcountFromBitrevLzcount
  .../ghidra/program/model/pcode/PcodeOp.java   |    8 +-
  .../AARCH64/data/languages/AARCH64base.sinc   |   37 +-
  .../VideoCore/data/languages/vc4.slaspec      |    1 -
- 32 files changed, 1794 insertions(+), 1469 deletions(-)
+ 32 files changed, 1792 insertions(+), 1467 deletions(-)
  create mode 100644 Ghidra/Framework/Emulation/src/main/java/ghidra/pcode/opbehavior/OpBehaviorBitrev.java
  create mode 100644 Ghidra/Framework/Emulation/src/main/java/ghidra/pcode/opbehavior/OpBehaviorTzcount.java
 
@@ -135,7 +135,7 @@ index 35658b2b48..4a4d90b88d 100644
  	actprop->addRule( new RuleOrCompare("analysis") );
  	actprop->addRule( new RuleSimplifyConstantLUT("analysis") );
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/dynamic.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/dynamic.cc
-index cf6e3f5ff9..036bb81bad 100644
+index 3b7ab16139..65c1491429 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/dynamic.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/dynamic.cc
 @@ -58,7 +58,7 @@ const uint4 DynamicHash::transtable[] = {
@@ -185,7 +185,7 @@ index 3e8013ae65..d4cb1b54ba 100644
  } // End namespace ghidra
  #endif
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/opcodes.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/opcodes.hh
-index ba5812135e..56ed76a0c9 100644
+index 2974d7cac3..d08d794751 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/opcodes.hh
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/opcodes.hh
 @@ -127,8 +127,10 @@ enum OpCode {
@@ -392,10 +392,10 @@ index 92ad05c0a3..7eda38b4c8 100644
    typedef enum sleightokentype sleightoken_kind_t;
  #endif
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/typeop.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/typeop.hh
-index 653ac1ee46..23b0b4bff1 100644
+index 4f9e6ad2b2..025575ef1d 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/typeop.hh
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/typeop.hh
-@@ -940,5 +940,20 @@ public:
+@@ -954,5 +954,20 @@ public:
    virtual void push(PrintLanguage *lng,const PcodeOp *op,const PcodeOp *readOp) const { lng->opLzcountOp(op); }
  };
  
@@ -437,7 +437,7 @@ index 7ee6b3d0e6..c6304cb91e 100644
      resmask &= fullmask;
      break;
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/opbehavior.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/opbehavior.cc
-index edb2a435d3..d2a24c023e 100644
+index f5b397cb07..b4186628ee 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/opbehavior.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/opbehavior.cc
 @@ -106,6 +106,8 @@ void OpBehavior::registerInstructions(vector<OpBehavior *> &inst,const Translate
@@ -449,7 +449,7 @@ index edb2a435d3..d2a24c023e 100644
  }
  
  /// \param sizeout is the size of the output in bytes
-@@ -792,4 +794,17 @@ uintb OpBehaviorLzcount::evaluateUnary(int4 sizeout,int4 sizein,uintb in1) const
+@@ -802,4 +804,17 @@ uintb OpBehaviorLzcount::evaluateUnary(int4 sizeout,int4 sizein,uintb in1) const
    return (uintb)(count_leading_zeros(in1) - 8*(sizeof(uintb) - sizein));
  }
  
@@ -468,34 +468,24 @@ index edb2a435d3..d2a24c023e 100644
 +
  } // End namespace ghidra
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/opcodes.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/opcodes.cc
-index bdd6f38587..08da12f714 100644
+index eab785e207..d7de1ff51a 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/opcodes.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/opcodes.cc
-@@ -44,15 +44,16 @@ static const char *opcode_name[] = {
+@@ -47,7 +47,8 @@ static const char *opcode_name[] = {
    "TRUNC", "CEIL", "FLOOR", "ROUND",
    "BUILD", "DELAY_SLOT", "PIECE", "SUBPIECE", "CAST",
    "LABEL", "CROSSBUILD", "SEGMENTOP", "CPOOLREF", "NEW",
--  "INSERT", "EXTRACT", "POPCOUNT", "LZCOUNT"
-+  "INSERT", "EXTRACT", "POPCOUNT", "LZCOUNT",
-+  "SPULL", "BITREV", "TZCOUNT"
+-  "INSERT", "ZPULL", "POPCOUNT", "LZCOUNT", "SPULL"
++  "INSERT", "ZPULL", "POPCOUNT", "LZCOUNT", "SPULL",
++  "BITREV", "TZCOUNT"
  };
  
- static const int4 opcode_indices[] = {
--   0, 39, 37, 40, 38,  4,  6, 60,  7,  8,  9, 64,  5, 57,  1, 68, 66,
-+   0, 75, 39, 37, 40, 38,  4,  6, 60,  7,  8,  9, 64,  5, 57,  1, 68, 66,
-   61, 71, 55, 52, 47, 48, 41, 43, 44, 49, 46, 51, 42, 53, 50, 58, 70,
-   54, 24, 19, 27, 21, 33, 11, 29, 15, 16, 32, 25, 12, 28, 35, 30,
-   23, 22, 34, 18, 13, 14, 36, 31, 20, 26, 17, 65,  2, 73, 69, 62, 72, 10, 59,
--  67,  3, 63, 56, 45
-+  67, 74,  3, 63, 56, 45, 76
- };
- 
- /// \param opc is an OpCode value
+ static map<string,OpCode> name2opcode;		///< Map from name to OpCode
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc
-index 7b3ac32bdb..4995fe60cc 100644
+index dfb8add9b3..deee9d1a96 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc
-@@ -12287,6 +12287,26 @@ int4 RuleLzcntZeroTest::applyOp(PcodeOp *op,Funcdata &data)
+@@ -12293,6 +12293,26 @@ int4 RuleLzcntZeroTest::applyOp(PcodeOp *op,Funcdata &data)
      return 1;
  }
  
@@ -4019,7 +4009,7 @@ index 416d57573f..b720e966c2 100644
  <sem>goto          { return GOTO_KEY; }
  <sem>call          { return CALL_KEY; }
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/typeop.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/typeop.cc
-index 712373093e..b94e5f7392 100644
+index 500a060809..7d214dcd67 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/typeop.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/typeop.cc
 @@ -106,6 +106,8 @@ void TypeOp::registerInstructions(vector<TypeOp *> &inst,TypeFactory *tlst,
@@ -4031,7 +4021,7 @@ index 712373093e..b94e5f7392 100644
  }
  
  /// Change basic data-type info (signed vs unsigned) and operator names ( '>>' vs '>>>' )
-@@ -2771,4 +2773,18 @@ TypeOpLzcount::TypeOpLzcount(TypeFactory *t)
+@@ -2783,4 +2785,18 @@ TypeOpLzcount::TypeOpLzcount(TypeFactory *t)
    behave = new OpBehaviorLzcount();
  }
  
@@ -4051,7 +4041,7 @@ index 712373093e..b94e5f7392 100644
 +
  } // End namespace ghidra
 diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/unionresolve.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/unionresolve.cc
-index 51faa027a4..29d951e01b 100644
+index d9ded76cef..a41bd6b2fa 100644
 --- a/Ghidra/Features/Decompiler/src/decompile/cpp/unionresolve.cc
 +++ b/Ghidra/Features/Decompiler/src/decompile/cpp/unionresolve.cc
 @@ -555,6 +555,8 @@ void ScoreUnionFields::scoreTrialDown(const Trial &trial,bool lastLevel)

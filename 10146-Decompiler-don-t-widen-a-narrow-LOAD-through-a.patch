@@ -1,0 +1,61 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Ash Pera <ashley.pera@noaa.gov>
+Date: Fri, 6 Nov 2026 06:22:51 -0700
+Subject: [PATCH] 10146: Decompiler: don't widen a narrow LOAD through a bare
+ pointer (RuleExpandLoad)
+
+Decompiler: RuleExpandLoad only widens a LOAD through a
+ declared field, symbol or enum
+---
+ .../decompile/cpp/include/ghidra/ruleaction.hh    |  1 +
+ .../Decompiler/src/decompile/cpp/ruleaction.cc    | 15 +++++++++++++++
+ 2 files changed, 16 insertions(+)
+
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/ruleaction.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/ruleaction.hh
+index 06df828595..3e58e9da50 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/ruleaction.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/ruleaction.hh
+@@ -1728,6 +1728,7 @@ public:
+ };
+ 
+ class RuleExpandLoad : public Rule {
++  static bool isFieldReference(Varnode *ptr);
+   static bool checkAndComparison(Varnode *vn);
+   static void modifyAndComparison(Funcdata &data,Varnode *oldVn,Varnode *newVn,Datatype *dt,int4 offset);
+ public:
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc
+index 9eebae2255..5c7b3b77a1 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/ruleaction.cc
+@@ -13057,6 +13057,20 @@ void RuleExpandLoad::modifyAndComparison(Funcdata &data,Varnode *oldVn,Varnode *
+   }
+ }
+ 
++/// \brief Check that a pointer refers to a declared field or symbol
++///
++/// A PTRSUB, possibly indexed as an array through PTRADD, names an object of the pointed-to size.
++/// \param ptr is the pointer being loaded through
++/// \return \b true if \b ptr is a field or symbol reference
++bool RuleExpandLoad::isFieldReference(Varnode *ptr)
++
++{
++  while (ptr->isWritten() && ptr->getDef()->code() == CPUI_PTRADD)
++    ptr = ptr->getDef()->getIn(0);
++  if (!ptr->isWritten()) return false;
++  return (ptr->getDef()->code() == CPUI_PTRSUB);
++}
++
+ /// \class RuleExpandLoad
+ /// \brief Convert LOAD size to match pointer data-type
+ ///
+@@ -13096,6 +13110,7 @@ int4 RuleExpandLoad::applyOp(PcodeOp *op,Funcdata &data)
+   elType = ((TypePointer *)elType)->getPtrTo();
+   if (elType->getSize() <= outSize) return 0;		// Pointer data-type must be bigger than LOAD
+   if (elType->getSize() < outSize + offset) return 0;
++  if (!elType->isEnumType() && !isFieldReference(rootPtr)) return 0;	// Bare pointer: object size unknown
+ 
+   type_metatype meta = elType->getMetatype();
+   if (meta == TYPE_UNKNOWN || meta == TYPE_STRUCT || meta == TYPE_ARRAY || meta == TYPE_UNION
+-- 
+2.45.1
+
