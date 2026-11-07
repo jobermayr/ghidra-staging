@@ -1,0 +1,560 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 3 Nov 2026 16:15:37 +0000
+Subject: [PATCH] 10153: Fix bounds/overflow bugs in BinaryReader, PEF
+ unpacker, InputStreamByteProvider
+
+- BinaryReader.ensureArrayRead: compute count * elementSize in long. The int
+  overflow let e.g. readNextIntArray(0x40000001) pass the range check and
+  allocate ~4GB from a tiny crafted file (Mach-O DyldChainedStartsOffsets,
+  COFF archive linker members, OAT, Swift). Same fix for fixed-length string
+  reads (charCount * charLen).
+- PEF SectionHeader.getUnpackedData: bounds-check all copies/allocations
+  against the unpacked buffer, use readNBytes, reject negative unpacked length
+  and overflowing packed values. Previously crafted input produced
+  ArrayIndexOutOfBounds/NegativeArraySize exceptions and unbounded allocations.
+  Zero-fill past the end is still tolerated (clamped) as before.
+- InputStreamByteProvider: use readNBytes/skipNBytes; short reads/skips are
+  legal per the InputStream contract and were treated as EOF.
+
+Adds regression tests for all three.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01MTr23yTKH3aVpYWc6CPbNF
+---
+ .../ghidra/app/util/bin/BinaryReader.java     |  16 ++-
+ .../app/util/bin/InputStreamByteProvider.java |  23 +--
+ .../util/bin/format/pef/SectionHeader.java    | 110 ++++++++-------
+ .../ghidra/app/util/bin/BinaryReaderTest.java |  47 +++++++
+ .../util/bin/InputStreamByteProviderTest.java |  63 +++++++++
+ .../bin/format/pef/SectionHeaderTest.java     | 132 ++++++++++++++++++
+ 6 files changed, 330 insertions(+), 61 deletions(-)
+ create mode 100644 Ghidra/Features/Base/src/test/java/ghidra/app/util/bin/InputStreamByteProviderTest.java
+ create mode 100644 Ghidra/Features/Base/src/test/java/ghidra/app/util/bin/format/pef/SectionHeaderTest.java
+
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/BinaryReader.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/BinaryReader.java
+index 280db5dfc3..2ab2fc3f18 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/BinaryReader.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/BinaryReader.java
+@@ -664,7 +664,7 @@ public class BinaryReader {
+ 		if (charCount < 0) {
+ 			throw new IllegalArgumentException(String.format("Invalid charCount: %d", charCount));
+ 		}
+-		byte[] bytes = readByteArray(currentIndex, charCount * charLen);
++		byte[] bytes = readByteArray(currentIndex, getStringByteCount(charCount, charLen));
+ 		currentIndex += bytes.length;
+ 
+ 		int strLen = getLengthWithoutTrailingNullTerms(bytes, charLen);
+@@ -951,7 +951,7 @@ public class BinaryReader {
+ 		if (charCount < 0) {
+ 			throw new IllegalArgumentException(String.format("Invalid charCount: %d", charCount));
+ 		}
+-		byte[] bytes = readByteArray(index, charCount * charLen);
++		byte[] bytes = readByteArray(index, getStringByteCount(charCount, charLen));
+ 
+ 		int strLen = getLengthWithoutTrailingNullTerms(bytes, charLen);
+ 		String result = new String(bytes, 0, strLen, charset);
+@@ -1355,11 +1355,21 @@ public class BinaryReader {
+ 		}
+ 	}
+ 
++	private static int getStringByteCount(int charCount, int charLen) throws IOException {
++		long byteCount = (long) charCount * charLen; // long math to avoid int overflow
++		if (byteCount > Integer.MAX_VALUE) {
++			throw new IOException(
++				"Invalid string length, charCount=%d, charLen=%d".formatted(charCount, charLen));
++		}
++		return (int) byteCount;
++	}
++
+ 	private void ensureArrayRead(long index, int count, int elementSize) throws IOException {
+ 		if (count < 0 || count > MAX_SANE_ARRAY_ELEMENT_COUNT) {
+ 			throw new IOException("Invalid number of elements specified: " + count);
+ 		}
+-		if (!isValidRange(index, count * elementSize)) {
++		long byteCount = (long) count * elementSize; // long math to avoid int overflow
++		if (byteCount > Integer.MAX_VALUE || !isValidRange(index, (int) byteCount)) {
+ 			throw new IOException("Unable to read array at 0x%x, count=%d, size=%d".formatted(index,
+ 				count, elementSize));
+ 		}
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/InputStreamByteProvider.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/InputStreamByteProvider.java
+index 40aa7832e5..a3f601f9db 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/InputStreamByteProvider.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/InputStreamByteProvider.java
+@@ -82,10 +82,9 @@ public class InputStreamByteProvider implements ByteProvider {
+ 			throw new IOException("Attempted to read byte that was already read.");
+ 		}
+ 		else if (index > currentIndex) {
+-			currentIndex += inputStream.skip(index - currentIndex);
+-			if (currentIndex != index) {
+-				throw new IOException("Not enough bytes were skipped.");
+-			}
++			// skip() may legally skip fewer bytes than requested, skipNBytes() loops until done
++			inputStream.skipNBytes(index - currentIndex);
++			currentIndex = index;
+ 		}
+ 
+ 		int value = inputStream.read();
+@@ -102,15 +101,17 @@ public class InputStreamByteProvider implements ByteProvider {
+ 			throw new IOException("Attempted to read bytes that were already read.");
+ 		}
+ 		else if (index > currentIndex) {
+-			currentIndex += inputStream.skip(index - currentIndex);
+-			if (currentIndex != index) {
+-				throw new IOException("Not enough bytes were skipped.");
+-			}
++			// skip() may legally skip fewer bytes than requested, skipNBytes() loops until done
++			inputStream.skipNBytes(index - currentIndex);
++			currentIndex = index;
+ 		}
+ 
+-		byte[] values = new byte[(int) len];
+-		int nRead = inputStream.read(values);
+-		if (nRead != len) {
++		if (len < 0 || len > Integer.MAX_VALUE) {
++			throw new IOException("Invalid length: " + len);
++		}
++		// read() may legally return fewer bytes than requested, readNBytes() loops until done
++		byte[] values = inputStream.readNBytes((int) len);
++		if (values.length != len) {
+ 			throw new EOFException();
+ 		}
+ 		currentIndex += len;
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/pef/SectionHeader.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/pef/SectionHeader.java
+index d1ed148306..4b4925a135 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/pef/SectionHeader.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/format/pef/SectionHeader.java
+@@ -119,6 +119,9 @@ public class SectionHeader implements StructConverter {
+ 		if (getSectionKind() != SectionKind.PackedData) {
+ 			throw new IOException("Attempt to unpack a section that is not packed.");
+ 		}
++		if (getUnpackedLength() < 0) {
++			throw new IllegalStateException("Invalid unpacked length: " + getUnpackedLength());
++		}
+ 		try (InputStream input = getData()) {
+ 			byte[] data = new byte[getUnpackedLength()];
+ 			int index = 0;
+@@ -136,29 +139,17 @@ public class SectionHeader implements StructConverter {
+ 				}
+ 				PackedDataOpcodes opcode = PackedDataOpcodes.get(value >> 5);
+ 				if (opcode == PackedDataOpcodes.kPEFPkDataZero) {
+-					index += count;
++					index = skip(data, index, count, opcode);
+ 				}
+ 				else if (opcode == PackedDataOpcodes.kPEFPkDataBlock) {
+-					byte[] rawData = new byte[count];
+-					int nRead = input.read(rawData);
+-					if (nRead != count) {
+-						throw new IllegalStateException(
+-							"Unable to read enough bytes for " + opcode);
+-					}
+-					System.arraycopy(rawData, 0, data, index, rawData.length);
+-					index += rawData.length;
++					byte[] rawData = readFully(input, count, data, index, opcode);
++					index = copy(rawData, data, index, opcode);
+ 				}
+ 				else if (opcode == PackedDataOpcodes.kPEFPkDataRepeat) {
+ 					int repeatCount = unpackNextValue(input);
+-					byte[] rawData = new byte[count];
+-					int nRead = input.read(rawData);
+-					if (nRead != rawData.length) {
+-						throw new IllegalStateException(
+-							"Unable to read enough bytes for " + opcode);
+-					}
++					byte[] rawData = readFully(input, count, data, index, opcode);
+ 					for (int i = 0; i < repeatCount + 1; ++i) {
+-						System.arraycopy(rawData, 0, data, index, rawData.length);
+-						index += rawData.length;
++						index = copy(rawData, data, index, opcode);
+ 					}
+ 				}
+ 				else if (opcode == PackedDataOpcodes.kPEFPkDataRepeatBlock) {
+@@ -166,30 +157,17 @@ public class SectionHeader implements StructConverter {
+ 					int customSize = unpackNextValue(input);
+ 					int repeatCount = unpackNextValue(input);
+ 
+-					byte[] commonData = new byte[commonSize];
+-					int nCommonRead = input.read(commonData);
+-					if (nCommonRead != commonData.length) {
+-						throw new IllegalStateException(
+-							"Unable to read enough common data bytes for " + opcode);
+-					}
++					byte[] commonData = readFully(input, commonSize, data, index, opcode);
+ 
+ 					for (int i = 0; i < repeatCount; ++i) {
+-						System.arraycopy(commonData, 0, data, index, commonData.length);
+-						index += commonData.length;
+-
+-						byte[] customData = new byte[customSize];
+-						int nCustomRead = input.read(customData);
+-						if (nCustomRead != customData.length) {
+-							throw new IllegalStateException(
+-								"Unable to read enough custom data bytes for " + opcode);
+-						}
+-						System.arraycopy(customData, 0, data, index, customData.length);
+-						index += customData.length;
++						index = copy(commonData, data, index, opcode);
++
++						byte[] customData = readFully(input, customSize, data, index, opcode);
++						index = copy(customData, data, index, opcode);
+ 					}
+ 
+ 					//a final common data pattern is added at end...
+-					System.arraycopy(commonData, 0, data, index, commonData.length);
+-					index += commonData.length;
++					index = copy(commonData, data, index, opcode);
+ 				}
+ 				else if (opcode == PackedDataOpcodes.kPEFPkDataRepeatZero) {
+ 					int commonSize = count;
+@@ -197,19 +175,13 @@ public class SectionHeader implements StructConverter {
+ 					int repeatCount = unpackNextValue(input);
+ 
+ 					for (int i = 0; i < repeatCount; ++i) {
+-						index += commonSize;//skip common size of zero bytes...
+-
+-						byte[] customData = new byte[customSize];
+-						int nCustomRead = input.read(customData);
+-						if (nCustomRead != customData.length) {
+-							throw new IllegalStateException(
+-								"Unable to read enough custom data bytes for " + opcode);
+-						}
+-						System.arraycopy(customData, 0, data, index, customData.length);
+-						index += customData.length;
++						index = skip(data, index, commonSize, opcode);//skip common size of zero bytes...
++
++						byte[] customData = readFully(input, customSize, data, index, opcode);
++						index = copy(customData, data, index, opcode);
+ 					}
+ 
+-					index += commonSize;//a final common size of zero bytes...
++					index = skip(data, index, commonSize, opcode);//a final common size of zero bytes...
+ 				}
+ 				else {
+ 					Msg.error(this, "Unrecognized packed data opcode: " + opcode);
+@@ -219,9 +191,53 @@ public class SectionHeader implements StructConverter {
+ 		}
+ 	}
+ 
++	/**
++	 * Reads exactly {@code size} bytes from the packed data stream, after verifying that they
++	 * will fit in the remaining unpacked data buffer (prevents excessive allocations caused by
++	 * corrupted size values).
++	 */
++	private static byte[] readFully(InputStream input, int size, byte[] data, int index,
++			PackedDataOpcodes opcode) throws IOException, IllegalStateException {
++		ensureFits(data, index, size, opcode);
++		byte[] bytes = input.readNBytes(size);
++		if (bytes.length != size) {
++			throw new IllegalStateException("Unable to read enough bytes for " + opcode);
++		}
++		return bytes;
++	}
++
++	private static int copy(byte[] src, byte[] data, int index, PackedDataOpcodes opcode)
++			throws IllegalStateException {
++		ensureFits(data, index, src.length, opcode);
++		System.arraycopy(src, 0, data, index, src.length);
++		return index + src.length;
++	}
++
++	private static int skip(byte[] data, int index, int size, PackedDataOpcodes opcode)
++			throws IllegalStateException {
++		if (size < 0) {
++			ensureFits(data, index, size, opcode); // throws
++		}
++		// zero-fill past the end is harmless (buffer is already zeroed), clamp to preserve
++		// historical tolerance and avoid int overflow of the index
++		return (int) Math.min((long) index + size, data.length);
++	}
++
++	private static void ensureFits(byte[] data, int index, int size, PackedDataOpcodes opcode)
++			throws IllegalStateException {
++		if (size < 0 || size > data.length - index) {
++			throw new IllegalStateException(
++				"Packed data for %s exceeds unpacked length: index=%d, size=%d, length=%d"
++						.formatted(opcode, index, size, data.length));
++		}
++	}
++
+ 	private int unpackNextValue(InputStream input) throws IOException, IllegalStateException {
+ 		int unpacked = 0;
+ 		while (true) {
++			if ((unpacked & ~(Integer.MAX_VALUE >>> 7)) != 0) {
++				throw new IllegalStateException("Packed value is too large");
++			}
+ 			unpacked <<= 7;
+ 			int value = input.read();
+ 			if (value == -1) {
+diff --git a/Ghidra/Features/Base/src/test/java/ghidra/app/util/bin/BinaryReaderTest.java b/Ghidra/Features/Base/src/test/java/ghidra/app/util/bin/BinaryReaderTest.java
+index 41eb80a480..e53db20404 100644
+--- a/Ghidra/Features/Base/src/test/java/ghidra/app/util/bin/BinaryReaderTest.java
++++ b/Ghidra/Features/Base/src/test/java/ghidra/app/util/bin/BinaryReaderTest.java
+@@ -19,6 +19,7 @@ import static org.junit.Assert.*;
+ 
+ import java.io.EOFException;
+ import java.io.IOException;
++import java.nio.charset.Charset;
+ import java.nio.charset.StandardCharsets;
+ 
+ import org.junit.Assert;
+@@ -630,4 +631,50 @@ public class BinaryReaderTest {
+ 		assertEquals("\ufffdA" /* unicode replacement char, 'A'*/, br.readUtf8String(0));
+ 	}
+ 
++	// ------------------------------------------------------------------------------------
++	// Array element count overflow
++	// ------------------------------------------------------------------------------------
++
++	@Test
++	public void testReadIntArray_countTimesSizeOverflow() {
++		// 0x40000001 * 4 overflows int to 4, which previously passed the range check
++		// and caused a ~4GB allocation (OOM) from a 16 byte input
++		BinaryReader br = br(true, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
++		try {
++			br.readIntArray(0, 0x40000001);
++			fail("Should have thrown IOException");
++		}
++		catch (IOException e) {
++			// good
++		}
++		assertEquals(0, br.getPointerIndex());
++	}
++
++	@Test
++	public void testReadNextLongArray_countTimesSizeOverflow() {
++		// 0x20000001 * 8 overflows int to 8
++		BinaryReader br = br(true, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
++		try {
++			br.readNextLongArray(0x20000001);
++			fail("Should have thrown IOException");
++		}
++		catch (IOException e) {
++			// good
++		}
++		assertEquals(0, br.getPointerIndex());
++	}
++
++	@Test
++	public void testReadString_charCountTimesCharLenOverflow() {
++		// 0x40000001 * 4 overflows int to 4, previously silently returned a 1 char string
++		BinaryReader br = br(true, 'A', 0, 0, 0, 'B', 0, 0, 0);
++		try {
++			br.readString(0, 0x40000001, Charset.forName("UTF-32LE"), 4);
++			fail("Should have thrown IOException");
++		}
++		catch (IOException e) {
++			// good
++		}
++	}
++
+ }
+diff --git a/Ghidra/Features/Base/src/test/java/ghidra/app/util/bin/InputStreamByteProviderTest.java b/Ghidra/Features/Base/src/test/java/ghidra/app/util/bin/InputStreamByteProviderTest.java
+new file mode 100644
+index 0000000000..1e5a101606
+--- /dev/null
++++ b/Ghidra/Features/Base/src/test/java/ghidra/app/util/bin/InputStreamByteProviderTest.java
+@@ -0,0 +1,63 @@
++/* ###
++ * IP: GHIDRA
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package ghidra.app.util.bin;
++
++import static org.junit.Assert.*;
++
++import java.io.*;
++
++import org.junit.Test;
++
++public class InputStreamByteProviderTest {
++
++	/**
++	 * A legal InputStream that returns at most 1 byte per bulk read/skip call (like many
++	 * decompressing or network streams do).
++	 */
++	private static class TrickleInputStream extends FilterInputStream {
++		TrickleInputStream(byte[] bytes) {
++			super(new ByteArrayInputStream(bytes));
++		}
++
++		@Override
++		public int read(byte[] b, int off, int len) throws IOException {
++			return super.read(b, off, Math.min(len, 1));
++		}
++
++		@Override
++		public long skip(long n) throws IOException {
++			return super.skip(Math.min(n, 1));
++		}
++	}
++
++	@Test
++	public void testReadBytes_shortReads() throws IOException {
++		byte[] bytes = { 1, 2, 3, 4, 5, 6, 7, 8 };
++		InputStreamByteProvider bp =
++			new InputStreamByteProvider(new TrickleInputStream(bytes), bytes.length);
++		assertArrayEquals(new byte[] { 1, 2, 3 }, bp.readBytes(0, 3));
++		assertArrayEquals(new byte[] { 6, 7 }, bp.readBytes(5, 2)); // forward skip of 2
++		assertEquals(8, bp.readByte(7)); // forward skip of 1
++	}
++
++	@Test(expected = EOFException.class)
++	public void testReadBytes_pastEnd() throws IOException {
++		byte[] bytes = { 1, 2, 3 };
++		InputStreamByteProvider bp =
++			new InputStreamByteProvider(new TrickleInputStream(bytes), bytes.length);
++		bp.readBytes(1, 5);
++	}
++}
+diff --git a/Ghidra/Features/Base/src/test/java/ghidra/app/util/bin/format/pef/SectionHeaderTest.java b/Ghidra/Features/Base/src/test/java/ghidra/app/util/bin/format/pef/SectionHeaderTest.java
+new file mode 100644
+index 0000000000..d0fb78993f
+--- /dev/null
++++ b/Ghidra/Features/Base/src/test/java/ghidra/app/util/bin/format/pef/SectionHeaderTest.java
+@@ -0,0 +1,132 @@
++/* ###
++ * IP: GHIDRA
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package ghidra.app.util.bin.format.pef;
++
++import static org.junit.Assert.*;
++
++import java.io.ByteArrayOutputStream;
++import java.io.IOException;
++
++import org.junit.Test;
++
++import ghidra.app.util.bin.BinaryReader;
++import ghidra.app.util.bin.ByteArrayProvider;
++import ghidra.util.task.TaskMonitor;
++
++public class SectionHeaderTest {
++
++	private static final int HEADER_SIZE = 28;
++
++	/**
++	 * Builds a big-endian PEF section header for a packed data section, immediately followed
++	 * by the given packed data bytes.
++	 */
++	private SectionHeader packedSection(int unpackedLength, int... packed) throws IOException {
++		ByteArrayOutputStream out = new ByteArrayOutputStream();
++		writeInt(out, SectionHeader.NO_NAME_OFFSET); // nameOffset
++		writeInt(out, 0); // defaultAddress
++		writeInt(out, unpackedLength); // totalLength
++		writeInt(out, unpackedLength); // unpackedLength
++		writeInt(out, packed.length); // containerLength
++		writeInt(out, HEADER_SIZE); // containerOffset
++		out.write(SectionKind.PackedData.getValue()); // sectionKind
++		out.write(0); // shareKind
++		out.write(0); // alignment
++		out.write(0); // reservedA
++		for (int b : packed) {
++			out.write(b);
++		}
++		BinaryReader reader = new BinaryReader(new ByteArrayProvider(out.toByteArray()), false);
++		return new SectionHeader(reader);
++	}
++
++	private static void writeInt(ByteArrayOutputStream out, int value) {
++		out.write(value >>> 24);
++		out.write(value >>> 16);
++		out.write(value >>> 8);
++		out.write(value);
++	}
++
++	@Test
++	public void testUnpack_valid() throws Exception {
++		SectionHeader section = packedSection(6, //
++			0x22, 'A', 'B', // block copy 2 bytes
++			0x02, // zero fill 2 bytes
++			0x41, 0x01, 'C' // repeat 1 byte, 1+1 times
++		);
++		assertArrayEquals(new byte[] { 'A', 'B', 0, 0, 'C', 'C' },
++			section.getUnpackedData(TaskMonitor.DUMMY));
++	}
++
++	@Test
++	public void testUnpack_blockExceedsUnpackedLength() throws Exception {
++		// block copy of 8 bytes into a 4 byte section, previously ArrayIndexOutOfBoundsException
++		SectionHeader section = packedSection(4, 0x28, 1, 2, 3, 4, 5, 6, 7, 8);
++		try {
++			section.getUnpackedData(TaskMonitor.DUMMY);
++			fail("Should have thrown IllegalStateException");
++		}
++		catch (IllegalStateException e) {
++			// good
++		}
++	}
++
++	@Test
++	public void testUnpack_repeatExceedsUnpackedLength() throws Exception {
++		// repeat 1 byte 100+1 times into a 4 byte section
++		SectionHeader section = packedSection(4, 0x41, 100, 'C');
++		try {
++			section.getUnpackedData(TaskMonitor.DUMMY);
++			fail("Should have thrown IllegalStateException");
++		}
++		catch (IllegalStateException e) {
++			// good
++		}
++	}
++
++	@Test
++	public void testUnpack_hugeCustomSizeDoesNotAllocate() throws Exception {
++		// repeat-zero with customSize 0xffffff, previously allocated it (16MB) before failing
++		SectionHeader section = packedSection(4, 0x81, 0x87, 0xff, 0xff, 0x7f, 0x01);
++		try {
++			section.getUnpackedData(TaskMonitor.DUMMY);
++			fail("Should have thrown IllegalStateException");
++		}
++		catch (IllegalStateException e) {
++			// good
++		}
++	}
++
++	@Test
++	public void testUnpack_negativeUnpackedLength() throws Exception {
++		// previously NegativeArraySizeException
++		SectionHeader section = packedSection(-1, 0x01);
++		try {
++			section.getUnpackedData(TaskMonitor.DUMMY);
++			fail("Should have thrown IllegalStateException");
++		}
++		catch (IllegalStateException e) {
++			// good
++		}
++	}
++
++	@Test
++	public void testUnpack_zeroFillPastEndIsTolerated() throws Exception {
++		// historical behavior: trailing zero fill past the end is ignored
++		SectionHeader section = packedSection(2, 0x22, 'A', 'B', 0x05);
++		assertArrayEquals(new byte[] { 'A', 'B' }, section.getUnpackedData(TaskMonitor.DUMMY));
++	}
++}
+-- 
+2.45.1
+
