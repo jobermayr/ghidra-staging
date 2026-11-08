@@ -1,0 +1,105 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DelaySystem <DelaySystem@tubot.lat>
+Date: Sat, 7 Nov 2026 19:31:59 -0800
+Subject: [PATCH] 10160: ARM: fix RFE pc/cpsr restore order
+
+ARM: fix RFE pc/cpsr restore order
+
+RFEIA/RFEIB/RFEDA/RFEDB loaded cpsr from the lower address and pc from the higher address. Per the ARM ARM the pc comes from the lower address and the SPSR from the higher address. The decrement forms additionally used wrong base addresses; their writeback is preserved.
+
+ARM: fix RFE decrement-form addresses (wordhigher is P==U)
+
+The previous commit moved the RFEDA/RFEDB loads to the wrong blocks.
+Per the ARM ARM decode (increment is U==1, wordhigher is P==U), RFEDA
+reads [Rn-4,Rn] and RFEDB reads [Rn-8,Rn-4] (FA/EA pop mapping); the
+original decrement-form addresses were already right and only the
+increment forms had pc/cpsr swapped. Restore the decrement forms and
+keep the RFEIA/RFEIB order fix.
+---
+ .../ARM/data/languages/ARMTHUMBinstructions.sinc |  8 ++++----
+ .../ARM/data/languages/ARMinstructions.sinc      | 16 ++++++++--------
+ 2 files changed, 12 insertions(+), 12 deletions(-)
+
+diff --git a/Ghidra/Processors/ARM/data/languages/ARMTHUMBinstructions.sinc b/Ghidra/Processors/ARM/data/languages/ARMTHUMBinstructions.sinc
+index 3084709472..9d8d0e5c9d 100644
+--- a/Ghidra/Processors/ARM/data/languages/ARMTHUMBinstructions.sinc
++++ b/Ghidra/Processors/ARM/data/languages/ARMTHUMBinstructions.sinc
+@@ -9710,9 +9710,9 @@ macro BitReverse(val) {
+ {
+   # register list is always: pc, cpsr
+   ptr:4 = part2Rd0003;
+-  cpsr = *ptr;
+-  ptr = ptr + 4;
+   dest:4 = *ptr;
++  ptr = ptr + 4;
++  cpsr = *ptr;
+   BranchWritePC(dest & 0xfffffffe); # Simple branch, mask off the last bit
+   return [pc];
+ }
+@@ -9721,9 +9721,9 @@ macro BitReverse(val) {
+ {
+   # register list is always: pc, cpsr
+   ptr:4 = part2Rd0003;
+-  cpsr = *ptr;
+-  ptr = ptr + 4;
+   dest:4 = *ptr;
++  ptr = ptr + 4;
++  cpsr = *ptr;
+   part2Rd0003 = ptr + 4;
+   BranchWritePC(dest & 0xfffffffe); # Simple branch, mask off the last bit
+   return [pc];
+diff --git a/Ghidra/Processors/ARM/data/languages/ARMinstructions.sinc b/Ghidra/Processors/ARM/data/languages/ARMinstructions.sinc
+index c661bc8d26..ad776bd773 100644
+--- a/Ghidra/Processors/ARM/data/languages/ARMinstructions.sinc
++++ b/Ghidra/Processors/ARM/data/languages/ARMinstructions.sinc
+@@ -2606,9 +2606,9 @@ SetMode: "#"^31  is c0004=0x1f  { setSystemMode(); }
+ {
+   # register list is always: pc, cpsr
+   ptr:4 = rn;
+-  cpsr = *ptr;
+-  ptr = ptr + 4;
+   pc = *ptr;
++  ptr = ptr + 4;
++  cpsr = *ptr;
+   return [pc];
+ }
+ 
+@@ -2616,9 +2616,9 @@ SetMode: "#"^31  is c0004=0x1f  { setSystemMode(); }
+ {
+   # register list is always: pc, cpsr
+   ptr:4 = rn + 4;
+-  cpsr = *ptr;
+-  ptr = ptr + 4;
+   pc = *ptr;
++  ptr = ptr + 4;
++  cpsr = *ptr;
+   return [pc];
+ }
+ 
+@@ -2646,9 +2646,9 @@ SetMode: "#"^31  is c0004=0x1f  { setSystemMode(); }
+ {
+   # register list is always: pc, cpsr
+   ptr:4 = Rn;
+-  cpsr = *ptr;
+-  ptr = ptr + 4;
+   pc = *ptr;
++  ptr = ptr + 4;
++  cpsr = *ptr;
+   Rn = ptr + 4;
+   return [pc];
+ }
+@@ -2657,9 +2657,9 @@ SetMode: "#"^31  is c0004=0x1f  { setSystemMode(); }
+ {
+   # register list is always: pc, cpsr
+   ptr:4 = Rn + 4;
+-  cpsr = *ptr;
+-  ptr = ptr + 4;
+   pc = *ptr;
++  ptr = ptr + 4;
++  cpsr = *ptr;
+   Rn = ptr;
+   return [pc];
+ }
+-- 
+2.45.1
+

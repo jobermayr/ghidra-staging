@@ -4,6 +4,9 @@ Date: Fri, 30 Oct 2026 13:10:25 -0500
 Subject: [PATCH] 10086: Decompiler Switch Analysis: don't nest switchD
  namespaces under an UndefinedFunction
 
+Decompiler Switch Analysis: don't nest switchD namespaces
+ under an UndefinedFunction
+
 GP-7316 creates the switchD_ namespace under decompilerResults.getFunction().
 For a computed jump outside any defined function that is an UndefinedFunction,
 whose getSymbol() throws UnsupportedOperationException when SymbolManager
@@ -14,9 +17,20 @@ duplicate up under the same parent it was created under.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_015RwRYnVtqwZWUAFbFfAhBd
+
+Test Decompiler Switch Analysis on a switch outside a defined function
+
+Reuse the existing x86-64 fixture without defining a function, so the
+switch is decompiled through an UndefinedFunction, and check that the
+case labels, the switchD_ namespace (under the global namespace) and
+the table references are recovered.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01NvtBaMzjqw4yWFLd5VQhMQ
 ---
- .../app/cmd/function/DecompilerSwitchAnalysisCmd.java       | 6 ++++--
- 1 file changed, 4 insertions(+), 2 deletions(-)
+ .../function/DecompilerSwitchAnalysisCmd.java |  6 ++-
+ .../DecompilerSwitchAnalyzerTest.java         | 54 +++++++++++++++++--
+ 2 files changed, 54 insertions(+), 6 deletions(-)
 
 diff --git a/Ghidra/Features/Decompiler/src/main/java/ghidra/app/cmd/function/DecompilerSwitchAnalysisCmd.java b/Ghidra/Features/Decompiler/src/main/java/ghidra/app/cmd/function/DecompilerSwitchAnalysisCmd.java
 index 0369fa411f..0707b7297a 100644
@@ -43,6 +57,92 @@ index 0369fa411f..0707b7297a 100644
  		}
  		catch (InvalidInputException e) {
  			// just go with default space
+diff --git a/Ghidra/Features/Decompiler/src/test.slow/java/ghidra/app/plugin/core/decompile/DecompilerSwitchAnalyzerTest.java b/Ghidra/Features/Decompiler/src/test.slow/java/ghidra/app/plugin/core/decompile/DecompilerSwitchAnalyzerTest.java
+index b0b97824c2..72bc73a61d 100644
+--- a/Ghidra/Features/Decompiler/src/test.slow/java/ghidra/app/plugin/core/decompile/DecompilerSwitchAnalyzerTest.java
++++ b/Ghidra/Features/Decompiler/src/test.slow/java/ghidra/app/plugin/core/decompile/DecompilerSwitchAnalyzerTest.java
+@@ -26,6 +26,7 @@ import ghidra.program.database.ProgramBuilder;
+ import ghidra.program.model.address.Address;
+ import ghidra.program.model.address.AddressSet;
+ import ghidra.program.model.listing.*;
++import ghidra.program.model.symbol.Namespace;
+ import ghidra.program.model.symbol.Reference;
+ import ghidra.program.model.symbol.Symbol;
+ import ghidra.util.task.TaskMonitor;
+@@ -51,8 +52,7 @@ public class DecompilerSwitchAnalyzerTest extends AbstractGenericTest {
+ 		program.endTransaction(txId, true);
+ 	}
+ 	
+-	@Test
+-	public void testDefaultSwitchLabelAndFlow() throws Exception {
++	private void buildSwitchProgram(boolean defineFunction) throws Exception {
+ 
+ 		builder = new ProgramBuilder("SwitchDefaultTest", "x86:LE:64:default", "gcc", null);
+ 
+@@ -125,8 +125,16 @@ public class DecompilerSwitchAnalyzerTest extends AbstractGenericTest {
+ 			"d6f1ffffe7f1fffff8f1ffff011b033b");
+ 
+ 		builder.disassemble("0x101169", 64);
+-		
+-		builder.createFunction("0x101169");
++
++		if (defineFunction) {
++			builder.createFunction("0x101169");
++		}
++	}
++
++	@Test
++	public void testDefaultSwitchLabelAndFlow() throws Exception {
++
++		buildSwitchProgram(true);
+ 
+ 		analyzer = new DecompilerSwitchAnalyzer();
+ 
+@@ -165,6 +173,44 @@ public class DecompilerSwitchAnalyzerTest extends AbstractGenericTest {
+ 		
+ 	}
+ 	
++	/**
++	 * A computed jump outside any defined function is decompiled through an
++	 * UndefinedFunction, which has no symbol and so cannot parent the switch
++	 * namespace. The switch must still be recovered, under the global namespace.
++	 */
++	@Test
++	public void testSwitchOutsideDefinedFunction() throws Exception {
++
++		buildSwitchProgram(false);
++
++		analyzer = new DecompilerSwitchAnalyzer();
++
++		program = builder.getProgram();
++		program.startTransaction("Test");
++
++		Address codeStart = addr("0x101169");
++		Listing listing = program.getListing();
++		assertNotNull("Bad instruction disassembly", listing.getInstructionAt(codeStart));
++		assertNull("Switch must not be inside a defined function",
++			program.getFunctionManager().getFunctionContaining(addr("0x001011a7")));
++
++		AddressSet addressSet = new AddressSet(codeStart, codeStart.add(0x200));
++		analyze(addressSet);
++
++		Symbol primarySymbol = program.getSymbolTable().getPrimarySymbol(addr("0x0010124c"));
++		assertNotNull("Case label set", primarySymbol);
++		assertEquals("Case label set", "caseD_9", primarySymbol.getName());
++		Namespace switchSpace = primarySymbol.getParentNamespace();
++		assertEquals("Switch space set", "switchD_001011a7", switchSpace.getName());
++		assertTrue("Switch space is global", switchSpace.getParentNamespace().isGlobal());
++
++		Instruction instr = listing.getInstructionAt(addr("0x001011a7"));
++		assertNumMnemonicReferences(instr, 10);
++		assertMnemonicReferenceTo(instr, addr("0x001011aa"));
++		assertMnemonicReferenceTo(instr, addr("0x0010124c"));
++		assertNotNull("Case target disassembled", listing.getInstructionAt(addr("0x0010124c")));
++	}
++
+ 	private void assertNoOperandReference(int opIndex, Instruction instr) {
+ 		Reference[] refs = instr.getOperandReferences(opIndex);
+ 		assertEquals("No reference on operand " + opIndex, 0, refs.length);
 -- 
 2.45.1
 
