@@ -1,0 +1,67 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Luke=20Sern=C3=A9?= <luke.serne@solconmail.nl>
+Date: Tue, 10 Nov 2026 17:02:23 +0100
+Subject: [PATCH] 10180: Decompiler: Merge adjacent builtin_strncpy calls
+
+Decompiler: Merge adjacent builtin_strncpy By also collecting
+ COPY operations that start before the root node, but whose size causes the
+ COPY to write into the root node, we can avoid two distinct builtin_strncpy's
+ being made.
+---
+ .../Decompiler/src/decompile/cpp/constseq.cc  | 22 +++++++++----------
+ 1 file changed, 10 insertions(+), 12 deletions(-)
+
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/constseq.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/constseq.cc
+index 3442b0c3b6..00f51cfd2e 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/constseq.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/constseq.cc
+@@ -246,20 +246,18 @@ StringSequence::StringSequence(Funcdata &fdata,Datatype *ct,MapEntry *ent,PcodeO
+ }
+ 
+ /// The COPYs must be in the same basic block.
+-/// If any COPY size does not match the \b copyType, return \b false.
+-/// If there is a COPY to the array entry before rootVn, return \b false.
+-/// Otherwise earlier COPYs are skipped. No COPYs are collected after the first gap (entry with no COPY to it).
++/// If any COPY at or after the root has a size that does not match the
++/// \b copyType, return \b false.
++/// If there is a COPY to the array entry before rootVn, or a wide COPY that has
++/// yet to be split into character sized pieces, return \b false.
++/// COPYs confined to earlier elements are skipped. No COPYs are collected after the first gap (entry with no COPY to it).
+ /// \param size is the number of bytes in the memory region
+ /// \return \b true to indicate legal COPY ops of constants were recovered.
+ bool StringSequence::collectCopyOps(int4 size)
+ 
+ {
+   Address endAddr = startAddr + (size - 1);		// startAddr - endAddr bounds the formal array
+-  Address beginAddr = startAddr;			// Start search for COPYs at the start of the array
+-  if (startAddr != rootAddr) {
+-    beginAddr = rootAddr - charType->getAlignSize();	// or the first address before the root address (whichever is later)
+-  }
+-  VarnodeLocSet::const_iterator iter = data.beginLoc(beginAddr);
++  VarnodeLocSet::const_iterator iter = data.beginLoc(startAddr);	// Start search for COPYs at the start of the array
+   VarnodeLocSet::const_iterator enditer = data.endLoc(endAddr);
+   int4 diff = rootAddr.getOffset() - startAddr.getOffset();
+   while(iter != enditer) {
+@@ -270,15 +268,15 @@ bool StringSequence::collectCopyOps(int4 size)
+     if (op->code() != CPUI_COPY) continue;
+     if (op->getParent() != block) continue;
+     if (!op->getIn(0)->isConstant()) continue;
+-    if (vn->getSize() != charType->getSize())
+-      return false;		// COPY is the wrong size (has yet to be split)
+     int4 tmpDiff = vn->getOffset() - startAddr.getOffset();
+     if (tmpDiff < diff) {
+-      if (tmpDiff + charType->getAlignSize() == diff)
++      if (tmpDiff + charType->getAlignSize() + vn->getSize() > diff)
+ 	return false;		// COPY to previous element, rootVn is not the first in sequence
+       continue;
+     }
+-    else if (tmpDiff > diff) {
++    if (vn->getSize() != charType->getSize())
++      return false;		// COPY is the wrong size (has yet to be split)
++    if (tmpDiff > diff) {
+       if (tmpDiff - diff < charType->getAlignSize())
+ 	continue;
+       if (tmpDiff - diff > charType->getAlignSize())
+-- 
+2.45.1
+
