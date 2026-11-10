@@ -1,0 +1,98 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: FLAB <menofavaska05063@gmail.com>
+Date: Tue, 10 Nov 2026 11:47:34 +0500
+Subject: [PATCH] 10179: Xtensa: prototype loop-back semantics at the final
+ instruction
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+=?UTF-8?q?=D0=9F=D1=80=D0=B5=D0=B4=D0=BB=D0=BE=D0=B6?=
+ =?UTF-8?q?=D0=B5=D0=BD=D0=B0=20=D0=BE=D0=B1=D1=89=D0=B0=D1=8F=20=D0=BC?=
+ =?UTF-8?q?=D0=BE=D0=B4=D0=B5=D0=BB=D1=8C=20=D0=B2=D0=BE=D0=B7=D0=B2=D1=80?=
+ =?UTF-8?q?=D0=B0=D1=82=D0=B0=20=D0=B0=D0=BF=D0=BF=D0=B0=D1=80=D0=B0=D1=82?=
+ =?UTF-8?q?=D0=BD=D1=8B=D1=85=20=D1=86=D0=B8=D0=BA=D0=BB=D0=BE=D0=B2=20Xte?=
+ =?UTF-8?q?nsa?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Возврат выполняется после кандидата последней инструкции длиной 2 или 3 байта с проверкой фактических LEND, LCOUNT и PS.EXCM. Зависимость исполнения от loopMode убрана; его место в контексте сохранено. Проверены 29 сценариев; классификация условного перехода в конце остаётся открытым вопросом.
+---
+ .../data/languages/xtensaInstructions.sinc      | 17 +++++++++++------
+ .../Xtensa/data/languages/xtensaMain.sinc       | 12 ++++--------
+ 2 files changed, 15 insertions(+), 14 deletions(-)
+
+diff --git a/Ghidra/Processors/Xtensa/data/languages/xtensaInstructions.sinc b/Ghidra/Processors/Xtensa/data/languages/xtensaInstructions.sinc
+index 33c12807cb..d752b437d8 100644
+--- a/Ghidra/Processors/Xtensa/data/languages/xtensaInstructions.sinc
++++ b/Ghidra/Processors/Xtensa/data/languages/xtensaInstructions.sinc
+@@ -1937,18 +1937,22 @@ rfi_eps: ptr is op_s	[ ptr = $(EPS_BASE) + (4 * op_s); ] { export *[register]:4
+ ## Loop Option ##
+ 
+ LoopOffset8: loc is ri8_i8 [ loc = inst_start + ri8_i8 + 4; ] { export *:4 loc; }
++LoopTail16: loc is ri8_i8 [ loc = inst_start + ri8_i8 + 2; ] { export *:4 loc; }
++LoopTail24: loc is ri8_i8 [ loc = inst_start + ri8_i8 + 1; ] { export *:4 loc; }
+ 
+ # LOOP - Loop (BRI8), pg. 392.
+-:loop as, LoopOffset8 is LoopOffset8 & ar = 8 & as & bri8_n = 0b11 & bri8_m = 0b01 & op0 = 6
+-	[ loopMode=1; loopEnd = 1; globalset(LoopOffset8, loopEnd); ] {
++:loop as, LoopOffset8 is LoopOffset8 & LoopTail16 & LoopTail24 & ar = 8 & as & at = 0b0111 & op0 = 6
++	[ loopEnd=0; globalset(LoopOffset8, loopEnd);
++	  loopEnd=1; globalset(LoopTail16, loopEnd); globalset(LoopTail24, loopEnd); ] {
+ 	LCOUNT = as - 1;
+ 	LBEG = inst_next;
+ 	LEND = &LoopOffset8;
+ }
+ 
+ # LOOPGTZ - Loop if Greater Than Zero (BRI8), pg. 394.
+-:loopgtz as, LoopOffset8 is LoopOffset8 & ar = 0b1010 & as & bri8_n = 0b11 & bri8_m = 0b01 & op0 = 0b0110
+-	[ loopMode=1; loopEnd = 1; globalset(LoopOffset8, loopEnd); ] {
++:loopgtz as, LoopOffset8 is LoopOffset8 & LoopTail16 & LoopTail24 & ar = 0b1010 & as & at = 0b0111 & op0 = 0b0110
++	[ loopEnd=0; globalset(LoopOffset8, loopEnd);
++	  loopEnd=1; globalset(LoopTail16, loopEnd); globalset(LoopTail24, loopEnd); ] {
+ 	LCOUNT = as - 1;
+ 	LBEG = inst_next;
+ 	LEND = &LoopOffset8;
+@@ -1956,8 +1960,9 @@ LoopOffset8: loc is ri8_i8 [ loc = inst_start + ri8_i8 + 4; ] { export *:4 loc;
+ }
+ 
+ # LOOPNEZ - Loop if Not Equal Zero (BRI8), pg. 396.
+-:loopnez as, LoopOffset8 is LoopOffset8 & ar = 0b1001 & as & bri8_n = 0b11 & bri8_m = 0b01 & op0 = 0b0110
+-	[ loopMode=1; loopEnd = 1; globalset(LoopOffset8, loopEnd); ] {
++:loopnez as, LoopOffset8 is LoopOffset8 & LoopTail16 & LoopTail24 & ar = 0b1001 & as & at = 0b0111 & op0 = 0b0110
++	[ loopEnd=0; globalset(LoopOffset8, loopEnd);
++	  loopEnd=1; globalset(LoopTail16, loopEnd); globalset(LoopTail24, loopEnd); ] {
+ 	LCOUNT = as - 1;
+ 	LBEG = inst_next;
+ 	LEND = &LoopOffset8;
+diff --git a/Ghidra/Processors/Xtensa/data/languages/xtensaMain.sinc b/Ghidra/Processors/Xtensa/data/languages/xtensaMain.sinc
+index ed3118845c..c8185fcf4b 100644
+--- a/Ghidra/Processors/Xtensa/data/languages/xtensaMain.sinc
++++ b/Ghidra/Processors/Xtensa/data/languages/xtensaMain.sinc
+@@ -281,18 +281,14 @@ Ret4: loc	is epsilon	[loc = ((inst_start + 3) & 0x0fffffff) | 0x40000000; ] { re
+ Ret8: loc	is epsilon	[loc = ((inst_start + 3) & 0x0fffffff) | 0x80000000; ] { ret:4 = loc; export ret; }
+ Ret12: loc	is epsilon	[loc = ((inst_start + 3) & 0x0fffffff) | 0xc0000000; ] { ret:4 = loc; export ret; }
+ 
+-:^instruction is phase=0 & loopMode=1 & instruction [ phase=1; ] {
++:^instruction is phase=0 & loopEnd=1 & instruction [ phase=1; ] {
+ 	build instruction;
+-	if (LCOUNT == 0 || $(PS_EXCM)) goto inst_next;
++	if (inst_next != LEND || LCOUNT == 0 || $(PS_EXCM)) goto <loop_done>;
+ 	LCOUNT = LCOUNT - 1;
+ 	goto [LBEG];
++<loop_done>
+ }
+-:^instruction is phase=0 & loopMode=1 & loopEnd=1 & instruction
+-	[ loopMode=0; phase=1; ] {
+-	build instruction;
+-}
+-
+-:^instruction is phase=0 & loopMode=0 & instruction
++:^instruction is phase=0 & loopEnd=0 & instruction
+ 	[ phase=1; ] {
+ 	build instruction;
+ }
+-- 
+2.45.1
+
