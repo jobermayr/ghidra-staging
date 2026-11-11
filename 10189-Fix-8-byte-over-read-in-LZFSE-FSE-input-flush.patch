@@ -1,0 +1,48 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: blaze0089 <267733108+blaze0089@users.noreply.github.com>
+Date: Wed, 11 Nov 2026 12:56:37 +0530
+Subject: [PATCH] 10189: Fix 8-byte over-read in LZFSE FSE input flush
+
+fse_in_checked_flush64 loads 8 bytes from the input buffer even when nbits is zero. In that case no bits are consumed, so the load is unnecessary and can read past the end of the compressed payload. The 32-bit variant already guards this case; add the same guard to the 64-bit variant.
+---
+ .../FileFormats/src/lzfse/c/lzfse_fse.h       | 23 +++++++++++--------
+ 1 file changed, 13 insertions(+), 10 deletions(-)
+
+diff --git a/Ghidra/Features/FileFormats/src/lzfse/c/lzfse_fse.h b/Ghidra/Features/FileFormats/src/lzfse/c/lzfse_fse.h
+index 435ebc0493..1c435fefcc 100644
+--- a/Ghidra/Features/FileFormats/src/lzfse/c/lzfse_fse.h
++++ b/Ghidra/Features/FileFormats/src/lzfse/c/lzfse_fse.h
+@@ -365,17 +365,20 @@ FSE_INLINE int fse_in_checked_flush64(fse_in_stream64 *s, const uint8_t **pbuf,
+                                       const uint8_t *buf_start) {
+   //  Get number of bits to add to bring us into the desired range.
+   fse_bit_count nbits = (63 - s->accum_nbits) & -8;
+-  //  Convert bits to bytes and decrement buffer address, then load new data.
+-  const uint8_t *buf = (*pbuf) - (nbits >> 3);
+-  if (buf < buf_start) {
+-    return -1; // out of range
++
++  if (nbits > 0) {
++    //  Convert bits to bytes and decrement buffer address, then load new data.
++    const uint8_t *buf = (*pbuf) - (nbits >> 3);
++    if (buf < buf_start) {
++      return -1; // out of range
++    }
++    *pbuf = buf;
++    uint64_t incoming;
++    memcpy(&incoming, buf, 8);
++    // Update the state object and verify its validity (in DEBUG).
++    s->accum = (s->accum << nbits) | fse_mask_lsb64(incoming, nbits);
++    s->accum_nbits += nbits;
+   }
+-  *pbuf = buf;
+-  uint64_t incoming;
+-  memcpy(&incoming, buf, 8);
+-  // Update the state object and verify its validity (in DEBUG).
+-  s->accum = (s->accum << nbits) | fse_mask_lsb64(incoming, nbits);
+-  s->accum_nbits += nbits;
+   DEBUG_CHECK_INPUT_STREAM_PARAMETERS
+   return 0; // OK
+ }
+-- 
+2.45.1
+

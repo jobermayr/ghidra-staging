@@ -1,0 +1,122 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: blaze0089 <267733108+blaze0089@users.noreply.github.com>
+Date: Wed, 11 Nov 2026 12:59:53 +0530
+Subject: [PATCH] 10191: Preserve backslashes in Version Tracking comment
+ strings
+
+encodeString() escaped tabs, CR, LF, and FF, but not backslashes. A comment such as C:\\Windows was stored as-is and then decoded as C: followed by a tab and indows. Escape backslashes during encoding, decode a doubled backslash back to a single backslash, and preserve trailing or unknown escape sequences instead of throwing or appending a character code. Added StringableTest to cover the round trip.
+---
+ .../feature/vt/api/util/Stringable.java       | 19 +++++++-
+ .../feature/vt/api/util/StringableTest.java   | 47 +++++++++++++++++++
+ 2 files changed, 64 insertions(+), 2 deletions(-)
+ create mode 100644 Ghidra/Features/VersionTracking/src/test/java/ghidra/feature/vt/api/util/StringableTest.java
+
+diff --git a/Ghidra/Features/VersionTracking/src/main/java/ghidra/feature/vt/api/util/Stringable.java b/Ghidra/Features/VersionTracking/src/main/java/ghidra/feature/vt/api/util/Stringable.java
+index 5975e593ee..39acf08351 100644
+--- a/Ghidra/Features/VersionTracking/src/main/java/ghidra/feature/vt/api/util/Stringable.java
++++ b/Ghidra/Features/VersionTracking/src/main/java/ghidra/feature/vt/api/util/Stringable.java
+@@ -156,7 +156,8 @@ public abstract class Stringable implements ExtensionPoint, DisplayStringProvide
+ 	/**
+ 	 * Encodes a comment string that may contain tabs, carriage returns, and linefeeds so that it 
+ 	 * can be saved as part of a Stringable. Tabs, carriage returns, and linefeeds are typically 
+-	 * used as delimiters for separating tokens within the Stringable.
++	 * used as delimiters for separating tokens within the Stringable. Backslashes are escaped as
++	 * well, since the decoder uses backslash as its escape character.
+ 	 * @param unencodedComment the actual comment text containing tabs, etc.
+ 	 * @return the encoded comment to be saved as part of the stringable.
+ 	 */
+@@ -184,6 +185,10 @@ public abstract class Stringable implements ExtensionPoint, DisplayStringProvide
+ 					startIndex = saveSubStringAndEscapedCharacter(unencodedComment, buffer,
+ 						startIndex, i, 'f');
+ 					break;
++				case '\\':
++					startIndex = saveSubStringAndEscapedCharacter(unencodedComment, buffer,
++						startIndex, i, '\\');
++					break;
+ 				default:
+ 					break;
+ 			}
+@@ -219,6 +224,13 @@ public abstract class Stringable implements ExtensionPoint, DisplayStringProvide
+ 		int index = encodedComment.indexOf('\\', startIndex);
+ 		while (index != -1) {
+ 			buffer.append(encodedComment.substring(startIndex, index));
++			if (index + 1 == encodedComment.length()) {
++				// A trailing backslash is not a valid escape sequence, but preserve it rather
++				// than throwing an exception on data written by an older version.
++				buffer.append('\\');
++				startIndex = encodedComment.length();
++				break;
++			}
+ 			char charAt = encodedComment.charAt(++index);
+ 			switch (charAt) {
+ 				case 't':
+@@ -233,9 +245,12 @@ public abstract class Stringable implements ExtensionPoint, DisplayStringProvide
+ 				case 'f':
+ 					buffer.append('\f');
+ 					break;
++				case '\\':
++					buffer.append('\\');
++					break;
+ 				default:
+ 					// TODO What should we do here? Got an unexpected escaped character.
+-					buffer.append('\\' + charAt);
++					buffer.append('\\').append(charAt);
+ 					break;
+ 			}
+ 			startIndex = ++index;
+diff --git a/Ghidra/Features/VersionTracking/src/test/java/ghidra/feature/vt/api/util/StringableTest.java b/Ghidra/Features/VersionTracking/src/test/java/ghidra/feature/vt/api/util/StringableTest.java
+new file mode 100644
+index 0000000000..b0f61f1639
+--- /dev/null
++++ b/Ghidra/Features/VersionTracking/src/test/java/ghidra/feature/vt/api/util/StringableTest.java
+@@ -0,0 +1,47 @@
++/* ###
++ * IP: GHIDRA
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package ghidra.feature.vt.api.util;
++
++import static org.junit.Assert.assertEquals;
++
++import org.junit.Test;
++
++public class StringableTest {
++
++	@Test
++	public void testCommentEncodingRoundTrip() {
++		assertRoundTrip("C:\\Windows\\System32");
++		assertRoundTrip("path\\to\\file");
++		assertRoundTrip("ends with \\");
++		assertRoundTrip("tab\tcr\rlf\nff\f");
++		assertRoundTrip("plain");
++		assertRoundTrip("\\t is not a tab");
++	}
++
++	@Test
++	public void testDecodeTrailingBackslash() {
++		assertEquals("ends with \\", Stringable.decodeString("ends with \\"));
++	}
++
++	@Test
++	public void testDecodeUnknownEscapePreserved() {
++		assertEquals("\\q", Stringable.decodeString("\\q"));
++	}
++
++	private void assertRoundTrip(String comment) {
++		assertEquals(comment, Stringable.decodeString(Stringable.encodeString(comment)));
++	}
++}
+-- 
+2.45.1
+

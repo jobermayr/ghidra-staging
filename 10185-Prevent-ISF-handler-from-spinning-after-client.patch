@@ -1,0 +1,50 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: blaze0089 <267733108+blaze0089@users.noreply.github.com>
+Date: Wed, 11 Nov 2026 11:36:14 +0530
+Subject: [PATCH] 10185: Prevent ISF handler from spinning after client
+ disconnect
+
+RootMessage.parseDelimitedFrom returns null at EOF. The handler loop ignored the null message and kept calling parseDelimitedFrom, so a client that connected and disconnected left a thread consuming a CPU core. Break out of the loop on EOF and close the accepted socket.
+---
+ .../ghidra/dbg/isf/IsfConnectionHandler.java  | 20 ++++++++++++++-----
+ 1 file changed, 15 insertions(+), 5 deletions(-)
+
+diff --git a/Ghidra/Debug/Debugger-isf/src/main/java/ghidra/dbg/isf/IsfConnectionHandler.java b/Ghidra/Debug/Debugger-isf/src/main/java/ghidra/dbg/isf/IsfConnectionHandler.java
+index c2df510736..df1cd27ab4 100644
+--- a/Ghidra/Debug/Debugger-isf/src/main/java/ghidra/dbg/isf/IsfConnectionHandler.java
++++ b/Ghidra/Debug/Debugger-isf/src/main/java/ghidra/dbg/isf/IsfConnectionHandler.java
+@@ -40,16 +40,26 @@ public class IsfConnectionHandler extends Thread {
+ 			InputStream inputStream = socket.getInputStream();
+ 			while (!socket.isClosed()) {
+ 				RootMessage root = RootMessage.parseDelimitedFrom(inputStream);
+-				if (root != null) {
+-					AbstractMessage msg = handler.processMessage(root);
+-					OutputStream out = socket.getOutputStream();
+-					msg.writeDelimitedTo(out);
+-					out.flush();
++				if (root == null) {
++					// EOF - the client closed the connection
++					break;
+ 				}
++				AbstractMessage msg = handler.processMessage(root);
++				OutputStream out = socket.getOutputStream();
++				msg.writeDelimitedTo(out);
++				out.flush();
+ 			}
+ 		}
+ 		catch (IOException e) {
+ 			Msg.error(this, e);
+ 		}
++		finally {
++			try {
++				socket.close();
++			}
++			catch (IOException e) {
++				// ignore
++			}
++		}
+ 	}
+ }
+-- 
+2.45.1
+
