@@ -4,6 +4,9 @@ Date: Tue, 3 Nov 2026 16:15:37 +0000
 Subject: [PATCH] 10153: Fix bounds/overflow bugs in BinaryReader, PEF
  unpacker, InputStreamByteProvider
 
+Fix bounds/overflow bugs in BinaryReader, PEF unpacker,
+ InputStreamByteProvider
+
 - BinaryReader.ensureArrayRead: compute count * elementSize in long. The int
   overflow let e.g. readNextIntArray(0x40000001) pass the range check and
   allocate ~4GB from a tiny crafted file (Mach-O DyldChainedStartsOffsets,
@@ -21,46 +24,78 @@ Adds regression tests for all three.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01MTr23yTKH3aVpYWc6CPbNF
+
+Address review: use MAX_SANE_ARRAY_BYTESIZE in BinaryReader size checks
+
+- Add MAX_SANE_ARRAY_BYTESIZE (same value as MAX_SANE_ARRAY_ELEMENT_COUNT for
+  now) and compare array / fixed-length string byte sizes against it instead
+  of Integer.MAX_VALUE.
+- Rename getStringByteCount to getSafeStringByteCount.
+- BinaryReaderTest: use named overflow counts in the testReadXYZArray_oversize
+  tests (large stream), add testReadLongArray_oversize, and cover byte sizes
+  that fit in an int32 but exceed the sane limit.
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01MTr23xfawVJuknq49nzDrp
+
+Address review: fold overflow count tests into the _oversize tests
+
+Move the count * size overflow cases into the respective
+testReadXYZArray_oversize / string oversize tests (large stream, named
+overflowCount constants) instead of keeping separate small-stream tests.
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01MTr23xfawVJuknq49nzDrp
 ---
- .../ghidra/app/util/bin/BinaryReader.java     |  16 ++-
+ .../ghidra/app/util/bin/BinaryReader.java     |  19 ++-
  .../app/util/bin/InputStreamByteProvider.java |  23 +--
  .../util/bin/format/pef/SectionHeader.java    | 110 ++++++++-------
- .../ghidra/app/util/bin/BinaryReaderTest.java |  47 +++++++
+ .../ghidra/app/util/bin/BinaryReaderTest.java | 102 ++++++++++++++
  .../util/bin/InputStreamByteProviderTest.java |  63 +++++++++
  .../bin/format/pef/SectionHeaderTest.java     | 132 ++++++++++++++++++
- 6 files changed, 330 insertions(+), 61 deletions(-)
+ 6 files changed, 388 insertions(+), 61 deletions(-)
  create mode 100644 Ghidra/Features/Base/src/test/java/ghidra/app/util/bin/InputStreamByteProviderTest.java
  create mode 100644 Ghidra/Features/Base/src/test/java/ghidra/app/util/bin/format/pef/SectionHeaderTest.java
 
 diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/BinaryReader.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/BinaryReader.java
-index 280db5dfc3..2ab2fc3f18 100644
+index 280db5dfc3..d2d25a79c2 100644
 --- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/BinaryReader.java
 +++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/bin/BinaryReader.java
-@@ -664,7 +664,7 @@ public class BinaryReader {
+@@ -36,6 +36,9 @@ public class BinaryReader {
+ 
+ 	private static final int MAX_SANE_ARRAY_ELEMENT_COUNT = Integer.MAX_VALUE - 1024; // same as MAX_SANE_BUFFER for now
+ 
++	// max total size in bytes of an array or fixed length string that will be read
++	private static final int MAX_SANE_ARRAY_BYTESIZE = MAX_SANE_ARRAY_ELEMENT_COUNT; // same for now
++
+ 	/**
+ 	 * The size of a BYTE in Java.
+ 	 */
+@@ -664,7 +667,7 @@ public class BinaryReader {
  		if (charCount < 0) {
  			throw new IllegalArgumentException(String.format("Invalid charCount: %d", charCount));
  		}
 -		byte[] bytes = readByteArray(currentIndex, charCount * charLen);
-+		byte[] bytes = readByteArray(currentIndex, getStringByteCount(charCount, charLen));
++		byte[] bytes = readByteArray(currentIndex, getSafeStringByteCount(charCount, charLen));
  		currentIndex += bytes.length;
  
  		int strLen = getLengthWithoutTrailingNullTerms(bytes, charLen);
-@@ -951,7 +951,7 @@ public class BinaryReader {
+@@ -951,7 +954,7 @@ public class BinaryReader {
  		if (charCount < 0) {
  			throw new IllegalArgumentException(String.format("Invalid charCount: %d", charCount));
  		}
 -		byte[] bytes = readByteArray(index, charCount * charLen);
-+		byte[] bytes = readByteArray(index, getStringByteCount(charCount, charLen));
++		byte[] bytes = readByteArray(index, getSafeStringByteCount(charCount, charLen));
  
  		int strLen = getLengthWithoutTrailingNullTerms(bytes, charLen);
  		String result = new String(bytes, 0, strLen, charset);
-@@ -1355,11 +1355,21 @@ public class BinaryReader {
+@@ -1355,11 +1358,21 @@ public class BinaryReader {
  		}
  	}
  
-+	private static int getStringByteCount(int charCount, int charLen) throws IOException {
++	private static int getSafeStringByteCount(int charCount, int charLen) throws IOException {
 +		long byteCount = (long) charCount * charLen; // long math to avoid int overflow
-+		if (byteCount > Integer.MAX_VALUE) {
++		if (byteCount > MAX_SANE_ARRAY_BYTESIZE) {
 +			throw new IOException(
 +				"Invalid string length, charCount=%d, charLen=%d".formatted(charCount, charLen));
 +		}
@@ -73,7 +108,7 @@ index 280db5dfc3..2ab2fc3f18 100644
  		}
 -		if (!isValidRange(index, count * elementSize)) {
 +		long byteCount = (long) count * elementSize; // long math to avoid int overflow
-+		if (byteCount > Integer.MAX_VALUE || !isValidRange(index, (int) byteCount)) {
++		if (byteCount > MAX_SANE_ARRAY_BYTESIZE || !isValidRange(index, (int) byteCount)) {
  			throw new IOException("Unable to read array at 0x%x, count=%d, size=%d".formatted(index,
  				count, elementSize));
  		}
@@ -286,7 +321,7 @@ index d1ed148306..4b4925a135 100644
  			int value = input.read();
  			if (value == -1) {
 diff --git a/Ghidra/Features/Base/src/test/java/ghidra/app/util/bin/BinaryReaderTest.java b/Ghidra/Features/Base/src/test/java/ghidra/app/util/bin/BinaryReaderTest.java
-index 41eb80a480..e53db20404 100644
+index 41eb80a480..450307bfee 100644
 --- a/Ghidra/Features/Base/src/test/java/ghidra/app/util/bin/BinaryReaderTest.java
 +++ b/Ghidra/Features/Base/src/test/java/ghidra/app/util/bin/BinaryReaderTest.java
 @@ -19,6 +19,7 @@ import static org.junit.Assert.*;
@@ -297,22 +332,55 @@ index 41eb80a480..e53db20404 100644
  import java.nio.charset.StandardCharsets;
  
  import org.junit.Assert;
-@@ -630,4 +631,50 @@ public class BinaryReaderTest {
- 		assertEquals("\ufffdA" /* unicode replacement char, 'A'*/, br.readUtf8String(0));
+@@ -235,6 +236,27 @@ public class BinaryReaderTest {
+ 		catch (IOException e) {
+ 			// good
+ 		}
++
++		// byte size still fits in an int32, but is larger than the max sane array byte size
++		int maxInt32ByteSizeCount = Integer.MAX_VALUE / 2 /*sizeof(int16)*/;
++		try {
++			br.readNextShortArray(maxInt32ByteSizeCount);
++			fail();
++		}
++		catch (IOException e) {
++			// good
++		}
++
++		// count * sizeof(int16) overflows a signed int32
++		int overflowCount = Integer.MAX_VALUE / 2 /*sizeof(int16)*/ + 1 + 1;
++		try {
++			br.readNextShortArray(overflowCount);
++			fail();
++		}
++		catch (IOException e) {
++			// good
++		}
++		assertEquals(0, br.getPointerIndex());
  	}
  
-+	// ------------------------------------------------------------------------------------
-+	// Array element count overflow
-+	// ------------------------------------------------------------------------------------
+ 	// ------------------------------------------------------------------------------------
+@@ -342,6 +364,68 @@ public class BinaryReaderTest {
+ 		catch (IOException e) {
+ 			// good
+ 		}
 +
-+	@Test
-+	public void testReadIntArray_countTimesSizeOverflow() {
-+		// 0x40000001 * 4 overflows int to 4, which previously passed the range check
-+		// and caused a ~4GB allocation (OOM) from a 16 byte input
-+		BinaryReader br = br(true, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
++		// byte size still fits in an int32, but is larger than the max sane array byte size
++		int maxInt32ByteSizeCount = Integer.MAX_VALUE / 4 /*sizeof(int32)*/;
 +		try {
-+			br.readIntArray(0, 0x40000001);
-+			fail("Should have thrown IOException");
++			br.readNextIntArray(maxInt32ByteSizeCount);
++			fail();
++		}
++		catch (IOException e) {
++			// good
++		}
++
++		// count * sizeof(int32) overflows an unsigned int32 and wraps to a small positive value
++		int overflowCount =
++			(int) (NumericUtilities.MAX_UNSIGNED_INT32_AS_LONG / 4 /*sizeof(int32)*/ + 1 + 1);
++		try {
++			br.readNextIntArray(overflowCount);
++			fail();
 +		}
 +		catch (IOException e) {
 +			// good
@@ -320,34 +388,72 @@ index 41eb80a480..e53db20404 100644
 +		assertEquals(0, br.getPointerIndex());
 +	}
 +
++	// ------------------------------------------------------------------------------------
++	// Longs
++	// ------------------------------------------------------------------------------------
++
 +	@Test
-+	public void testReadNextLongArray_countTimesSizeOverflow() {
-+		// 0x20000001 * 8 overflows int to 8
-+		BinaryReader br = br(true, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
++	public void testReadLongArray_oversize() {
++		BinaryReader br =
++			staticValueBR(true, NumericUtilities.MAX_UNSIGNED_INT32_AS_LONG * 100, (byte) 0xaa);
++
 +		try {
-+			br.readNextLongArray(0x20000001);
-+			fail("Should have thrown IOException");
++			br.readNextLongArray(Integer.MAX_VALUE - 10);
++			fail();
++		}
++		catch (IOException e) {
++			// good
++		}
++
++		// byte size still fits in an int32, but is larger than the max sane array byte size
++		int maxInt32ByteSizeCount = Integer.MAX_VALUE / 8 /*sizeof(int64)*/;
++		try {
++			br.readNextLongArray(maxInt32ByteSizeCount);
++			fail();
++		}
++		catch (IOException e) {
++			// good
++		}
++
++		// count * sizeof(int64) overflows an unsigned int32 and wraps to a small positive value
++		int overflowCount =
++			(int) (NumericUtilities.MAX_UNSIGNED_INT32_AS_LONG / 8 /*sizeof(int64)*/ + 1 + 1);
++		try {
++			br.readNextLongArray(overflowCount);
++			fail();
 +		}
 +		catch (IOException e) {
 +			// good
 +		}
 +		assertEquals(0, br.getPointerIndex());
-+	}
-+
+ 	}
+ 
+ 	// ------------------------------------------------------------------------------------
+@@ -608,6 +692,24 @@ public class BinaryReaderTest {
+ 		}
+ 	}
+ 
 +	@Test
-+	public void testReadString_charCountTimesCharLenOverflow() {
-+		// 0x40000001 * 4 overflows int to 4, previously silently returned a 1 char string
-+		BinaryReader br = br(true, 'A', 0, 0, 0, 'B', 0, 0, 0);
++	public void test_ReadUtf32String_oversize() {
++		BinaryReader br =
++			staticValueBR(true, NumericUtilities.MAX_UNSIGNED_INT32_AS_LONG * 100, (byte) 0xaa);
++
++		// charCount * sizeof(utf32 char) overflows an unsigned int32 and wraps to a small
++		// positive value, which would silently produce a truncated string
++		int overflowCount =
++			(int) (NumericUtilities.MAX_UNSIGNED_INT32_AS_LONG / 4 /*sizeof(utf32 char)*/ + 1 + 1);
 +		try {
-+			br.readString(0, 0x40000001, Charset.forName("UTF-32LE"), 4);
-+			fail("Should have thrown IOException");
++			br.readString(0, overflowCount, Charset.forName("UTF-32LE"), 4);
++			fail();
 +		}
 +		catch (IOException e) {
 +			// good
 +		}
 +	}
 +
- }
+ 	@Test
+ 	public void test_ReadUtf8String() throws IOException {
+ 		// tests variable length decoding
 diff --git a/Ghidra/Features/Base/src/test/java/ghidra/app/util/bin/InputStreamByteProviderTest.java b/Ghidra/Features/Base/src/test/java/ghidra/app/util/bin/InputStreamByteProviderTest.java
 new file mode 100644
 index 0000000000..1e5a101606

@@ -1,0 +1,61 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Chris Bongaarts <cab@bongalow.net>
+Date: Sat, 14 Nov 2026 02:28:14 -0600
+Subject: [PATCH] 10217: Decompiler: label switch cases with indexes, not byte
+ offsets, when index scaled by a left shift
+
+Decompiler: label switches by the index when it is scaled by
+ a left shift
+
+JumpBasic::findUnnormalized walks back from the normalized switch
+variable through INT_ADD/INT_SUB and INT_ZEXT/INT_SEXT, but not through
+INT_LEFT, even though it receives maxleftright (JumpTable::maxleftright,
+"Maximum shifts to normalize") and OpBehaviorIntLeft::recoverInputBinary
+already reverses a shift for backup2Switch. When the bounded value is
+the scaled index (common on 8-bit CPUs: ASL A; TAY; LDA table,Y), the
+cases were labelled with byte offsets 0,2,4,... instead of the index
+0,1,2,...
+
+Add a CPUI_INT_LEFT case: a shift by a constant in slot 0, limited by
+maxleftright and smaller than the output width, makes the shifted input
+the switch variable. The labels are then recovered through the existing
+recoverInputBinary.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01NvtBaQBU5K9LiCeqXgAhG3
+---
+ .../Decompiler/src/decompile/cpp/jumptable.cc         | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/jumptable.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/jumptable.cc
+index d8bfce88f8..28d39504f6 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/jumptable.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/jumptable.cc
+@@ -1592,6 +1592,7 @@ void JumpBasic::findUnnormalized(uint4 maxaddsub,uint4 maxleftright,uint4 maxext
+   markModel(true);
+ 
+   int4 countaddsub=0;
++  int4 countleftright=0;
+   int4 countext=0;
+   PcodeOp *normop = (PcodeOp *)0;
+   while(i<pathMeld.numCommonVarnode()) {
+@@ -1610,6 +1611,16 @@ void JumpBasic::findUnnormalized(uint4 maxaddsub,uint4 maxleftright,uint4 maxext
+       if (!normop->getIn(1-j)->isConstant()) break;
+       switchvn = testvn;
+       break;
++    case CPUI_INT_LEFT:
++      // An index scaled by a shift (i << c, e.g. a word table indexed by i*2) is labeled
++      // by i, not by the byte offset.  backup2Switch reverses it through
++      // OpBehaviorIntLeft::recoverInputBinary.
++      countleftright += 1;
++      if (countleftright > maxleftright) break;
++      if (j != 0 || !normop->getIn(1)->isConstant()) break;
++      if (normop->getIn(1)->getOffset() >= 8*normop->getOut()->getSize()) break;
++      switchvn = testvn;
++      break;
+     case CPUI_INT_ZEXT:
+     case CPUI_INT_SEXT:
+       countext += 1;
+-- 
+2.45.1
+

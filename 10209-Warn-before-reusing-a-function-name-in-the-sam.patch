@@ -1,0 +1,120 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: culpen90 <sinnomine@duck.com>
+Date: Fri, 13 Nov 2026 10:37:30 -0500
+Subject: [PATCH] 10209: Warn before reusing a function name in the same
+ namespace
+
+---
+ .../java/ghidra/app/util/AddEditDialog.java   | 24 +++++++++
+ .../plugin/core/label/AddEditDialoglTest.java | 53 +++++++++++++++++++
+ 2 files changed, 77 insertions(+)
+
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/util/AddEditDialog.java b/Ghidra/Features/Base/src/main/java/ghidra/app/util/AddEditDialog.java
+index c6210a7ab6..543bc7a924 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/util/AddEditDialog.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/util/AddEditDialog.java
+@@ -190,6 +190,9 @@ public class AddEditDialog extends ReusableDialogComponentProvider {
+ 		if (parent == null) {
+ 			return;
+ 		}
++		if (!confirmFunctionRename(symbolName, parent)) {
++			return;
++		}
+ 
+ 		boolean isCurrentlyEntryPoint = false;
+ 		boolean isCurrentlyPinned = false;
+@@ -230,6 +233,27 @@ public class AddEditDialog extends ReusableDialogComponentProvider {
+ 		close();
+ 	}
+ 
++	private boolean confirmFunctionRename(String name, Namespace namespace) {
++		if (symbol == null || symbol.getSymbolType() != SymbolType.FUNCTION) {
++			return true;
++		}
++		if (name.equals(symbol.getName()) && namespace.equals(symbol.getParentNamespace())) {
++			return true;
++		}
++
++		SymbolTable symbolTable = program.getSymbolTable();
++		for (Symbol other : symbolTable.getSymbols(name, namespace)) {
++			if (other.getSymbolType() == SymbolType.FUNCTION && !other.equals(symbol)) {
++				String message = "A function named \"%s\" already exists in namespace \"%s\".\n" +
++					"Use this name anyway?";
++				int choice = OptionDialog.showYesNoDialogWithNoAsDefaultButton(getComponent(),
++					"Duplicate Function Name", message.formatted(name, namespace.getName(true)));
++				return choice == OptionDialog.YES_OPTION;
++			}
++		}
++		return true;
++	}
++
+ 	private void checkForRemoveLabel() {
+ 
+ 		if (!isEditing()) {
+diff --git a/Ghidra/Features/Base/src/test.slow/java/ghidra/app/plugin/core/label/AddEditDialoglTest.java b/Ghidra/Features/Base/src/test.slow/java/ghidra/app/plugin/core/label/AddEditDialoglTest.java
+index 1f9667792d..b9e29f7586 100644
+--- a/Ghidra/Features/Base/src/test.slow/java/ghidra/app/plugin/core/label/AddEditDialoglTest.java
++++ b/Ghidra/Features/Base/src/test.slow/java/ghidra/app/plugin/core/label/AddEditDialoglTest.java
+@@ -335,6 +335,59 @@ public class AddEditDialoglTest extends AbstractGhidraHeadedIntegrationTest {
+ 		assertTrue(function.getSymbol().isPrimary());
+ 	}
+ 
++	@Test
++	public void testRenameFunctionToExistingName() {
++		Symbol existing = getUniqueSymbol(program, "entry", null);
++		Symbol target = st.getPrimarySymbol(addr(0x01002239));
++		String originalName = target.getName();
++
++		editLabel(target);
++		setText(existing.getName());
++		pressOk();
++
++		Window warning = waitForWindow("Duplicate Function Name");
++		assertNotNull(warning);
++		pressButtonByText(warning, "No");
++		assertEditDialogVisible(true);
++		assertEquals(originalName, target.getName());
++
++		pressOk();
++		warning = waitForWindow("Duplicate Function Name");
++		assertNotNull(warning);
++		pressButtonByText(warning, "Yes");
++		assertEditDialogVisible(false);
++		assertEquals(existing.getName(), target.getName());
++	}
++
++	@Test
++	public void testRenameFunctionToExistingNameInAnotherNamespace() throws Exception {
++		Symbol existing = getUniqueSymbol(program, "entry", null);
++		Symbol target = st.getPrimarySymbol(addr(0x01002239));
++		String name = existing.getName();
++		Namespace namespace = program.withTransaction("Set function namespace", () -> {
++			Namespace ns = st.createNameSpace(globalScope, "OtherNamespace", SourceType.USER_DEFINED);
++			existing.setNamespace(ns);
++			return ns;
++		});
++
++		editLabel(target);
++		setText(name);
++		pressOk();
++		assertEditDialogVisible(false);
++		assertEquals(name, target.getName());
++		assertEquals(globalScope, target.getParentNamespace());
++
++		editLabel(target);
++		setText(namespace.getName() + Namespace.DELIMITER + name);
++		pressOk();
++
++		Window warning = waitForWindow("Duplicate Function Name");
++		assertNotNull(warning);
++		pressButtonByText(warning, "Yes");
++		assertEditDialogVisible(false);
++		assertEquals(namespace, target.getParentNamespace());
++	}
++
+ 	@Test
+ 	public void testRenameFunction_Trim() throws Exception {
+ 
+-- 
+2.45.1
+
