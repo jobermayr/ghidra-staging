@@ -1,0 +1,137 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Christopher Pruijsen <christopher.pruijsen@gmail.com>
+Date: Sun, 15 Nov 2026 15:04:54 +0000
+Subject: [PATCH] 10221: Demangler: do not demangle a symbol again after it
+ became non-primary
+
+---
+ .../analysis/AbstractDemanglerAnalyzer.java   | 24 ++++++++++----
+ .../MicrosoftDemanglerAnalyzerTest.java       | 32 +++++++++++++++++++
+ 2 files changed, 50 insertions(+), 6 deletions(-)
+
+diff --git a/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/analysis/AbstractDemanglerAnalyzer.java b/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/analysis/AbstractDemanglerAnalyzer.java
+index ffd36dd437..1fe228b80e 100644
+--- a/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/analysis/AbstractDemanglerAnalyzer.java
++++ b/Ghidra/Features/Base/src/main/java/ghidra/app/plugin/core/analysis/AbstractDemanglerAnalyzer.java
+@@ -15,6 +15,8 @@
+  */
+ package ghidra.app.plugin.core.analysis;
+ 
++import java.util.*;
++
+ import org.apache.commons.lang3.StringUtils;
+ import org.apache.commons.lang3.exception.ExceptionUtils;
+ 
+@@ -127,6 +129,7 @@ public abstract class AbstractDemanglerAnalyzer extends AbstractAnalyzer {
+ 			throws CancelledException {
+ 
+ 		int count = initialCount;
++		Address previousAddress = null;
+ 
+ 		// Note: iterator will continually need to reinitialize due to symbol changes
+ 		//       consider copying primary symbols to alt storage for iteration
+@@ -140,6 +143,11 @@ public abstract class AbstractDemanglerAnalyzer extends AbstractAnalyzer {
+ 			}
+ 
+ 			Symbol primarySymbol = it.next();
++			Address address = primarySymbol.getAddress();
++			List<Symbol> nonPrimarySymbols =
++				address.equals(previousAddress) ? List.of() : getNonPrimarySymbols(program, address);
++			previousAddress = address;
++
+ 			if (!skipSymbol(primarySymbol)) {
+ 
+ 				MangledContext mangledContext =
+@@ -150,22 +158,26 @@ public abstract class AbstractDemanglerAnalyzer extends AbstractAnalyzer {
+ 				}
+ 			}
+ 
+-			Address address = primarySymbol.getAddress();
+-			demangleNonPrimarySymbols(program, address, options, log, monitor);
++			demangleNonPrimarySymbols(program, nonPrimarySymbols, options, log, monitor);
+ 		}
+ 
+ 		return count;
+ 	}
+ 
+-	private void demangleNonPrimarySymbols(Program program, Address address,
++	private List<Symbol> getNonPrimarySymbols(Program program, Address address) {
++		return Arrays.stream(program.getSymbolTable().getSymbols(address))
++				.filter(symbol -> !symbol.isPrimary())
++				.toList();
++	}
++
++	private void demangleNonPrimarySymbols(Program program, List<Symbol> symbols,
+ 			DemanglerOptions options, MessageLog log, TaskMonitor monitor)
+ 			throws CancelledException {
+ 
+-		SymbolTable symbolTable = program.getSymbolTable();
+-		for (Symbol symbol : symbolTable.getSymbols(address)) {
++		for (Symbol symbol : symbols) {
+ 			monitor.checkCancelled();
+ 
+-			if (symbol.isPrimary() || skipSymbol(symbol)) {
++			if (symbol.isDeleted() || skipSymbol(symbol)) {
+ 				continue;
+ 			}
+ 
+diff --git a/Ghidra/Features/MicrosoftDemangler/src/test/java/ghidra/app/plugin/core/analysis/MicrosoftDemanglerAnalyzerTest.java b/Ghidra/Features/MicrosoftDemangler/src/test/java/ghidra/app/plugin/core/analysis/MicrosoftDemanglerAnalyzerTest.java
+index 79f4a61c20..f83430586e 100644
+--- a/Ghidra/Features/MicrosoftDemangler/src/test/java/ghidra/app/plugin/core/analysis/MicrosoftDemanglerAnalyzerTest.java
++++ b/Ghidra/Features/MicrosoftDemangler/src/test/java/ghidra/app/plugin/core/analysis/MicrosoftDemanglerAnalyzerTest.java
+@@ -27,6 +27,7 @@ import ghidra.framework.options.Options;
+ import ghidra.program.database.ProgramBuilder;
+ import ghidra.program.database.ProgramDB;
+ import ghidra.program.model.address.Address;
++import ghidra.program.model.address.AddressSet;
+ import ghidra.program.model.data.ParameterDefinition;
+ import ghidra.program.model.listing.*;
+ import ghidra.program.model.symbol.SourceType;
+@@ -122,6 +123,25 @@ public class MicrosoftDemanglerAnalyzerTest extends AbstractGhidraHeadedIntegrat
+ 			function.getSignature().toString());
+ 	}
+ 
++	@Test
++	public void testDemangledLabelIsNotAppliedAgainAsNonPrimary() throws Exception {
++
++		Address addr = addr("0x110");
++		createSymbol(addr, "?foo@@YAHH@Z");
++
++		analyzeAndAssertAppliedOnce(addr);
++	}
++
++	@Test
++	public void testDemangledFunctionNameIsNotAppliedAgainAsNonPrimary() throws Exception {
++
++		Address addr = addr("0x110");
++		tx(program, () -> program.getFunctionManager()
++				.createFunction("?foo@@YAHH@Z", addr, new AddressSet(addr), SourceType.ANALYSIS));
++
++		analyzeAndAssertAppliedOnce(addr);
++	}
++
+ //==================================================================================================
+ // Private Methods
+ //==================================================================================================
+@@ -130,6 +150,18 @@ public class MicrosoftDemanglerAnalyzerTest extends AbstractGhidraHeadedIntegrat
+ 		tx(program, () -> analyzer.added(program, program.getMemory(), TaskMonitor.DUMMY, log));
+ 	}
+ 
++	private void analyzeAndAssertAppliedOnce(Address addr) {
++		analyze();
++
++		Function function = program.getFunctionManager().getFunctionAt(addr);
++		assertNotNull(function);
++		assertEquals("int foo(int param_1)", function.getSignature().toString());
++		for (Bookmark bookmark : program.getBookmarkManager().getBookmarks(addr)) {
++			assertFalse(bookmark.getComment(),
++				bookmark.getComment().startsWith("Couldn't apply demangled signature"));
++		}
++	}
++
+ 	private void setApplySignatureOption(boolean doUse) {
+ 
+ 		// Analyzers . Demangler Microsoft . msdApplyOptions . applyFunctionSignatures
+-- 
+2.45.1
+

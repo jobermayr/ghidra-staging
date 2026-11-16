@@ -1,0 +1,70 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: c64cryptoboy <cryptoboy@gmail.com>
+Date: Sun, 15 Nov 2026 15:36:26 -0800
+Subject: [PATCH] 10224: 6502: Fix stacked status and return-address semantics
+
+Co-authored-by: Pi <noreply@pi.dev>
+---
+ Ghidra/Processors/6502/data/languages/6502.sinc     | 9 ++++++---
+ Ghidra/Processors/6502/data/languages/65c02.slaspec | 1 +
+ 2 files changed, 7 insertions(+), 3 deletions(-)
+
+diff --git a/Ghidra/Processors/6502/data/languages/6502.sinc b/Ghidra/Processors/6502/data/languages/6502.sinc
+index 619ae00a08..a0b039f098 100644
+--- a/Ghidra/Processors/6502/data/languages/6502.sinc
++++ b/Ghidra/Processors/6502/data/languages/6502.sinc
+@@ -43,6 +43,8 @@ define token data (16)
+ 
+ # PLP and RTI ignore b5 (unused) and b4 (B flag) as neither bit has storage on chip
+ # and only exist in stack data.
++# Bits 4 and 5 only exist in stacked status, not as physical flags.
++# Retain the legacy P and B register definitions for saved-program compatibility.
+ macro popSR() {
+ 	S = S + 1;
+ 	local temp:2 = zext(S) + 0x0100;
+@@ -52,7 +54,6 @@ macro popSR() {
+ @ifdef MITSUBISHI_MELPS740
+ 	$(T_FLAG) = 1; # Constant flag always set to 1 in pop
+ @endif
+-	$(B_FLAG) = 0; # Break flag always to 0 in pop
+ 	$(D_FLAG) = ccr[3,1];
+ 	$(I_FLAG) = ccr[2,1];
+ 	$(Z_FLAG) = ccr[1,1];
+@@ -61,13 +62,12 @@ macro popSR() {
+ 
+ macro pushSR() {
+ 	local temp:2 = zext(S) + 0x0100;
+-	local ccr:1 = 0xff;  # Break (B) flag and bit 5 set to 1
++	local ccr:1 = 0x30;  # Break (B) flag and bit 5 set to 1
+ 	ccr[7,1] = $(N_FLAG);
+ 	ccr[6,1] = $(V_FLAG);
+ @ifdef MITSUBISHI_MELPS740
+ 	ccr[5,1] = 1; # Constant flag always set to 1 in push
+ @endif
+-	ccr[4,1] = 1; # Break flag always set to 1 in push
+ 	ccr[3,1] = $(D_FLAG);
+ 	ccr[2,1] = $(I_FLAG);
+ 	ccr[1,1] = $(Z_FLAG);
+@@ -333,6 +333,9 @@ ADDRI:  (imm16)   is imm16    {
+ 	stackPush(temp & 0xFF);
+ 	pushSR();
+ 	$(I_FLAG) = 1;
++@ifdef CMOS_BRK_CLEAR_D
++	$(D_FLAG) = 0;
++@endif
+ 	local target:2 = 0xFFFE;
+ 	goto [*:2 target];
+ }
+diff --git a/Ghidra/Processors/6502/data/languages/65c02.slaspec b/Ghidra/Processors/6502/data/languages/65c02.slaspec
+index 5a5a8a703d..b5ae4e4191 100644
+--- a/Ghidra/Processors/6502/data/languages/65c02.slaspec
++++ b/Ghidra/Processors/6502/data/languages/65c02.slaspec
+@@ -1,4 +1,5 @@
+ @define 6502_VERSION "CMOS"
++@define CMOS_BRK_CLEAR_D "1"
+ 
+ @include "6502.sinc"
+ 
+-- 
+2.45.1
+

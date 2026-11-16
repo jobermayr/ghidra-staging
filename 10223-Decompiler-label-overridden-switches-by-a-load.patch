@@ -1,0 +1,138 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Chris Bongaarts <cab@bongalow.net>
+Date: Sun, 15 Nov 2026 10:58:14 -0600
+Subject: [PATCH] 10223: Decompiler: label overridden switches by a loaded
+ index when no other variable fits
+
+Some computed jumps index their address table with a value read through a
+pointer, as a bytecode or script interpreter does with the opcode it fetches
+(target = T[*ip]). With a manual jump-table override, recoverModel tries only
+the variable proposed by findLikelyNorm, which is the pointer arithmetic of the
+table read, and otherwise falls back to setupTrivial: the switch is printed on
+the loaded target address and every case label is an address.
+
+Add JumpBasicOverride::trialLoadNorm, called after that trial fails and before
+setupTrivial. It tries each Varnode common to all paths that is the output of a
+LOAD (at most 2 bytes, at most 32 candidates), nearest the BRANCHIND first,
+with the existing trialNorm, and accepts the first that reproduces every
+override destination. A new isloadnorm flag, cloned and cleared like
+istrivial, makes recoverModel re-derive the variable on each copy of the
+function; without it trialNorm would accept the earlier values for whatever
+Varnode findLikelyNorm hands it.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01NvtBaRRAc3SfKXLzLpASbV
+---
+ .../decompile/cpp/include/ghidra/jumptable.hh |  2 +
+ .../Decompiler/src/decompile/cpp/jumptable.cc | 43 ++++++++++++++++++-
+ 2 files changed, 43 insertions(+), 2 deletions(-)
+
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/jumptable.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/jumptable.hh
+index 8408d1c138..e661037b28 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/jumptable.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/jumptable.hh
+@@ -482,10 +482,12 @@ class JumpBasicOverride : public JumpBasic {
+   Varnode *outerVn;		///< Two-leaf model: the leaf selecting the outer table (e.g. an object type)
+   Varnode *innerVn;		///< Two-leaf model: the leaf indexing the inner table (e.g. a state)
+   int4 innerBits;		///< Two-leaf model: label = (outer << innerBits) | inner
++  bool isloadnorm;		///< \b true if the normalized switch variable is a LOADed value (see trialLoadNorm)
+   int4 findStartOp(Varnode *vn);
+   int4 trialNorm(Funcdata *fd,Varnode *trialvn,uint4 tolerance);
+   void setupTrivial(void);
+   Varnode *findLikelyNorm(void);
++  bool trialLoadNorm(Funcdata *fd);
+   void clearCopySpecific(void);
+   static bool sliceHasLoad(Varnode *vn,int4 depth,bool &isfree);
+   bool pointerHasRomBase(Funcdata *fd,Varnode *vn,AddrSpace *spc,int4 depth);
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/jumptable.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/jumptable.cc
+index 8b26cc85bc..d1ab3b1df9 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/jumptable.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/jumptable.cc
+@@ -2028,6 +2028,7 @@ JumpBasicOverride::JumpBasicOverride(JumpTable *jt)
+   outerVn = (Varnode *)0;
+   innerVn = (Varnode *)0;
+   innerBits = 0;
++  isloadnorm = false;
+ }
+ 
+ /// \param adtable is the list of externally provided addresses, which will be deduped
+@@ -2201,6 +2202,34 @@ Varnode *JumpBasicOverride::findLikelyNorm(void)
+   return res;
+ }
+ 
++/// \brief Try each LOADed Varnode on the common path as the normalized switch variable
++///
++/// Some computed jumps index their address table with a value that is itself read through a
++/// pointer, such as an opcode fetched by a bytecode interpreter (\e target = T[*ip]).
++/// findLikelyNorm() does not propose such a Varnode.  Here every Varnode common to all paths that
++/// is the output of a LOAD (other than the BRANCHIND input itself) is tried with trialNorm(),
++/// nearest the BRANCHIND first, and the first one producing every manual address is used.
++/// \param fd is the function containing the switch
++/// \return \b true if a normalized switch variable was found
++bool JumpBasicOverride::trialLoadNorm(Funcdata *fd)
++
++{
++  int4 limit = pathMeld.numCommonVarnode();
++  if (limit > 32) limit = 32;		// Bound the number of emulation trials
++  for(int4 i=1;i<limit;++i) {
++    Varnode *vn = pathMeld.getVarnode(i);
++    if (!vn->isWritten() || vn->getDef()->code() != CPUI_LOAD) continue;
++    if (vn->getSize() > 2) continue;	// Too wide for an enumerable index
++    if (trialNorm(fd,vn,10) >= 0) {
++      varnodeIndex = i;
++      normalvn = vn;
++      isloadnorm = true;
++      return true;
++    }
++  }
++  return false;
++}
++
+ /// \brief Clear varnodes and ops that are specific to one instance of a function
+ void JumpBasicOverride::clearCopySpecific(void)
+ 
+@@ -2645,6 +2674,14 @@ bool JumpBasicOverride::recoverModel(Funcdata *fd,PcodeOp *indop,const JumpModel
+     istwoleaf = false;
+     if (!trialTwoLeaf(fd,indop,maxtablesize))
+       setupTrivial();
++      return true;
++  }
++  if (isloadnorm) {		// A LOADed switch variable was chosen on an earlier copy of the function
++    values.clear();		// Re-derive it on this copy:  trialNorm() would otherwise accept the
++    addrtable.clear();		// earlier values for whichever Varnode it is handed
++    isloadnorm = false;
++    if (!trialLoadNorm(fd))
++      setupTrivial();
+     return true;
+   }
+   if (!istrivial) {		// If we haven't previously decided to use trivial model
+@@ -2677,8 +2714,8 @@ bool JumpBasicOverride::recoverModel(Funcdata *fd,PcodeOp *indop,const JumpModel
+     // No single normalized variable produces every address.  Before falling back to the trivial
+     // model, try a two-level table dispatch, but only on a first derivation (values is empty);
+     // a copy carrying values from an earlier derivation keeps that earlier decision.
+-    if (values.empty() && trialTwoLeaf(fd,indop,maxtablesize))
+-      return true;
++    if (values.empty() && trialTwoLeaf(fd,indop,maxtablesize) && trialLoadNorm(fd))
++     return true;
+   }
+   setupTrivial();
+   return true;
+@@ -2734,6 +2771,7 @@ JumpModel *JumpBasicOverride::clone(JumpTable *jt) const
+   res->hash = hash;
+   res->istwoleaf = istwoleaf;	// Leaves are function-copy specific: recoverModel re-derives them
+   res->innerBits = innerBits;
++  res->isloadnorm = isloadnorm;	// The Varnode itself is re-derived by recoverModel
+   return res;
+ }
+ 
+@@ -2752,6 +2790,7 @@ void JumpBasicOverride::clear(void)
+   istwoleaf = false;
+   outerVn = (Varnode *)0;
+   innerVn = (Varnode *)0;
++  isloadnorm = false;
+ }
+ 
+ void JumpBasicOverride::findUnnormalized(uint4 maxaddsub,uint4 maxleftright,uint4 maxext)
+-- 
+2.45.1
+
