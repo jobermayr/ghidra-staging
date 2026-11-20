@@ -15,17 +15,17 @@ Options:
  -PsharedBfd  Link against a shared libbfd
  -Ptest       Build decomp_test_dbg
 ---
- .../Features/Decompiler/buildNatives.gradle   | 668 ++++++++++++------
+ .../Features/Decompiler/buildNatives.gradle   | 674 ++++++++++++------
  .../src/decompile/cpp/ghidra_arch.cc          |   7 +
  .../src/decompile/cpp/ghidra_process.cc       |  48 ++
  .../Decompiler/src/decompile/cpp/test.cc      |  14 +-
- 4 files changed, 526 insertions(+), 211 deletions(-)
+ 4 files changed, 532 insertions(+), 211 deletions(-)
 
 diff --git a/Ghidra/Features/Decompiler/buildNatives.gradle b/Ghidra/Features/Decompiler/buildNatives.gradle
-index ebd7dba0d6..e581ff767b 100644
+index ebd7dba0d6..fbf386cf62 100644
 --- a/Ghidra/Features/Decompiler/buildNatives.gradle
 +++ b/Ghidra/Features/Decompiler/buildNatives.gradle
-@@ -22,237 +22,502 @@ if (findProject(':Generic') == null) {
+@@ -22,237 +22,508 @@ if (findProject(':Generic') == null) {
  	apply from: "../../../GPL/nativeBuildProperties.gradle"
  }
  
@@ -288,13 +288,11 @@ index ebd7dba0d6..e581ff767b 100644
 +}
 +
 +// Make it possible to use system zlib
-+def checkZlibSources = {
++def checkZlibSources = { c ->
 +	if (isCurrentWindows() || !project.hasProperty('sysZlib')) {
-+		c {
-+			source {
-+				srcDir "src/decompile/zlib"
-+				include "*.c"
-+			}
++		c.source {
++			srcDir "src/decompile/zlib"
++			include "*.c"
 +		}
 +	}
 +}
@@ -539,14 +537,25 @@ index ebd7dba0d6..e581ff767b 100644
 -					source {
 -						srcDir "src/decompile/zlib"
 -						include "*.c"
-+				}
-+				checkZlibSources()
+-					}
+ 				}
+-			} // end sources (sleigh)
+-			
+-			binaries {
+-				all{ b ->
+-					b.cppCompiler.define "LOCAL_ZLIB"
+-					b.cCompiler.define "NO_GZIP"
++				withType(CSourceSet).all { c ->
++					checkZlibSources(c)
+ 				}
+-			} // end binaries.all (sleigh)
 +			}
 +			binaries.all { b ->
 +				checkSleighFlags(b)
 +			}
-+		} // end sleigh
-+
+ 		} // end sleigh
+ 
+-	}  // end components
 +		if (project.hasProperty('cli')) {
 +			decomp_dbg(NativeExecutableSpec) {
 +				baseName "decomp_dbg"
@@ -564,15 +573,11 @@ index ebd7dba0d6..e581ff767b 100644
 +						exportedHeaders {
 +							srcDir "src/decompile/cpp"
 +						}
- 					}
-+					checkZlibSources()
- 				}
--			} // end sources (sleigh)
--			
--			binaries {
--				all{ b ->
--					b.cppCompiler.define "LOCAL_ZLIB"
--					b.cCompiler.define "NO_GZIP"
++					}
++					withType(CSourceSet).all { c ->
++						checkZlibSources(c)
++					}
++				}
 +				binaries.all { b ->
 +					if (b.toolChain in Gcc || b.toolChain in Clang) {
 +						b.cppCompiler.args "-g"
@@ -589,12 +594,9 @@ index ebd7dba0d6..e581ff767b 100644
 +						b.cppCompiler.define "LOCAL_ZLIB"
 +						b.cCompiler.define "NO_GZIP"
 +					}
- 				}
--			} // end binaries.all (sleigh)
--		} // end sleigh
++				}
 +			} // end decomp_dbg
- 
--	}  // end components
++
 +			sleigh_dbg(NativeExecutableSpec) {
 +				targetPlatforms_bfd.each { platform ->
 +					targetPlatform platform
@@ -611,7 +613,9 @@ index ebd7dba0d6..e581ff767b 100644
 +							srcDir "src/decompile/cpp"
 +						}
 +					}
-+					checkZlibSources()
++					withType(CSourceSet).all { c ->
++						checkZlibSources(c)
++					}
 +				}
 +				binaries.all { b ->
 +					if (b.toolChain in Gcc || b.toolChain in Clang) {
@@ -652,10 +656,12 @@ index ebd7dba0d6..e581ff767b 100644
 +							include decompiler_unittest_files
 +						}
 +						exportedHeaders {
-+							srcDir "src/decompile/cpp/include"
++							srcDir "src/decompile/cpp"
 +						}
 +					}
-+					checkZlibSources()
++					withType(CSourceSet).all { c ->
++						checkZlibSources(c)
++					}
 +				}
 +				binaries.all { b ->
 +					b.cppCompiler.define "__TERMINAL__"
@@ -720,7 +726,7 @@ index ebd7dba0d6..e581ff767b 100644
  				if (b.targetPlatform.operatingSystem.windows) {
  					b.cppCompiler.define "WINDOWS"
  					b.cppCompiler.define "_WINDOWS"
-@@ -263,25 +528,10 @@ model {
+@@ -263,25 +534,10 @@ model {
  						b.cppCompiler.define "_WIN64"
  					}	
  				}
