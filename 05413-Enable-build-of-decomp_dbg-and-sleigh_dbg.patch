@@ -13,17 +13,19 @@ Options:
  -Popt        Build optimized with GCC / Clang (disable on Windows with -Pnoopt)
  -PsysZlib    Build against system zlib (ignored for Windows)
  -PsharedBfd  Link against a shared libbfd
+ -Ptest       Build decomp_test_dbg
 ---
- .../Features/Decompiler/buildNatives.gradle   | 575 ++++++++++++------
+ .../Features/Decompiler/buildNatives.gradle   | 668 ++++++++++++------
  .../src/decompile/cpp/ghidra_arch.cc          |   7 +
  .../src/decompile/cpp/ghidra_process.cc       |  48 ++
- 3 files changed, 449 insertions(+), 181 deletions(-)
+ .../Decompiler/src/decompile/cpp/test.cc      |  14 +-
+ 4 files changed, 526 insertions(+), 211 deletions(-)
 
 diff --git a/Ghidra/Features/Decompiler/buildNatives.gradle b/Ghidra/Features/Decompiler/buildNatives.gradle
-index ebd7dba0d6..d3878219a4 100644
+index ebd7dba0d6..e581ff767b 100644
 --- a/Ghidra/Features/Decompiler/buildNatives.gradle
 +++ b/Ghidra/Features/Decompiler/buildNatives.gradle
-@@ -22,20 +22,237 @@ if (findProject(':Generic') == null) {
+@@ -22,237 +22,502 @@ if (findProject(':Generic') == null) {
  	apply from: "../../../GPL/nativeBuildProperties.gradle"
  }
  
@@ -110,6 +112,8 @@ index ebd7dba0d6..d3878219a4 100644
 +	"varnode.cc"
 +]
 +
++def decompiler_common_files = core_files + decompiler_files
++
 +def decompiler_opt_files = [
 +	"comment_ghidra.cc",
 +	"cpool_ghidra.cc",
@@ -125,25 +129,46 @@ index ebd7dba0d6..d3878219a4 100644
 +	"typegrp_ghidra.cc"
 +]
 +
-+def decompiler_cli_files = [
-+	"bfd_arch.cc",
++def decompiler_cli_no_bfd_files = [
 +	"callgraph.cc",
-+	"codedata.cc",
-+	"consolemain.cc",
-+	"grammar.cc",
 +	"ifacedecomp.cc",
 +	"ifaceterm.cc",
 +	"inject_sleigh.cc",
 +	"interface.cc",
-+	"loadimage_bfd.cc",
-+	"loadimage_xml.cc",
 +	"libdecomp.cc",
++	"loadimage_xml.cc",
 +	"raw_arch.cc",
-+	"rulecompile.cc",
 +	"sleigh_arch.cc",
 +	"testfunction.cc",
-+	"unify.cc",
 +	"xml_arch.cc"
++]
++
++def decompiler_cli_bfd_files = [
++	"bfd_arch.cc",
++	"codedata.cc",
++	"consolemain.cc",
++	"grammar.cc",
++	"loadimage_bfd.cc",
++	"rulecompile.cc",
++	"unify.cc",
++]
++
++def decompiler_grammar_files = [
++	"grammar.cc"
++]
++
++def decompiler_dbg_files = decompiler_common_files + decompiler_cli_no_bfd_files + decompiler_grammar_files
++
++def decompiler_cli_files = decompiler_dbg_files  + decompiler_cli_bfd_files
++
++def decompiler_unittest_files = [
++	"testcirclerange.cc",
++	"testfloatemu.cc",
++	"testfuncproto.cc",
++	"testmarshal.cc",
++	"testmultiprec.cc",
++	"testparamstore.cc",
++	"testtypes.cc"
 +]
 +
 +def sleigh_common_files = [
@@ -167,6 +192,25 @@ index ebd7dba0d6..d3878219a4 100644
 +	"slghscan.cc"
 +]
 +
++def decompiler_test_files = decompiler_dbg_files + sleigh_common_files
++
++def targetPlatforms_bfd = [
++	"freebsd_arm_64",
++	"freebsd_x86_64",
++	"linux_arm_64",
++	"linux_x86_64",
++	"mac_arm_64",
++	"mac_x86_64",
++	"openbsd_arm_64",
++	"openbsd_x86_64"
++]
++
++def targetPlatforms_no_bfd = [
++	"win_arm_64",
++	"win_x86_64"
++]
++
++def targetPlatforms = targetPlatforms_bfd + targetPlatforms_no_bfd
 +
 +/*
 + * Try to find libbfd*.so or a static libbfd.a for linking decomp_dbg
@@ -243,6 +287,31 @@ index ebd7dba0d6..d3878219a4 100644
 +	b.linker.args.addAll optFlags
 +}
 +
++// Make it possible to use system zlib
++def checkZlibSources = {
++	if (isCurrentWindows() || !project.hasProperty('sysZlib')) {
++		c {
++			source {
++				srcDir "src/decompile/zlib"
++				include "*.c"
++			}
++		}
++	}
++}
++
++def checkSleighFlags(NativeBinarySpec b) {
++	if (b.toolChain in Gcc || b.toolChain in Clang) {
++		getOptFlags(b)
++		if (project.hasProperty('sysZlib')) {
++			b.linker.args "-lz"
++		}
++	}
++	if (isCurrentWindows() || !project.hasProperty('sysZlib')) {
++		b.cppCompiler.define "LOCAL_ZLIB"
++		b.cCompiler.define "NO_GZIP"
++	}
++}
++
 +/*
   * Define the "native build model" for building the decompiler executables.
 + * Options:
@@ -254,6 +323,7 @@ index ebd7dba0d6..d3878219a4 100644
 + * -Popt	Build optimized with GCC / Clang (disable on Windows with -Pnoopt)
 + * -PsysZlib	Build against system zlib (ignored for Windows)
 + * -PsharedBfd	Link against a shared libbfd
++ * -Ptest       Build decomp_test_dbg
   */
  model {
 -	// Define the source files that are compiled and linked to become the decompiler.
@@ -266,11 +336,22 @@ index ebd7dba0d6..d3878219a4 100644
 -
  			baseName "decompile"
 -
- 			// these tell gradle for which platforms to build a decompiler executable.
- 			targetPlatform "win_x86_64"
- 			targetPlatform "win_arm_64"
-@@ -51,106 +268,28 @@ model {
- 			targetPlatform "openbsd_arm_64"
+-			// these tell gradle for which platforms to build a decompiler executable.
+-			targetPlatform "win_x86_64"
+-			targetPlatform "win_arm_64"
+-			targetPlatform "linux_x86_64"
+-			targetPlatform "linux_arm_64"
+-			targetPlatform "mac_x86_64"
+-			targetPlatform "mac_arm_64"
+-			targetPlatform "freebsd_x86_64"
+-			targetPlatform "freebsd_arm_64"
+-			targetPlatform "freebsd_ppc_64"
+-			targetPlatform "freebsd_ppc_64le"
+-			targetPlatform "openbsd_x86_64"
+-			targetPlatform "openbsd_arm_64"
++			targetPlatforms.each { platform ->
++				targetPlatform platform
++			}
  			sources {
  				cpp {
 -					// NOTE: The bison/flex generated files are assumed to be up-to-date.
@@ -370,8 +451,7 @@ index ebd7dba0d6..d3878219a4 100644
 -		            }
 +					source {
 +						srcDir "src/decompile/cpp"
-+						include core_files
-+						include decompiler_files
++						include decompiler_common_files
 +						include decompiler_opt_files
 +					}
  					exportedHeaders {
@@ -395,8 +475,21 @@ index ebd7dba0d6..d3878219a4 100644
  		} // end decompile
  
  		sleigh(NativeExecutableSpec) {
-@@ -168,91 +307,180 @@ model {
- 			targetPlatform "openbsd_arm_64"
+-			targetPlatform "win_x86_64"
+-			targetPlatform "win_arm_64"
+-			targetPlatform "linux_x86_64"
+-			targetPlatform "linux_arm_64"
+-			targetPlatform "mac_x86_64"
+-			targetPlatform "mac_arm_64"
+-			targetPlatform "freebsd_x86_64"
+-			targetPlatform "freebsd_arm_64"
+-			targetPlatform "freebsd_ppc_64"
+-			targetPlatform "freebsd_ppc_64le"
+-			targetPlatform "openbsd_x86_64"
+-			targetPlatform "openbsd_arm_64"
++			targetPlatforms.each { platform ->
++				targetPlatform platform
++			}
  			sources {
  				cpp {
 -					// NOTE: The bison/flex generated files are assumed to be up-to-date.
@@ -447,68 +540,39 @@ index ebd7dba0d6..d3878219a4 100644
 -						srcDir "src/decompile/zlib"
 -						include "*.c"
 +				}
-+				if (isCurrentWindows() || !project.hasProperty('sysZlib')) {
-+					c {
-+						source {
-+							srcDir "src/decompile/zlib"
-+							include "*.c"
-+						}
-+					}
-+				}
++				checkZlibSources()
 +			}
 +			binaries.all { b ->
-+				if (b.toolChain in Gcc || b.toolChain in Clang) {
-+					getOptFlags(b)
-+					if (project.hasProperty('sysZlib')) {
-+						b.linker.args "-lz"
- 					}
- 				}
--			} // end sources (sleigh)
--			
--			binaries {
--				all{ b ->
-+				if (isCurrentWindows() || !project.hasProperty('sysZlib')) {
- 					b.cppCompiler.define "LOCAL_ZLIB"
- 					b.cCompiler.define "NO_GZIP"
- 				}
--			} // end binaries.all (sleigh)
++				checkSleighFlags(b)
 +			}
- 		} // end sleigh
- 
--	}  // end components
++		} // end sleigh
++
 +		if (project.hasProperty('cli')) {
 +			decomp_dbg(NativeExecutableSpec) {
 +				baseName "decomp_dbg"
-+				targetPlatform "linux_x86_64"
-+				targetPlatform "linux_arm_64"
-+				targetPlatform "mac_x86_64"
-+				targetPlatform "mac_arm_64"
-+				targetPlatform "freebsd_x86_64"
-+				targetPlatform "freebsd_arm_64"
-+				targetPlatform "openbsd_x86_64"
-+				targetPlatform "openbsd_arm_64"
++				targetPlatforms_bfd.each { platform ->
++					targetPlatform platform
++				}
 +				sources {
 +					cpp {
 +						source {
 +							srcDir "src/decompile/cpp"
-+							include core_files
-+							include decompiler_files
++							include decompiler_common_files
 +							include decompiler_cli_files
 +							include sleigh_common_files
 +						}
 +						exportedHeaders {
 +							srcDir "src/decompile/cpp"
 +						}
-+					}
-+					if (isCurrentWindows() || !project.hasProperty('sysZlib')) {
-+						c {
-+							source {
-+								srcDir "src/decompile/zlib"
-+								include "*.c"
-+							}
-+						}
-+					}
-+				}
+ 					}
++					checkZlibSources()
+ 				}
+-			} // end sources (sleigh)
+-			
+-			binaries {
+-				all{ b ->
+-					b.cppCompiler.define "LOCAL_ZLIB"
+-					b.cCompiler.define "NO_GZIP"
 +				binaries.all { b ->
 +					if (b.toolChain in Gcc || b.toolChain in Clang) {
 +						b.cppCompiler.args "-g"
@@ -525,18 +589,16 @@ index ebd7dba0d6..d3878219a4 100644
 +						b.cppCompiler.define "LOCAL_ZLIB"
 +						b.cCompiler.define "NO_GZIP"
 +					}
-+				}
+ 				}
+-			} // end binaries.all (sleigh)
+-		} // end sleigh
 +			} // end decomp_dbg
-+
+ 
+-	}  // end components
 +			sleigh_dbg(NativeExecutableSpec) {
-+				targetPlatform "linux_x86_64"
-+				targetPlatform "linux_arm_64"
-+				targetPlatform "mac_x86_64"
-+				targetPlatform "mac_arm_64"
-+				targetPlatform "freebsd_x86_64"
-+				targetPlatform "freebsd_arm_64"
-+				targetPlatform "openbsd_x86_64"
-+				targetPlatform "openbsd_arm_64"
++				targetPlatforms_bfd.each { platform ->
++					targetPlatform platform
++				}
 +				sources {
 +					cpp {
 +						source {
@@ -549,14 +611,7 @@ index ebd7dba0d6..d3878219a4 100644
 +							srcDir "src/decompile/cpp"
 +						}
 +					}
-+					if (isCurrentWindows() || !project.hasProperty('sysZlib')) {
-+						c {
-+							source {
-+								srcDir "src/decompile/zlib"
-+								include "*.c"
-+							}
-+						}
-+					}
++					checkZlibSources()
 +				}
 +				binaries.all { b ->
 +					if (b.toolChain in Gcc || b.toolChain in Clang) {
@@ -577,7 +632,37 @@ index ebd7dba0d6..d3878219a4 100644
 +					b.cppCompiler.define "YYDEBUG"
 +				}
 +			} // end sleigh_dbg
-+		} // end debug
++		} // end cli
++
++		if (project.hasProperty('test')) {
++			decomp_test_dbg(NativeExecutableSpec) {
++				baseName "decomp_test_dbg"
++				targetPlatforms.each { platform ->
++					targetPlatform platform
++				}
++				sources {
++					cpp {
++						source {
++							srcDir "src/decompile/cpp"
++							include "test.cc"
++							include decompiler_test_files
++						}
++						source {
++							srcDir "src/decompile/unittests"
++							include decompiler_unittest_files
++						}
++						exportedHeaders {
++							srcDir "src/decompile/cpp/include"
++						}
++					}
++					checkZlibSources()
++				}
++				binaries.all { b ->
++					b.cppCompiler.define "__TERMINAL__"
++					checkSleighFlags(b)
++				}
++			} // end decomp_test_dbg
++		} // end test
 +	} // end components
  
  	binaries {
@@ -635,7 +720,7 @@ index ebd7dba0d6..d3878219a4 100644
  				if (b.targetPlatform.operatingSystem.windows) {
  					b.cppCompiler.define "WINDOWS"
  					b.cppCompiler.define "_WINDOWS"
-@@ -263,25 +491,10 @@ model {
+@@ -263,25 +528,10 @@ model {
  						b.cppCompiler.define "_WIN64"
  					}	
  				}
@@ -754,6 +839,56 @@ index 1f8216c87a..dd246ea244 100644
    signal(SIGSEGV, &segvHandler);  // Exit on SEGV errors
  #ifdef _WINDOWS
    // Force i/o streams to be in binary mode
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/test.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/test.cc
+index cd982a461a..30322399c2 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/test.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/test.cc
+@@ -105,13 +105,17 @@ int main(int argc, char **argv) {
+ 
+   bool runUnitTests = true;
+   bool runDataTests = true;
++  bool needSleigh = true;
+ 
++  string sleighdirname = FileManage::discoverGhidraRoot(argv[0]);
+   argc -= 1;
+   argv += 1;
+   set<string> unitTestNames;
+   set<string> dataTestNames;
+-  string dirname("../datatests");
+-  string sleighdirname("../../../../../../..");
++  if (sleighdirname.size() != 0) {
++    needSleigh = false;
++  }
++  string dirname(sleighdirname + "/Ghidra/Features/Decompiler/src/decompile/datatests");
+   while (argc > 0) {
+     string command(argv[0]);
+     if (command == "-path") {
+@@ -124,12 +128,14 @@ int main(int argc, char **argv) {
+       sleighdirname = argv[1];
+       argv += 2;
+       argc -= 2;
++      needSleigh = false;
+     }
+     else if (command == "-usesleighenv") {
+       const char *sleighhomepath = getenv("SLEIGHHOME");
+       if (sleighhomepath != (const char *)0) {
+         cout << "Using SLEIGHHOME=" << sleighhomepath << endl;
+         sleighdirname = sleighhomepath;
++        needSleigh = false;
+       }
+       else
+         cout << "No SLEIGHHOME environment variable" << endl;
+@@ -153,6 +159,10 @@ int main(int argc, char **argv) {
+       return -1;
+     }
+   }
++  if (needSleigh) {
++    cout << "Couldn't detect sleigh automatically." << endl;
++    exit(1);
++  }
+   startDecompilerLibrary(sleighdirname.c_str());
+ 
+   // Keep track of failed tests as return code to indicate failures, clamped at
 -- 
 2.45.1
 

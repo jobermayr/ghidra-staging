@@ -1,0 +1,63 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: b84330808 <b84330808@gmail.com>
+Date: Thu, 19 Nov 2026 00:30:52 +0900
+Subject: [PATCH] 10240: Keep Rust generic arguments together when they contain
+ a fn pointer return type
+
+Keep Rust generic arguments together around fn pointer arrows
+
+The v0 demangler prints function pointer types as `fn(&str) -> usize`.
+The `>` of that arrow was counted as the end of a template by both
+RustDemanglerParser and SymbolPathParser, so the rest of the generic
+arguments was split into namespaces on every `::`.
+---
+ .../analysis/rust/demangler/RustDemanglerParser.java |  2 +-
+ .../main/java/ghidra/app/util/SymbolPathParser.java  | 12 +++++++++++-
+ 2 files changed, 12 insertions(+), 2 deletions(-)
+
+diff --git a/Ghidra/Features/Rust/src/main/java/ghidra/app/plugin/core/analysis/rust/demangler/RustDemanglerParser.java b/Ghidra/Features/Rust/src/main/java/ghidra/app/plugin/core/analysis/rust/demangler/RustDemanglerParser.java
+index ba85e0d4b9..2f20f66553 100644
+--- a/Ghidra/Features/Rust/src/main/java/ghidra/app/plugin/core/analysis/rust/demangler/RustDemanglerParser.java
++++ b/Ghidra/Features/Rust/src/main/java/ghidra/app/plugin/core/analysis/rust/demangler/RustDemanglerParser.java
+@@ -143,7 +143,7 @@ public class RustDemanglerParser {
+ 				if (ch == '<' || ch == '(') {
+ 					++depth;
+ 				}
+-				else if ((ch == '>' || ch == ')') && depth != 0) {
++				else if ((ch == '>' || ch == ')') && depth != 0 && !(ch == '>' && last == '-')) {
+ 					--depth;
+ 				}
+ 
+diff --git a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/util/SymbolPathParser.java b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/util/SymbolPathParser.java
+index fbfd29dced..49cf719ea0 100644
+--- a/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/util/SymbolPathParser.java
++++ b/Ghidra/Framework/SoftwareModeling/src/main/java/ghidra/app/util/SymbolPathParser.java
+@@ -114,7 +114,9 @@ public class SymbolPathParser {
+ 				++templateLevel;
+ 			}
+ 			else if (c == '>') {
+-				--templateLevel;
++				if (!isArrow(i, name)) {
++					--templateLevel;
++				}
+ 			}
+ 			else if (c == '(') {
+ 				++parenLevel;
+@@ -164,6 +166,14 @@ public class SymbolPathParser {
+ 		return name.charAt(i) == ':' && name.charAt(i + 1) == ':';
+ 	}
+ 
++	/**
++	 * Checks for the '>' of an arrow, as in a Rust function pointer type such as
++	 * {@code fn(u8) -> u32}, which does not close a template
++	 */
++	private static boolean isArrow(int i, String name) {
++		return i > 0 && name.charAt(i - 1) == '-';
++	}
++
+ 	private static boolean isAngleOperator(String component) {
+ 		//@formatter:off
+ 		return switch (component) {
+-- 
+2.45.1
+

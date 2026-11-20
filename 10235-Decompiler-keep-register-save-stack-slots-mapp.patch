@@ -1,0 +1,201 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: William Chuang <rw0124336@gmail.com>
+Date: Tue, 17 Nov 2026 14:07:42 -0700
+Subject: [PATCH] 10235: Decompiler: keep register-save stack slots mapped when
+ a direct pointer escapes (#9728)
+
+Decompiler: keep register-save stack slots mapped when a
+ direct pointer escapes
+
+Some ARM compilers (IAR, Keil MDK) allocate locals with "push {r7,lr}"
+instead of "sub sp". ActionRestrictLocal marked the slot as unmapped
+register-save storage, so it was treated as unaliased and a stored constant
+was propagated across a call that receives a pointer to the slot.
+
+Leave the slot mapped when a pointer with a constant offset from the stack
+pointer (no variable index) points into it. Adds datatest escapedstackslot.xml.
+
+Fixes #9728
+---
+ .../Decompiler/certification.manifest         |  1 +
+ .../src/decompile/cpp/coreaction.cc           | 50 +++++++++++++++++
+ .../cpp/include/ghidra/coreaction.hh          |  2 +
+ .../decompile/cpp/include/ghidra/varmap.hh    |  1 +
+ .../decompile/datatests/escapedstackslot.xml  | 53 +++++++++++++++++++
+ 5 files changed, 107 insertions(+)
+ create mode 100644 Ghidra/Features/Decompiler/src/decompile/datatests/escapedstackslot.xml
+
+diff --git a/Ghidra/Features/Decompiler/certification.manifest b/Ghidra/Features/Decompiler/certification.manifest
+index e8296dfe5b..9485d767a4 100644
+--- a/Ghidra/Features/Decompiler/certification.manifest
++++ b/Ghidra/Features/Decompiler/certification.manifest
+@@ -43,6 +43,7 @@ src/decompile/datatests/doublemove.xml||GHIDRA||||END|
+ src/decompile/datatests/dupptr.xml||GHIDRA||||END|
+ src/decompile/datatests/elseif.xml||GHIDRA||||END|
+ src/decompile/datatests/enum.xml||GHIDRA||||END|
++src/decompile/datatests/escapedstackslot.xml||GHIDRA||||END|
+ src/decompile/datatests/fallback_return_nonfirst_register.xml||GHIDRA||||END|
+ src/decompile/datatests/floatcast.xml||GHIDRA||||END|
+ src/decompile/datatests/floatconv.xml||GHIDRA||||END|
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc b/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
+index b6a7cd09f7..115fe3fafe 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/coreaction.cc
+@@ -2637,6 +2637,48 @@ int4 ActionReturnRecovery::apply(Funcdata &data)
+   return 0;
+ }
+ 
++/// \brief Collect starting offsets of pointers into the stack that are a constant offset from the stack pointer
++///
++/// Pointers built with a variable index, like array accesses, are not included.
++/// \param data is the function being analyzed
++/// \param spc is the stack address space
++/// \param alias will hold the sorted list of offsets
++void ActionRestrictLocal::collectDirectAlias(Funcdata &data,AddrSpace *spc,vector<uintb> &alias)
++
++{
++  AliasChecker aliasCheck;
++  aliasCheck.gather(&data,spc,false);
++  const vector<AliasChecker::AddBase> &addBase( aliasCheck.getAddBase() );
++  unordered_map<uint4, uintb> *calculatedOffsets = aliasCheck.getCalculatedOffsets();
++  for(int4 i=0;i<addBase.size();++i) {
++    if (addBase[i].index != (Varnode *)0) continue;
++    uintb offset = AliasChecker::gatherOffset(addBase[i].base, calculatedOffsets);
++    alias.push_back(AddrSpace::addressToByte(offset,spc->getWordSize()));
++  }
++  sort(alias.begin(),alias.end());
++}
++
++/// \brief Check if a pointer to a stack slot holding a saved register escapes
++///
++/// Some compilers allocate space for local variables by pushing registers, for instance
++/// \e push \e {r7,lr} instead of \e sub \e sp,#4 on ARM.  The slot initially receives the value
++/// of an \e unaffected register, but its address is then taken, typically to pass the local variable
++/// to a sub-function. Such a slot must stay mapped. Otherwise it is treated as having no aliases, and
++/// values stored in it are incorrectly propagated across calls that can modify it.
++/// \param saveOp is the COPY saving the unaffected register into the stack slot
++/// \param alias is the sorted list of starting offsets of direct pointers into the stack space
++/// \return \b true if a pointer to the slot exists
++bool ActionRestrictLocal::isSaveSlotAliased(PcodeOp *saveOp,const vector<uintb> &alias)
++
++{
++  Varnode *slotvn = saveOp->getOut();
++  uintb first = slotvn->getOffset();
++  uintb last = first + slotvn->getSize() - 1;
++  if (last < first) return false;	// Slot wraps around the address space
++  vector<uintb>::const_iterator iter = lower_bound(alias.begin(),alias.end(),first);
++  return (iter != alias.end() && *iter <= last);
++}
++
+ int4 ActionRestrictLocal::apply(Funcdata &data)
+ 
+ {
+@@ -2676,6 +2718,8 @@ int4 ActionRestrictLocal::apply(Funcdata &data)
+     }
+   }
+ 
++  vector<uintb> alias;
++  bool aliasGathered = false;
+   eiter = data.getFuncProto().effectBegin();
+   endeiter = data.getFuncProto().effectEnd();
+   for(;eiter!=endeiter;++eiter) { // Iterate through saved registers
+@@ -2690,6 +2734,12 @@ int4 ActionRestrictLocal::apply(Funcdata &data)
+ 	Varnode *outvn = op->getOut();
+ 	if (!data.getScopeLocal()->isUnaffectedStorage(outvn))	// Is this where unaffected values get saved
+ 	  continue;
++	if (!aliasGathered) {
++	  collectDirectAlias(data,outvn->getSpace(),alias);
++	  aliasGathered = true;
++	}
++	if (isSaveSlotAliased(op,alias))	// Slot also holds a local variable
++	  continue;
+ 	data.getScopeLocal()->markNotMapped(outvn->getSpace(),outvn->getOffset(),outvn->getSize(),false);
+       }
+     }
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/coreaction.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/coreaction.hh
+index 1c190a01d3..5299e86c58 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/coreaction.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/coreaction.hh
+@@ -862,6 +862,8 @@ public:
+ /// Mark what we know of parameters and unaffected stores
+ /// so that they cannot be treated as local variables.
+ class ActionRestrictLocal : public Action {
++  static void collectDirectAlias(Funcdata &data,AddrSpace *spc,vector<uintb> &alias);	///< Collect constant offset pointers into the stack
++  static bool isSaveSlotAliased(PcodeOp *saveOp,const vector<uintb> &alias);	///< Check if a pointer to a saved register slot escapes
+ public:
+   ActionRestrictLocal(const string &g) : Action(0,"restrictlocal",g) {}	///< Constructor
+   virtual Action *clone(const ActionGroupList &grouplist) const {
+diff --git a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/varmap.hh b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/varmap.hh
+index 934559cc5b..6f8732ac22 100644
+--- a/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/varmap.hh
++++ b/Ghidra/Features/Decompiler/src/decompile/cpp/include/ghidra/varmap.hh
+@@ -172,6 +172,7 @@ public:
+   const vector<uintb> &getAlias(void) const { return alias; }		///< Get the list of alias starting offsets
+   static void gatherAdditiveBase(Varnode *startvn,vector<AddBase> &addbase);
+   static uintb gatherOffset(Varnode *vn, unordered_map<uint4, uintb> *offsets);
++  unordered_map<uint4, uintb> *getCalculatedOffsets() { return &calculatedOffsets; }
+ };
+ 
+ /// \brief A container for hints about the data-type layout of an address space
+diff --git a/Ghidra/Features/Decompiler/src/decompile/datatests/escapedstackslot.xml b/Ghidra/Features/Decompiler/src/decompile/datatests/escapedstackslot.xml
+new file mode 100644
+index 0000000000..ca50506c28
+--- /dev/null
++++ b/Ghidra/Features/Decompiler/src/decompile/datatests/escapedstackslot.xml
+@@ -0,0 +1,53 @@
++<decompilertest>
++<!-- ARM Thumb code allocating locals with "push" instead of "sub sp" (GitHub issue #9728).
++     The slot receiving a register from "push" is written and its address is passed to a
++     sub-function, so it holds a local variable that must stay mapped and aliased.
++     my_function:  push {r7,lr}; movs r0,#1; str r0,[sp,#0]; mov r0,sp; bl some_function; pop {r0,pc}
++     my_function2: push {r2,r3,r7,lr}; movs r0,#1; str r0,[sp,#0]; mov r0,sp; add r1,sp,#4;
++                   add r2,sp,#8; bl some_function; pop {r0,r1,r2,pc}
++     my_function3: push {r5,r6,r7,lr}; mov r0,sp; bl some_function; add sp,#0xc; pop {pc}
++     framefunc:    push {r7,lr}; add r7,sp,#0; bl some_function; nop; pop {r7,pc}
++                   (genuine save of r7 followed by a frame pointer to its slot, must stay hidden)
++-->
++<binaryimage arch="ARM:LE:32:v8:default">
++<bytechunk space="ram" offset="0x10000" readonly="true">80b501200090684600f0faff01bd</bytechunk>
++<bytechunk space="ram" offset="0x10100" readonly="true">8cb501200090684601a902aa00f078ff07bd</bytechunk>
++<bytechunk space="ram" offset="0x10200" readonly="true">e0b5684600f0fcfe03b000bd</bytechunk>
++<bytechunk space="ram" offset="0x10300" readonly="true">80b500af00f07cfe00bf80bd</bytechunk>
++<bytechunk space="ram" offset="0x11000" readonly="true">7047</bytechunk>
++<symbol space="ram" offset="0x10000" name="my_function"/>
++<symbol space="ram" offset="0x10100" name="my_function2"/>
++<symbol space="ram" offset="0x10200" name="my_function3"/>
++<symbol space="ram" offset="0x10300" name="framefunc"/>
++<symbol space="ram" offset="0x11000" name="some_function"/>
++</binaryimage>
++<script>
++<com>option readonly on</com>
++<com>set context TMode 1 [ram,0x10000] [ram,0x11002]</com>
++<com>parse line extern void some_function(int4 *ptr);</com>
++<com>parse line extern int4 my_function(void);</com>
++<com>parse line extern int4 my_function2(void);</com>
++<com>lo fu my_function</com>
++<com>decompile</com>
++<com>print C</com>
++<com>lo fu my_function2</com>
++<com>decompile</com>
++<com>print C</com>
++<com>lo fu my_function3</com>
++<com>decompile</com>
++<com>print C</com>
++<com>lo fu framefunc</com>
++<com>decompile</com>
++<com>print C</com>
++<com>quit</com>
++</script>
++<stringmatch name="Escaped stack slot #1" min="1" max="1">iStack_8 = 1;</stringmatch>
++<stringmatch name="Escaped stack slot #2" min="1" max="1">some_function\(&amp;iStack_8\);</stringmatch>
++<stringmatch name="Escaped stack slot #3" min="1" max="1">return iStack_8;</stringmatch>
++<stringmatch name="Escaped stack slot #4" min="0" max="0">return 1;</stringmatch>
++<stringmatch name="Escaped stack slot #5" min="1" max="1">return aiStack_10\[0\];</stringmatch>
++<stringmatch name="Escaped stack slot #6" min="1" max="1">some_function\(&amp;iStack_10\);</stringmatch>
++<stringmatch name="Escaped stack slot #7" min="0" max="0">\[128\]</stringmatch>
++<stringmatch name="Escaped stack slot #8" min="1" max="1">some_function\(param_1\);</stringmatch>
++<stringmatch name="Escaped stack slot #9" min="0" max="0">unaff_r7</stringmatch>
++</decompilertest>
+-- 
+2.45.1
+
